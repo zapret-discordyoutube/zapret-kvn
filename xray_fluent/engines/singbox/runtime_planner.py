@@ -130,7 +130,7 @@ def parse_singbox_document(source_path: Path, text: str) -> ParsedSingboxDocumen
     except json.JSONDecodeError as exc:
         raise ValueError(f"{source_path.name}: {_format_json_error_message(text, exc)}") from exc
     if not isinstance(payload, dict):
-        raise ValueError("Корень sing-box config должен быть JSON-объектом.")
+        raise ValueError(_invalid_json_root_message(source_path.name, payload))
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     has_proxy_outbound = _config_has_proxy_outbound(payload)
     return ParsedSingboxDocument(
@@ -139,6 +139,33 @@ def parse_singbox_document(source_path: Path, text: str) -> ParsedSingboxDocumen
         text_hash=text_hash,
         payload=payload,
         has_proxy_outbound=has_proxy_outbound,
+    )
+
+
+def _invalid_json_root_message(source_name: str, payload: Any) -> str:
+    if isinstance(payload, list):
+        return (
+            f"{source_name}: конфиг sing-box начинается с массива […], а должен "
+            "начинаться с объекта {...}. Уберите внешние квадратные скобки."
+        )
+    if isinstance(payload, str):
+        return (
+            f"{source_name}: весь конфиг sing-box распознан как строка, а должен быть "
+            "объектом {...}. Уберите внешние кавычки и экранирование."
+        )
+    if payload is None:
+        return (
+            f"{source_name}: вместо полного объекта {{...}} указано null. "
+            "Вставьте конфиг sing-box целиком."
+        )
+    if isinstance(payload, bool):
+        return (
+            f"{source_name}: вместо объекта {{...}} указано логическое значение. "
+            "Вставьте полный конфиг sing-box."
+        )
+    return (
+        f"{source_name}: вместо объекта {{...}} указано число. "
+        "Вставьте полный конфиг sing-box."
     )
 
 
