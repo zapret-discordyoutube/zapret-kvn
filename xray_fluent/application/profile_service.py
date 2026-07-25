@@ -144,17 +144,37 @@ def save_config_text(controller: AppController, engine: str, text: str, path: st
 
 
 def apply_singbox_config_text(controller: AppController, text: str) -> tuple[bool, Path | None, str]:
-    ok, message = controller.validate_json_text(text)
+    repair = controller.try_repair_singbox_json_text(text)
+    validation_text = repair.repaired_text if repair is not None else text
+    ok, message = controller.validate_singbox_json_text(validation_text)
     if not ok:
         return False, None, message
-    path = save_config_text(controller, "singbox", text)
+    if repair is not None:
+        path = ensure_active_config(controller, "singbox")
+        try:
+            result = controller._persist_singbox_config_repair(path, text)
+        except ValueError as exc:
+            return False, path, str(exc)
+        if result is None:
+            return False, path, "Не удалось применить найденное исправление конфига sing-box."
+        recovered = True
+    else:
+        path = save_config_text(controller, "singbox", text)
+        recovered = False
+    recovery_note = (
+        " Конфиг автоматически восстановлен; исходный текст сохранён в резервной копии."
+        if recovered
+        else ""
+    )
     if controller._active_core == "singbox" or (
         controller.is_singbox_editor_mode() and (controller.connected or controller._desired_connected)
     ):
         controller._desired_connected = True
         controller._request_transition("sing-box config applied")
-        return True, path, "Конфиг сохранён. Применяю изменения sing-box..."
-    return True, path, "Конфиг сохранён. Он будет использован при следующем запуске sing-box."
+        return True, path, f"Конфиг сохранён.{recovery_note} Применяю изменения sing-box..."
+    return True, path, (
+        f"Конфиг сохранён.{recovery_note} Он будет использован при следующем запуске sing-box."
+    )
 
 
 def apply_xray_config_text(controller: AppController, text: str) -> tuple[bool, Path | None, str]:

@@ -126,6 +126,10 @@ class _RawConfigEditor(QWidget):
         self._saved_text = text
         self._refresh_file_label()
 
+    def replace_editor_text(self, text: str) -> None:
+        self.editor.selectAll()
+        self.editor.insertPlainText(text)
+
     def set_status(self, level: str, message: str) -> None:
         prefix = {
             "success": "OK",
@@ -376,6 +380,9 @@ class ConfigsPage(QWidget):
     def set_document(self, core: str, path: Path, text: str) -> None:
         editor = self._editors[core]
         editor.set_document(path, text)
+
+    def replace_editor_text(self, core: str, text: str) -> None:
+        self._editors[core].replace_editor_text(text)
 
     def set_template_source(self, core: str, path: Path | None) -> None:
         self._editors[core].set_template_source(path)

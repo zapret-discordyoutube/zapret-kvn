@@ -762,18 +762,32 @@ class MainWindow(FluentWindow):
         try:
             if core == "singbox":
                 path = self.controller.save_singbox_config_text(text)
+                path, saved_text = self.controller.load_active_singbox_config_text()
             else:
                 path = self.controller.save_xray_config_text(text)
+                saved_text = text
         except Exception as exc:
             self.configs_page.set_status(core, "error", str(exc))
             self._show_status("error", str(exc).splitlines()[0])
             return
-        self.configs_page.mark_saved(core, path, text)
+        self.configs_page.mark_saved(core, path, saved_text)
+        if saved_text != text:
+            self.configs_page.set_document(core, path, saved_text)
         self.configs_page.set_status(core, "success", f"Сохранено: {path.name}")
         self._show_status("success", f"Сохранено: {path.name}")
 
     def _validate_core_config(self, core: str, text: str) -> None:
         if core == "singbox":
+            repair = self.controller.try_repair_singbox_json_text(text)
+            if repair is not None:
+                self.configs_page.replace_editor_text(core, repair.repaired_text)
+                message = (
+                    f"Конфиг восстановлен автоматически: {repair.description}. "
+                    "Проверьте результат и нажмите «Сохранить» или «Применить»."
+                )
+                self.configs_page.set_status(core, "warning", message)
+                self._show_status("warning-long", message)
+                return
             ok, message = self.controller.validate_singbox_json_text(text)
         else:
             ok, message = self.controller.validate_xray_json_text(text)
@@ -791,7 +805,11 @@ class MainWindow(FluentWindow):
             self._show_status("error", message.splitlines()[0])
             return
         if path is not None:
-            self.configs_page.mark_saved(core, path, text)
+            if core == "singbox":
+                loaded_path, saved_text = self.controller.load_active_singbox_config_text()
+                self.configs_page.set_document(core, loaded_path, saved_text)
+            else:
+                self.configs_page.mark_saved(core, path, text)
         level = "info" if "Применяю" in message else "success"
         self.configs_page.set_status(core, level, message)
         self._show_status(level, message.splitlines()[0])

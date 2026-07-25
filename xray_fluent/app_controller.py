@@ -67,6 +67,11 @@ from .application.nodes import (
     start_country_ip_resolution as start_country_ip_resolution_operation,
     update_node as update_node_operation,
 )
+from .application.singbox_config_recovery import (
+    SingboxConfigRepair,
+    repair_singbox_config_file,
+    try_repair_singbox_config_text,
+)
 from .application.runtime import (
     ActiveSessionSnapshot,
     TransitionContext,
@@ -578,9 +583,35 @@ class AppController(QObject):
     def _cache_singbox_document_state(self, path: Path, text: str) -> SingboxDocumentState:
         return self._singbox_documents.cache_state(path, text)
 
+    def _persist_singbox_config_repair(
+        self,
+        path: Path,
+        text: str,
+    ) -> tuple[SingboxDocumentState, SingboxConfigRepair] | None:
+        try:
+            repair = repair_singbox_config_file(path, text)
+        except OSError as exc:
+            raise ValueError(
+                f"{path.name}: удалось определить безопасное исправление, "
+                f"но не удалось сохранить резервную копию или исправленный конфиг: {exc}"
+            ) from exc
+        if repair is None:
+            return None
+
+        repaired_state = self._cache_singbox_document_state(path, repair.repaired_text)
+        message = repair.notice(path.name)
+        self._log(f"[sing-box] {message}")
+        self.status.emit("warning-long", message)
+        return repaired_state, repair
+
+    def _recover_singbox_document_state(self, state: SingboxDocumentState) -> SingboxDocumentState:
+        result = self._persist_singbox_config_repair(state.source_path, state.text)
+        return result[0] if result is not None else state
+
     def _get_singbox_document_state(self) -> SingboxDocumentState:
         path = self._ensure_active_singbox_config()
-        return self._singbox_documents.get_state(path)
+        state = self._singbox_documents.get_state(path)
+        return self._recover_singbox_document_state(state)
 
     def _default_singbox_template_path_for_config(self, config_path: Path) -> Path | None:
         relative = config_path.relative_to(self.get_singbox_config_dir().resolve()).as_posix()
@@ -599,13 +630,16 @@ class AppController(QObject):
         return ensure_active_config_operation(self, "xray", path)
 
     def load_active_singbox_config_text(self) -> tuple[Path, str]:
-        return load_active_config_text_operation(self, "singbox")
+        state = self._get_singbox_document_state()
+        return state.source_path, state.text
 
     def load_active_xray_config_text(self) -> tuple[Path, str]:
         return load_active_config_text_operation(self, "xray")
 
     def load_singbox_config_text(self, path: str | Path) -> tuple[Path, str]:
-        return load_config_text_operation(self, "singbox", path)
+        load_config_text_operation(self, "singbox", path)
+        state = self._get_singbox_document_state()
+        return state.source_path, state.text
 
     def load_xray_config_text(self, path: str | Path) -> tuple[Path, str]:
         return load_config_text_operation(self, "xray", path)
@@ -636,7 +670,15 @@ class AppController(QObject):
         return validate_json_text(text)
 
     def validate_singbox_json_text(self, text: str) -> tuple[bool, str]:
-        return self.validate_json_text(text)
+        try:
+            parse_singbox_document(self.get_active_singbox_config_path(), text)
+        except ValueError as exc:
+            return False, str(exc)
+        return True, "JSON корректен и имеет допустимую структуру конфига sing-box."
+
+    @staticmethod
+    def try_repair_singbox_json_text(text: str) -> SingboxConfigRepair | None:
+        return try_repair_singbox_config_text(text)
 
     def validate_xray_json_text(self, text: str) -> tuple[bool, str]:
         ok, message = self.validate_json_text(text)
