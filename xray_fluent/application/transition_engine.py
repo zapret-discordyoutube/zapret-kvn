@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from .session_state import ActiveSessionSnapshot
 
 
+NODE_SWITCH_DEBOUNCE_MS = 180
+
+
 @dataclass(slots=True)
 class TransitionContext:
     desired_connected: bool
@@ -64,6 +67,25 @@ def transition_status_text(action: str) -> str:
         "reconnect": "Переподключение...",
     }
     return mapping.get(action, "Применение изменений...")
+
+
+def transition_request_delay_ms(reason: str) -> int:
+    return NODE_SWITCH_DEBOUNCE_MS if reason == "node switched" else 0
+
+
+def proxy_resolution_is_current(
+    *,
+    result_generation: int,
+    current_generation: int,
+    desired_connected: bool,
+    result_server: str,
+    current_server: str,
+) -> bool:
+    return (
+        result_generation == current_generation
+        and desired_connected
+        and result_server == current_server
+    )
 
 
 def can_apply_proxy_runtime_change(

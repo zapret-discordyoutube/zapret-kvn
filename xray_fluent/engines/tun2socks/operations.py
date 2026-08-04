@@ -181,7 +181,7 @@ def hot_swap(controller: AppController, reason: str, node: Node) -> bool:
                 ping_port=node.port,
             )
             controller._set_connection_status("running", f"Переключено: {node.name} (TUN)", level="success")
-            controller.save()
+            controller.schedule_save()
         else:
             controller._log("[hot-swap] xray restart failed")
             controller._set_connection_status("error", "Не удалось переключить сервер, подключение остановлено", level="error")

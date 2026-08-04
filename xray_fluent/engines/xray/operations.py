@@ -201,7 +201,7 @@ def restart_proxy_core(controller: AppController, reason: str) -> bool:
             ping_port=runtime.ping_port,
         )
         controller._set_connection_status("running", f"Переключено: {session_label}", level="success")
-        controller.save()
+        controller.schedule_save()
         return True
     finally:
         controller._switching = False

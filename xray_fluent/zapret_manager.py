@@ -24,8 +24,21 @@ WINWS2_EXE = ZAPRET_DIR / "exe" / "winws2.exe"
 WINWS_EXE = ZAPRET_DIR / "exe" / "winws.exe"
 PRESETS_DIR = ZAPRET_DIR / "presets"
 
-_IPSET_EXCLUDE_IP_PREFIX = "--ipset-exclude-ip="
+_IPSET_IP_PREFIX = "--ipset-ip="
 _UDP_PROXY_TYPES = frozenset({"hysteria", "hysteria2", "tuic"})
+_PROFILE_ARGUMENT_PREFIXES = (
+    "--filter-",
+    "--hostlist",
+    "--import",
+    "--in-range",
+    "--ipset",
+    "--lua-desync",
+    "--name",
+    "--out-range",
+    "--payload",
+    "--skip",
+    "--template",
+)
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -54,6 +67,9 @@ class ZapretManager(QObject):
         self._current_preset: str = ""
         self._start_args: list[str] = []
         self._protected_proxy_ips: set[str] = set()
+        self._proxy_resolution_cache: dict[str, set[str]] = {}
+        self._pending_restart_preset = ""
+        self._stop_expected = False
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(3000)
         self._health_timer.timeout.connect(self._check_health)
@@ -90,49 +106,39 @@ class ZapretManager(QObject):
         return args
 
     @staticmethod
-    def _with_ip_exclusions(args: list[str], excluded_ips: set[str]) -> list[str]:
-        """Add fixed IP exclusions to every winws2 profile in an argument list."""
-        if not excluded_ips:
+    def _with_proxy_pass_profile(args: list[str], protected_ips: set[str]) -> list[str]:
+        """Prepend a pass-through profile for protected UDP proxy endpoints."""
+        if not protected_ips:
             return list(args)
 
         normalized_ips = sorted(
-            excluded_ips,
+            protected_ips,
             key=lambda value: (ipaddress.ip_address(value).version, value),
         )
-
-        def update_profile(profile: list[str]) -> list[str]:
-            merged = list(profile)
-            existing_values: list[str] = []
-            first_index: int | None = None
-            for index in range(len(merged) - 1, -1, -1):
-                argument = merged[index]
-                if not argument.startswith(_IPSET_EXCLUDE_IP_PREFIX):
-                    continue
-                first_index = index
-                value = argument[len(_IPSET_EXCLUDE_IP_PREFIX):]
-                existing_values[0:0] = [item for item in value.split(",") if item]
-                merged.pop(index)
-
-            seen = {value.lstrip("#") for value in existing_values}
-            existing_values.extend(ip for ip in normalized_ips if ip not in seen)
-            exclusion = _IPSET_EXCLUDE_IP_PREFIX + ",".join(existing_values)
-            if first_index is None:
-                merged.append(exclusion)
-            else:
-                merged.insert(min(first_index, len(merged)), exclusion)
-            return merged
-
-        result: list[str] = []
-        profile: list[str] = []
-        for argument in args:
-            if argument == "--new" or argument.startswith("--new="):
-                result.extend(update_profile(profile))
-                result.append(argument)
-                profile = []
-            else:
-                profile.append(argument)
-        result.extend(update_profile(profile))
-        return result
+        first_profile_index = next(
+            (
+                index
+                for index, argument in enumerate(args)
+                if argument == "--new"
+                or argument.startswith("--new=")
+                or argument.startswith(_PROFILE_ARGUMENT_PREFIXES)
+            ),
+            len(args),
+        )
+        global_args = args[:first_profile_index]
+        original_profiles = args[first_profile_index:]
+        if not any(
+            argument.startswith("--lua-init=") and "zapret-lib.lua" in argument
+            for argument in global_args
+        ):
+            global_args = ["--lua-init=@lua/zapret-lib.lua", *global_args]
+        pass_profile = [
+            "--filter-udp=*",
+            _IPSET_IP_PREFIX + ",".join(normalized_ips),
+            "--lua-desync=pass",
+        ]
+        separator = ["--new"] if original_profiles else []
+        return [*global_args, *pass_profile, *separator, *original_profiles]
 
     @staticmethod
     def _resolve_server_ips(server: str) -> set[str]:
@@ -153,33 +159,75 @@ class ZapretManager(QObject):
                 continue
         return resolved
 
-    def protect_proxy_node(self, node: object) -> set[str]:
-        """Keep UDP proxy endpoints out of winws2 desynchronization profiles."""
+    @staticmethod
+    def proxy_protection_server(node: object | None) -> str:
+        if node is None:
+            return ""
         outbound = getattr(node, "outbound", {})
         proxy_type = str(outbound.get("type") or getattr(node, "scheme", "")).lower()
         if proxy_type not in _UDP_PROXY_TYPES:
-            return set()
+            return ""
+        return str(outbound.get("server") or getattr(node, "server", "")).strip()
 
-        server = str(outbound.get("server") or getattr(node, "server", ""))
+    def cache_proxy_resolution(self, server: str, protected_ips: set[str]) -> None:
+        if server:
+            self._proxy_resolution_cache[server] = set(protected_ips)
+
+    def apply_cached_proxy_node(self, node: object | None) -> bool:
+        """Apply a prepared endpoint without DNS or other blocking work."""
+        server = self.proxy_protection_server(node)
+        if not server:
+            self._set_protected_proxy_ips(set())
+            return True
+        protected_ips = self._proxy_resolution_cache.get(server)
+        if protected_ips is None:
+            return False
+        self._set_protected_proxy_ips(protected_ips)
+        return True
+
+    def protect_proxy_node(self, node: object) -> set[str]:
+        """Keep UDP proxy endpoints out of winws2 desynchronization profiles."""
+        server = self.proxy_protection_server(node)
+        if not server:
+            self._set_protected_proxy_ips(set())
+            return set()
         try:
             resolved = self._resolve_server_ips(server)
         except OSError as exc:
             log.warning("zapret could not resolve protected proxy endpoint %s: %s", server, exc)
-            self.log_line.emit(f"[zapret] Не удалось добавить сервер прокси в исключения: {server}")
+            self.log_line.emit(f"[zapret] Не удалось определить IP сервера UDP-прокси: {server}")
             return set()
-        new_ips = resolved - self._protected_proxy_ips
-        if not new_ips:
-            return resolved
+        self.cache_proxy_resolution(server, resolved)
+        self._set_protected_proxy_ips(resolved)
+        return resolved
 
-        self._protected_proxy_ips.update(new_ips)
-        joined = ", ".join(sorted(new_ips))
-        self.log_line.emit(f"[zapret] Сервер UDP-прокси исключён из обработки: {joined}")
+    def _set_protected_proxy_ips(self, protected_ips: set[str]) -> None:
+        if protected_ips == self._protected_proxy_ips:
+            return
+
+        self._protected_proxy_ips = set(protected_ips)
+        if protected_ips:
+            joined = ", ".join(sorted(protected_ips))
+            self.log_line.emit(f"[zapret] Для сервера UDP-прокси включён профиль pass: {joined}")
+        else:
+            self.log_line.emit("[zapret] Профиль pass для UDP-прокси отключён")
 
         if self.running and self._current_preset:
             preset = self._current_preset
-            self.log_line.emit("[zapret] Перезапуск с обновлёнными исключениями")
-            self.start(preset)
-        return resolved
+            self.log_line.emit("[zapret] Перезапуск с обновлённым профилем pass")
+            self._restart_for_proxy_protection(preset)
+
+    def _restart_for_proxy_protection(self, preset: str) -> None:
+        """Restart winws2 through QProcess signals instead of waitForFinished()."""
+        self._pending_restart_preset = preset
+        process = self._process
+        if process is None or process.state() == QProcess.ProcessState.NotRunning:
+            self._pending_restart_preset = ""
+            QTimer.singleShot(0, lambda preset=preset: self.start(preset))
+            return
+        self._health_timer.stop()
+        self._stop_expected = True
+        process.kill()
 
     @staticmethod
     def _parse_metadata(text: str) -> dict[str, str]:
@@ -322,7 +370,7 @@ class ZapretManager(QObject):
                          arg_count=arg_count, file_path=target)
 
     def start(self, preset_name: str) -> None:
-        if self.running:
+        if self._process is not None and self._process.state() != QProcess.ProcessState.NotRunning:
             self.stop()
 
         killed = self._kill_orphaned()
@@ -340,7 +388,7 @@ class ZapretManager(QObject):
             return
 
         # Parse preset and pass args directly (winws2 @file can't handle spaces in path)
-        args = self._with_ip_exclusions(
+        args = self._with_proxy_pass_profile(
             self._parse_preset_args(preset),
             self._protected_proxy_ips,
         )
@@ -357,32 +405,49 @@ class ZapretManager(QObject):
         self._process.setWorkingDirectory(str(ZAPRET_DIR))
         self._process.readyReadStandardOutput.connect(self._on_stdout)
         self._process.readyReadStandardError.connect(self._on_stderr)
+        self._process.started.connect(self._on_started)
+        self._process.errorOccurred.connect(self._on_process_error)
         self._process.finished.connect(self._on_finished)
 
         log.info("zapret start: %s [%s] (%d args)", exe.name, preset_name, len(args))
         self.log_line.emit(f"[zapret] Запуск: {preset_name} ({len(args)} аргументов)")
         self._process.start()
 
-        if not self._process.waitForStarted(5000):
-            self.error.emit("Не удалось запустить winws2.exe")
-            self._process = None
-            return
-
+    def _on_started(self) -> None:
         self._health_timer.start()
         self.started.emit()
 
+    def _on_process_error(self, process_error: QProcess.ProcessError) -> None:
+        if process_error != QProcess.ProcessError.FailedToStart:
+            return
+        self.error.emit(f"Не удалось запустить winws2.exe: {process_error.name}")
+        process = self._process
+        if process is not None and process.state() == QProcess.ProcessState.NotRunning:
+            self._health_timer.stop()
+            self._process = None
+            self._current_preset = ""
+            self._start_args = []
+            self.stopped.emit()
+
     def stop(self) -> None:
+        self._pending_restart_preset = ""
         self._health_timer.stop()
-        if self._process is None:
+        process = self._process
+        if process is None:
             return
 
-        if self._process.state() == QProcess.ProcessState.Running:
+        if process.state() != QProcess.ProcessState.NotRunning:
             log.info("zapret stop")
-            self._process.kill()
-            self._process.waitForFinished(5000)
+            self._stop_expected = True
+            process.kill()
+            process.waitForFinished(5000)
 
-        self._process = None
-        self.stopped.emit()
+        if self._process is process:
+            self._process = None
+            self._current_preset = ""
+            self._start_args = []
+            self._stop_expected = False
+            self.stopped.emit()
 
     # ── internals ───────────────────────────────────────────────
 
@@ -444,7 +509,11 @@ class ZapretManager(QObject):
                 self.log_line.emit(f"[zapret] {line.strip()}")
 
     def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
+        if self._process is None:
+            return
         self._health_timer.stop()
+        expected = self._stop_expected
+        pending_restart = self._pending_restart_preset
 
         # Drain any buffered output before dropping the process reference
         remaining = self._drain_output()
@@ -454,7 +523,7 @@ class ZapretManager(QObject):
         preset = self._current_preset or "?"
         log.info("zapret finished: code=%d status=%s preset=%s", exit_code, exit_status.name, preset)
 
-        if exit_code != 0 or exit_status == QProcess.ExitStatus.CrashExit:
+        if not expected and (exit_code != 0 or exit_status == QProcess.ExitStatus.CrashExit):
             # Подробности в лог
             hint = self._exit_code_hint(exit_code)
             if hint:
@@ -477,7 +546,11 @@ class ZapretManager(QObject):
         self._process = None
         self._current_preset = ""
         self._start_args = []
+        self._stop_expected = False
+        self._pending_restart_preset = ""
         self.stopped.emit()
+        if pending_restart:
+            QTimer.singleShot(0, lambda preset=pending_restart: self.start(preset))
 
     def _check_health(self) -> None:
         if not self.running:

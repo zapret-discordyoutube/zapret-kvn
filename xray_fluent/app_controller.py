@@ -99,6 +99,7 @@ from .application.runtime import (
     on_speed_result as on_speed_result_operation,
     on_xray_update_worker_done as on_xray_update_worker_done_operation,
     ping_nodes as ping_nodes_operation,
+    proxy_resolution_is_current,
     reconnect as reconnect_operation,
     routing_signature as routing_signature_operation,
     run_xray_core_update as run_xray_core_update_operation,
@@ -110,12 +111,14 @@ from .application.runtime import (
     stop_metrics_worker as stop_metrics_worker_operation,
     system_proxy_bypass_lan as system_proxy_bypass_lan_operation,
     test_connectivity as test_connectivity_operation,
+    transition_request_delay_ms,
     transition_signature as transition_signature_operation,
     transition_status_text,
     tun_layer_signature as tun_layer_signature_operation,
     xray_layer_signature as xray_layer_signature_operation,
 )
 from .country_flags import CountryResolver
+from .background_workers import ProxyProtectionResolver, StateSaveWorker
 from .engines.xray import (
     XrayManager,
     XrayTunRouteManager,
@@ -254,6 +257,9 @@ class AppController(QObject):
         self._connectivity_worker: ConnectivityTestWorker | None = None
         self._metrics_worker: LiveMetricsWorker | None = None
         self._xray_update_worker: XrayCoreUpdateWorker | None = None
+        self._state_save_worker: StateSaveWorker | None = None
+        self._proxy_protection_workers: dict[int, ProxyProtectionResolver] = {}
+        self._proxy_protection_wait_generation = 0
         self._singbox_documents = SingboxDocumentCache()
         self._ping_total = 0
         self._ping_completed = 0
@@ -319,6 +325,9 @@ class AppController(QObject):
         self._save_timer.setInterval(250)
         self._save_timer.timeout.connect(self._flush_scheduled_save)
         self._save_pending = False
+        self._transition_timer = QTimer(self)
+        self._transition_timer.setSingleShot(True)
+        self._transition_timer.timeout.connect(self._drain_transition_queue)
 
     def load(self) -> bool:
         try:
@@ -366,6 +375,13 @@ class AppController(QObject):
         if self._save_timer.isActive():
             self._save_timer.stop()
         self._save_pending = False
+        worker = self._state_save_worker
+        if worker is not None and worker.isRunning():
+            worker.wait()
+        if self._state_save_worker is worker:
+            self._state_save_worker = None
+            if worker is not None:
+                worker.deleteLater()
         self.storage.save(self.state)
 
     def schedule_save(self) -> None:
@@ -375,8 +391,21 @@ class AppController(QObject):
     def _flush_scheduled_save(self) -> None:
         if not self._save_pending:
             return
+        if self._state_save_worker is not None and self._state_save_worker.isRunning():
+            return
         self._save_pending = False
-        self.storage.save(self.state)
+        worker = StateSaveWorker(self.storage, self.state, parent=self)
+        self._state_save_worker = worker
+        worker.failed.connect(lambda message: self._log(f"[storage] background save failed: {message}"))
+        worker.finished.connect(lambda worker=worker: self._on_scheduled_save_finished(worker))
+        worker.start()
+
+    def _on_scheduled_save_finished(self, worker: StateSaveWorker) -> None:
+        if self._state_save_worker is worker:
+            self._state_save_worker = None
+        worker.deleteLater()
+        if self._save_pending and not self._save_timer.isActive():
+            QTimer.singleShot(0, self._flush_scheduled_save)
 
     @staticmethod
     def _signature(payload: object) -> str:
@@ -1072,14 +1101,92 @@ class AppController(QObject):
         self._transition_pending = True
         self._transition_reason = reason
         self._transition_generation += 1
-        if self._transition_active or self._transition_scheduled:
+        generation = self._transition_generation
+        self._proxy_protection_wait_generation = 0
+        if self._desired_connected and self._prepare_proxy_protection(generation):
+            if self._transition_timer.isActive():
+                self._transition_timer.stop()
+            self._transition_scheduled = False
+            return
+        if self._transition_active:
+            return
+        self._schedule_transition_drain(transition_request_delay_ms(reason))
+
+    def _prepare_proxy_protection(self, generation: int) -> bool:
+        node = self.selected_node
+        if self.zapret.apply_cached_proxy_node(node):
+            return False
+        server = self.zapret.proxy_protection_server(node)
+        if not server:
+            return False
+
+        worker = ProxyProtectionResolver(
+            generation,
+            server,
+            self.zapret._resolve_server_ips,
+            parent=self,
+        )
+        self._proxy_protection_workers[generation] = worker
+        self._proxy_protection_wait_generation = generation
+        worker.resolved.connect(self._on_proxy_protection_resolved)
+        worker.finished.connect(
+            lambda generation=generation, worker=worker: self._forget_proxy_protection_worker(generation, worker)
+        )
+        self.transition_state_changed.emit(True, "Определение адреса сервера...")
+        worker.start()
+        return True
+
+    def _on_proxy_protection_resolved(
+        self,
+        generation: int,
+        server: str,
+        protected_ips: set[str],
+        error: Exception | None,
+    ) -> None:
+        if error is None:
+            self.zapret.cache_proxy_resolution(server, protected_ips)
+        else:
+            self._log(f"[zapret] proxy endpoint DNS failed for {server}: {error}")
+
+        if generation != self._transition_generation:
+            return
+        self._proxy_protection_wait_generation = 0
+        if not self._desired_connected:
+            self.transition_state_changed.emit(False, "")
+            return
+        if not proxy_resolution_is_current(
+            result_generation=generation,
+            current_generation=self._transition_generation,
+            desired_connected=self._desired_connected,
+            result_server=server,
+            current_server=self.zapret.proxy_protection_server(self.selected_node),
+        ):
+            return
+        if error is None:
+            self.zapret.apply_cached_proxy_node(self.selected_node)
+        if not self._transition_active:
+            self._schedule_transition_drain(transition_request_delay_ms(self._transition_reason))
+
+    def _forget_proxy_protection_worker(
+        self,
+        generation: int,
+        worker: ProxyProtectionResolver,
+    ) -> None:
+        if self._proxy_protection_workers.get(generation) is worker:
+            self._proxy_protection_workers.pop(generation, None)
+        worker.deleteLater()
+
+    def _schedule_transition_drain(self, delay_ms: int) -> None:
+        if self._transition_active or self._proxy_protection_wait_generation == self._transition_generation:
             return
         self._transition_scheduled = True
-        QTimer.singleShot(0, self._drain_transition_queue)
+        self._transition_timer.start(max(0, int(delay_ms)))
 
     def _drain_transition_queue(self) -> None:
         self._transition_scheduled = False
         if self._transition_active:
+            return
+        if self._proxy_protection_wait_generation == self._transition_generation:
             return
 
         if not self._transition_pending and not self._needs_transition():
@@ -1106,8 +1213,7 @@ class AppController(QObject):
         finally:
             self._transition_active = False
             if self._transition_pending or self._needs_transition():
-                self._transition_scheduled = True
-                QTimer.singleShot(0, self._drain_transition_queue)
+                self._schedule_transition_drain(0)
             else:
                 self.transition_state_changed.emit(False, "")
 

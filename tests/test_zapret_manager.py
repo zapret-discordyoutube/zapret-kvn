@@ -9,8 +9,9 @@ from xray_fluent.zapret_manager import ZapretManager
 
 
 class ZapretManagerTests(unittest.TestCase):
-    def test_ip_exclusion_is_added_to_every_profile(self) -> None:
+    def test_pass_profile_is_inserted_before_original_profiles(self) -> None:
         args = [
+            "--lua-init=@lua/zapret-lib.lua",
             "--wf-udp-out=443",
             "--filter-udp=443",
             "--new",
@@ -20,14 +21,23 @@ class ZapretManagerTests(unittest.TestCase):
             "--filter-udp=*",
         ]
 
-        updated = ZapretManager._with_ip_exclusions(args, {"203.0.113.7", "2001:db8::7"})
+        updated = ZapretManager._with_proxy_pass_profile(args, {"203.0.113.7", "2001:db8::7"})
 
         self.assertEqual(
-            [arg for arg in updated if arg.startswith("--ipset-exclude-ip=")],
+            updated,
             [
-                "--ipset-exclude-ip=203.0.113.7,2001:db8::7",
-                "--ipset-exclude-ip=192.0.2.0/24,203.0.113.7,2001:db8::7",
-                "--ipset-exclude-ip=203.0.113.7,2001:db8::7",
+                "--lua-init=@lua/zapret-lib.lua",
+                "--wf-udp-out=443",
+                "--filter-udp=*",
+                "--ipset-ip=203.0.113.7,2001:db8::7",
+                "--lua-desync=pass",
+                "--new",
+                "--filter-udp=443",
+                "--new",
+                "--filter-tcp=443",
+                "--ipset-exclude-ip=192.0.2.0/24",
+                "--new=catch-all",
+                "--filter-udp=*",
             ],
         )
 
@@ -61,14 +71,46 @@ class ZapretManagerTests(unittest.TestCase):
 
         with (
             patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
-            patch.object(manager, "start") as start,
+            patch.object(manager, "_restart_for_proxy_protection") as restart,
         ):
             manager.protect_proxy_node(node)
 
-        start.assert_called_once_with("Default")
+        restart.assert_called_once_with("Default")
 
-    def test_tcp_proxy_node_is_not_excluded(self) -> None:
+    def test_cached_endpoint_is_applied_without_dns(self) -> None:
         manager = ZapretManager()
+        node = parse_single("hy2://secret@proxy.example.com:443/?insecure=1")
+        manager.cache_proxy_resolution("proxy.example.com", {"203.0.113.7"})
+
+        with patch.object(manager, "_resolve_server_ips") as resolve:
+            applied = manager.apply_cached_proxy_node(node)
+
+        self.assertTrue(applied)
+        resolve.assert_not_called()
+        self.assertEqual(manager._protected_proxy_ips, {"203.0.113.7"})
+
+    def test_uncached_endpoint_never_falls_back_to_gui_thread_dns(self) -> None:
+        manager = ZapretManager()
+        node = parse_single("hy2://secret@proxy.example.com:443/?insecure=1")
+
+        with patch.object(manager, "_resolve_server_ips") as resolve:
+            applied = manager.apply_cached_proxy_node(node)
+
+        self.assertFalse(applied)
+        resolve.assert_not_called()
+
+    def test_new_hysteria2_node_replaces_previous_pass_endpoint(self) -> None:
+        manager = ZapretManager()
+        manager._protected_proxy_ips = {"203.0.113.7"}
+        node = parse_single("hy2://secret@203.0.113.8:443/?insecure=1")
+
+        manager.protect_proxy_node(node)
+
+        self.assertEqual(manager._protected_proxy_ips, {"203.0.113.8"})
+
+    def test_tcp_proxy_node_clears_previous_pass_profile(self) -> None:
+        manager = ZapretManager()
+        manager._protected_proxy_ips = {"203.0.113.7"}
         node = parse_single("vless://00000000-0000-4000-8000-000000000001@example.com:443")
 
         with patch.object(manager, "_resolve_server_ips") as resolve:

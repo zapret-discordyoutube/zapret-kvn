@@ -95,7 +95,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             session_label = node.name if node else "unknown"
 
         if node is not None:
-            controller.zapret.protect_proxy_node(node)
+            controller.zapret.apply_cached_proxy_node(node)
             if not singbox_editor_mode and not xray_raw_mode:
                 problem = controller._prepare_node_for_runtime(node)
                 if problem:
@@ -223,7 +223,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
                 )[1]
             ),
         )
-        controller.save()
+        controller.schedule_save()
         session_mode = "xray-tun" if tun and controller._active_core == "xray" else controller._active_core
         controller._traffic_history.start_session(session_label, session_mode)
         return True

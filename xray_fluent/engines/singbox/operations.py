@@ -156,6 +156,7 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         except ValueError as exc:
             controller._set_connection_status("error", str(exc), level="error")
             return False
+        controller.zapret.apply_cached_proxy_node(node if plan.used_selected_node else None)
 
         session_label = plan.source_path.name
         if plan.used_selected_node and node is not None:
@@ -214,7 +215,7 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
             f"Переключено: {session_label}" + (" (TUN, xray sidecar)" if plan.is_hybrid else " (TUN)"),
             level="success",
         )
-        controller.save()
+        controller.schedule_save()
         return True
     finally:
         controller._switching = False
@@ -236,6 +237,7 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         except ValueError as exc:
             controller._set_connection_status("error", str(exc), level="error")
             return False
+        controller.zapret.apply_cached_proxy_node(node if plan.used_selected_node else None)
 
         session_label = _proxy_session_label(plan, node)
         controller._set_connection_status("starting", f"Переключение на {session_label}...", level="info")
@@ -285,7 +287,7 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         )
         suffix = " (sing-box + Xray sidecar)" if plan.is_hybrid else " (sing-box extended)"
         controller._set_connection_status("running", f"Переключено: {session_label}{suffix}", level="success")
-        controller.save()
+        controller.schedule_save()
         return True
     finally:
         controller._switching = False

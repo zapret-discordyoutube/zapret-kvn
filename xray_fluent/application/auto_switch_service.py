@@ -83,7 +83,7 @@ def check_auto_switch(controller: AppController, down_bps: float) -> None:
 
     controller.state.selected_node_id = next_node.id
     controller.selection_changed.emit(next_node)
-    controller.save()
+    controller.schedule_save()
     controller._desired_connected = True
     controller._request_transition("auto-switch: speed drop")
 

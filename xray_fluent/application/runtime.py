@@ -27,6 +27,8 @@ from .transition_engine import (
     can_tun_hot_swap,
     compute_transition_action,
     needs_transition,
+    proxy_resolution_is_current,
+    transition_request_delay_ms,
     transition_status_text,
 )
 from .update_service import on_xray_update_worker_done, run_xray_core_update
