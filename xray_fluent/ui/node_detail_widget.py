@@ -132,9 +132,9 @@ class NodeDetailWidget(QWidget):
         self._reset_breadcrumb()
         self._refresh()
 
-    def refresh(self) -> None:
+    def refresh(self, node_id: str | None = None) -> None:
         """Refresh display with latest data (call after ping/speed update)."""
-        if self._node:
+        if self._node and (node_id is None or self._node.id == node_id):
             self._refresh()
 
     def set_speed_test_running(self, running: bool, *, stopping: bool = False) -> None:

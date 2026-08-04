@@ -60,6 +60,13 @@
         "outbound": "direct"
       },
       {
+        "domain_suffix": [
+          "championat.com"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
         "rule_set": [
           "geosite-category-ru",
           "geoip-ru"

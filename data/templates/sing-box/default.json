@@ -51,6 +51,13 @@
         "outbound": "direct"
       },
       {
+        "domain_suffix": [
+          "championat.com"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
         "ip_is_private": true,
         "action": "route",
         "outbound": "direct"

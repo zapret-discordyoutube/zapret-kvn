@@ -39,7 +39,7 @@ class NodesTableModel(QAbstractTableModel):
 
     def set_nodes(self, nodes: list[Node]) -> None:
         self.beginResetModel()
-        self._nodes = list(nodes)
+        self._nodes = nodes
         self._id_to_row = {node.id: row for row, node in enumerate(self._nodes)}
         self.endResetModel()
 
@@ -80,6 +80,24 @@ class NodesTableModel(QAbstractTableModel):
                 return
             self._speed_progress[node_id] = percent
         self._emit_cell_changed(node_id, 7)
+
+    def set_speed_progress_batch(self, progress: dict[str, int]) -> None:
+        changed_rows: list[int] = []
+        for node_id, percent in progress.items():
+            percent = max(0, min(100, int(percent)))
+            if self._speed_progress.get(node_id) == percent:
+                continue
+            self._speed_progress[node_id] = percent
+            row = self._id_to_row.get(node_id)
+            if row is not None:
+                changed_rows.append(row)
+        if not changed_rows:
+            return
+        self.dataChanged.emit(
+            self.index(min(changed_rows), 7),
+            self.index(max(changed_rows), 7),
+            [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole, SPEED_PROGRESS_ROLE],
+        )
 
     def clear_speed_progress(self) -> None:
         if not self._speed_progress:
@@ -148,25 +166,23 @@ class NodesTableModel(QAbstractTableModel):
         return None
 
     def refresh_ping(self, node_id: str) -> None:
-        row = self._id_to_row.get(node_id)
-        if row is None:
-            return
-        top_left = self.index(row, 0)
-        bottom_right = self.index(row, 9)
-        self.dataChanged.emit(
-            top_left,
-            bottom_right,
-            [
-                Qt.ItemDataRole.DisplayRole,
-                Qt.ItemDataRole.ToolTipRole,
-                Qt.ItemDataRole.ForegroundRole,
-            ],
-        )
+        self._emit_row_changed(node_id)
+
+    def finish_ping(self, node_id: str) -> None:
+        self._busy_ping_ids.discard(node_id)
+        self._emit_row_changed(node_id)
 
     def refresh_speed(self, node_id: str) -> None:
         self._emit_cell_changed(node_id, 7)
 
+    def finish_speed(self, node_id: str) -> None:
+        self._speed_progress.pop(node_id, None)
+        self._emit_row_changed(node_id)
+
     def refresh_alive_status(self, node_id: str) -> None:
+        self._emit_row_changed(node_id)
+
+    def _emit_row_changed(self, node_id: str) -> None:
         row = self._id_to_row.get(node_id)
         if row is None:
             return
@@ -179,6 +195,8 @@ class NodesTableModel(QAbstractTableModel):
                 Qt.ItemDataRole.DisplayRole,
                 Qt.ItemDataRole.ToolTipRole,
                 Qt.ItemDataRole.ForegroundRole,
+                PING_BUSY_ROLE,
+                SPEED_PROGRESS_ROLE,
             ],
         )
 

@@ -13,6 +13,7 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     PrimaryToolButton,
     SearchLineEdit,
+    SmoothMode,
     SubtitleLabel,
     TableView,
     TransparentToolButton,
@@ -67,13 +68,13 @@ class NodesPage(QWidget):
         self.setObjectName("nodes")
 
         self._nodes: list[Node] = []
-        self._visible_node_ids: list[str] = []
         self._id_to_node: dict[str, Node] = {}
         self._search_haystacks: dict[str, str] = {}
         self._sort_ascending = True
         self._cached_groups: frozenset[str] = frozenset()
         self._cached_tags: frozenset[str] = frozenset()
         self._pending_ping_ids: set[str] = set()
+        self._pending_speed_progress: dict[str, int] = {}
         self._speed_test_running = False
         self._speed_test_stopping = False
 
@@ -224,7 +225,8 @@ class NodesPage(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.setIconSize(QSize(20, 14))
         self.table.setWordWrap(False)
-        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.scrollDelagate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
         self._activity_delegate = NodesActivityDelegate(self.table)
@@ -260,6 +262,11 @@ class NodesPage(QWidget):
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self._reload)
 
+        self._speed_progress_timer = QTimer(self)
+        self._speed_progress_timer.setSingleShot(True)
+        self._speed_progress_timer.setInterval(50)
+        self._speed_progress_timer.timeout.connect(self._flush_speed_progress)
+
         # --- Connections ---
         self.search_edit.textChanged.connect(self._search_timer.start)
         self.group_filter.currentIndexChanged.connect(self._reload)
@@ -292,32 +299,27 @@ class NodesPage(QWidget):
     def set_nodes(self, nodes: list[Node], selected_id: str | None = None) -> None:
         self._nodes = list(nodes)
         self._id_to_node = {node.id: node for node in self._nodes}
-        self._search_haystacks = {
-            node.id: " ".join([node.name, node.scheme, node.server, node.group, " ".join(node.tags)]).lower()
-            for node in self._nodes
-        }
+        self._search_haystacks.clear()
         self._rebuild_filter_combos()
         self._reload()
         if selected_id and selected_id not in self._selected_ids():
             self._select_node(selected_id)
 
-    def update_ping(self, node_id: str, ping_ms: int | None) -> None:
+    def update_ping(self, node_id: str, _ping_ms: int | None) -> None:
         self._pending_ping_ids.discard(node_id)
-        self._table_model.set_ping_busy(node_id, False)
-        self._table_model.refresh_ping(node_id)
-        self._activity_delegate.set_ping_animation_active(bool(self._pending_ping_ids))
+        self._table_model.finish_ping(node_id)
 
-    def update_speed(self, node_id: str, speed_mbps: float | None) -> None:
-        self._table_model.set_speed_progress(node_id, None)
-        self._table_model.refresh_speed(node_id)
+    def update_speed(self, node_id: str, _speed_mbps: float | None) -> None:
+        self._pending_speed_progress.pop(node_id, None)
+        self._table_model.finish_speed(node_id)
 
-    def update_alive_status(self, node_id: str, is_alive: bool | None) -> None:
+    def update_alive_status(self, node_id: str, _is_alive: bool | None) -> None:
         self._table_model.refresh_alive_status(node_id)
 
-    def refresh_detail(self) -> None:
+    def refresh_detail(self, node_id: str | None = None) -> None:
         """Refresh detail view if it is currently visible."""
         if self._stack.currentIndex() == 1:
-            self._detail_widget.refresh()
+            self._detail_widget.refresh(node_id)
 
     # ── Filter combos ──
 
@@ -369,15 +371,18 @@ class NodesPage(QWidget):
             if tag_filter != "Все теги" and tag_filter not in node.tags:
                 continue
             if query:
-                haystack = self._search_haystacks.get(node.id, "")
+                haystack = self._search_haystacks.get(node.id)
+                if haystack is None:
+                    haystack = " ".join(
+                        [node.name, node.scheme, node.server, node.group, " ".join(node.tags)]
+                    ).lower()
+                    self._search_haystacks[node.id] = haystack
                 if query not in haystack:
                     continue
             filtered.append(node)
 
         sort_key = self.sort_combo.currentText()
         filtered = self._sort_nodes(filtered, sort_key, self._sort_ascending)
-
-        self._visible_node_ids = [node.id for node in filtered]
 
         self.table.setUpdatesEnabled(False)
         self._table_model.set_nodes(filtered)
@@ -408,25 +413,36 @@ class NodesPage(QWidget):
             return
         self._pending_ping_ids = targets
         self._table_model.set_ping_busy_ids(targets)
-        self._activity_delegate.set_ping_animation_active(True)
 
     def start_speed_activity(self) -> None:
+        self._speed_progress_timer.stop()
+        self._pending_speed_progress.clear()
         self._table_model.clear_speed_progress()
         self._speed_test_running = True
         self._speed_test_stopping = False
         self._sync_speed_test_controls()
 
     def update_speed_progress(self, node_id: str, percent: int) -> None:
-        self._table_model.set_speed_progress(node_id, percent)
+        self._pending_speed_progress[node_id] = max(0, min(100, int(percent)))
+        if not self._speed_progress_timer.isActive():
+            self._speed_progress_timer.start()
+
+    def _flush_speed_progress(self) -> None:
+        if not self._pending_speed_progress:
+            return
+        progress = self._pending_speed_progress
+        self._pending_speed_progress = {}
+        self._table_model.set_speed_progress_batch(progress)
 
     def finish_ping_activity(self) -> None:
         if not self._pending_ping_ids:
             return
         self._pending_ping_ids.clear()
         self._table_model.clear_ping_busy()
-        self._activity_delegate.set_ping_animation_active(False)
 
     def finish_speed_activity(self) -> None:
+        self._speed_progress_timer.stop()
+        self._pending_speed_progress.clear()
         self._table_model.clear_speed_progress()
         self._speed_test_running = False
         self._speed_test_stopping = False
@@ -450,6 +466,11 @@ class NodesPage(QWidget):
     @staticmethod
     def _sort_nodes(nodes: list[Node], key: str, ascending: bool) -> list[Node]:
         if key == "Вручную":
+            if ascending and all(
+                nodes[index - 1].sort_order <= nodes[index].sort_order
+                for index in range(1, len(nodes))
+            ):
+                return nodes
             return sorted(nodes, key=lambda n: n.sort_order, reverse=not ascending)
         if key == "Имя":
             return sorted(nodes, key=lambda n: n.name.lower(), reverse=not ascending)
@@ -504,9 +525,9 @@ class NodesPage(QWidget):
             return set()
         ids: set[str] = set()
         for index in model.selectedRows():
-            row = index.row()
-            if 0 <= row < len(self._visible_node_ids):
-                ids.add(self._visible_node_ids[row])
+            node = self._table_model.node_at_row(index.row())
+            if node is not None:
+                ids.add(node.id)
         return ids
 
     def _select_node(self, node_id: str) -> None:
@@ -590,22 +611,20 @@ class NodesPage(QWidget):
     # ── Double-click / context menu ──
 
     def _on_double_click(self, index) -> None:
-        row = index.row()
-        if 0 <= row < len(self._visible_node_ids):
-            node_id = self._visible_node_ids[row]
-            node = self._id_to_node.get(node_id)
-            if node:
-                self._show_detail(node)
+        node = self._table_model.node_at_row(index.row())
+        if node is not None:
+            self._show_detail(node)
 
     def _on_context_menu(self, pos) -> None:
         index = self.table.indexAt(pos)
         if not index.isValid():
             return
         clicked_row = index.row()
-        if clicked_row < 0 or clicked_row >= len(self._visible_node_ids):
+        clicked_node = self._table_model.node_at_row(clicked_row)
+        if clicked_node is None:
             return
 
-        clicked_id = self._visible_node_ids[clicked_row]
+        clicked_id = clicked_node.id
         current_ids = self._selected_ids()
         if clicked_id not in current_ids:
             self.table.clearSelection()
@@ -684,11 +703,10 @@ class NodesPage(QWidget):
 
     def _copy_multiple_links(self, node_ids: set[str]) -> None:
         links: list[str] = []
-        for vid in self._visible_node_ids:
-            if vid in node_ids:
-                node = self._id_to_node.get(vid)
-                if node and node.link:
-                    links.append(node.link)
+        for row in range(self._table_model.rowCount()):
+            node = self._table_model.node_at_row(row)
+            if node is not None and node.id in node_ids and node.link:
+                links.append(node.link)
         if links:
             clipboard = QApplication.clipboard()
             if clipboard is not None:

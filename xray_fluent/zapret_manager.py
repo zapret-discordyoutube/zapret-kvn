@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import shutil
+import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +23,9 @@ ZAPRET_DIR = BASE_DIR / "zapret"
 WINWS2_EXE = ZAPRET_DIR / "exe" / "winws2.exe"
 WINWS_EXE = ZAPRET_DIR / "exe" / "winws.exe"
 PRESETS_DIR = ZAPRET_DIR / "presets"
+
+_IPSET_EXCLUDE_IP_PREFIX = "--ipset-exclude-ip="
+_UDP_PROXY_TYPES = frozenset({"hysteria", "hysteria2", "tuic"})
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -48,6 +53,7 @@ class ZapretManager(QObject):
         self._process: QProcess | None = None
         self._current_preset: str = ""
         self._start_args: list[str] = []
+        self._protected_proxy_ips: set[str] = set()
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(3000)
         self._health_timer.timeout.connect(self._check_health)
@@ -82,6 +88,98 @@ class ZapretManager(QObject):
             if stripped and not stripped.startswith("#"):
                 args.append(stripped)
         return args
+
+    @staticmethod
+    def _with_ip_exclusions(args: list[str], excluded_ips: set[str]) -> list[str]:
+        """Add fixed IP exclusions to every winws2 profile in an argument list."""
+        if not excluded_ips:
+            return list(args)
+
+        normalized_ips = sorted(
+            excluded_ips,
+            key=lambda value: (ipaddress.ip_address(value).version, value),
+        )
+
+        def update_profile(profile: list[str]) -> list[str]:
+            merged = list(profile)
+            existing_values: list[str] = []
+            first_index: int | None = None
+            for index in range(len(merged) - 1, -1, -1):
+                argument = merged[index]
+                if not argument.startswith(_IPSET_EXCLUDE_IP_PREFIX):
+                    continue
+                first_index = index
+                value = argument[len(_IPSET_EXCLUDE_IP_PREFIX):]
+                existing_values[0:0] = [item for item in value.split(",") if item]
+                merged.pop(index)
+
+            seen = {value.lstrip("#") for value in existing_values}
+            existing_values.extend(ip for ip in normalized_ips if ip not in seen)
+            exclusion = _IPSET_EXCLUDE_IP_PREFIX + ",".join(existing_values)
+            if first_index is None:
+                merged.append(exclusion)
+            else:
+                merged.insert(min(first_index, len(merged)), exclusion)
+            return merged
+
+        result: list[str] = []
+        profile: list[str] = []
+        for argument in args:
+            if argument == "--new" or argument.startswith("--new="):
+                result.extend(update_profile(profile))
+                result.append(argument)
+                profile = []
+            else:
+                profile.append(argument)
+        result.extend(update_profile(profile))
+        return result
+
+    @staticmethod
+    def _resolve_server_ips(server: str) -> set[str]:
+        host = server.strip().strip("[]").rstrip(".")
+        if not host:
+            return set()
+        try:
+            return {str(ipaddress.ip_address(host))}
+        except ValueError:
+            pass
+
+        resolved: set[str] = set()
+        for info in socket.getaddrinfo(host, None, type=socket.SOCK_DGRAM):
+            address = info[4][0]
+            try:
+                resolved.add(str(ipaddress.ip_address(address)))
+            except ValueError:
+                continue
+        return resolved
+
+    def protect_proxy_node(self, node: object) -> set[str]:
+        """Keep UDP proxy endpoints out of winws2 desynchronization profiles."""
+        outbound = getattr(node, "outbound", {})
+        proxy_type = str(outbound.get("type") or getattr(node, "scheme", "")).lower()
+        if proxy_type not in _UDP_PROXY_TYPES:
+            return set()
+
+        server = str(outbound.get("server") or getattr(node, "server", ""))
+        try:
+            resolved = self._resolve_server_ips(server)
+        except OSError as exc:
+            log.warning("zapret could not resolve protected proxy endpoint %s: %s", server, exc)
+            self.log_line.emit(f"[zapret] Не удалось добавить сервер прокси в исключения: {server}")
+            return set()
+        new_ips = resolved - self._protected_proxy_ips
+        if not new_ips:
+            return resolved
+
+        self._protected_proxy_ips.update(new_ips)
+        joined = ", ".join(sorted(new_ips))
+        self.log_line.emit(f"[zapret] Сервер UDP-прокси исключён из обработки: {joined}")
+
+        if self.running and self._current_preset:
+            preset = self._current_preset
+            self.log_line.emit("[zapret] Перезапуск с обновлёнными исключениями")
+            self.start(preset)
+        return resolved
 
     @staticmethod
     def _parse_metadata(text: str) -> dict[str, str]:
@@ -242,7 +340,10 @@ class ZapretManager(QObject):
             return
 
         # Parse preset and pass args directly (winws2 @file can't handle spaces in path)
-        args = self._parse_preset_args(preset)
+        args = self._with_ip_exclusions(
+            self._parse_preset_args(preset),
+            self._protected_proxy_ips,
+        )
         if not args:
             self.error.emit(f"Пресет пустой: {preset_name}")
             return

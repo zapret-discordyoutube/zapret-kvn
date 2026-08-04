@@ -227,6 +227,9 @@ class AppController(QObject):
         self.network_monitor = NetworkMonitor(parent=self)
 
         self.state = AppState()
+        self._node_lookup_source_id = 0
+        self._node_lookup_size = -1
+        self._node_by_id: dict[str, Node] = {}
         self.recent_logs: list[str] = []
         self.connected = False
         self.locked = False

@@ -52,6 +52,22 @@ class NodesTableModelTests(unittest.TestCase):
         self.assertIsNone(index.data(SPEED_PROGRESS_ROLE))
         self.assertEqual(index.data(Qt.ItemDataRole.DisplayRole), "12.5 MB/s")
 
+    def test_progress_batch_and_result_each_emit_one_repaint(self) -> None:
+        other = Node(id="node-2", name="Other")
+        self.model.set_nodes([self.node, other])
+        changes = []
+        self.model.dataChanged.connect(lambda *args: changes.append(args))
+
+        self.model.set_speed_progress_batch({self.node.id: 25, other.id: 50})
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(self.model.index(0, 7).data(SPEED_PROGRESS_ROLE), 25)
+        self.assertEqual(self.model.index(1, 7).data(SPEED_PROGRESS_ROLE), 50)
+
+        changes.clear()
+        self.model.finish_speed(self.node.id)
+        self.assertEqual(len(changes), 1)
+        self.assertIsNone(self.model.index(0, 7).data(SPEED_PROGRESS_ROLE))
+
     def test_batch_ping_update_emits_one_table_range_change(self) -> None:
         other = Node(id="node-2", name="Other")
         self.model.set_nodes([self.node, other])

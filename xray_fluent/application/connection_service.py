@@ -94,11 +94,13 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
         else:
             session_label = node.name if node else "unknown"
 
-        if node is not None and not singbox_editor_mode and not xray_raw_mode:
-            problem = controller._prepare_node_for_runtime(node)
-            if problem:
-                controller._set_connection_status("error", problem, level="error")
-                return False
+        if node is not None:
+            controller.zapret.protect_proxy_node(node)
+            if not singbox_editor_mode and not xray_raw_mode:
+                problem = controller._prepare_node_for_runtime(node)
+                if problem:
+                    controller._set_connection_status("error", problem, level="error")
+                    return False
 
         if tun:
             controller._log(f"[tun] attempting TUN connect, admin={_is_admin()}")

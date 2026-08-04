@@ -44,10 +44,13 @@ def on_countries_resolved(controller: AppController, results: dict[str, str]) ->
 def get_node_by_id(controller: AppController, node_id: str | None) -> Node | None:
     if not node_id:
         return None
-    for node in controller.state.nodes:
-        if node.id == node_id:
-            return node
-    return None
+    nodes = controller.state.nodes
+    source_id = id(nodes)
+    if controller._node_lookup_source_id != source_id or controller._node_lookup_size != len(nodes):
+        controller._node_by_id = {node.id: node for node in nodes}
+        controller._node_lookup_source_id = source_id
+        controller._node_lookup_size = len(nodes)
+    return controller._node_by_id.get(node_id)
 
 
 def prepare_node_for_runtime(controller: AppController, node: Node | None) -> str | None:

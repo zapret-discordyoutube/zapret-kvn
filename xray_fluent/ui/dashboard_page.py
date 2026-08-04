@@ -64,7 +64,6 @@ def _mode_title(mode: str) -> str:
 
 class DashboardPage(QWidget):
     toggle_connection_requested = pyqtSignal()
-    node_selected = pyqtSignal(str)
     mode_changed = pyqtSignal(str)
     tun_toggled = pyqtSignal(bool)
     proxy_toggled = pyqtSignal(bool)
@@ -73,8 +72,7 @@ class DashboardPage(QWidget):
         super().__init__(parent)
         self.setObjectName("dashboard")
 
-        self._nodes: list[Node] = []
-        self._node_ids: list[str] = []
+        self._node_count = 0
         self._selected_node: Node | None = None
         self._connected = False
         self._connection_phase = "idle"
@@ -174,10 +172,6 @@ class DashboardPage(QWidget):
         # Toggle button inside connection card
         self.toggle_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Запустить прокси", self.connection_card)
         connection_layout.addWidget(self.toggle_btn)
-
-        # Hidden node combo (keeps selection logic intact, UI on nodes page)
-        self.node_combo = ComboBox(self.connection_card)
-        self.node_combo.setVisible(False)
 
         connection_layout.addStretch(1)
         self.connection_status_label.setWordWrap(True)
@@ -368,7 +362,6 @@ class DashboardPage(QWidget):
         proc_detail_layout.addWidget(self._proc_detail_table, 1)
 
         # ── Signal connections ────────────────────────────────
-        self.node_combo.currentIndexChanged.connect(self._on_node_changed)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.tun_switch.checkedChanged.connect(self._on_tun_toggled)
         self.proxy_switch.checkedChanged.connect(self._on_proxy_toggled)
@@ -380,37 +373,15 @@ class DashboardPage(QWidget):
     # ── Public API ────────────────────────────────────────────
 
     def set_nodes(self, nodes: list[Node], selected_node_id: str | None) -> None:
-        self._nodes = list(nodes)
-        self._node_ids = []
-
-        self.node_combo.blockSignals(True)
-        self.node_combo.clear()
-
-        selected_index = 0
-        for index, node in enumerate(self._nodes):
-            self.node_combo.addItem(self._node_title(node))
-            self._node_ids.append(node.id)
-            if selected_node_id and selected_node_id == node.id:
-                selected_index = index
-
-        if self._nodes:
-            self.node_combo.setEnabled(True)
-            self.node_combo.setCurrentIndex(selected_index)
-            self._selected_node = self._nodes[selected_index]
-        else:
-            self.node_combo.addItem("Профили не импортированы")
-            self.node_combo.setEnabled(False)
-            self._selected_node = None
-
-        self.node_combo.blockSignals(False)
+        self._node_count = len(nodes)
+        self._selected_node = next(
+            (node for node in nodes if selected_node_id and node.id == selected_node_id),
+            nodes[0] if nodes else None,
+        )
         self._refresh_dashboard()
 
     def set_selected_node(self, node: Node | None) -> None:
         self._selected_node = node
-        if node is not None and node.id in self._node_ids:
-            self.node_combo.blockSignals(True)
-            self.node_combo.setCurrentIndex(self._node_ids.index(node.id))
-            self.node_combo.blockSignals(False)
         self._refresh_dashboard()
 
     def set_connection(self, connected: bool) -> None:
@@ -554,7 +525,7 @@ class DashboardPage(QWidget):
         if selected is None:
             self.profile_name_label.setText("Профиль не выбран")
             self.profile_endpoint_label.setText("Сначала импортируйте или выберите узел")
-            self.profile_group_label.setText(f"Профилей: {len(self._nodes)}")
+            self.profile_group_label.setText(f"Профилей: {self._node_count}")
             self.profile_latency_label.setText("Задержка: --")
             return
 
@@ -802,16 +773,7 @@ class DashboardPage(QWidget):
             return f"Активный сеанс: {self._selected_node_summary()}"
         return f"Готов к запуску: {self._selected_node_summary()}"
 
-    def _node_title(self, node: Node) -> str:
-        name = node.name or node.server or "Безымянный"
-        scheme = node.scheme.upper() if node.scheme else "NODE"
-        return f"{name} ({scheme})"
-
     # ── Signal handlers ───────────────────────────────────────
-
-    def _on_node_changed(self, index: int) -> None:
-        if 0 <= index < len(self._node_ids):
-            self.node_selected.emit(self._node_ids[index])
 
     def _on_mode_changed(self, index: int) -> None:
         value = self.mode_combo.itemData(index)
@@ -838,7 +800,7 @@ class DashboardPage(QWidget):
         self._apply_interaction_state()
 
     def _apply_interaction_state(self) -> None:
-        has_profiles = bool(self._nodes) or not self._settings.tun_mode or (
+        has_profiles = self._node_count > 0 or not self._settings.tun_mode or (
             self._settings.tun_mode and self._settings.tun_engine in {"singbox", "xray"}
         )
         busy = self._transition_busy or self._connection_phase == "starting"

@@ -188,8 +188,6 @@ class MainWindow(FluentWindow):
         self.dashboard_page.toggle_connection_requested.connect(self.controller.toggle_connection)
         self.dashboard_page.tun_toggled.connect(self._on_dashboard_tun_toggled)
         self.dashboard_page.proxy_toggled.connect(self._on_dashboard_proxy_toggled)
-        self.dashboard_page.node_selected.connect(self.controller.set_selected_node)
-
         self.nodes_page.import_clipboard_requested.connect(self._import_nodes_from_clipboard)
         self.nodes_page.delete_requested.connect(self.controller.remove_nodes)
         self.nodes_page.reorder_requested.connect(self.controller.reorder_nodes)
@@ -329,7 +327,7 @@ class MainWindow(FluentWindow):
 
     def _on_ping_updated(self, node_id: str, ping_ms: int | None) -> None:
         self.nodes_page.update_ping(node_id, ping_ms)
-        self.nodes_page.refresh_detail()
+        self.nodes_page.refresh_detail(node_id)
         node = self.controller.selected_node
         if node and node.id == node_id:
             self.dashboard_page.set_selected_latency(ping_ms)
@@ -441,6 +439,9 @@ class MainWindow(FluentWindow):
             self._bulk_task_type = task
             return
 
+        update_step = max(1, (total + 99) // 100)
+        if current != total and current % update_step:
+            return
         self._set_bulk_task_tip_content(content)
 
     def _on_bulk_task_tip_closed(self) -> None:
@@ -452,7 +453,6 @@ class MainWindow(FluentWindow):
             return
         self._bulk_task_tip.content = content
         self._bulk_task_tip.contentLabel.setText(content)
-        self._bulk_task_tip.adjustSize()
 
     def _clear_bulk_task_tip(self) -> None:
         if self._bulk_task_tip is None:
@@ -529,10 +529,9 @@ class MainWindow(FluentWindow):
     def _on_speed_progress_updated(self, node_id: str, percent: int) -> None:
         self.nodes_page.update_speed_progress(node_id, percent)
 
-    def _on_speed_updated(self, node_id: str, speed_mbps: float | None, is_alive: bool) -> None:
+    def _on_speed_updated(self, node_id: str, speed_mbps: float | None, _is_alive: bool) -> None:
         self.nodes_page.update_speed(node_id, speed_mbps)
-        self.nodes_page.update_alive_status(node_id, is_alive)
-        self.nodes_page.refresh_detail()
+        self.nodes_page.refresh_detail(node_id)
 
     def _on_edit_node(self, node_id: str) -> None:
         node = self.controller._get_node_by_id(node_id)

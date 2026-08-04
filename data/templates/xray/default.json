@@ -69,6 +69,14 @@
       },
       {
         "type": "field",
+        "domain": [
+          "domain:championat.com"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
         "ip": [
           "geoip:private"
         ],
