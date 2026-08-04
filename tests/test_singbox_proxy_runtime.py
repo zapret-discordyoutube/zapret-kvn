@@ -7,8 +7,10 @@ import tempfile
 import unittest
 
 from xray_fluent.engines.singbox.runtime_planner import (
+    classify_node_for_singbox,
     parse_singbox_document,
     plan_singbox_proxy_runtime,
+    plan_singbox_runtime,
 )
 from xray_fluent.link_parser import parse_single
 from xray_fluent.models import Node
@@ -50,9 +52,30 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         )
         proxy = next(item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy")
         self.assertEqual(proxy["type"], "hysteria2")
+        # Порт clash_api подбирается пробным bind'ом (19090 может быть в
+        # excluded port range Windows), поэтому проверяем согласованность,
+        # а не конкретное значение.
+        self.assertGreater(plan.clash_api_port, 0)
         self.assertEqual(
             plan.singbox_config["experimental"]["clash_api"]["external_controller"],
-            "127.0.0.1:19090",
+            f"127.0.0.1:{plan.clash_api_port}",
+        )
+
+    def test_clash_api_port_self_heals_when_default_is_taken(self) -> None:
+        import socket
+
+        from xray_fluent.constants import SINGBOX_CLASH_API_PORT
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+            blocker.bind(("127.0.0.1", SINGBOX_CLASH_API_PORT))
+            plan = self._build_plan(
+                "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1"
+            )
+
+        self.assertGreater(plan.clash_api_port, SINGBOX_CLASH_API_PORT)
+        self.assertEqual(
+            plan.singbox_config["experimental"]["clash_api"]["external_controller"],
+            f"127.0.0.1:{plan.clash_api_port}",
         )
 
     def test_extended_core_accepts_new_protocol_proxy_plans(self) -> None:
@@ -140,6 +163,55 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         self.assertEqual(proxy["type"], "socks")
         self.assertEqual(plan.xray_sidecar.config["outbounds"][0]["protocol"], "vless")
 
+    def test_vless_reality_stays_native_in_tun_and_proxy_modes(self) -> None:
+        link = (
+            "vless://11111111-1111-1111-1111-111111111111@reality.example:8443"
+            "?type=tcp&encryption=none&security=reality"
+            "&pbk=Ie4ld0x7PvMRA2idLXq58rXRhefsved2eKgqtBtS2Hg"
+            "&fp=edge&sni=www.example.com&sid=0123456789abcdef&spx=%2F#Reality"
+        )
+        document = parse_singbox_document(
+            TEMPLATE_PATH,
+            TEMPLATE_PATH.read_text(encoding="utf-8"),
+        )
+        node = parse_single(link)
+
+        self.assertEqual(classify_node_for_singbox(node), "native_singbox")
+        self.assertEqual(node.outbound["streamSettings"]["realitySettings"]["spiderX"], "/")
+
+        plans = (
+            plan_singbox_runtime(document, node),
+            plan_singbox_proxy_runtime(
+                document,
+                node,
+                allowed_proxy_ports={1390, 1391},
+            ),
+        )
+        for plan in plans:
+            with self.subTest(mode="proxy" if plan.socks_port else "tun"):
+                self.assertEqual(plan.outcome, "native_singbox")
+                self.assertIsNone(plan.xray_sidecar)
+                proxy = next(
+                    item
+                    for item in plan.singbox_config["outbounds"]
+                    if item.get("tag") == "proxy"
+                )
+                self.assertEqual(proxy["type"], "vless")
+                self.assertEqual(proxy["server"], "reality.example")
+                self.assertEqual(proxy["server_port"], 8443)
+                self.assertEqual(
+                    proxy["tls"],
+                    {
+                        "enabled": True,
+                        "server_name": "www.example.com",
+                        "utls": {"enabled": True, "fingerprint": "edge"},
+                        "reality": {
+                            "enabled": True,
+                            "public_key": "Ie4ld0x7PvMRA2idLXq58rXRhefsved2eKgqtBtS2Hg",
+                            "short_id": "0123456789abcdef",
+                        },
+                    },
+                )
 
 if __name__ == "__main__":
     unittest.main()

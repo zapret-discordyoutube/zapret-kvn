@@ -31,7 +31,7 @@ def start_metrics_worker(controller: AppController) -> None:
         ping_host=ping_host,
         ping_port=ping_port,
         mode=mode,
-        clash_api_port=SINGBOX_CLASH_API_PORT,
+        clash_api_port=controller._singbox_clash_api_port or SINGBOX_CLASH_API_PORT,
         socks_port=socks_port,
         http_port=http_port,
         xray_inbound_tags=list(inbound_tags),
@@ -58,6 +58,7 @@ def cleanup_connection_runtime_state(
 ) -> None:
     controller._xray_tun_routes.cleanup()
     controller._xray_api_port = 0
+    controller._singbox_clash_api_port = 0
     controller._protect_ss_port = 0
     controller._protect_ss_password = ""
     controller._tun2socks_proxy_username = ""

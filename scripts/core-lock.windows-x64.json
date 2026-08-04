@@ -4,10 +4,10 @@
   "sources": [
     {
       "id": "sing-box-extended",
-      "version": "v1.13.14-extended-2.5.0",
-      "archive": "sing-box-1.13.14-extended-2.5.0-windows-amd64-purego.zip",
-      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.13.14-extended-2.5.0/sing-box-1.13.14-extended-2.5.0-windows-amd64-purego.zip",
-      "sha256": "04e4b32983c5e58849243188bc5cba35fb9d559e0277bc73b8a5ef435fc6e571",
+      "version": "v1.13.14-extended-2.5.2",
+      "archive": "sing-box-1.13.14-extended-2.5.2-windows-amd64-purego.zip",
+      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.13.14-extended-2.5.2/sing-box-1.13.14-extended-2.5.2-windows-amd64-purego.zip",
+      "sha256": "6525ff0effa82e8131cc01bc32ce56d6fa0f03c7975bdbb57efdd706425b2579",
       "files": [
         { "match": "(^|/)sing-box\\.exe$", "target": "sing-box.exe" },
         { "match": "(^|/)libcronet\\.dll$", "target": "libcronet.dll" },

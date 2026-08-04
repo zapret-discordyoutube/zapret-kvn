@@ -269,6 +269,7 @@ class AppController(QObject):
         self._tun2socks_proxy_username: str = ""
         self._tun2socks_proxy_password: str = ""
         self._xray_api_port: int = 0
+        self._singbox_clash_api_port: int = 0
         self._traffic_history = TrafficHistoryStorage()
         self._traffic_save_counter = 0
 
@@ -829,15 +830,27 @@ class AppController(QObject):
             self._protect_ss_port = 0
             self._protect_ss_password = ""
 
+        if plan.clash_api_port <= 0:
+            self._log(
+                "[sing-box] clash_api отключён: свободный порт метрик не найден "
+                f"(диапазон {SINGBOX_CLASH_API_PORT}+ зарезервирован Windows)"
+            )
+        elif plan.clash_api_port != SINGBOX_CLASH_API_PORT:
+            self._log(
+                f"[sing-box] clash_api порт изменён: {SINGBOX_CLASH_API_PORT} -> {plan.clash_api_port} "
+                "(исходный зарезервирован Windows)"
+            )
         sb_ok = self.singbox.start(self.state.settings.singbox_path, plan.singbox_config)
         self._log(f"[sing-box] start result: {sb_ok}")
         if sb_ok:
+            self._singbox_clash_api_port = plan.clash_api_port
             return True
 
         if plan.xray_sidecar is not None and self.xray.is_running:
             self.xray.stop()
         self._protect_ss_port = 0
         self._protect_ss_password = ""
+        self._singbox_clash_api_port = 0
         return False
 
     def _build_runtime_xray_config(self, node: Node | None = None, *, tun_mode: bool = False) -> XrayRuntimeConfig:

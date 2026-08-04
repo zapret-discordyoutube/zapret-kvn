@@ -929,17 +929,39 @@ class MainWindow(FluentWindow):
             lambda: self._start_update_download(self._pending_update)
         )
 
-        if silent:
-            return
+        # A silent check only suppresses routine progress, errors and the
+        # "up to date" message.  A newer version is actionable and must still
+        # be shown to the user.
+        self._show_update_available_dialog(update, open_updates_page=not silent)
 
-        # Switch to Updates page and show dialog
-        self.switchTo(self.updates_page)
+    def _show_update_available_dialog(
+        self,
+        update: AppUpdate,
+        *,
+        open_updates_page: bool,
+    ) -> None:
+        was_hidden = not self.isVisible()
+        was_minimized = self.isMinimized()
+
+        # qfluentwidgets MessageBox stays hidden when its parent is hidden.
+        # Bring the window forward for the prompt and restore its previous
+        # state when the user postpones the update.
+        if was_minimized:
+            self.showNormal()
+        elif was_hidden:
+            self.show()
+        self.activateWindow()
+        self.raise_()
+
+        if open_updates_page:
+            self.switchTo(self.updates_page)
 
         from qfluentwidgets import MessageBox
         box = MessageBox(
             "Доступно обновление",
             f"Доступна новая версия v{update.version}.\n"
             f"Текущая: v{APP_VERSION}\n\n"
+            f"Рекомендуется обновить приложение.\n\n"
             f"Приложение скачает обновление, закроется и перезапустится автоматически.",
             self,
         )
@@ -947,6 +969,12 @@ class MainWindow(FluentWindow):
         box.cancelButton.setText("Позже")
         if box.exec():
             self._start_update_download(update)
+            return
+
+        if was_hidden:
+            self.hide()
+        elif was_minimized:
+            self.showMinimized()
 
     def _start_update_download(self, update: AppUpdate) -> None:
         if not self.controller.state.settings.allow_updates:

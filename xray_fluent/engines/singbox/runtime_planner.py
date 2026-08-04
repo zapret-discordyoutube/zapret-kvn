@@ -90,6 +90,7 @@ class SingboxRuntimePlan:
     requested_http_port: int = 0
     socks_port: int = 0
     http_port: int = 0
+    clash_api_port: int = 0
 
     @property
     def is_hybrid(self) -> bool:
@@ -191,7 +192,7 @@ def plan_singbox_runtime(
 ) -> SingboxRuntimePlan:
     runtime_config = deepcopy(document.payload)
     strip_singbox_proxy_inbounds(runtime_config)
-    _ensure_singbox_metrics_contract(runtime_config)
+    clash_api_port = _ensure_singbox_metrics_contract(runtime_config)
     _ensure_singbox_tun_runtime_contract(runtime_config)
 
     return _plan_runtime_outbound(
@@ -201,6 +202,7 @@ def plan_singbox_runtime(
         preferred_relay_port=preferred_relay_port,
         preferred_protect_port=preferred_protect_port,
         preferred_protect_password=preferred_protect_password,
+        clash_api_port=clash_api_port,
     )
 
 
@@ -221,7 +223,7 @@ def plan_singbox_proxy_runtime(
         runtime_config,
         allowed_proxy_ports=allowed_proxy_ports,
     )
-    _ensure_singbox_metrics_contract(runtime_config)
+    clash_api_port = _ensure_singbox_metrics_contract(runtime_config)
 
     return _plan_runtime_outbound(
         document,
@@ -234,6 +236,7 @@ def plan_singbox_proxy_runtime(
         requested_http_port=selection.requested_http_port,
         socks_port=selection.socks_port,
         http_port=selection.http_port,
+        clash_api_port=clash_api_port,
     )
 
 
@@ -249,6 +252,7 @@ def _plan_runtime_outbound(
     requested_http_port: int = 0,
     socks_port: int = 0,
     http_port: int = 0,
+    clash_api_port: int = 0,
 ) -> SingboxRuntimePlan:
 
     outbounds = runtime_config.get("outbounds")
@@ -267,6 +271,7 @@ def _plan_runtime_outbound(
             requested_http_port=requested_http_port,
             socks_port=socks_port,
             http_port=http_port,
+            clash_api_port=clash_api_port,
         )
 
     if node is None:
@@ -304,6 +309,7 @@ def _plan_runtime_outbound(
             requested_http_port=requested_http_port,
             socks_port=socks_port,
             http_port=http_port,
+            clash_api_port=clash_api_port,
         )
 
     try:
@@ -321,6 +327,7 @@ def _plan_runtime_outbound(
             requested_http_port=requested_http_port,
             socks_port=socks_port,
             http_port=http_port,
+            clash_api_port=clash_api_port,
         )
 
     assert isinstance(outbounds, list)
@@ -339,6 +346,7 @@ def _plan_runtime_outbound(
         requested_http_port=requested_http_port,
         socks_port=socks_port,
         http_port=http_port,
+        clash_api_port=clash_api_port,
     )
 
 
@@ -355,6 +363,7 @@ def _plan_hybrid_runtime(
     requested_http_port: int = 0,
     socks_port: int = 0,
     http_port: int = 0,
+    clash_api_port: int = 0,
 ) -> SingboxRuntimePlan:
     relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(preferred=SINGBOX_XRAY_RELAY_PORT)
     excluded_ports = {relay_port}
@@ -422,6 +431,7 @@ def _plan_hybrid_runtime(
         requested_http_port=requested_http_port,
         socks_port=socks_port,
         http_port=http_port,
+        clash_api_port=clash_api_port,
     )
 
 
@@ -566,10 +576,28 @@ def _ensure_hybrid_protect_route(payload: dict[str, Any]) -> None:
     rules.insert(0, protect_rule)
 
 
-def _ensure_singbox_metrics_contract(payload: dict[str, Any]) -> None:
+def _ensure_singbox_metrics_contract(payload: dict[str, Any]) -> int:
+    """Назначить clash_api заведомо доступный порт.
+
+    Windows может зарезервировать 19090 (excluded port ranges Hyper-V/WinNAT),
+    тогда bind падает с WSAEACCES и sing-box не стартует вовсе. Порт подбирается
+    пробным bind'ом; если свободного нет — clash_api убирается: живые метрики
+    вторичны, соединение важнее.
+    """
     experimental = _ensure_dict(payload, "experimental")
+    try:
+        port = _find_free_port(
+            preferred=SINGBOX_CLASH_API_PORT,
+            port_range=range(SINGBOX_CLASH_API_PORT, SINGBOX_CLASH_API_PORT + 500),
+        )
+    except RuntimeError:
+        experimental.pop("clash_api", None)
+        if not experimental:
+            payload.pop("experimental", None)
+        return 0
     clash_api = _ensure_dict(experimental, "clash_api")
-    clash_api["external_controller"] = f"127.0.0.1:{SINGBOX_CLASH_API_PORT}"
+    clash_api["external_controller"] = f"127.0.0.1:{port}"
+    return port
 
 
 def _ensure_singbox_tun_runtime_contract(payload: dict[str, Any]) -> None:

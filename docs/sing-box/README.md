@@ -15,7 +15,7 @@ The goal is not to mirror the entire upstream manual. The goal is to pin down:
 
 ## Source Baseline
 
-Prepared on `2026-03-27` and updated on `2026-07-11` against these sources:
+Prepared on `2026-03-27` and updated on `2026-08-04` against these sources:
 
 - local upstream source tree:
   `C:\Users\Admin\Downloads\sing-box-testing`
@@ -29,9 +29,12 @@ Prepared on `2026-03-27` and updated on `2026-07-11` against these sources:
 Important version note:
 
 - the bundled production core is `shtorm-7/sing-box-extended`
-  `v1.13.14-extended-2.5.0` Windows AMD64 purego (upstream sing-box
+  `v1.13.14-extended-2.5.2` Windows AMD64 purego (upstream sing-box
   `1.13.14`); this variant keeps the Naive outbound and ships its matching
   `libcronet.dll`;
+- `2.5.2` is required for current VLESS REALITY servers; the previous `2.5.0`
+  core sent obsolete client version bytes in the REALITY ClientHello and could
+  fail verification even when the same profile worked on the Android core;
 - the upstream docs above come from the `testing` branch, not from a frozen
   release tag;
 - those docs already mention fields added in `sing-box 1.14.0`;
