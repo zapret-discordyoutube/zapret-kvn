@@ -1,7 +1,7 @@
 # Project Rules
 
 - Do not create new Git branches unless the user explicitly asks for one. By default, keep work on `main` and commit/push requested changes directly to `main`.
-- Production builds are created remotely by the `Build & Release` GitHub Actions workflow after a push to `main`. Do not run a local build unless the user explicitly asks for one; validate source changes locally with the relevant tests and core config checks before pushing.
+- Stable production releases are built, packaged, verified, and published locally on the Windows workstation by following `$zapret-kvn-release` in `.agents/skills/zapret-kvn-release/SKILL.md`. A release request authorizes that local build. Keep the `Build & Release` GitHub Actions workflow enabled as a background fallback, but do not inspect, poll, wait for, or cancel its runs unless the user explicitly asks.
 - For sing-box and Xray proxy/native TUN modes, the active raw JSON config is the routing and DNS source of truth. Keep versioned defaults under `data/templates/sing-box` and `data/templates/xray`, using only the original native core schemas.
 - Do not introduce a custom routing DSL, overlay, `${APP_ROUTE_RULES}`-style compiler, or hidden Python injection of product routing policy. Runtime mutations must stay limited to app-owned transport and safety contracts.
 - The same active raw JSON owns routing for an engine's proxy and native TUN modes. The hybrid Xray sidecar owns only its `proxy` path, while tun2socks remains a separate legacy path.
