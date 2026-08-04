@@ -8,6 +8,9 @@ from PyQt6.QtGui import QBrush, QColor
 from ..country_flags import get_flag_icon
 from ..models import Node
 
+PING_BUSY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+SPEED_PROGRESS_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+
 _RED_BRUSH = QBrush(QColor(220, 50, 50))
 _GREEN_BRUSH = QBrush(QColor(76, 175, 80))
 _ORANGE_BRUSH = QBrush(QColor(255, 152, 0))
@@ -32,7 +35,7 @@ class NodesTableModel(QAbstractTableModel):
         self._nodes: list[Node] = []
         self._id_to_row: dict[str, int] = {}
         self._busy_ping_ids: set[str] = set()
-        self._busy_speed_ids: set[str] = set()
+        self._speed_progress: dict[str, int] = {}
 
     def set_nodes(self, nodes: list[Node]) -> None:
         self.beginResetModel()
@@ -53,34 +56,36 @@ class NodesTableModel(QAbstractTableModel):
         if changed:
             self._emit_cell_changed(node_id, 6)
 
+    def set_ping_busy_ids(self, node_ids: set[str]) -> None:
+        node_ids = set(node_ids)
+        if node_ids == self._busy_ping_ids:
+            return
+        self._busy_ping_ids = node_ids
+        self._emit_column_changed(6)
+
     def clear_ping_busy(self) -> None:
         if not self._busy_ping_ids:
             return
-        busy_ids = list(self._busy_ping_ids)
         self._busy_ping_ids.clear()
-        for node_id in busy_ids:
-            self._emit_cell_changed(node_id, 6)
+        self._emit_column_changed(6)
 
-    def set_speed_busy(self, node_id: str, busy: bool) -> None:
-        changed = False
-        if busy:
-            if node_id not in self._busy_speed_ids:
-                self._busy_speed_ids.add(node_id)
-                changed = True
+    def set_speed_progress(self, node_id: str, percent: int | None) -> None:
+        if percent is None:
+            if node_id not in self._speed_progress:
+                return
+            self._speed_progress.pop(node_id, None)
         else:
-            if node_id in self._busy_speed_ids:
-                self._busy_speed_ids.discard(node_id)
-                changed = True
-        if changed:
-            self._emit_cell_changed(node_id, 7)
+            percent = max(0, min(100, int(percent)))
+            if self._speed_progress.get(node_id) == percent:
+                return
+            self._speed_progress[node_id] = percent
+        self._emit_cell_changed(node_id, 7)
 
-    def clear_speed_busy(self) -> None:
-        if not self._busy_speed_ids:
+    def clear_speed_progress(self) -> None:
+        if not self._speed_progress:
             return
-        busy_ids = list(self._busy_speed_ids)
-        self._busy_speed_ids.clear()
-        for node_id in busy_ids:
-            self._emit_cell_changed(node_id, 7)
+        self._speed_progress.clear()
+        self._emit_column_changed(7)
 
     def row_for_node(self, node_id: str) -> int | None:
         return self._id_to_row.get(node_id)
@@ -116,6 +121,14 @@ class NodesTableModel(QAbstractTableModel):
             return None
 
         node = self._nodes[row]
+
+        if role == PING_BUSY_ROLE:
+            return col == 6 and node.id in self._busy_ping_ids
+
+        if role == SPEED_PROGRESS_ROLE:
+            if col == 7:
+                return self._speed_progress.get(node.id)
+            return None
 
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             return self._display_text(node, col)
@@ -187,7 +200,7 @@ class NodesTableModel(QAbstractTableModel):
                 return ""
             return "--" if node.ping_ms is None else f"{node.ping_ms} ms"
         if col == 7:
-            if node.id in self._busy_speed_ids:
+            if node.id in self._speed_progress:
                 return ""
             return "--" if node.speed_mbps is None else f"{node.speed_mbps:.1f} MB/s"
         if col == 8:
@@ -199,9 +212,9 @@ class NodesTableModel(QAbstractTableModel):
 
     def _tooltip_text(self, node: Node, col: int) -> str | None:
         if col == 6 and node.id in self._busy_ping_ids:
-            return None
-        if col == 7 and node.id in self._busy_speed_ids:
-            return None
+            return "Проверка пинга..."
+        if col == 7 and node.id in self._speed_progress:
+            return f"Тест скорости: {self._speed_progress[node.id]}%"
         if col == 6 and node.ping_ms is not None:
             return f"Пинг: {node.ping_ms} ms"
         if col == 8:
@@ -255,5 +268,21 @@ class NodesTableModel(QAbstractTableModel):
                 Qt.ItemDataRole.DisplayRole,
                 Qt.ItemDataRole.ToolTipRole,
                 Qt.ItemDataRole.ForegroundRole,
+                PING_BUSY_ROLE,
+                SPEED_PROGRESS_ROLE,
+            ],
+        )
+
+    def _emit_column_changed(self, column: int) -> None:
+        if not self._nodes:
+            return
+        self.dataChanged.emit(
+            self.index(0, column),
+            self.index(len(self._nodes) - 1, column),
+            [
+                Qt.ItemDataRole.DisplayRole,
+                Qt.ItemDataRole.ToolTipRole,
+                PING_BUSY_ROLE,
+                SPEED_PROGRESS_ROLE,
             ],
         )
