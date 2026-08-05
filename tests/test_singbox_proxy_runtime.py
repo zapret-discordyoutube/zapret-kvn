@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from xray_fluent.engines.singbox.runtime_planner import (
     classify_node_for_singbox,
@@ -162,6 +163,84 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         proxy = next(item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy")
         self.assertEqual(proxy["type"], "socks")
         self.assertEqual(plan.xray_sidecar.config["outbounds"][0]["protocol"], "vless")
+
+    def test_xray_sidecar_uses_os_assigned_ports_when_preferred_ranges_are_reserved(self) -> None:
+        class ReservedRangeSocket:
+            assigned_ports = iter((55000, 55001))
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.port = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def bind(self, address) -> None:
+                if int(address[1]) != 0:
+                    raise OSError(10013, "Port range is reserved")
+                self.port = next(self.assigned_ports)
+
+            def getsockname(self):
+                return ("127.0.0.1", self.port)
+
+        document = parse_singbox_document(
+            TEMPLATE_PATH,
+            TEMPLATE_PATH.read_text(encoding="utf-8"),
+        )
+        node = parse_single(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443"
+            "?type=xhttp&security=tls&sni=example.com&path=%2Fapi#XHTTP"
+        )
+
+        with patch(
+            "xray_fluent.engines.singbox.runtime_planner.socket.socket",
+            side_effect=ReservedRangeSocket,
+        ):
+            plan = plan_singbox_proxy_runtime(
+                document,
+                node,
+                allowed_proxy_ports={1390, 1391},
+            )
+
+        self.assertTrue(plan.is_hybrid)
+        self.assertIsNotNone(plan.xray_sidecar)
+        self.assertEqual(plan.xray_sidecar.relay_port, 55000)
+        self.assertEqual(plan.xray_sidecar.protect_port, 55001)
+
+    def test_xray_sidecar_port_failure_is_reported_as_planner_error(self) -> None:
+        class UnavailableSocket:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def bind(self, _address) -> None:
+                raise OSError(10013, "No local ports available")
+
+        document = parse_singbox_document(
+            TEMPLATE_PATH,
+            TEMPLATE_PATH.read_text(encoding="utf-8"),
+        )
+        node = parse_single(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443"
+            "?type=xhttp&security=tls&sni=example.com&path=%2Fapi#XHTTP"
+        )
+
+        with patch(
+            "xray_fluent.engines.singbox.runtime_planner.socket.socket",
+            side_effect=UnavailableSocket,
+        ), self.assertRaisesRegex(ValueError, "гибридного режима sing-box \\+ Xray"):
+            plan_singbox_proxy_runtime(
+                document,
+                node,
+                allowed_proxy_ports={1390, 1391},
+            )
 
     def test_vless_reality_stays_native_in_tun_and_proxy_modes(self) -> None:
         link = (

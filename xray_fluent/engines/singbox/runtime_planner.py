@@ -365,13 +365,23 @@ def _plan_hybrid_runtime(
     http_port: int = 0,
     clash_api_port: int = 0,
 ) -> SingboxRuntimePlan:
-    relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(preferred=SINGBOX_XRAY_RELAY_PORT)
-    excluded_ports = {relay_port}
-    protect_port = preferred_protect_port if preferred_protect_port > 0 else _find_free_port(
-        preferred=SS_PROTECT_PORT_START,
-        port_range=range(SS_PROTECT_PORT_START, SS_PROTECT_PORT_END),
-        excluded=excluded_ports,
-    )
+    try:
+        relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(
+            preferred=SINGBOX_XRAY_RELAY_PORT,
+            allow_ephemeral_fallback=True,
+        )
+        excluded_ports = {relay_port}
+        protect_port = preferred_protect_port if preferred_protect_port > 0 else _find_free_port(
+            preferred=SS_PROTECT_PORT_START,
+            port_range=range(SS_PROTECT_PORT_START, SS_PROTECT_PORT_END),
+            excluded=excluded_ports,
+            allow_ephemeral_fallback=True,
+        )
+    except RuntimeError as exc:
+        raise ValueError(
+            "Не удалось подобрать свободные локальные TCP-порты для "
+            "гибридного режима sing-box + Xray."
+        ) from exc
     protect_password = preferred_protect_password or _generate_ss_password()
     relay_username, relay_password = generate_local_proxy_credentials(prefix="sidecar")
 
@@ -894,6 +904,7 @@ def _find_free_port(
     preferred: int,
     port_range: range | None = None,
     excluded: set[int] | None = None,
+    allow_ephemeral_fallback: bool = False,
 ) -> int:
     excluded = excluded or set()
     candidates: list[int] = []
@@ -913,6 +924,18 @@ def _find_free_port(
                 return port
             except OSError:
                 continue
+    if allow_ephemeral_fallback:
+        # Hyper-V/WinNAT may reserve an entire preferred range. Port 0 asks
+        # Windows for a currently usable dynamic port outside those exclusions.
+        for _ in range(32):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind((PROXY_HOST, 0))
+                    port = int(s.getsockname()[1])
+                except (OSError, TypeError, ValueError, IndexError):
+                    continue
+            if port > 0 and port not in excluded:
+                return port
     raise RuntimeError(f"No free TCP port available near {preferred}")
 
 

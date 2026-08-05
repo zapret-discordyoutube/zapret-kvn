@@ -23,7 +23,8 @@
     },
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct",
+      "domain_resolver": "bootstrap-dns"
     },
     {
       "type": "block",
@@ -32,6 +33,7 @@
   ],
   "route": {
     "auto_detect_interface": true,
+    "default_domain_resolver": "proxy-dns",
     "rule_set": [
       {
         "type": "remote",
@@ -51,6 +53,13 @@
       }
     ],
     "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
       {
         "process_name": [
           "Яндекс Музыка.exe",
@@ -98,6 +107,22 @@
       }
     ],
     "final": "direct"
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "bootstrap-dns",
+        "type": "udp",
+        "server": "1.1.1.1"
+      },
+      {
+        "tag": "proxy-dns",
+        "type": "tcp",
+        "server": "8.8.8.8",
+        "detour": "proxy"
+      }
+    ],
+    "final": "proxy-dns"
   },
   "experimental": {
     "cache_file": {
