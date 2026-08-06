@@ -292,5 +292,45 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     },
                 )
 
+    def test_vless_encryption_stays_native_in_tun_and_proxy_modes(self) -> None:
+        encryption = (
+            "mlkem768x25519plus.native.0rtt."
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        )
+        link = (
+            "vless://11111111-1111-1111-1111-111111111111@reality.example:8443"
+            f"?type=tcp&encryption={encryption}&security=reality"
+            "&pbk=Ie4ld0x7PvMRA2idLXq58rXRhefsved2eKgqtBtS2Hg"
+            "&fp=edge&sni=www.example.com&sid=0123456789abcdef&spx=%2F#Reality"
+        )
+        document = parse_singbox_document(
+            TEMPLATE_PATH,
+            TEMPLATE_PATH.read_text(encoding="utf-8"),
+        )
+        node = parse_single(link)
+
+        user = node.outbound["settings"]["vnext"][0]["users"][0]
+        self.assertEqual(user["encryption"], encryption)
+        self.assertEqual(classify_node_for_singbox(node), "native_singbox")
+
+        plans = (
+            plan_singbox_runtime(document, node),
+            plan_singbox_proxy_runtime(
+                document,
+                node,
+                allowed_proxy_ports={1390, 1391},
+            ),
+        )
+        for plan in plans:
+            with self.subTest(mode="proxy" if plan.socks_port else "tun"):
+                self.assertEqual(plan.outcome, "native_singbox")
+                self.assertIsNone(plan.xray_sidecar)
+                proxy = next(
+                    item
+                    for item in plan.singbox_config["outbounds"]
+                    if item.get("tag") == "proxy"
+                )
+                self.assertEqual(proxy["encryption"], encryption)
+
 if __name__ == "__main__":
     unittest.main()

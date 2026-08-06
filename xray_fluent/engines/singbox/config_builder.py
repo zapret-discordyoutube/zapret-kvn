@@ -64,6 +64,9 @@ def _convert_outbound(xray_ob: dict[str, Any]) -> dict[str, Any]:
         users = (vnext.get("users") or [{}])[0]
         sb["uuid"] = str(users.get("id") or "")
         if protocol == "vless":
+            encryption = str(users.get("encryption") or "none").strip()
+            if encryption and encryption.lower() != "none":
+                sb["encryption"] = encryption
             flow = str(users.get("flow") or "")
             if flow:
                 sb["flow"] = flow
