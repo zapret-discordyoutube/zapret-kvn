@@ -24,7 +24,12 @@ jobs:
           python3 -m compileall -q xray_fluent scripts tests
 
       - name: Install test dependencies
-        run: python3 -m pip install --break-system-packages -r requirements.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends libegl1 libgl1
+          python3 -m pip install --break-system-packages -r requirements.txt
 
       - name: Run platform-independent tests
         run: python3 -m unittest discover -s tests -v
