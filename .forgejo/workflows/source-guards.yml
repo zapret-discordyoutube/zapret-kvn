@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends libegl1 libgl1
+          apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0
           python3 -m pip install --break-system-packages -r requirements.txt
 
       - name: Run platform-independent tests
