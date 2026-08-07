@@ -76,6 +76,13 @@
         "outbound": "direct"
       },
       {
+        "domain_suffix": [
+          "zapret.moe"
+        ],
+        "action": "route",
+        "outbound": "proxy"
+      },
+      {
         "rule_set": [
           "geosite-category-ru",
           "geoip-ru"

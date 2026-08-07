@@ -58,6 +58,13 @@
         "outbound": "direct"
       },
       {
+        "domain_suffix": [
+          "zapret.moe"
+        ],
+        "action": "route",
+        "outbound": "proxy"
+      },
+      {
         "ip_is_private": true,
         "action": "route",
         "outbound": "direct"
