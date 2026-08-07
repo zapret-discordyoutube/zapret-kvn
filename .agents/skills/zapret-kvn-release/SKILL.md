@@ -1,6 +1,6 @@
 ---
 name: zapret-kvn-release
-description: Build, package, verify, and publish Zapret KVN stable Windows x64 releases locally to the project Forgejo, including stable-only Telegram delivery through ZapretGPT to @vpndiscordyooutube. Use when working in /home/codex-pve/Xray-windows-64 and the user asks to build locally, publish or release a stable version, replace release assets, bump the application version, prepare the five Windows release artifacts, or deliver the Windows installer to the channel. Forgejo Actions is portable source validation only. Never send dev, test, RC, draft, or prerelease builds to the Telegram channel.
+description: Build, verify, package, and publish Zapret KVN Windows x64 releases locally with a default dev-then-stable sequence, Forgejo publication, and stable-only Telegram delivery through ZapretGPT to @vpndiscordyooutube. Use when working in /home/codex-pve/Xray-windows-64 and the user asks to build locally, publish or release a version, replace release assets, bump the application version, prepare the five Windows release artifacts, or deliver the Windows installer to the channel. Forgejo Actions is portable source validation only. Never publish dev, test, RC, draft, or prerelease builds to the stable Release or Telegram channel.
 ---
 
 # Zapret KVN Local Release
@@ -13,6 +13,14 @@ description: Build, package, verify, and publish Zapret KVN stable Windows x64 r
 - Treat Forgejo Actions as independent portable source validation and keep its
   source-verification workflow enabled. The trusted Windows workstation remains
   the only stable Windows build owner because the Forgejo runner is Linux-only.
+- Use `dev -> stable` as the default release sequence. A normal stable release
+  request authorizes both stages. Stop after dev only when the user explicitly
+  requests a dev-only build.
+- Treat dev as a validation gate: build and test the candidate commit locally,
+  but do not create a stable tag, Forgejo Release, release assets, or Telegram
+  post from it.
+- After dev passes, create a separate stable version commit and rebuild from
+  that exact SHA. Never rename, promote, or reuse dev binaries as stable assets.
 - Do not smoke-start the built GUI.
 - Use `python build.py` for the application build. Never invoke PyInstaller directly.
 - Treat a source commit or push as source delivery only. Never use it as a
@@ -22,11 +30,16 @@ description: Build, package, verify, and publish Zapret KVN stable Windows x64 r
 ## Prepare the exact release source
 
 1. Read `AGENTS.md`, inspect the worktree, and preserve unrelated user changes.
-2. Validate source changes with relevant tests and `git diff --check` before committing or pushing.
-3. Push the intended release commit to `main` and record its full SHA.
-4. Determine the next stable patch version from the latest stable Git tag. Do not infer publication from `APP_VERSION` alone.
-5. Build from that exact commit in a dedicated Windows workspace such as `C:\Users\privacy\ZapretKVN-local-release`. Keep the workspace and caches for future releases; never delete an unverified directory.
-6. Commit the intended stable `APP_VERSION` before building. The immutable Windows build must use the exact pushed source commit without a private version edit.
+2. Validate all source changes with relevant tests and `git diff --check`.
+3. Commit and push the dev candidate to `main`; record its full SHA and run the
+   Windows dev gate from that exact commit.
+4. Continue only after the dev gate passes. Determine the next stable patch
+   version from the latest stable Git tag; do not infer it from `APP_VERSION`.
+5. Set the intended stable `APP_VERSION`, commit and push it to `main`, and
+   record the separate stable SHA. Do not use a private Windows-only version edit.
+6. Build stable from that exact commit in a dedicated Windows workspace such as
+   `C:\Users\privacy\ZapretKVN-local-release`. Keep the workspace and caches for
+   future releases; never delete an unverified directory.
 
 ## Use the cached fast path
 
@@ -36,28 +49,44 @@ description: Build, package, verify, and publish Zapret KVN stable Windows x64 r
 - Reuse `.cache/core-bundle/core-windows-x64.7z` only when the installed `core/core-manifest.windows-x64.json` `lock_sha256` equals the SHA-256 of `scripts/core-lock.windows-x64.json`. Otherwise rebuild the bundle. Always run the install/verification step before tests.
 - Remove only exact, version-named output archives before repackaging. Do not broadly clean the workspace or caches.
 
-## Validate and build on Windows
+## Run the dev gate on Windows
 
-1. Check whether `ZapretKVN.exe` is running. Stop only the verified application process and its verified bundled core processes when they would lock build files or test ports.
-2. Build and install the pinned core bundle:
+1. Fetch the pushed dev candidate and detach the cached workspace at its exact
+   SHA. Preserve unrelated untracked helper files.
+2. Check whether `ZapretKVN.exe` is running. Stop only the verified application process and its verified bundled core processes when they would lock build files or test ports.
+3. Build and install the pinned core bundle:
 
    ```powershell
    ./scripts/build_core_bundle.ps1
    ./scripts/install_core_bundle.ps1
    ```
 
-3. Create or reuse `.venv`, install `requirements.txt`, and run `pip check`.
-4. Run the full Windows test suite:
+4. Create or reuse `.venv`, install `requirements.txt`, and run `pip check`.
+5. Run the full Windows test suite:
 
    ```powershell
    .venv/Scripts/python.exe -m unittest discover -s tests -v
    ```
 
-5. Run the project builder without starting the application:
+6. Run the project builder without starting the application:
 
    ```powershell
    python build.py --no-zip
    ```
+
+7. Verify the dev EXE exists and contains the expected shipped templates. Do
+   not package, tag, publish, or send this dev build.
+
+## Rebuild stable on Windows
+
+1. After the stable version commit is pushed, fetch `origin` and detach the
+   same cached workspace at the exact stable SHA.
+2. Require the tracked `APP_VERSION` to equal the intended stable version and
+   require the stable tag and Forgejo Release to be absent.
+3. Reinstall/verify the pinned core bundle, update `.venv` dependencies, run
+   `pip check`, and rerun the full Windows test suite.
+4. Run `python build.py --no-zip` again. This fresh output, not the dev output,
+   is the only input allowed for stable packaging. Do not smoke-start the GUI.
 
 ## Package and verify
 
