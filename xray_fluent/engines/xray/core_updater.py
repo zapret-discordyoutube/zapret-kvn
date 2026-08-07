@@ -15,7 +15,7 @@ import zipfile
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ...constants import XRAY_FORGEJO_RELEASES_API, XRAY_PATH_DEFAULT
+from ...constants import XRAY_PATH_DEFAULT, XRAY_RELEASES_API
 from ...path_utils import resolve_configured_path
 from ...update_checker import check_update
 from .manager import get_xray_version
@@ -187,7 +187,7 @@ def resolve_xray_release(channel: str, feed_url: str = "") -> XrayCoreRelease | 
             notes=info.notes,
         )
 
-    payload = _request_json(XRAY_FORGEJO_RELEASES_API)
+    payload = _request_json(XRAY_RELEASES_API)
     if not isinstance(payload, list):
         return None
     releases = [

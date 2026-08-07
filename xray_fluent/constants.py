@@ -12,9 +12,7 @@ PROXY_HOST = "127.0.0.1"
 DEFAULT_SOCKS_PORT = 1390
 DEFAULT_HTTP_PORT = 1391
 DEFAULT_XRAY_STATS_API_PORT = 19085
-XRAY_FORGEJO_RELEASES_API = (
-    "https://git.zapret.moe/api/v1/repos/zapretdiscordyoutube/Xray-core/releases"
-)
+XRAY_RELEASES_API = "https://api.github.com/repos/XTLS/Xray-core/releases"
 
 ROUTING_GLOBAL = "global"
 ROUTING_RULE = "rule"

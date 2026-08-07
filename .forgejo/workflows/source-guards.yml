@@ -21,6 +21,10 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
+          if git grep -n -I -E -- 'git\.zapret\.moe/(api/v1/repos/)?zapretdiscordyoutube/([A-Za-z0-9._-]+-upstream|Xray-core)' -- ':!.forgejo/workflows/source-guards.yml'; then
+            echo 'Use the official third-party source instead of our retired mirror.' >&2
+            exit 1
+          fi
           python3 -m compileall -q xray_fluent scripts tests
 
       - name: Install test dependencies

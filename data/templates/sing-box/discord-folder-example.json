@@ -39,7 +39,7 @@
         "type": "remote",
         "tag": "geosite-category-ru",
         "format": "binary",
-        "url": "https://git.zapret.moe/zapretdiscordyoutube/russia-v2ray-rules-upstream/raw/branch/main/sing-box/rule-set-geosite/geosite-category-ru.srs",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-category-ru.srs",
         "download_detour": "direct",
         "update_interval": "24h"
       },
@@ -47,7 +47,7 @@
         "type": "remote",
         "tag": "geoip-ru",
         "format": "binary",
-        "url": "https://git.zapret.moe/zapretdiscordyoutube/russia-v2ray-rules-upstream/raw/branch/main/sing-box/rule-set-geoip/geoip-ru.srs",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru.srs",
         "download_detour": "direct",
         "update_interval": "24h"
       }

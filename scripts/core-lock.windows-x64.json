@@ -6,7 +6,7 @@
       "id": "sing-box-extended",
       "version": "v1.13.14-extended-2.5.2",
       "archive": "sing-box-1.13.14-extended-2.5.2-windows-amd64-purego.zip",
-      "url": "https://git.zapret.moe/zapretdiscordyoutube/sing-box-extended-upstream/releases/download/v1.13.14-extended-2.5.2/sing-box-1.13.14-extended-2.5.2-windows-amd64-purego.zip",
+      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.13.14-extended-2.5.2/sing-box-1.13.14-extended-2.5.2-windows-amd64-purego.zip",
       "sha256": "6525ff0effa82e8131cc01bc32ce56d6fa0f03c7975bdbb57efdd706425b2579",
       "files": [
         { "match": "(^|/)sing-box\\.exe$", "target": "sing-box.exe" },
@@ -18,7 +18,7 @@
       "id": "xray-core",
       "version": "v26.3.27",
       "archive": "Xray-windows-64.zip",
-      "url": "https://git.zapret.moe/zapretdiscordyoutube/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip",
+      "url": "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip",
       "sha256": "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad",
       "files": [
         { "match": "(^|/)xray\\.exe$", "target": "xray.exe" },
@@ -31,7 +31,7 @@
       "id": "tun2socks",
       "version": "v2.6.0",
       "archive": "tun2socks-windows-amd64.zip",
-      "url": "https://git.zapret.moe/zapretdiscordyoutube/tun2socks-upstream/releases/download/v2.6.0/tun2socks-windows-amd64.zip",
+      "url": "https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-windows-amd64.zip",
       "sha256": "1429e2e3b1ea09052da2c65e5005538b5730d63da37e304f4ad6fd2698a66695",
       "files": [
         { "match": "(^|/)tun2socks-windows-amd64\\.exe$", "target": "tun2socks.exe" }
