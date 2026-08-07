@@ -1,6 +1,6 @@
 ---
 name: zapret-kvn-release
-description: Build, package, verify, and publish Zapret KVN stable Windows x64 releases locally. Use when working in /home/codex-pve/Xray-windows-64 and the user asks to build locally, publish or release a stable version, replace release assets, bump the application version, or prepare the five Windows release artifacts. Keep GitHub Actions as an untouched background fallback.
+description: Build, package, verify, and publish Zapret KVN stable Windows x64 releases locally to the project Forgejo. Use when working in /home/codex-pve/Xray-windows-64 and the user asks to build locally, publish or release a stable version, replace release assets, bump the application version, or prepare the five Windows release artifacts. Forgejo Actions is portable source validation only.
 ---
 
 # Zapret KVN Local Release
@@ -10,7 +10,7 @@ description: Build, package, verify, and publish Zapret KVN stable Windows x64 r
 - Work directly on `main`; do not create a branch unless the user explicitly asks.
 - Treat a request to publish a stable release as authorization to build and package it locally.
 - Use the local Windows workstation available through SSH alias `win10`. The Linux host cannot produce the Windows executable directly.
-- Keep the `Build & Release` GitHub Actions workflow enabled as a background fallback. Do not inspect, poll, wait for, or cancel its runs unless the user explicitly changes this rule.
+- Treat Forgejo Actions as independent portable source validation. The trusted Windows workstation remains the only stable Windows build owner.
 - Do not smoke-start the built GUI.
 - Use `python build.py` for the application build. Never invoke PyInstaller directly.
 
@@ -19,9 +19,9 @@ description: Build, package, verify, and publish Zapret KVN stable Windows x64 r
 1. Read `AGENTS.md`, inspect the worktree, and preserve unrelated user changes.
 2. Validate source changes with relevant tests and `git diff --check` before committing or pushing.
 3. Push the intended release commit to `main` and record its full SHA.
-4. Determine the next stable patch version from the latest stable Git tag. Do not infer completion from `APP_VERSION` alone because the background workflow may bump it later.
+4. Determine the next stable patch version from the latest stable Git tag. Do not infer publication from `APP_VERSION` alone.
 5. Build from that exact commit in a dedicated Windows workspace such as `C:\Users\privacy\ZapretKVN-local-release`. Keep the workspace and caches for future releases; never delete an unverified directory.
-6. If the exact commit still contains the previous `APP_VERSION`, update only the disposable Windows build copy to the new version before building. Synchronize the tracked version on `main` after publication if the background workflow has not already done so.
+6. Commit the intended stable `APP_VERSION` before building. The immutable Windows build must use the exact pushed source commit without a private version edit.
 
 ## Use the cached fast path
 
@@ -68,8 +68,17 @@ Run `7z t` on the SFX, ZIP, 7z, and core bundle. Recompute the ZIP hash after tr
 
 ## Publish locally built assets
 
-- If the stable GitHub Release does not exist, create it for the exact release commit with generated notes and mark it latest.
-- If the background workflow already created the release, leave the workflow untouched and replace all five assets with the locally built files using `gh release upload --clobber`.
-- Read back the release and verify that it is published, non-prerelease, latest, and contains all five expected assets with nonzero sizes.
-- Fetch `origin/main` and tags after publication. Fast-forward local `main`; if the tracked `APP_VERSION` still needs updating, commit it with `[skip ci]` and push.
-- Keep GitHub Actions as fallback even after a successful local publication; do not report or wait on its status.
+- Read the Forgejo token from a mode-`0600` file outside Git. Never print it,
+  place it in a command-line URL, copy it into the Windows build, or commit it.
+- Require an absent immutable `v<VERSION>` tag and Forgejo Release. Push the
+  tag to the exact verified source commit, create a draft release, and upload
+  exactly the five verified assets.
+- Publish the draft only after every remote asset has the expected nonzero
+  size. Download every asset back over HTTPS and compare its SHA-256 with the
+  qualified local file.
+- Read back the release and verify that it is published, non-prerelease,
+  selected as Latest, bound to the exact source commit, and contains no extra
+  or missing assets.
+- Fetch `origin/main` and tags after publication and require the local worktree
+  to remain clean. Forgejo Actions must not create, replace, or publish stable
+  Windows releases.

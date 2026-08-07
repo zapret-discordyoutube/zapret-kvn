@@ -1,4 +1,4 @@
-"""Self-update: check GitHub releases, download, extract, restart."""
+"""Self-update: check Forgejo releases, download, verify, extract, restart."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import zipfile  # kept for legacy .zip support
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 from urllib.request import Request
 
 from .http_utils import build_opener, urlopen
@@ -25,8 +26,14 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from .constants import APP_VERSION, BASE_DIR
 
-GITHUB_REPO = "youtubediscord/zapret-kvn"
-GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+FORGEJO_RELEASE_API = (
+    "https://git.zapret.moe/api/v1/repos/"
+    "zapretdiscordyoutube/zapret-kvn/releases/latest"
+)
+FORGEJO_RELEASE_DOWNLOAD_PREFIX = (
+    "/zapretdiscordyoutube/zapret-kvn/releases/download/"
+)
+FORGEJO_HOST = "git.zapret.moe"
 USER_AGENT = f"ZapretKVN/{APP_VERSION}"
 
 
@@ -133,20 +140,37 @@ def _sha256_file(file_path: Path) -> str:
 
 
 def _fetch_text(url: str) -> str:
+    if not _is_trusted_release_url(url):
+        raise ValueError("Forgejo вернул недоверенную ссылку на контрольную сумму")
     request = Request(url, headers={"User-Agent": USER_AGENT})
     with urlopen(request, timeout=15) as response:
         return response.read().decode("utf-8", errors="replace")
 
 
+def _is_trusted_release_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == FORGEJO_HOST
+        and parsed.path.startswith(FORGEJO_RELEASE_DOWNLOAD_PREFIX)
+    )
+
+
 class UpdateChecker(QThread):
-    """Check GitHub for a newer release."""
+    """Check the project Forgejo for a newer release."""
 
     result = pyqtSignal(object)  # AppUpdate | None
     error = pyqtSignal(str)
 
     def run(self) -> None:
         try:
-            req = Request(GITHUB_API, headers={"User-Agent": USER_AGENT})
+            req = Request(
+                FORGEJO_RELEASE_API,
+                headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            )
             with urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
 
@@ -167,6 +191,11 @@ class UpdateChecker(QThread):
                 self.error.emit(f"Релиз {tag} найден, но отсутствует Windows zip-архив")
                 return
 
+            asset_url = str(asset.get("browser_download_url") or "")
+            if not _is_trusted_release_url(asset_url):
+                self.error.emit(f"Релиз {tag} содержит недоверенную ссылку на архив")
+                return
+
             digest = _extract_digest(str(asset.get("digest") or ""))
             if not digest:
                 asset_name = str(asset.get("name") or "")
@@ -183,8 +212,9 @@ class UpdateChecker(QThread):
                     if sidecar:
                         break
                 if sidecar:
+                    sidecar_url = str(sidecar.get("browser_download_url") or "")
                     digest = _extract_digest(
-                        _fetch_text(str(sidecar.get("browser_download_url") or ""))
+                        _fetch_text(sidecar_url)
                     )
             if not digest:
                 self.error.emit(f"Релиз {tag} найден, но архив не содержит SHA-256")
@@ -193,7 +223,7 @@ class UpdateChecker(QThread):
             self.result.emit(AppUpdate(
                 version=tag.lstrip("v"),
                 tag=tag,
-                download_url=asset["browser_download_url"],
+                download_url=asset_url,
                 size=asset.get("size", 0),
                 notes=data.get("body", ""),
                 digest_sha256=digest,

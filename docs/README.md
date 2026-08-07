@@ -1,8 +1,8 @@
 # Zapret KVN (beta)
 
-Простой VPN-клиент для Windows с обходом блокировок от создателей [Zapret 2 GUI](https://github.com/youtubediscord/zapret). Работает из коробки.
+Простой VPN-клиент для Windows с обходом блокировок от создателей [Zapret 2 GUI](https://git.zapret.moe/zapretdiscordyoutube/zapret). Работает из коробки.
 
-### [Получить ключи можно тут](https://t.me/zapretvpns_bot) | [Скачать](https://github.com/youtubediscord/zapret-kvn/releases) | [Android](https://github.com/youtubediscord/ZapretKVN-android)
+### [Получить ключи можно тут](https://t.me/zapretvpns_bot) | [Скачать](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases) | [Android](https://git.zapret.moe/zapretdiscordyoutube/ZapretKVN-android)
 
 <img width="200" alt="image" src="https://github.com/user-attachments/assets/089ae538-686f-4b6d-94f6-c0ff56bd3664" /><img width="200" alt="image" src="https://github.com/user-attachments/assets/f144c777-d60c-440b-bc29-39285d588ac6" /><img width="200" alt="image" src="https://github.com/user-attachments/assets/f97650a0-d83c-4b49-9809-16c2d69f314c" />
 
@@ -11,7 +11,7 @@
 > [!WARNING]
 > Первая бета-версия. Некоторый функционал может работать некорректно.
 > 
-> Сообщить о проблеме рекомендуем ТОЛЬКО сюда: [Issues](https://github.com/youtubediscord/zapret-kvn/issues)
+> Сообщить о проблеме рекомендуем ТОЛЬКО сюда: [Issues](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/issues)
 
 
 ## Что это
@@ -104,7 +104,7 @@ Xray-only transport'ов приложение автоматически исп�
 
 ## Установка
 
-1. Скачайте установщик со страницы [Releases](https://github.com/youtubediscord/zapret-kvn/releases)
+1. Скачайте установщик со страницы [Releases](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases)
 2. Запустите скачанный `.exe` — он распакует программу в выбранную папку
 3. Запустите `ZapretKVN.exe` из этой папки
 
@@ -127,7 +127,7 @@ Xray-only transport'ов приложение автоматически исп�
 python build.py
 ```
 
-GitHub Actions кэширует готовый `core-windows-x64.7z` по хэшу lock-файла,
+Локальный Windows-сборщик кэширует готовый `core-windows-x64.7z` по хэшу lock-файла,
 кэширует Windows virtualenv и PyInstaller binary cache, запускает тесты, а
 приложение собирает только через проектный `build.py`. В artifacts публикуются
 и portable-приложение, и отдельный Windows x64 core bundle.
@@ -146,7 +146,7 @@ GitHub Actions кэширует готовый `core-windows-x64.7z` по хэш
 ## Обратная связь
 
 - [Telegram-канал](https://t.me/vpndiscordyooutube) — новости и обновления
-- [Сообщить о проблеме](https://github.com/youtubediscord/zapret-kvn/issues)
+- [Сообщить о проблеме](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/issues)
 
 ## Лицензия
 

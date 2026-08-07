@@ -1,4 +1,4 @@
 interface:
   display_name: "Zapret KVN Release"
-  short_description: "Build and publish stable releases locally"
-  default_prompt: "Use $zapret-kvn-release to build and publish a stable Zapret KVN release locally."
+  short_description: "Build locally and publish to Forgejo"
+  default_prompt: "Use $zapret-kvn-release to build and publish a verified stable Zapret KVN release to Forgejo."
