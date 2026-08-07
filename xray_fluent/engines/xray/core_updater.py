@@ -15,7 +15,7 @@ import zipfile
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ...constants import XRAY_GITHUB_RELEASES_API, XRAY_PATH_DEFAULT
+from ...constants import XRAY_FORGEJO_RELEASES_API, XRAY_PATH_DEFAULT
 from ...path_utils import resolve_configured_path
 from ...update_checker import check_update
 from .manager import get_xray_version
@@ -124,7 +124,7 @@ def _request_json(url: str) -> object:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _pick_release_from_github(releases: list[dict], channel: str) -> dict | None:
+def _pick_release(releases: list[dict], channel: str) -> dict | None:
     if channel == "stable":
         for release in releases:
             if not bool(release.get("prerelease")):
@@ -150,7 +150,7 @@ def _pick_release_from_github(releases: list[dict], channel: str) -> dict | None
     return None
 
 
-def _find_github_asset(release: dict, name: str) -> dict | None:
+def _find_release_asset(release: dict, name: str) -> dict | None:
     for asset in release.get("assets", []):
         if str(asset.get("name") or "").lower() == name.lower():
             return asset
@@ -187,20 +187,26 @@ def resolve_xray_release(channel: str, feed_url: str = "") -> XrayCoreRelease | 
             notes=info.notes,
         )
 
-    payload = _request_json(XRAY_GITHUB_RELEASES_API)
+    payload = _request_json(XRAY_FORGEJO_RELEASES_API)
     if not isinstance(payload, list):
         return None
-    release = _pick_release_from_github([item for item in payload if isinstance(item, dict)], normalized_channel)
+    releases = [
+        item
+        for item in payload
+        if isinstance(item, dict)
+        and _find_release_asset(item, "Xray-windows-64.zip") is not None
+    ]
+    release = _pick_release(releases, normalized_channel)
     if not release:
         return None
 
-    zip_asset = _find_github_asset(release, "Xray-windows-64.zip")
+    zip_asset = _find_release_asset(release, "Xray-windows-64.zip")
     if not zip_asset:
         return None
 
     digest = _extract_digest(str(zip_asset.get("digest") or ""))
     if not digest:
-        dgst_asset = _find_github_asset(release, "Xray-windows-64.zip.dgst")
+        dgst_asset = _find_release_asset(release, "Xray-windows-64.zip.dgst")
         if dgst_asset:
             digest = _fetch_dgst_hash(str(dgst_asset.get("browser_download_url") or ""))
 
