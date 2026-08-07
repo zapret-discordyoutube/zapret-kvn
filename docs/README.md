@@ -4,7 +4,7 @@
 
 ### [Получить ключи можно тут](https://t.me/zapretvpns_bot) | [Скачать](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases) | [Android](https://git.zapret.moe/zapretdiscordyoutube/ZapretKVN-android)
 
-<img width="200" alt="image" src="https://github.com/user-attachments/assets/089ae538-686f-4b6d-94f6-c0ff56bd3664" /><img width="200" alt="image" src="https://github.com/user-attachments/assets/f144c777-d60c-440b-bc29-39285d588ac6" /><img width="200" alt="image" src="https://github.com/user-attachments/assets/f97650a0-d83c-4b49-9809-16c2d69f314c" />
+<img width="200" alt="Список серверов Zapret KVN" src="assets/zapret-kvn-server-list.png"><img width="200" alt="Подключение Zapret KVN" src="assets/zapret-kvn-connection.png"><img width="200" alt="Настройки Zapret KVN" src="assets/zapret-kvn-settings.png">
 
 
 
