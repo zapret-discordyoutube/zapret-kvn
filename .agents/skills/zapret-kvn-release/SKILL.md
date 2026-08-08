@@ -5,6 +5,15 @@ description: Build, verify, package, and publish Zapret KVN Windows x64 releases
 
 # Zapret KVN Local Release
 
+A commit is a readiness boundary. Never create an intermediate, checkpoint, or
+partially verified commit. During a stable release, inspect the entire shared
+working tree, finish and validate every intentional source change, and include
+every ready change regardless of who authored it. If an intentional source
+change is incomplete or unsafe, stop the stable release until it is resolved
+instead of hiding, stashing, or excluding it. Generated packages, caches,
+credentials, and other local-only build state are never part of this source
+scope.
+
 ## Preserve the release contract
 
 - Work directly on `main`; do not create a branch unless the user explicitly asks.
@@ -19,8 +28,10 @@ description: Build, verify, package, and publish Zapret KVN Windows x64 releases
 - Treat dev as a validation gate: build and test the candidate commit locally,
   but do not create a stable tag, Forgejo Release, release assets, or Telegram
   post from it.
-- After dev passes, create a separate stable version commit and rebuild from
-  that exact SHA. Never rename, promote, or reuse dev binaries as stable assets.
+- Choose and set the stable version before the one final release-source commit.
+  After the dev gate passes, rebuild stable from that same exact SHA. Never make
+  a checkpoint dev commit, create a second version-only commit, rename, promote,
+  or reuse dev binaries as stable assets.
 - Do not smoke-start the built GUI.
 - Use `python build.py` for the application build. Never invoke PyInstaller directly.
 - Treat a source commit or push as source delivery only. Never use it as a
@@ -29,15 +40,22 @@ description: Build, verify, package, and publish Zapret KVN Windows x64 releases
 
 ## Prepare the exact release source
 
-1. Read `AGENTS.md`, inspect the worktree, and preserve unrelated user changes.
-2. Validate all source changes with relevant tests and `git diff --check`.
-3. Commit and push the dev candidate to `main`; record its full SHA and run the
-   Windows dev gate from that exact commit.
-4. Continue only after the dev gate passes. Determine the next stable patch
-   version from the latest stable Git tag; do not infer it from `APP_VERSION`.
-5. Set the intended stable `APP_VERSION`, commit and push it to `main`, and
-   record the separate stable SHA. Do not use a private Windows-only version edit.
-6. Build stable from that exact commit in a dedicated Windows workspace such as
+1. Read `AGENTS.md` and inspect every tracked and untracked path. For stable,
+   treat every intentional source change in the shared tree as release scope
+   regardless of author. Finish and validate it or stop before publication.
+2. Determine the next stable patch version from the latest stable Git tag; do
+   not infer it from `APP_VERSION`. Set the intended stable `APP_VERSION` in the
+   shared checkout; do not use a private Windows-only version edit.
+3. Validate the complete final source snapshot with relevant tests and
+   `git diff --check`. Stage every reviewed, ready source change by explicit
+   path, excluding generated packages, caches, credentials, and local-only
+   files, then review the exact staged diff.
+4. Create one concise release-source commit only after the complete source task
+   and all required checks have succeeded. Push it to `main`, record its full
+   SHA, and run the Windows dev gate from that exact commit.
+5. Continue only after the dev gate passes. Do not create another source or
+   version commit between the dev gate and stable rebuild.
+6. Build stable from the same exact commit in a dedicated Windows workspace such as
    `C:\Users\privacy\ZapretKVN-local-release`. Keep the workspace and caches for
    future releases; never delete an unverified directory.
 
@@ -51,7 +69,7 @@ description: Build, verify, package, and publish Zapret KVN Windows x64 releases
 
 ## Run the dev gate on Windows
 
-1. Fetch the pushed dev candidate and detach the cached workspace at its exact
+1. Fetch the pushed release candidate and detach the cached workspace at its exact
    SHA. Preserve unrelated untracked helper files.
 2. Check whether `ZapretKVN.exe` is running. Stop only the verified application process and its verified bundled core processes when they would lock build files or test ports.
 3. Build and install the pinned core bundle:
@@ -79,8 +97,8 @@ description: Build, verify, package, and publish Zapret KVN Windows x64 releases
 
 ## Rebuild stable on Windows
 
-1. After the stable version commit is pushed, fetch `origin` and detach the
-   same cached workspace at the exact stable SHA.
+1. After the dev gate passes on the final release-source commit, fetch `origin`
+   and detach the same cached workspace at that exact SHA.
 2. Require the tracked `APP_VERSION` to equal the intended stable version and
    require the stable tag and Forgejo Release to be absent.
 3. Reinstall/verify the pinned core bundle, update `.venv` dependencies, run
