@@ -414,30 +414,30 @@ class UpdateDownloader(QThread):
 
             downloaded_ok = False
 
-            # Attempt 1: through proxy (if available)
-            if self._proxy_url:
-                self.status.emit("Загрузка через прокси...")
-                try:
-                    self._download(zip_path, self._proxy_url)
-                    downloaded_ok = True
-                except Exception as exc:
-                    _log.warning("Proxy download failed: %s", exc)
+            # Attempt 1: direct (no proxy)
+            self.status.emit("Загрузка напрямую...")
+            try:
+                self._download(zip_path, None)
+                downloaded_ok = True
+            except Exception as exc:
+                _log.warning("Direct download failed: %s", exc)
+                if self._proxy_url:
                     self.status.emit(
-                        "Прокси-сервер недоступен, пробую напрямую..."
+                        "Прямая загрузка не удалась, пробую через прокси..."
                     )
                     self.progress.emit(0)
                     # clean partial file
                     if zip_path.exists():
                         zip_path.unlink()
 
-            # Attempt 2: direct (no proxy)
-            if not downloaded_ok:
-                self.status.emit("Загрузка напрямую...")
+            # Attempt 2: through proxy (if available)
+            if not downloaded_ok and self._proxy_url:
+                self.status.emit("Загрузка через прокси...")
                 try:
-                    self._download(zip_path, None)
+                    self._download(zip_path, self._proxy_url)
                     downloaded_ok = True
                 except Exception as exc:
-                    _log.warning("Direct download failed: %s", exc)
+                    _log.warning("Proxy download failed: %s", exc)
 
             if not downloaded_ok:
                 msg = (
@@ -446,7 +446,7 @@ class UpdateDownloader(QThread):
                 )
                 if self._proxy_url:
                     msg = (
-                        "Не удалось скачать обновление ни через прокси, ни напрямую.\n"
+                        "Не удалось скачать обновление ни напрямую, ни через прокси.\n"
                         "Переключитесь на рабочий сервер и попробуйте снова."
                     )
                 self.error.emit(msg)
