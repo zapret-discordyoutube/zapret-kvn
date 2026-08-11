@@ -27,8 +27,12 @@ class YandexMusicDirectTemplateTests(unittest.TestCase):
                 self.assertEqual(direct_rule.get("action"), "route")
                 self.assertEqual(direct_rule.get("outbound"), "direct")
                 self.assertTrue(
-                    all(rule.get("action") in {"sniff", "hijack-dns"} for rule in rules[:direct_index]),
-                    "Yandex Music direct must precede all user routing rules",
+                    all(
+                        rule.get("action") in {"sniff", "hijack-dns"}
+                        or rule.get("outbound") == "block"
+                        for rule in rules[:direct_index]
+                    ),
+                    "Only protocol handling and narrow block rules may precede Yandex Music direct",
                 )
 
     def test_all_xray_templates_route_yandex_music_direct_first(self) -> None:
@@ -37,12 +41,22 @@ class YandexMusicDirectTemplateTests(unittest.TestCase):
         for path in sorted(template_dir.glob("*.json")):
             with self.subTest(template=path.name):
                 payload = json.loads(path.read_text(encoding="utf-8"))
-                direct_rule = payload["routing"]["rules"][0]
+                rules = payload["routing"]["rules"]
+                direct_index = next(
+                    index
+                    for index, rule in enumerate(rules)
+                    if set(rule.get("process", [])) == YANDEX_MUSIC_PROCESSES
+                )
+                direct_rule = rules[direct_index]
 
                 self.assertEqual(direct_rule.get("type"), "field")
                 self.assertEqual(set(direct_rule.get("process", [])), YANDEX_MUSIC_PROCESSES)
                 self.assertEqual(direct_rule.get("network"), "tcp,udp")
                 self.assertEqual(direct_rule.get("outboundTag"), "direct")
+                self.assertTrue(
+                    all(rule.get("outboundTag") == "block" for rule in rules[:direct_index]),
+                    "Only narrow block rules may precede Yandex Music direct",
+                )
 
 
 if __name__ == "__main__":

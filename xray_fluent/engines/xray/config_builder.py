@@ -22,6 +22,22 @@ from ...models import AppSettings, Node, RoutingSettings
 from ...service_presets import SERVICE_PRESETS_BY_ID
 
 
+_VPN_DETECTION_DOMAINS = (
+    "domain:mobileproxy.passport.yandex.net",
+    "domain:relay-api.eu.2gis.com",
+    "domain:api.ipify.org",
+    "domain:checkip.amazonaws.com",
+    "domain:ifconfig.me",
+    "domain:ip.mail.ru",
+    "domain:ipv4-internet.yandex.net",
+    "domain:ipv6-internet.yandex.net",
+    "domain:trace-flow.ru",
+    "domain:api.oneme.ru",
+    "domain:vk-analytics.ru",
+    "domain:apptracer.ru",
+)
+
+
 def _normalize_loglevel(value: str) -> str:
     normalized = value.lower().strip()
     if normalized == "warn":
@@ -121,6 +137,14 @@ def build_xray_config(
             "outboundTag": "api",
         }
     ]
+    routing_rules.append(
+        {
+            "type": "field",
+            "domain": list(_VPN_DETECTION_DOMAINS),
+            "network": "tcp,udp",
+            "outboundTag": "block",
+        }
+    )
 
     if routing.bypass_lan:
         routing_rules.append(
@@ -172,6 +196,36 @@ def build_xray_config(
     _append_domain_ip_rule(routing_rules, routing.proxy_domains, "proxy")
 
     mode = routing.mode
+
+    if mode == ROUTING_RULE:
+        routing_rules.extend(
+            [
+                {
+                    "type": "field",
+                    "domain": ["geosite:ru-blocked"],
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy",
+                },
+                {
+                    "type": "field",
+                    "ip": ["geoip:ru-blocked"],
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy",
+                },
+                {
+                    "type": "field",
+                    "domain": ["geosite:category-ru"],
+                    "network": "tcp,udp",
+                    "outboundTag": "direct",
+                },
+                {
+                    "type": "field",
+                    "ip": ["geoip:ru"],
+                    "network": "tcp,udp",
+                    "outboundTag": "direct",
+                },
+            ]
+        )
 
     if mode == ROUTING_GLOBAL:
         routing_rules.append(
@@ -272,7 +326,7 @@ def build_xray_config(
             "services": ["StatsService"],
         },
         "routing": {
-            "domainStrategy": "AsIs",
+            "domainStrategy": "IPIfNonMatch",
             "rules": routing_rules,
         },
     }

@@ -283,7 +283,10 @@ def _install_zip_archive(archive_path: Path, target_xray_path: Path) -> None:
                 shutil.copy2(target_xray_path, backup_copy)
             staged_targets.append((target_xray_path, staged_xray, backup_copy))
 
-            for optional_name in ("geoip.dat", "geosite.dat", "wintun.dll"):
+            # Geo databases are an application-owned routing dependency. The
+            # official Xray archive does not contain runetfreedom's ru-blocked
+            # tags, so a core-only update must not silently replace them.
+            for optional_name in ("wintun.dll",):
                 src = _find_file(temp_dir, optional_name)
                 if src:
                     dest = target_dir / optional_name

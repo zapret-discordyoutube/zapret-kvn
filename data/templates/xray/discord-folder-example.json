@@ -56,8 +56,27 @@
     }
   ],
   "routing": {
-    "domainStrategy": "AsIs",
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
+      {
+        "type": "field",
+        "domain": [
+          "domain:mobileproxy.passport.yandex.net",
+          "domain:relay-api.eu.2gis.com",
+          "domain:api.ipify.org",
+          "domain:checkip.amazonaws.com",
+          "domain:ifconfig.me",
+          "domain:ip.mail.ru",
+          "domain:ipv4-internet.yandex.net",
+          "domain:ipv6-internet.yandex.net",
+          "domain:trace-flow.ru",
+          "domain:api.oneme.ru",
+          "domain:vk-analytics.ru",
+          "domain:apptracer.ru"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "block"
+      },
       {
         "type": "field",
         "process": [
@@ -79,6 +98,22 @@
         "type": "field",
         "domain": [
           "domain:zapret.moe"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "proxy"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "geosite:ru-blocked"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "proxy"
+      },
+      {
+        "type": "field",
+        "ip": [
+          "geoip:ru-blocked"
         ],
         "network": "tcp,udp",
         "outboundTag": "proxy"

@@ -37,11 +37,27 @@
     "rule_set": [
       {
         "type": "remote",
+        "tag": "geosite-ru-blocked",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-ru-blocked.srs",
+        "download_detour": "direct",
+        "update_interval": "6h"
+      },
+      {
+        "type": "remote",
+        "tag": "geoip-ru-blocked",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru-blocked.srs",
+        "download_detour": "direct",
+        "update_interval": "6h"
+      },
+      {
+        "type": "remote",
         "tag": "geosite-category-ru",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-category-ru.srs",
         "download_detour": "direct",
-        "update_interval": "24h"
+        "update_interval": "6h"
       },
       {
         "type": "remote",
@@ -49,7 +65,7 @@
         "format": "binary",
         "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru.srs",
         "download_detour": "direct",
-        "update_interval": "24h"
+        "update_interval": "6h"
       }
     ],
     "rules": [
@@ -59,6 +75,24 @@
       {
         "protocol": "dns",
         "action": "hijack-dns"
+      },
+      {
+        "domain_suffix": [
+          "mobileproxy.passport.yandex.net",
+          "relay-api.eu.2gis.com",
+          "api.ipify.org",
+          "checkip.amazonaws.com",
+          "ifconfig.me",
+          "ip.mail.ru",
+          "ipv4-internet.yandex.net",
+          "ipv6-internet.yandex.net",
+          "trace-flow.ru",
+          "api.oneme.ru",
+          "vk-analytics.ru",
+          "apptracer.ru"
+        ],
+        "action": "route",
+        "outbound": "block"
       },
       {
         "process_name": [
@@ -78,6 +112,14 @@
       {
         "domain_suffix": [
           "zapret.moe"
+        ],
+        "action": "route",
+        "outbound": "proxy"
+      },
+      {
+        "rule_set": [
+          "geosite-ru-blocked",
+          "geoip-ru-blocked"
         ],
         "action": "route",
         "outbound": "proxy"
