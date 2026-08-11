@@ -3,6 +3,19 @@
 Keep the ``test_app_*`` prefix: widget test modules must sort before
 ``tests/test_engine_process_stop.py`` which creates a bare QCoreApplication
 at import time (see tests/test_app_nodes_page_view.py).
+
+Widget lifecycle note (Windows crash guard): full pages are created ONCE per
+module and shared between tests, and are intentionally never destroyed while
+tests run. qfluentwidgets' SmoothScrollDelegate monkey-patches bound methods
+onto every scroll widget (``parent.setVerticalScrollBarPolicy = self...``),
+creating Python reference cycles between the widget and its delegate. With
+``deleteLater()`` + ``processEvents()`` the C++ teardown of several such pages
+in one batch races the cyclic garbage collector and crashes with an access
+violation on Windows (native use-after-free inside the Qt destructor cascade;
+reproduced independently of this repo's code). The real application never
+destroys pages mid-run either, so shared long-lived instances match production
+behaviour. All assertions are unchanged — only the create/destroy churn is
+gone. Do NOT re-introduce per-test page creation with deleteLater here.
 """
 
 from __future__ import annotations
@@ -36,15 +49,32 @@ from xray_fluent.ui.traffic_graph import DetailTrafficGraphWidget
 AS_NEEDED = Qt.ScrollBarPolicy.ScrollBarAsNeeded
 MIN_WINDOW_WIDTH = 860
 
+_PAGE_FACTORIES = [
+    ("dashboard", DashboardPage),
+    ("settings", SettingsPage),
+    ("routing", RoutingPage),
+    ("history", HistoryPage),
+    ("configs", ConfigsPage),
+]
 
-def _page_factories():
-    return [
-        ("dashboard", DashboardPage),
-        ("settings", SettingsPage),
-        ("routing", RoutingPage),
-        ("history", HistoryPage),
-        ("configs", ConfigsPage),
-    ]
+#: Shared widgets, created lazily and kept alive for the whole process
+#: (see the module docstring — destroying them mid-run crashes on Windows).
+_shared_pages: dict[str, object] = {}
+_shared_widgets: dict[str, object] = {}
+
+
+def _pages():
+    """Name -> shared page instance, creating each page once."""
+    for name, factory in _PAGE_FACTORIES:
+        if name not in _shared_pages:
+            _shared_pages[name] = factory()
+    return [(name, _shared_pages[name]) for name, _ in _PAGE_FACTORIES]
+
+
+def _shared(name, factory):
+    if name not in _shared_widgets:
+        _shared_widgets[name] = factory()
+    return _shared_widgets[name]
 
 
 def _scroll_areas(page):
@@ -67,7 +97,7 @@ def _assert_transparent_stylesheet(test: unittest.TestCase, widget) -> None:
 
 class ScrollablePageBaseTest(unittest.TestCase):
     def test_base_page_policies_and_body(self) -> None:
-        page = ScrollablePage()
+        page = _shared("base_page", ScrollablePage)
         self.assertEqual(page.scroll_area.horizontalScrollBarPolicy(), AS_NEEDED)
         self.assertEqual(page.scroll_area.verticalScrollBarPolicy(), AS_NEEDED)
         self.assertTrue(page.scroll_area.widgetResizable())
@@ -86,80 +116,63 @@ class PagesUseScrollablePageTest(unittest.TestCase):
     """AC7: every listed page scrolls with ScrollBarAsNeeded, Mica-transparent."""
 
     def test_pages_horizontal_policy_as_needed(self) -> None:
-        for name, factory in _page_factories():
+        for name, page in _pages():
             with self.subTest(page=name):
-                page = factory()
                 for area in _scroll_areas(page):
                     self.assertEqual(area.horizontalScrollBarPolicy(), AS_NEEDED)
                     self.assertTrue(area.widgetResizable())
-                page.deleteLater()
-        QApplication.processEvents()
 
     def test_pages_have_no_opaque_background(self) -> None:
-        for name, factory in _page_factories():
+        for name, page in _pages():
             with self.subTest(page=name):
-                page = factory()
                 _assert_transparent_stylesheet(self, page)
                 for area in _scroll_areas(page):
                     _assert_transparent_stylesheet(self, area)
                     _assert_transparent_stylesheet(self, area.viewport())
                     _assert_transparent_stylesheet(self, area.widget())
-                page.deleteLater()
-        QApplication.processEvents()
 
     def test_non_dashboard_pages_subclass_scrollable_page(self) -> None:
-        for name, factory in _page_factories():
+        for name, page in _pages():
             if name == "dashboard":
                 continue
             with self.subTest(page=name):
-                page = factory()
                 self.assertIsInstance(page, ScrollablePage)
-                page.deleteLater()
-        QApplication.processEvents()
 
 
 class MinimumWidthsTest(unittest.TestCase):
     """AC9: pages must fit the 860px minimum window width."""
 
     def test_page_minimum_size_hints_fit_min_window(self) -> None:
-        for name, factory in _page_factories():
+        for name, page in _pages():
             with self.subTest(page=name):
-                page = factory()
                 self.assertLessEqual(page.minimumSizeHint().width(), MIN_WINDOW_WIDTH)
                 self.assertLessEqual(page.minimumWidth(), MIN_WINDOW_WIDTH)
-                page.deleteLater()
-        QApplication.processEvents()
 
     def test_detail_traffic_graph_minimum_width(self) -> None:
-        graph = DetailTrafficGraphWidget()
+        graph = _shared("detail_graph", DetailTrafficGraphWidget)
         self.assertEqual(graph.minimumWidth(), 240)
-        graph.deleteLater()
-        QApplication.processEvents()
 
     def test_settings_edit_cards_are_moderate_and_expanding(self) -> None:
-        line_card = _LineEditCard(FIF.LINK, "t", "c")
+        line_card = _shared("line_card", lambda: _LineEditCard(FIF.LINK, "t", "c"))
         self.assertLessEqual(line_card.edit.minimumWidth(), 240)
         self.assertEqual(
             line_card.edit.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding
         )
-        browse_card = _BrowseCard(FIF.FOLDER, "t", "c")
+        browse_card = _shared("browse_card", lambda: _BrowseCard(FIF.FOLDER, "t", "c"))
         self.assertLessEqual(browse_card.edit.minimumWidth(), 220)
         self.assertEqual(
             browse_card.edit.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding
         )
 
-        page = SettingsPage()
+        page = dict(_pages())["settings"]
         for card in (page.xray_path_card, page.singbox_path_card):
             self.assertLessEqual(card.edit.minimumWidth(), 220)
             self.assertEqual(
                 card.edit.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding
             )
-        for widget in (line_card, browse_card, page):
-            widget.deleteLater()
-        QApplication.processEvents()
 
     def test_configs_combos_are_moderate_and_expanding(self) -> None:
-        page = ConfigsPage()
+        page = dict(_pages())["configs"]
         for core, editor in page._editors.items():
             for combo in (editor.config_combo, editor.template_combo):
                 with self.subTest(core=core):
@@ -168,11 +181,9 @@ class MinimumWidthsTest(unittest.TestCase):
                         combo.sizePolicy().horizontalPolicy(),
                         QSizePolicy.Policy.Expanding,
                     )
-        page.deleteLater()
-        QApplication.processEvents()
 
     def test_dashboard_cards_size_policy(self) -> None:
-        page = DashboardPage()
+        page = dict(_pages())["dashboard"]
         cards = (
             page.connection_card,
             page.routing_card,
@@ -183,8 +194,6 @@ class MinimumWidthsTest(unittest.TestCase):
             policy = card.sizePolicy()
             self.assertEqual(policy.horizontalPolicy(), QSizePolicy.Policy.Expanding)
             self.assertEqual(policy.verticalPolicy(), QSizePolicy.Policy.Preferred)
-        page.deleteLater()
-        QApplication.processEvents()
 
 
 if __name__ == "__main__":
