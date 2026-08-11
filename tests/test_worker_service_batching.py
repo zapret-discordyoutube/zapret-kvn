@@ -2,7 +2,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from xray_fluent.application.worker_service import on_speed_complete, on_speed_result
+from xray_fluent.application.worker_service import (
+    on_ping_complete,
+    on_speed_complete,
+    on_speed_result,
+)
 from xray_fluent.models import Node
 
 
@@ -35,6 +39,25 @@ class WorkerServiceBatchingTests(unittest.TestCase):
         on_speed_complete(controller)
         controller.save.assert_called_once_with()
         controller.bulk_task_progress.emit.assert_called_once_with("speed", 1, 1, True)
+
+    def test_ping_complete_uses_debounced_schedule_save(self) -> None:
+        worker = object()
+        controller = SimpleNamespace(
+            _ping_worker=worker,
+            _ping_total=3,
+            _ping_completed=3,
+            sender=lambda: worker,
+            bulk_task_progress=_Signal(),
+            save=Mock(),
+            schedule_save=Mock(),
+        )
+
+        on_ping_complete(controller)
+
+        controller.save.assert_not_called()
+        controller.schedule_save.assert_called_once_with()
+        controller.bulk_task_progress.emit.assert_called_once_with("ping", 3, 3, True)
+        self.assertIsNone(controller._ping_worker)
 
 
 if __name__ == "__main__":

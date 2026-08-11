@@ -3,8 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .config_documents import RawConfigTextCache
+
 if TYPE_CHECKING:
     from ..app_controller import AppController
+
+# Raw config text is read 3-4 times during a single connect/hot-swap
+# transition; the (mtime_ns, size) check keeps the cache correct when the
+# file is edited or rewritten between reads.
+_raw_config_text_cache = RawConfigTextCache()
 
 
 def get_active_config_path(controller: AppController, engine: str) -> Path:
@@ -56,19 +63,26 @@ def ensure_active_config(controller: AppController, engine: str, path: str | Pat
     resolved.parent.mkdir(parents=True, exist_ok=True)
     if not resolved.exists():
         if template_path is not None:
-            resolved.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+            template_text = template_path.read_text(encoding="utf-8")
+            resolved.write_text(template_text, encoding="utf-8")
+            _raw_config_text_cache.store(resolved, template_text)
             template_setter(template_path, emit_signal=False)
         else:
             resolved.write_text(default_text, encoding="utf-8")
+            _raw_config_text_cache.store(resolved, default_text)
     setter(resolved)
     return resolved
 
 
 def load_active_config_text(controller: AppController, engine: str) -> tuple[Path, str]:
     path = ensure_active_config(controller, engine)
-    text = path.read_text(encoding="utf-8")
     if engine == "singbox":
+        # sing-box has its own document cache and extra writers (config repair)
+        # outside this module, so keep the direct read for it.
+        text = path.read_text(encoding="utf-8")
         controller._cache_singbox_document_state(path, text)
+    else:
+        text = _raw_config_text_cache.read_text(path)
     return path, text
 
 
@@ -112,6 +126,7 @@ def import_template(controller: AppController, engine: str, path: str | Path) ->
     # the UI can appear to switch templates while launch still uses an older
     # config file from data/configs/.
     active_path.write_text(template_text, encoding="utf-8")
+    _raw_config_text_cache.store(active_path, template_text)
     set_template(template_path)
     set_config(active_path)
     text = template_text
@@ -127,6 +142,7 @@ def reset_active_config_to_template(controller: AppController, engine: str) -> t
     active_path = ensure_active_config(controller, engine)
     text = template_path.read_text(encoding="utf-8")
     active_path.write_text(text, encoding="utf-8")
+    _raw_config_text_cache.store(active_path, text)
     if engine == "singbox":
         controller._cache_singbox_document_state(active_path, text)
     return True, active_path, f"Активная копия сброшена к шаблону: {template_path.name}"
@@ -135,6 +151,7 @@ def reset_active_config_to_template(controller: AppController, engine: str) -> t
 def save_config_text(controller: AppController, engine: str, text: str, path: str | Path | None = None) -> Path:
     resolved = ensure_active_config(controller, engine, path)
     resolved.write_text(text, encoding="utf-8")
+    _raw_config_text_cache.store(resolved, text)
     if engine == "singbox":
         controller._set_active_singbox_config_path(resolved)
         controller._cache_singbox_document_state(resolved, text)

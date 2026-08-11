@@ -156,6 +156,8 @@ def build_exe() -> None:
         "--hidden-import", "win32comext.shell.shellcon",
         # encodings.idna is needed by socket.getaddrinfo() for hostname resolution
         "--hidden-import", "encodings.idna",
+        # Imported lazily by QR support and therefore must be explicit for PyInstaller.
+        "--hidden-import", "zxingcpp",
     ]
     _run(cmd, cwd=str(ROOT))
 

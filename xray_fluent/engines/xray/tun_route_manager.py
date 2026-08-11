@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ... import win_netinfo
 from ...constants import XRAY_TUN_DEFAULT_INTERFACE_NAME
 from ...subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text_pumped, sleep_with_events
 
@@ -166,15 +167,38 @@ class XrayTunRouteManager(QObject):
     def _wait_for_tun_interface(self, tun_interface_name: str, max_wait_sec: float = 12.0) -> WindowsTunInterface | None:
         waited = 0.0
         while waited < max_wait_sec:
-            interface = self._read_tun_interface(tun_interface_name)
+            interface, fast_probe = self._read_tun_interface(tun_interface_name)
             if interface is not None:
                 return interface
-            sleep_with_events(0.5)
-            waited += 0.5
+            step = 0.1 if fast_probe else 0.5
+            sleep_with_events(step)
+            waited += step
         return None
 
     @staticmethod
-    def _read_tun_interface(tun_interface_name: str) -> WindowsTunInterface | None:
+    def _read_tun_interface(tun_interface_name: str) -> tuple[WindowsTunInterface | None, bool]:
+        """Return (interface info or None, fast ctypes path was used)."""
+        if win_netinfo.is_available():
+            try:
+                adapter = win_netinfo.find_adapter(tun_interface_name)
+            except Exception:
+                pass  # fall back to the PowerShell probe below
+            else:
+                if adapter is None or adapter.if_index <= 0 or not adapter.ipv4_addresses:
+                    return None, True
+                return (
+                    WindowsTunInterface(
+                        interface_index=adapter.if_index,
+                        ipv4_address=adapter.ipv4_addresses[0],
+                        ipv6_address=adapter.ipv6_addresses[0] if adapter.ipv6_addresses else "",
+                    ),
+                    True,
+                )
+        return XrayTunRouteManager._read_tun_interface_powershell(tun_interface_name), False
+
+    @staticmethod
+    def _read_tun_interface_powershell(tun_interface_name: str) -> WindowsTunInterface | None:
+        """Legacy PowerShell probe, kept as a fallback for the ctypes fast path."""
         escaped_name = _powershell_string_literal(tun_interface_name)
         script = (
             f"$ipv4 = Get-NetIPAddress -InterfaceAlias '{escaped_name}' -AddressFamily IPv4 -ErrorAction SilentlyContinue "

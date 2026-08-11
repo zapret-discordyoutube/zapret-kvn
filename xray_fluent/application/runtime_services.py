@@ -3,13 +3,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..constants import SINGBOX_CLASH_API_PORT
-from ..live_metrics_worker import LiveMetricsWorker
 
 if TYPE_CHECKING:
     from ..app_controller import AppController
 
 
 def start_metrics_worker(controller: AppController) -> None:
+    # Ленивая загрузка: live_metrics_worker тянет Windows-only win_proc_monitor.
+    from ..live_metrics_worker import LiveMetricsWorker
+
     session = controller._active_session
     node = controller.selected_node
     ping_host = session.ping_host if session is not None else (node.server if node else "")
@@ -40,13 +42,48 @@ def start_metrics_worker(controller: AppController) -> None:
     controller._metrics_worker.start()
 
 
-def stop_metrics_worker(controller: AppController) -> None:
-    if not controller._metrics_worker:
-        return
-    if controller._metrics_worker.isRunning():
-        controller._metrics_worker.stop()
-        controller._metrics_worker.wait(1200)
+def stop_metrics_worker(controller: AppController, *, wait: bool = False) -> None:
+    worker = controller._metrics_worker
     controller._metrics_worker = None
+    if not worker:
+        return
+    try:
+        worker.metrics.disconnect(controller._on_live_metrics)
+    except (TypeError, RuntimeError):
+        pass
+    if not worker.isRunning():
+        return
+    worker.stop()
+    if wait:
+        # Блокирующий путь — только для shutdown приложения.
+        worker.wait(1200)
+        return
+    # Горячий путь (hot-swap): не блокируем GUI-поток ожиданием потока —
+    # воркер доживает в списке retiring и удаляется по своему finished.
+    retiring = _retiring_metrics_workers(controller)
+    retiring.append(worker)
+
+    def _release(_done: list[bool] = []) -> None:
+        if _done:
+            return
+        _done.append(True)
+        try:
+            retiring.remove(worker)
+        except ValueError:
+            pass
+        worker.deleteLater()
+
+    worker.finished.connect(_release)
+    if not worker.isRunning():
+        _release()
+
+
+def _retiring_metrics_workers(controller: AppController) -> list:
+    workers = getattr(controller, "_retiring_metrics_workers", None)
+    if workers is None:
+        workers = []
+        controller._retiring_metrics_workers = workers
+    return workers
 
 
 def cleanup_connection_runtime_state(
@@ -172,6 +209,15 @@ def on_live_metrics(controller: AppController, payload: dict[str, object]) -> No
 def shutdown(controller: AppController) -> None:
     if controller._transition_timer.isActive():
         controller._transition_timer.stop()
+    if controller._subscription_timer.isActive():
+        controller._subscription_timer.stop()
+    controller._subscription_update_queue.clear()
+    controller._subscription_queued_ids.clear()
+    controller._subscription_check_ids.clear()
+    for worker in list(controller._subscription_workers.values()):
+        if worker.isRunning():
+            # Auto mode may perform one 15-second direct attempt and one proxy retry.
+            worker.wait(32000)
     for worker in list(controller._proxy_protection_workers.values()):
         if worker.isRunning():
             worker.wait(5000)
@@ -183,7 +229,10 @@ def shutdown(controller: AppController) -> None:
         controller._ping_worker.wait(500)
     if controller._connectivity_worker and controller._connectivity_worker.isRunning():
         controller._connectivity_worker.wait(1000)
-    stop_metrics_worker(controller)
+    stop_metrics_worker(controller, wait=True)
+    for worker in list(_retiring_metrics_workers(controller)):
+        if worker.isRunning():
+            worker.wait(1200)
     if controller._speed_worker and controller._speed_worker.isRunning():
         controller._speed_worker.cancel()
         controller._speed_worker.wait(20000)

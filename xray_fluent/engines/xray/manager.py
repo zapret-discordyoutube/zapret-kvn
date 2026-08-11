@@ -14,17 +14,23 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
-from ...constants import RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
+from ...application.async_steps import (
+    TransitionSteps,
+    run_in_worker,
+    run_steps_blocking,
+    sleep_ms,
+    wait_process_finished,
+    wait_process_started,
+)
+from ...application.port_allocator import is_tcp_port_bindable
+from ...constants import PROXY_HOST, RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
 from ...path_utils import resolve_configured_path
 from ...subprocess_utils import (
     decode_output,
     kill_processes_by_path,
-    pump_qt_events,
     result_output_text,
+    run_text,
     run_text_pumped,
-    sleep_with_events,
-    wait_for_qprocess_finished,
-    wait_for_qprocess_started,
 )
 
 
@@ -63,6 +69,12 @@ class XrayManager(QObject):
         return self._last_exit_expected
 
     def start(self, xray_path: str, config: dict[str, Any]) -> bool:
+        # Холодный совместимый путь (connect/reconnect, sing-box sidecar, тесты):
+        # выполняет те же шаги синхронно. Горячие переходы (hot-swap) используют
+        # start_steps() через TransitionRunner (AC22).
+        return bool(run_steps_blocking(self.start_steps(xray_path, config)))
+
+    def start_steps(self, xray_path: str, config: dict[str, Any]) -> TransitionSteps:
         if not xray_path or not xray_path.strip():
             self.error.emit("Путь к Xray не настроен (укажите его в Настройки -> Пути к ядрам)")
             return False
@@ -81,15 +93,18 @@ class XrayManager(QObject):
         self._exe_path = exe
 
         if self._process.state() != QProcess.ProcessState.NotRunning:
-            if not self.stop(expected=True):
+            if not (yield from self.stop_steps(expected=True)):
                 self.error.emit("Не удалось остановить предыдущий процесс Xray")
                 return False
         elif self._running:
             self._running = False
             self.state_changed.emit(False)
 
+        start_began = time.monotonic()
         required_ports = self._extract_required_ports(config)
-        port_error = self._ensure_ports_available(required_ports)
+        ports_began = time.monotonic()
+        port_error = yield from self._ensure_ports_available_steps(required_ports)
+        ports_elapsed = time.monotonic() - ports_began
         if port_error:
             self.error.emit(port_error)
             return False
@@ -104,21 +119,38 @@ class XrayManager(QObject):
         self._process.setWorkingDirectory(str(exe.parent))
         self._process.setProgram(str(exe))
         self._process.setArguments(["run", "-c", str(XRAY_CONFIG_FILE)])
+        spawn_began = time.monotonic()
         self._process.start()
 
-        if not wait_for_qprocess_started(self._process, 2000):
+        started = yield wait_process_started(self._process, 2000)
+        if not started:
             self._starting = False
             self._report_startup_failure(f"Не удалось запустить Xray: {self._process.errorString()}")
             return False
+        spawn_elapsed = time.monotonic() - spawn_began
 
-        if not self._wait_until_ready(required_ports):
+        ready_began = time.monotonic()
+        ready = yield from self._wait_until_ready_steps(required_ports)
+        if not ready:
             self._starting = False
             return False
+        ready_elapsed = time.monotonic() - ready_began
 
         self._starting = False
+        self.log_received.emit(
+            "[xray-perf] start: "
+            f"ensure_ports={ports_elapsed:.2f}s spawn={spawn_elapsed:.2f}s "
+            f"wait_ready={ready_elapsed:.2f}s total={time.monotonic() - start_began:.2f}s"
+        )
         return True
 
     def stop(self, expected: bool = True) -> bool:
+        # Холодный совместимый путь (disconnect, shutdown, sing-box flows):
+        # синхронный драйвер тех же шагов. Горячие переходы используют
+        # stop_steps() через TransitionRunner (AC22).
+        return bool(run_steps_blocking(self.stop_steps(expected=expected)))
+
+    def stop_steps(self, expected: bool = True) -> TransitionSteps:
         if self._process.state() == QProcess.ProcessState.NotRunning:
             self._stop_requested = False
             if self._running:
@@ -126,31 +158,42 @@ class XrayManager(QObject):
                 self.state_changed.emit(False)
             return True
 
+        stop_began = time.monotonic()
         self._stop_requested = expected
-        self._process.terminate()
-        if wait_for_qprocess_finished(self._process, 3000):
-            return True
-
+        # На Windows terminate() шлёт WM_CLOSE, консольный xray его игнорирует, а
+        # процесс stateless (конфиг переписывается на каждый старт) — убиваем сразу,
+        # не сжигая 3с таймаута terminate на каждом переключении.
         self._process.kill()
-        if wait_for_qprocess_finished(self._process, 2000):
+        if (yield wait_process_finished(self._process, 2000)):
+            self._log_stop_perf(stop_began)
             return True
 
         exe = self._exe_path
         if os.name == "nt" and exe is not None:
             try:
-                if kill_processes_by_path(exe.name, exe, timeout=5):
-                    sleep_with_events(0.5)
-                    if wait_for_qprocess_finished(self._process, 1000):
-                        return True
+                killed = yield run_in_worker(
+                    lambda name=exe.name, path=exe: kill_processes_by_path(
+                        name, path, timeout=5, pump=False
+                    )
+                )
             except Exception:
-                pass
+                killed = False
+            if killed:
+                yield sleep_ms(500)
+                if (yield wait_process_finished(self._process, 1000)):
+                    self._log_stop_perf(stop_began)
+                    return True
 
         if self._process.state() == QProcess.ProcessState.NotRunning:
+            self._log_stop_perf(stop_began)
             return True
 
         self._stop_requested = False
         self.error.emit("Не удалось вовремя остановить процесс Xray")
         return False
+
+    def _log_stop_perf(self, stop_began: float) -> None:
+        self.log_received.emit(f"[xray-perf] stop: total={time.monotonic() - stop_began:.2f}s")
 
     def _on_ready_read(self) -> None:
         chunk = self._process.readAllStandardOutput()
@@ -221,22 +264,32 @@ class XrayManager(QObject):
         return port_roles
 
     def _ensure_ports_available(self, port_roles: dict[int, str]) -> str | None:
+        return run_steps_blocking(self._ensure_ports_available_steps(port_roles))
+
+    def _ensure_ports_available_steps(self, port_roles: dict[int, str]) -> TransitionSteps:
         for port, role in port_roles.items():
-            owner = self._find_listening_port_owner(port)
-            if owner is None:
+            # Быстрый путь: bind-проба вместо netstat (~мс против сотен мс на порт).
+            if is_tcp_port_bindable(PROXY_HOST, port):
                 continue
-            pid, name = owner
-            if pid > 0 and (name or "").strip().lower() == "xray.exe" and self._kill_pid(pid):
-                sleep_with_events(0.5)
-                if self._find_listening_port_owner(port) is None:
-                    self.log_received.emit(f"[xray] terminated stale xray.exe PID {pid} on port {port}")
-                    continue
+            # Порт занят — netstat/tasklist в worker-пуле, только как диагностика конфликта.
+            owner = yield run_in_worker(
+                lambda probe_port=port: self._find_listening_port_owner(probe_port)
+            )
+            pid, name = owner if owner is not None else (0, "")
+            if pid > 0 and (name or "").strip().lower() == "xray.exe":
+                killed = yield run_in_worker(lambda stale_pid=pid: self._kill_pid(stale_pid))
+                if killed:
+                    yield sleep_ms(500)
+                    if is_tcp_port_bindable(PROXY_HOST, port):
+                        self.log_received.emit(f"[xray] terminated stale xray.exe PID {pid} on port {port}")
+                        continue
             return self._port_conflict_message(port, role, pid, name)
         return None
 
     def _find_listening_port_owner(self, port: int) -> tuple[int, str] | None:
+        # Выполняется в worker-пуле (run_in_worker) — без прокачки Qt-событий.
         try:
-            result = run_text_pumped(
+            result = run_text(
                 ["netstat", "-ano", "-p", "tcp"],
                 timeout=5,
                 check=False,
@@ -281,7 +334,7 @@ class XrayManager(QObject):
         if pid <= 0:
             return ""
         try:
-            result = run_text_pumped(
+            result = run_text(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 timeout=5,
                 check=False,
@@ -302,7 +355,7 @@ class XrayManager(QObject):
         if pid <= 0:
             return False
         try:
-            result = run_text_pumped(
+            result = run_text(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 timeout=5,
                 check=False,
@@ -330,19 +383,31 @@ class XrayManager(QObject):
         return f"{prefix} уже занят {owner}.{hint}"
 
     def _wait_until_ready(self, port_roles: dict[int, str], timeout_sec: float = 5.0) -> bool:
+        return bool(run_steps_blocking(self._wait_until_ready_steps(port_roles, timeout_sec)))
+
+    def _wait_until_ready_steps(self, port_roles: dict[int, str], timeout_sec: float = 5.0) -> TransitionSteps:
         if not port_roles:
             return True
+        ports = tuple(port_roles)
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
-            pump_qt_events()
             if self._process.state() == QProcess.ProcessState.NotRunning:
                 self._report_startup_failure(self._unexpected_exit_message(self._last_exit_code, self._last_exit_status, startup=True))
                 return False
-            if all(self._is_port_ready(port) for port in port_roles):
+            # Пробные connect'ы (до 0.2с на порт) уходят в worker-пул.
+            ready = yield run_in_worker(
+                lambda probe=ports: all(self._is_port_ready(port) for port in probe)
+            )
+            if ready:
                 return True
-            sleep_with_events(0.1)
-        not_ready = [f"{role} {port}" if role else str(port) for port, role in port_roles.items() if not self._is_port_ready(port)]
-        self.stop(expected=True)
+            yield sleep_ms(100)
+        pending = yield run_in_worker(
+            lambda probe=ports: [port for port in probe if not self._is_port_ready(port)]
+        )
+        not_ready = [
+            f"{port_roles[port]} {port}" if port_roles[port] else str(port) for port in pending
+        ]
+        yield from self.stop_steps(expected=True)
         details = ", ".join(not_ready) if not_ready else "нужные порты"
         self._report_startup_failure(f"Xray запустился, но не открыл нужные порты: {details}")
         return False

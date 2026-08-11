@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ...application.async_steps import TransitionSteps, run_steps_blocking
 from ...application.port_allocator import is_tcp_port_bindable, select_available_port
 from ...runtime_security import (
     generate_local_proxy_credentials,
@@ -119,7 +121,15 @@ def start_tun(
 
 
 def hot_swap(controller: AppController, reason: str, node: Node) -> bool:
+    # Холодный совместимый путь: синхронный драйвер тех же шагов.
+    # Горячий путь идёт через hot_swap_steps() + TransitionRunner (AC22).
+    return bool(run_steps_blocking(hot_swap_steps(controller, reason, node)))
+
+
+def hot_swap_steps(controller: AppController, reason: str, node: Node) -> TransitionSteps:
     controller._switching = True
+    swap_began = time.monotonic()
+    perf = {"stop": 0.0, "build": 0.0, "start": 0.0, "metrics": 0.0}
     try:
         problem = controller._prepare_node_for_runtime(node)
         if problem:
@@ -127,7 +137,9 @@ def hot_swap(controller: AppController, reason: str, node: Node) -> bool:
             return False
         controller._log(f"[hot-swap] {reason} — restarting xray only, tun2socks stays up")
         controller._set_connection_status("starting", f"Переключение на {node.name}...", level="info")
-        controller.xray.stop()
+        stage_began = time.monotonic()
+        yield from controller.xray.stop_steps()
+        perf["stop"] = time.monotonic() - stage_began
         proxy_username = controller._tun2socks_proxy_username
         proxy_password = controller._tun2socks_proxy_password
         if not proxy_username or not proxy_password:
@@ -144,6 +156,7 @@ def hot_swap(controller: AppController, reason: str, node: Node) -> bool:
             if active_session is not None and active_session.socks_port > 0
             else int(DEFAULT_SOCKS_PORT)
         )
+        stage_began = time.monotonic()
         config = build_xray_config(
             node,
             controller.state.routing,
@@ -166,7 +179,10 @@ def hot_swap(controller: AppController, reason: str, node: Node) -> bool:
                 level="error",
             )
             return False
-        ok = controller.xray.start(controller.state.settings.xray_path, config)
+        perf["build"] = time.monotonic() - stage_began
+        stage_began = time.monotonic()
+        ok = yield from controller.xray.start_steps(controller.state.settings.xray_path, config)
+        perf["start"] = time.monotonic() - stage_began
         if ok:
             node.last_used_at = datetime.now(timezone.utc).isoformat()
             controller._capture_active_session(
@@ -192,7 +208,15 @@ def hot_swap(controller: AppController, reason: str, node: Node) -> bool:
         controller._auto_switch_transitioning = False
         _, controller.connected = controller._refresh_connected_state()
         controller.connection_changed.emit(controller.connected)
+        stage_began = time.monotonic()
         if controller.connected:
             controller._start_metrics_worker()
         else:
             controller._stop_metrics_worker()
+        perf["metrics"] = time.monotonic() - stage_began
+        controller._log(
+            "[hot-swap] perf: "
+            f"stop={perf['stop']:.2f}s build={perf['build']:.2f}s "
+            f"start={perf['start']:.2f}s metrics={perf['metrics']:.2f}s "
+            f"total={time.monotonic() - swap_began:.2f}s"
+        )

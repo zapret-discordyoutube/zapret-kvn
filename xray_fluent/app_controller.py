@@ -117,8 +117,17 @@ from .application.runtime import (
     tun_layer_signature as tun_layer_signature_operation,
     xray_layer_signature as xray_layer_signature_operation,
 )
+from .application.subscription_service import (
+    apply_not_modified,
+    hide_subscription_node as hide_subscription_node_operation,
+    mark_subscription_failure,
+    reconcile_subscription,
+    remove_subscription as remove_subscription_operation,
+    subscription_due,
+)
+from .application.async_steps import TransitionRunner, TransitionSteps, run_steps_blocking
 from .country_flags import CountryResolver
-from .background_workers import ProxyProtectionResolver, StateSaveWorker
+from .background_workers import ProxyProtectionResolver, StateSaveWorker, SubscriptionUpdateWorker
 from .engines.xray import (
     XrayManager,
     XrayTunRouteManager,
@@ -126,6 +135,7 @@ from .engines.xray import (
     get_windows_default_route_context,
     get_xray_version,
     restart_proxy_core as restart_xray_proxy_core,
+    restart_proxy_core_steps as restart_xray_proxy_core_steps,
 )
 from .engines.singbox import (
     SingBoxManager,
@@ -155,13 +165,26 @@ from .constants import (
     XRAY_DEFAULT_CONFIG_NAME,
     XRAY_TUN_DEFAULT_INTERFACE_NAME,
     XRAY_TEMPLATES_DIR,
+    STATE_SCHEMA_VERSION,
 )
 from .diagnostics import export_diagnostics
-from .models import AppSettings, AppState, Node, RoutingSettings
+from .models import (
+    AppSettings,
+    AppState,
+    Node,
+    RoutingSettings,
+    Subscription,
+    SubscriptionUpdateResult,
+)
+from .subscription_http import validate_subscription_url
+from .subscription_parser import validate_filter_patterns
 from .network_monitor import NetworkMonitor
 from .proxy_manager import ProxyManager
 from .security import create_password_hash, get_idle_seconds, verify_password
-from .engines.tun2socks import Tun2SocksManager, hot_swap as hot_swap_tun2socks
+from .engines.tun2socks import (
+    Tun2SocksManager,
+    hot_swap_steps as hot_swap_tun2socks_steps,
+)
 from .storage import PassphraseRequired, StateStorage
 from .startup import build_startup_command, set_startup_enabled
 from .subprocess_utils import result_output_text, run_text
@@ -198,6 +221,10 @@ _XRAY_METRICS_API_INBOUND_TAG = "__app_metrics_api_in"
 _XRAY_TUN_INBOUND_TAG = "__app_tun_in"
 class AppController(QObject):
     nodes_changed = pyqtSignal(object)
+    subscriptions_changed = pyqtSignal(object)
+    subscription_update_started = pyqtSignal(str)
+    subscription_update_progress = pyqtSignal(str, str)
+    subscription_update_finished = pyqtSignal(object)
     selection_changed = pyqtSignal(object)
     connection_changed = pyqtSignal(bool)
     connection_status_changed = pyqtSignal(str, str)
@@ -258,6 +285,11 @@ class AppController(QObject):
         self._metrics_worker: LiveMetricsWorker | None = None
         self._xray_update_worker: XrayCoreUpdateWorker | None = None
         self._state_save_worker: StateSaveWorker | None = None
+        self._subscription_workers: dict[str, SubscriptionUpdateWorker] = {}
+        self._subscription_update_queue: list[tuple[Subscription, str, bool, bool]] = []
+        self._subscription_queued_ids: set[str] = set()
+        self._pending_subscription_additions: dict[str, Subscription] = {}
+        self._subscription_check_ids: set[str] = set()
         self._proxy_protection_workers: dict[int, ProxyProtectionResolver] = {}
         self._proxy_protection_wait_generation = 0
         self._singbox_documents = SingboxDocumentCache()
@@ -298,6 +330,7 @@ class AppController(QObject):
         self._transition_reason = ""
         self._transition_generation = 0
         self._blocked_transition_signature = ""
+        self._transition_runner: TransitionRunner | None = None
 
         self.xray.log_received.connect(self._on_xray_log)
         self.xray.error.connect(self._on_xray_error)
@@ -328,6 +361,9 @@ class AppController(QObject):
         self._transition_timer = QTimer(self)
         self._transition_timer.setSingleShot(True)
         self._transition_timer.timeout.connect(self._drain_transition_queue)
+        self._subscription_timer = QTimer(self)
+        self._subscription_timer.setInterval(15 * 60 * 1000)
+        self._subscription_timer.timeout.connect(self._check_due_subscriptions)
 
     def load(self) -> bool:
         try:
@@ -338,7 +374,11 @@ class AppController(QObject):
 
         self._detect_countries_sync()
         self._migrate_sort_order()
+        if self.state.schema_version != STATE_SCHEMA_VERSION:
+            self.state.schema_version = STATE_SCHEMA_VERSION
+            self.save()
         self.nodes_changed.emit(self.state.nodes)
+        self.subscriptions_changed.emit(self.state.subscriptions)
         self.selection_changed.emit(self.selected_node)
         self.routing_changed.emit(self.state.routing)
         self.settings_changed.emit(self.state.settings)
@@ -356,6 +396,8 @@ class AppController(QObject):
 
         self.network_monitor.start()
         self._lock_timer.start()
+        self._subscription_timer.start()
+        QTimer.singleShot(30_000, self._check_due_subscriptions)
         return True
 
     def set_data_passphrase(self, passphrase: str) -> None:
@@ -377,7 +419,7 @@ class AppController(QObject):
         self._save_pending = False
         worker = self._state_save_worker
         if worker is not None and worker.isRunning():
-            worker.wait()
+            worker.wait(5000)
         if self._state_save_worker is worker:
             self._state_save_worker = None
             if worker is not None:
@@ -608,8 +650,8 @@ class AppController(QObject):
 
     def get_effective_http_proxy_port(self) -> int | None:
         session = self._active_session
-        if session is not None and session.tun_mode:
-            return None
+        if session is not None:
+            return session.http_port if session.http_port > 0 else None
         _, http_port = self.get_effective_proxy_ports()
         return http_port if http_port > 0 else None
 
@@ -1203,19 +1245,80 @@ class AppController(QObject):
         reason = self._transition_reason or action
         self._transition_active = True
         self.transition_state_changed.emit(True, self._transition_status_text(action))
+        # Переход выполняется генератором через TransitionRunner: блокирующие шаги
+        # (ожидание QProcess, subprocess-вызовы, паузы) не держат GUI-поток, а на
+        # каждом резюме проверяется _transition_generation — устаревший переход
+        # (пришёл новый запрос) закрывается, его оставшиеся шаги не выполняются.
+        generation = self._transition_generation
+        runner = TransitionRunner(
+            self._transition_action_steps(action, reason),
+            is_current=lambda: self._transition_generation == generation,
+            on_finished=self._on_transition_runner_finished,
+            parent=self,
+        )
+        self._transition_runner = runner
+        runner.start()
+
+    def _on_transition_runner_finished(self, runner: TransitionRunner) -> None:
+        if self._transition_runner is runner:
+            self._transition_runner = None
+        runner.deleteLater()
         try:
-            ok = self._run_transition_action(action, reason)
-            if ok:
-                self._blocked_transition_signature = ""
+            if not runner.cancelled:
+                if runner.error is not None:
+                    self._log(f"[transition] failed with error: {runner.error!r}")
+                ok = bool(runner.result) and runner.error is None
+                if ok:
+                    self._blocked_transition_signature = ""
+                else:
+                    self._blocked_transition_signature = self._transition_signature()
+                    self._desired_connected = self.connected
             else:
-                self._blocked_transition_signature = self._transition_signature()
-                self._desired_connected = self.connected
+                # Отменённый переход не трогает blocked-сигнатуру и desired_connected
+                # (актуальное действие пересчитает следующий drain), но обязан
+                # оставить связку процессов консистентной.
+                self._reconcile_cancelled_transition()
         finally:
             self._transition_active = False
             if self._transition_pending or self._needs_transition():
                 self._schedule_transition_drain(0)
             else:
                 self.transition_state_changed.emit(False, "")
+
+    def _reconcile_cancelled_transition(self) -> None:
+        """Привести процессы к консистентному виду после отменённого перехода.
+
+        Отмена по generation может остановить hot-swap между шагами: например
+        xray уже убит, а tun2socks ещё жив (connected=False, но процессы есть).
+        Тогда очередь не вычислит disconnect (connected=False), и без уборки
+        остался бы осиротевший tun2socks/xray. Частично живая связка гасится,
+        сессия очищается; следующий drain пересчитает актуальное действие
+        (connect при desired_connected=True даёт полный переезд на новую ноду).
+        """
+        if self.connected:
+            return
+        any_running = self.xray.is_running or self.singbox.is_running or self.tun2socks.is_running
+        if any_running:
+            self._log("[transition] cancelled mid-swap — stopping partial connection processes")
+            self._stop_active_connection_processes(disable_proxy=not self._desired_connected)
+        if self._active_session is not None:
+            self._clear_active_session()
+            if not self._desired_connected:
+                self._set_connection_status("idle", "Отключено", level="info")
+
+    def _transition_action_steps(self, action: str, reason: str) -> TransitionSteps:
+        """Generator executed by TransitionRunner for one transition action.
+
+        Горячие пути (tun_hot_swap, proxy_hot_swap) полностью генераторные.
+        Холодные пути (connect/disconnect/reconnect/proxy_update) пока выполняются
+        синхронно одним шагом: полная миграция connect-цепочки (sing-box, zapret,
+        TUN-роуты) отложена как слишком рискованная за один заход (частичный AC22).
+        """
+        if action == "tun_hot_swap":
+            return (yield from self._hot_swap_node_steps(reason))
+        if action == "proxy_hot_swap":
+            return (yield from self._restart_proxy_core_steps(reason))
+        return self._run_transition_action(action, reason)
 
     def _run_transition_action(self, action: str, reason: str) -> bool:
         if action == "disconnect":
@@ -1242,6 +1345,11 @@ class AppController(QObject):
         on_countries_resolved_operation(self, results)
 
     def shutdown(self) -> None:
+        # Незавершённый асинхронный переход закрывается (finally-блоки операций
+        # выполняются) до остановки процессов при выходе.
+        runner = self._transition_runner
+        if runner is not None:
+            runner.cancel()
         shutdown_operation(self)
 
     @staticmethod
@@ -1310,6 +1418,311 @@ class AppController(QObject):
 
     def import_nodes_from_text(self, text: str) -> tuple[int, list[str]]:
         return import_nodes_from_text_operation(self, text)
+
+    def get_subscription(self, subscription_id: str | None) -> Subscription | None:
+        if not subscription_id:
+            return None
+        return next((item for item in self.state.subscriptions if item.id == subscription_id), None)
+
+    def _unique_subscription_name(self, name: str, *, exclude_id: str | None = None) -> str:
+        base = name.strip() or "Подписка"
+        used = {
+            item.name.casefold()
+            for item in self.state.subscriptions
+            if item.id != exclude_id and item.name.strip()
+        }
+        if base.casefold() not in used:
+            return base
+        index = 2
+        while f"{base} ({index})".casefold() in used:
+            index += 1
+        return f"{base} ({index})"
+
+    def add_subscription(self, subscription: Subscription, *, mode: str = "auto") -> bool:
+        validate_subscription_url(subscription.url)
+        validate_filter_patterns(subscription.include_pattern, subscription.exclude_pattern)
+        subscription.url = subscription.url.strip()
+        if any(item.url == subscription.url for item in self.state.subscriptions):
+            self.status.emit("warning", "Эта подписка уже добавлена")
+            return False
+        if subscription.id in self._subscription_workers or subscription.id in self._subscription_queued_ids:
+            return False
+        self._pending_subscription_additions[subscription.id] = subscription
+        self._enqueue_subscription_update(subscription, mode, pending_add=True, apply_result=True)
+        return True
+
+    def update_subscription_definition(self, subscription_id: str, updates: dict[str, Any]) -> bool:
+        subscription = self.get_subscription(subscription_id)
+        if (
+            subscription is None
+            or subscription_id in self._subscription_workers
+            or subscription_id in self._subscription_queued_ids
+        ):
+            return False
+        url = str(updates.get("url", subscription.url)).strip()
+        include_pattern = str(updates.get("include_pattern", subscription.include_pattern)).strip()
+        exclude_pattern = str(updates.get("exclude_pattern", subscription.exclude_pattern)).strip()
+        validate_subscription_url(url)
+        validate_filter_patterns(include_pattern, exclude_pattern)
+        if any(item.id != subscription_id and item.url == url for item in self.state.subscriptions):
+            self.status.emit("warning", "Эта подписка уже добавлена")
+            return False
+        old_url = subscription.url
+        old_include_pattern = subscription.include_pattern
+        old_exclude_pattern = subscription.exclude_pattern
+        requested_name = str(updates.get("name", subscription.name)).strip()
+        subscription.name = self._unique_subscription_name(requested_name, exclude_id=subscription_id)
+        subscription.url = url
+        subscription.user_agent = str(updates.get("user_agent", subscription.user_agent)).strip()
+        subscription.auto_update = bool(updates.get("auto_update", subscription.auto_update))
+        interval = updates.get("update_interval_hours", subscription.update_interval_hours)
+        subscription.update_interval_hours = int(interval) if interval else None
+        subscription.include_pattern = include_pattern
+        subscription.exclude_pattern = exclude_pattern
+        if (
+            old_url != url
+            or old_include_pattern != include_pattern
+            or old_exclude_pattern != exclude_pattern
+        ):
+            subscription.etag = ""
+            subscription.last_modified = ""
+            subscription.pending_url = ""
+        self.subscriptions_changed.emit(self.state.subscriptions)
+        self.save()
+        return True
+
+    def update_subscription(self, subscription_id: str, *, mode: str = "auto") -> bool:
+        subscription = self.get_subscription(subscription_id)
+        if subscription is None:
+            return False
+        return self._enqueue_subscription_update(subscription, mode, pending_add=False, apply_result=True)
+
+    def check_subscription(self, subscription_id: str, *, mode: str = "auto") -> bool:
+        subscription = self.get_subscription(subscription_id)
+        if subscription is None:
+            return False
+        return self._enqueue_subscription_update(subscription, mode, pending_add=False, apply_result=False)
+
+    def update_all_subscriptions(self, *, mode: str = "auto") -> int:
+        count = 0
+        for subscription in sorted(self.state.subscriptions, key=lambda item: item.sort_order):
+            if self._enqueue_subscription_update(
+                subscription, mode, pending_add=False, apply_result=True
+            ):
+                count += 1
+        return count
+
+    def remove_subscription(self, subscription_id: str, *, keep_nodes: bool = False) -> bool:
+        if subscription_id in self._subscription_workers:
+            self.status.emit("warning", "Дождитесь завершения обновления подписки")
+            return False
+        if subscription_id in self._subscription_queued_ids:
+            self._subscription_update_queue = [
+                item for item in self._subscription_update_queue if item[0].id != subscription_id
+            ]
+            self._subscription_queued_ids.discard(subscription_id)
+        previous_selected = self.state.selected_node_id
+        if not remove_subscription_operation(self.state, subscription_id, keep_nodes=keep_nodes):
+            return False
+        self.subscriptions_changed.emit(self.state.subscriptions)
+        self.nodes_changed.emit(self.state.nodes)
+        self.selection_changed.emit(self.selected_node)
+        self.save()
+        if previous_selected != self.state.selected_node_id and (self.connected or self._desired_connected):
+            if self.state.selected_node_id is None and not self._can_connect_without_selected_node():
+                self._desired_connected = False
+            self._request_transition("subscription removed")
+        return True
+
+    def hide_subscription_node(self, node_id: str) -> bool:
+        return self.hide_subscription_nodes({node_id}) > 0
+
+    def hide_subscription_nodes(self, node_ids: set[str]) -> int:
+        previous_selected = self.state.selected_node_id
+        hidden = 0
+        for node_id in set(node_ids):
+            if hide_subscription_node_operation(self.state, node_id) is not None:
+                hidden += 1
+        if not hidden:
+            return 0
+        self.subscriptions_changed.emit(self.state.subscriptions)
+        self.nodes_changed.emit(self.state.nodes)
+        self.selection_changed.emit(self.selected_node)
+        self.save()
+        if previous_selected != self.state.selected_node_id and (self.connected or self._desired_connected):
+            if self.state.selected_node_id is None and not self._can_connect_without_selected_node():
+                self._desired_connected = False
+            self._request_transition("subscription node hidden")
+        return hidden
+
+    def reset_subscription_hidden_nodes(self, subscription_id: str) -> bool:
+        subscription = self.get_subscription(subscription_id)
+        if (
+            subscription is None
+            or subscription_id in self._subscription_workers
+            or subscription_id in self._subscription_queued_ids
+        ):
+            return False
+        subscription.hidden_source_keys.clear()
+        subscription.etag = ""
+        subscription.last_modified = ""
+        self.subscriptions_changed.emit(self.state.subscriptions)
+        self.save()
+        return True
+
+    def accept_subscription_pending_url(self, subscription_id: str) -> bool:
+        subscription = self.get_subscription(subscription_id)
+        if subscription is None or not subscription.pending_url:
+            return False
+        subscription.url = subscription.pending_url
+        subscription.pending_url = ""
+        subscription.etag = ""
+        subscription.last_modified = ""
+        self.subscriptions_changed.emit(self.state.subscriptions)
+        self.save()
+        return True
+
+    def _enqueue_subscription_update(
+        self,
+        subscription: Subscription,
+        mode: str,
+        pending_add: bool,
+        apply_result: bool,
+    ) -> bool:
+        if subscription.id in self._subscription_workers or subscription.id in self._subscription_queued_ids:
+            return False
+        self._subscription_update_queue.append(
+            (deepcopy(subscription), mode, pending_add, apply_result)
+        )
+        self._subscription_queued_ids.add(subscription.id)
+        self._drain_subscription_update_queue()
+        return True
+
+    def _drain_subscription_update_queue(self) -> None:
+        while self._subscription_update_queue and len(self._subscription_workers) < 3:
+            subscription, mode, pending_add, apply_result = self._subscription_update_queue.pop(0)
+            self._subscription_queued_ids.discard(subscription.id)
+            if not pending_add and self.get_subscription(subscription.id) is None:
+                continue
+            proxy_port = self.get_effective_http_proxy_port() if self.connected else None
+            worker = SubscriptionUpdateWorker(
+                subscription,
+                mode=mode,
+                proxy_port=proxy_port,
+                parent=self,
+            )
+            self._subscription_workers[subscription.id] = worker
+            if not apply_result:
+                self._subscription_check_ids.add(subscription.id)
+            worker.progress.connect(self.subscription_update_progress.emit)
+            worker.completed.connect(self._on_subscription_update_completed)
+            worker.failed.connect(self._on_subscription_update_failed)
+            worker.finished.connect(
+                lambda sid=subscription.id, current=worker: self._on_subscription_worker_finished(sid, current)
+            )
+            self.subscription_update_started.emit(subscription.id)
+            worker.start()
+
+    def _on_subscription_update_completed(self, worker_subscription, fetched, parsed) -> None:
+        subscription = self.get_subscription(worker_subscription.id)
+        pending_add = subscription is None and worker_subscription.id in self._pending_subscription_additions
+        if pending_add:
+            if fetched.not_modified or parsed is None:
+                self._pending_subscription_additions.pop(worker_subscription.id, None)
+                self.subscription_update_finished.emit(
+                    SubscriptionUpdateResult(
+                        subscription_id=worker_subscription.id,
+                        success=False,
+                        message="Новая подписка вернула 304 без локального снимка",
+                    )
+                )
+                return
+            subscription = self._pending_subscription_additions[worker_subscription.id]
+            subscription.name = self._unique_subscription_name(
+                subscription.name or parsed.metadata.title or "Подписка"
+            )
+        if subscription is None:
+            return
+        if parsed is not None and subscription.hidden_source_keys:
+            hidden = set(subscription.hidden_source_keys)
+            parsed.nodes = [node for node in parsed.nodes if node.source_key not in hidden]
+        if subscription.id in self._subscription_check_ids:
+            subscription.last_checked_at = datetime.now(timezone.utc).isoformat()
+            subscription.last_error = ""
+            subscription.failure_count = 0
+            subscription.backoff_until = None
+            node_count = len(
+                [node for node in self.state.nodes if node.subscription_id == subscription.id]
+                if fetched.not_modified
+                else parsed.nodes
+            )
+            result = SubscriptionUpdateResult(
+                subscription_id=subscription.id,
+                success=True,
+                message=f"Проверка успешна: серверов {node_count}",
+                skipped=0 if parsed is None else parsed.skipped,
+                warnings=[] if parsed is None else list(parsed.warnings),
+                not_modified=fetched.not_modified,
+            )
+            self.subscriptions_changed.emit(self.state.subscriptions)
+            self.save()
+            self.subscription_update_finished.emit(result)
+            return
+        if fetched.not_modified:
+            result = apply_not_modified(subscription, fetched)
+        else:
+            outcome = reconcile_subscription(self.state, subscription, parsed, fetched)
+            result = outcome.result
+            if pending_add:
+                self.state.subscriptions.append(subscription)
+            if pending_add and self.state.selected_node_id is None:
+                first = next((node for node in self.state.nodes if node.subscription_id == subscription.id), None)
+                self.state.selected_node_id = first.id if first else None
+            self._detect_countries_sync()
+            self.nodes_changed.emit(self.state.nodes)
+            self.selection_changed.emit(self.selected_node)
+            if result.reconnect_required and (self.connected or self._desired_connected):
+                if self.state.selected_node_id is None and not self._can_connect_without_selected_node():
+                    self._desired_connected = False
+                else:
+                    self._desired_connected = True
+                self._request_transition("subscription updated")
+            QTimer.singleShot(500, self._start_country_ip_resolution)
+        self._pending_subscription_additions.pop(subscription.id, None)
+        self.subscriptions_changed.emit(self.state.subscriptions)
+        self.save()
+        self.subscription_update_finished.emit(result)
+
+    def _on_subscription_update_failed(self, worker_subscription, message: str) -> None:
+        subscription = self.get_subscription(worker_subscription.id)
+        if subscription is not None:
+            result = mark_subscription_failure(subscription, message)
+            self.subscriptions_changed.emit(self.state.subscriptions)
+            self.save()
+        else:
+            self._pending_subscription_additions.pop(worker_subscription.id, None)
+            result = SubscriptionUpdateResult(
+                subscription_id=worker_subscription.id,
+                success=False,
+                message=message,
+            )
+        self.subscription_update_finished.emit(result)
+
+    def _on_subscription_worker_finished(self, subscription_id: str, worker) -> None:
+        if self._subscription_workers.get(subscription_id) is worker:
+            self._subscription_workers.pop(subscription_id, None)
+        self._subscription_check_ids.discard(subscription_id)
+        worker.deleteLater()
+        self._drain_subscription_update_queue()
+
+    def _check_due_subscriptions(self) -> None:
+        if self.locked:
+            return
+        for subscription in self.state.subscriptions:
+            if subscription_due(subscription):
+                self._enqueue_subscription_update(
+                    subscription, "auto", pending_add=False, apply_result=True
+                )
 
     def remove_nodes(self, node_ids: set[str]) -> None:
         remove_nodes_operation(self, node_ids)
@@ -1397,6 +1810,13 @@ class AppController(QObject):
         if self._active_core == "singbox":
             return restart_singbox_proxy_runtime_operation(self, reason)
         return restart_xray_proxy_core(self, reason)
+
+    def _restart_proxy_core_steps(self, reason: str) -> TransitionSteps:
+        """Генераторная версия proxy hot-swap для TransitionRunner (AC22)."""
+        if self._active_core == "singbox":
+            # Холодный путь: sing-box proxy runtime остаётся синхронным.
+            return restart_singbox_proxy_runtime_operation(self, reason)
+        return (yield from restart_xray_proxy_core_steps(self, reason))
 
     def _restart_singbox_runtime(self, reason: str) -> bool:
         return restart_singbox_runtime_operation(self, reason)
@@ -1522,12 +1942,14 @@ class AppController(QObject):
         if not self.state.security.enabled:
             self.locked = False
             self.lock_state_changed.emit(False)
+            QTimer.singleShot(0, self._check_due_subscriptions)
             return True
 
         ok = verify_password(password, self.state.security.password_hash, self.state.security.salt)
         if ok:
             self.locked = False
             self.lock_state_changed.emit(False)
+            QTimer.singleShot(0, self._check_due_subscriptions)
         return ok
 
     def lock(self) -> None:
@@ -1641,6 +2063,10 @@ class AppController(QObject):
             self._request_transition("network changed")
 
     def _hot_swap_node(self, reason: str) -> bool:
+        """Handle node switch while TUN is active (синхронный совместимый путь)."""
+        return bool(run_steps_blocking(self._hot_swap_node_steps(reason)))
+
+    def _hot_swap_node_steps(self, reason: str) -> TransitionSteps:
         """Handle node switch while TUN is active."""
         node = self.selected_node
         session = self._active_session
@@ -1653,6 +2079,7 @@ class AppController(QObject):
         self._protect_ss_password = session.protect_ss_password
 
         if self._active_core == "singbox":
+            # Холодный путь: sing-box native TUN остаётся синхронным.
             try:
                 return self._restart_singbox_runtime(reason)
             finally:
@@ -1664,7 +2091,7 @@ class AppController(QObject):
                 self._auto_switch_transitioning = False
                 return False
             try:
-                return hot_swap_tun2socks(self, reason, node)
+                return (yield from hot_swap_tun2socks_steps(self, reason, node))
             finally:
                 self._auto_switch_transitioning = False
 

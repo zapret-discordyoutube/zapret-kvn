@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QGuiApplication, QIcon
+from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QGuiApplication, QIcon
 from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QSystemTrayIcon
 from qfluentwidgets import (
     FluentIcon as FIF,
@@ -20,7 +20,8 @@ from qfluentwidgets import (
 from ..app_controller import AppController
 from ..storage import PassphraseRequired
 from ..constants import APP_ICON_PATH, APP_NAME, APP_VERSION, LOG_DIR
-from ..models import AppSettings, Node, RoutingSettings
+from ..models import AppSettings, Node, RoutingSettings, Subscription, SubscriptionUpdateResult
+from ..subscription_http import mask_subscription_url
 from ..app_updater import AppUpdate, UpdateChecker, UpdateDownloader
 from ..engines.xray import XrayCoreUpdateResult
 from .bulk_edit_dialog import BulkEditDialog
@@ -31,6 +32,7 @@ from .node_edit_dialog import NodeEditDialog
 from .nodes_page import NodesPage
 from .configs_page import ConfigsPage
 from .settings_page import SettingsPage
+from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionDialog, SubscriptionsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
 from .updates_page import UpdatesPage
@@ -75,9 +77,11 @@ class MainWindow(FluentWindow):
             return
 
         self._initialized = True
+        self._nodes_view_prefs_applied = False
         self.controller = AppController(self)
         self.dashboard_page = DashboardPage(self)
         self.nodes_page = NodesPage(self)
+        self.subscriptions_page = SubscriptionsPage(self)
         self.configs_page = ConfigsPage(self)
         self.zapret_page = ZapretPage(self)
         self.logs_page = LogsPage(self)
@@ -124,6 +128,7 @@ class MainWindow(FluentWindow):
         self.navigationInterface.setExpandWidth(200)
         self.addSubInterface(self.dashboard_page, FIF.SPEED_HIGH, "Панель")
         self.addSubInterface(self.nodes_page, FIF.LINK, "Серверы")
+        self.addSubInterface(self.subscriptions_page, FIF.CLOUD, "Подписки")
         self.addSubInterface(self.configs_page, FIF.CODE, "Конфиги")
         self.addSubInterface(self.zapret_page, FIF.COMMAND_PROMPT, "Zapret")
         self.addSubInterface(self.logs_page, FIF.DOCUMENT, "Логи")
@@ -190,6 +195,7 @@ class MainWindow(FluentWindow):
         self.dashboard_page.proxy_toggled.connect(self._on_dashboard_proxy_toggled)
         self.nodes_page.import_clipboard_requested.connect(self._import_nodes_from_clipboard)
         self.nodes_page.delete_requested.connect(self.controller.remove_nodes)
+        self.nodes_page.hide_subscription_nodes_requested.connect(self.controller.hide_subscription_nodes)
         self.nodes_page.reorder_requested.connect(self.controller.reorder_nodes)
         self.nodes_page.selected_node_changed.connect(self.controller.set_selected_node)
         self.nodes_page.ping_requested.connect(self._ping_requested)
@@ -197,6 +203,27 @@ class MainWindow(FluentWindow):
         self.nodes_page.export_runtime_json_requested.connect(self._export_runtime_json)
         self.nodes_page.edit_node_requested.connect(self._on_edit_node)
         self.nodes_page.bulk_edit_requested.connect(self._on_bulk_edit_nodes)
+        self.nodes_page.view_prefs_changed.connect(self._on_nodes_view_prefs_changed)
+
+        self.subscriptions_page.add_requested.connect(self._add_subscription)
+        self.subscriptions_page.edit_requested.connect(self._edit_subscription)
+        self.subscriptions_page.update_requested.connect(
+            lambda sid, mode: self.controller.update_subscription(sid, mode=mode)
+        )
+        self.subscriptions_page.check_requested.connect(
+            lambda sid, mode: self.controller.check_subscription(sid, mode=mode)
+        )
+        self.subscriptions_page.update_all_requested.connect(
+            lambda mode: self.controller.update_all_subscriptions(mode=mode)
+        )
+        self.subscriptions_page.delete_requested.connect(self._delete_subscription)
+        self.subscriptions_page.auto_update_changed.connect(self._set_subscription_auto_update)
+        self.subscriptions_page.open_url_requested.connect(
+            lambda url: QDesktopServices.openUrl(QUrl(url))
+        )
+        self.subscriptions_page.show_url_requested.connect(self._show_subscription_url)
+        self.subscriptions_page.reset_hidden_requested.connect(self._reset_subscription_hidden)
+        self.subscriptions_page.accept_pending_url_requested.connect(self._accept_subscription_url)
 
         self.configs_page.open_requested.connect(self._open_core_config)
         self.configs_page.config_selected.connect(self._select_core_config)
@@ -236,6 +263,9 @@ class MainWindow(FluentWindow):
         self.controller.speed_test_cancelled.connect(self._on_speed_test_cancelled)
 
         self.controller.nodes_changed.connect(self._on_nodes_changed)
+        self.controller.subscriptions_changed.connect(self._on_subscriptions_changed)
+        self.controller.subscription_update_started.connect(self._on_subscription_update_started)
+        self.controller.subscription_update_finished.connect(self._on_subscription_update_finished)
         self.controller.selection_changed.connect(self._on_selection_changed)
         self.controller.connection_changed.connect(self._on_connection_changed)
         self.controller.connection_status_changed.connect(self.dashboard_page.set_runtime_status)
@@ -276,12 +306,112 @@ class MainWindow(FluentWindow):
         return False
 
     def _on_nodes_changed(self, nodes: list[Node]) -> None:
+        if not self._nodes_view_prefs_applied:
+            # Apply persisted list view preferences before the first set_nodes.
+            self._nodes_view_prefs_applied = True
+            self.nodes_page.apply_view_settings(self.controller.state.settings)
         selected_id = self.controller.state.selected_node_id
         self.nodes_page.set_nodes(nodes, selected_id)
         self.dashboard_page.set_nodes(nodes, selected_id)
         self._refresh_tray_tooltip()
+        self.subscriptions_page.set_data(self.controller.state.subscriptions, nodes)
+
+    def _on_subscriptions_changed(self, subscriptions: list[Subscription]) -> None:
+        self.subscriptions_page.set_data(subscriptions, self.controller.state.nodes)
+        self.nodes_page.set_subscriptions(subscriptions)
+
+    def _add_subscription(self) -> None:
+        dialog = SubscriptionDialog(parent=self)
+        if dialog.exec() != int(QDialog.DialogCode.Accepted):
+            return
+        try:
+            started = self.controller.add_subscription(dialog.subscription_value())
+        except Exception as exc:
+            self._show_status("error", str(exc))
+            return
+        if started:
+            self._show_status("info", "Проверяю подписку…")
+
+    def _edit_subscription(self, subscription_id: str) -> None:
+        subscription = self.controller.get_subscription(subscription_id)
+        if subscription is None:
+            return
+        provider_names = [
+            node.provider_name or node.name
+            for node in self.controller.state.nodes
+            if node.subscription_id == subscription_id
+        ]
+        dialog = SubscriptionDialog(subscription, self, provider_names=provider_names)
+        if dialog.exec() != int(QDialog.DialogCode.Accepted):
+            return
+        try:
+            changed = self.controller.update_subscription_definition(subscription_id, dialog.update_values())
+        except Exception as exc:
+            self._show_status("error", str(exc))
+            return
+        if changed:
+            self.controller.update_subscription(subscription_id)
+
+    def _delete_subscription(self, subscription_id: str) -> None:
+        subscription = self.controller.get_subscription(subscription_id)
+        if subscription is None:
+            return
+        dialog = SubscriptionDeleteDialog(subscription.name or "Подписка", self)
+        if dialog.exec() == int(QDialog.DialogCode.Accepted):
+            self.controller.remove_subscription(
+                subscription_id,
+                keep_nodes=dialog.keep_nodes_check.isChecked(),
+            )
+
+    def _set_subscription_auto_update(self, subscription_id: str, enabled: bool) -> None:
+        subscription = self.controller.get_subscription(subscription_id)
+        if subscription is None or subscription.auto_update == enabled:
+            return
+        self.controller.update_subscription_definition(subscription_id, {"auto_update": enabled})
+
+    def _show_subscription_url(self, subscription_id: str) -> None:
+        subscription = self.controller.get_subscription(subscription_id)
+        if subscription is not None:
+            self._show_status("info-long", mask_subscription_url(subscription.url))
+
+    def _reset_subscription_hidden(self, subscription_id: str) -> None:
+        if self.controller.reset_subscription_hidden_nodes(subscription_id):
+            self.controller.update_subscription(subscription_id)
+
+    def _accept_subscription_url(self, subscription_id: str) -> None:
+        if self.controller.accept_subscription_pending_url(subscription_id):
+            self.controller.update_subscription(subscription_id)
+
+    def _on_subscription_update_started(self, subscription_id: str) -> None:
+        self.subscriptions_page.set_updating(subscription_id, True)
+
+    def _on_subscription_update_finished(self, result: SubscriptionUpdateResult) -> None:
+        self.subscriptions_page.set_updating(result.subscription_id, False)
+        if result.success:
+            message = result.message
+            if not result.not_modified:
+                message += (
+                    f"; добавлено {result.added}, обновлено {result.updated}, "
+                    f"удалено {result.removed}, пропущено {result.skipped}"
+                )
+            if result.warnings:
+                message += f"; предупреждения: {'; '.join(result.warnings[:2])}"
+            self._show_status("warning-long" if result.warnings else "success", message)
+        else:
+            self._show_status("error", result.message)
+
+    def _on_nodes_view_prefs_changed(self, prefs: dict) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return
+        settings = controller.state.settings
+        for key, value in prefs.items():
+            if hasattr(settings, key):
+                setattr(settings, key, value)
+        controller.schedule_save()
 
     def _on_selection_changed(self, node: Node | None) -> None:
+        self.nodes_page.set_active_node(node.id if node else None)
         self.dashboard_page.set_selected_node(node)
         if node:
             self.dashboard_page.set_selected_latency(node.ping_ms)

@@ -32,6 +32,9 @@ class Node:
     ping_history: list[tuple[str, int | None]] = field(default_factory=list)
     speed_history: list[tuple[str, float | None]] = field(default_factory=list)
     sort_order: int = 0
+    subscription_id: str | None = None
+    source_key: str = ""
+    provider_name: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +56,9 @@ class Node:
             "ping_history": self.ping_history,
             "speed_history": self.speed_history,
             "sort_order": self.sort_order,
+            "subscription_id": self.subscription_id,
+            "source_key": self.source_key,
+            "provider_name": self.provider_name,
         }
 
     @staticmethod
@@ -76,7 +82,159 @@ class Node:
             ping_history=data.get("ping_history", []),
             speed_history=data.get("speed_history", []),
             sort_order=int(data.get("sort_order", 0)),
+            subscription_id=(str(data.get("subscription_id")) if data.get("subscription_id") else None),
+            source_key=str(data.get("source_key") or ""),
+            provider_name=str(data.get("provider_name") or data.get("name") or ""),
         )
+
+
+@dataclass(slots=True)
+class SubscriptionInfo:
+    upload: int = 0
+    download: int = 0
+    total: int = 0
+    expire: int = 0
+    web_page_url: str = ""
+    support_url: str = ""
+
+    @property
+    def used(self) -> int:
+        return max(0, self.upload) + max(0, self.download)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "upload": self.upload,
+            "download": self.download,
+            "total": self.total,
+            "expire": self.expire,
+            "web_page_url": self.web_page_url,
+            "support_url": self.support_url,
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "SubscriptionInfo":
+        def _number(key: str) -> int:
+            try:
+                return max(0, int(data.get(key) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        return SubscriptionInfo(
+            upload=_number("upload"),
+            download=_number("download"),
+            total=_number("total"),
+            expire=_number("expire"),
+            web_page_url=str(data.get("web_page_url") or ""),
+            support_url=str(data.get("support_url") or ""),
+        )
+
+
+@dataclass(slots=True)
+class Subscription:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = ""
+    url: str = ""
+    user_agent: str = ""
+    auto_update: bool = True
+    update_interval_hours: int | None = None
+    provider_interval_hours: int | None = None
+    include_pattern: str = ""
+    exclude_pattern: str = ""
+    etag: str = ""
+    last_modified: str = ""
+    last_checked_at: str | None = None
+    last_success_at: str | None = None
+    last_error: str = ""
+    failure_count: int = 0
+    backoff_until: str | None = None
+    info: SubscriptionInfo = field(default_factory=SubscriptionInfo)
+    pending_url: str = ""
+    hidden_source_keys: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=utc_now_iso)
+    sort_order: int = 0
+
+    @property
+    def effective_interval_hours(self) -> int:
+        value = self.update_interval_hours or self.provider_interval_hours or 24
+        return max(1, int(value))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "url": self.url,
+            "user_agent": self.user_agent,
+            "auto_update": self.auto_update,
+            "update_interval_hours": self.update_interval_hours,
+            "provider_interval_hours": self.provider_interval_hours,
+            "include_pattern": self.include_pattern,
+            "exclude_pattern": self.exclude_pattern,
+            "etag": self.etag,
+            "last_modified": self.last_modified,
+            "last_checked_at": self.last_checked_at,
+            "last_success_at": self.last_success_at,
+            "last_error": self.last_error,
+            "failure_count": self.failure_count,
+            "backoff_until": self.backoff_until,
+            "info": self.info.to_dict(),
+            "pending_url": self.pending_url,
+            "hidden_source_keys": list(self.hidden_source_keys),
+            "created_at": self.created_at,
+            "sort_order": self.sort_order,
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "Subscription":
+        def _optional_positive_int(key: str) -> int | None:
+            try:
+                value = int(data.get(key) or 0)
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        def _non_negative_int(key: str) -> int:
+            try:
+                return max(0, int(data.get(key) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        return Subscription(
+            id=str(data.get("id") or uuid.uuid4()),
+            name=str(data.get("name") or ""),
+            url=str(data.get("url") or ""),
+            user_agent=str(data.get("user_agent") or ""),
+            auto_update=bool(data.get("auto_update", True)),
+            update_interval_hours=_optional_positive_int("update_interval_hours"),
+            provider_interval_hours=_optional_positive_int("provider_interval_hours"),
+            include_pattern=str(data.get("include_pattern") or ""),
+            exclude_pattern=str(data.get("exclude_pattern") or ""),
+            etag=str(data.get("etag") or ""),
+            last_modified=str(data.get("last_modified") or ""),
+            last_checked_at=data.get("last_checked_at"),
+            last_success_at=data.get("last_success_at"),
+            last_error=str(data.get("last_error") or ""),
+            failure_count=_non_negative_int("failure_count"),
+            backoff_until=data.get("backoff_until"),
+            info=SubscriptionInfo.from_dict(dict(data.get("info") or {})),
+            pending_url=str(data.get("pending_url") or ""),
+            hidden_source_keys=[str(item) for item in (data.get("hidden_source_keys") or [])],
+            created_at=str(data.get("created_at") or utc_now_iso()),
+            sort_order=_non_negative_int("sort_order"),
+        )
+
+
+@dataclass(slots=True)
+class SubscriptionUpdateResult:
+    subscription_id: str
+    success: bool
+    message: str = ""
+    added: int = 0
+    updated: int = 0
+    removed: int = 0
+    skipped: int = 0
+    warnings: list[str] = field(default_factory=list)
+    not_modified: bool = False
+    reconnect_required: bool = False
 
 
 @dataclass(slots=True)
@@ -196,6 +354,13 @@ class AppSettings:
     auto_switch_threshold_kbps: int = 50
     auto_switch_delay_sec: int = 30
     auto_switch_cooldown_sec: int = 60
+    # Server list view preferences (stable english keys; empty = defaults)
+    nodes_sort_key: str = "manual"  # manual | name | group | type | ping | speed | last_used
+    nodes_sort_desc: bool = False
+    nodes_group_filter: str = ""
+    nodes_tag_filter: str = ""
+    nodes_source_filter: str = ""
+    nodes_visible_columns: list[str] = field(default_factory=list)  # empty = default set
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -234,6 +399,12 @@ class AppSettings:
             "auto_switch_threshold_kbps": self.auto_switch_threshold_kbps,
             "auto_switch_delay_sec": self.auto_switch_delay_sec,
             "auto_switch_cooldown_sec": self.auto_switch_cooldown_sec,
+            "nodes_sort_key": self.nodes_sort_key,
+            "nodes_sort_desc": self.nodes_sort_desc,
+            "nodes_group_filter": self.nodes_group_filter,
+            "nodes_tag_filter": self.nodes_tag_filter,
+            "nodes_source_filter": self.nodes_source_filter,
+            "nodes_visible_columns": list(self.nodes_visible_columns),
         }
 
     @staticmethod
@@ -274,6 +445,12 @@ class AppSettings:
             auto_switch_threshold_kbps=int(data.get("auto_switch_threshold_kbps") or 50),
             auto_switch_delay_sec=int(data.get("auto_switch_delay_sec") or 30),
             auto_switch_cooldown_sec=int(data.get("auto_switch_cooldown_sec") or 60),
+            nodes_sort_key=str(data.get("nodes_sort_key") or "manual"),
+            nodes_sort_desc=bool(data.get("nodes_sort_desc", False)),
+            nodes_group_filter=str(data.get("nodes_group_filter") or ""),
+            nodes_tag_filter=str(data.get("nodes_tag_filter") or ""),
+            nodes_source_filter=str(data.get("nodes_source_filter") or ""),
+            nodes_visible_columns=[str(item) for item in (data.get("nodes_visible_columns") or [])],
         )
 
 
@@ -282,6 +459,7 @@ class AppState:
     schema_version: int = STATE_SCHEMA_VERSION
     selected_node_id: str | None = None
     nodes: list[Node] = field(default_factory=list)
+    subscriptions: list[Subscription] = field(default_factory=list)
     routing: RoutingSettings = field(default_factory=RoutingSettings)
     settings: AppSettings = field(default_factory=AppSettings)
     security: SecuritySettings = field(default_factory=SecuritySettings)
@@ -291,6 +469,7 @@ class AppState:
             "schema_version": self.schema_version,
             "selected_node_id": self.selected_node_id,
             "nodes": [node.to_dict() for node in self.nodes],
+            "subscriptions": [subscription.to_dict() for subscription in self.subscriptions],
             "routing": self.routing.to_dict(),
             "settings": self.settings.to_dict(),
             "security": self.security.to_dict(),
@@ -300,10 +479,15 @@ class AppState:
     def from_dict(data: dict[str, Any]) -> "AppState":
         nodes_raw = data.get("nodes") or []
         nodes = [Node.from_dict(item) for item in nodes_raw if isinstance(item, dict)]
+        subscriptions_raw = data.get("subscriptions") or []
+        subscriptions = [
+            Subscription.from_dict(item) for item in subscriptions_raw if isinstance(item, dict)
+        ]
         return AppState(
             schema_version=int(data.get("schema_version") or STATE_SCHEMA_VERSION),
             selected_node_id=data.get("selected_node_id"),
             nodes=nodes,
+            subscriptions=subscriptions,
             routing=RoutingSettings.from_dict(dict(data.get("routing") or {})),
             settings=AppSettings.from_dict(dict(data.get("settings") or {})),
             security=SecuritySettings.from_dict(dict(data.get("security") or {})),

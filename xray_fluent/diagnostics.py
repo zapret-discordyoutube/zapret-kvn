@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import platform
+import re
 import zipfile
 
 from .models import AppState
@@ -14,19 +15,34 @@ REDACT_KEYS = {
     "password",
     "pass",
     "token",
-    "publicKey",
-    "privateKey",
-    "shortId",
+    "publickey",
+    "privatekey",
+    "private_key",
+    "secretkey",
+    "secret_key",
+    "pre_shared_key",
+    "presharedkey",
+    "shortid",
     "sid",
     "uuid",
+    "url",
+    "pending_url",
+    "web_page_url",
+    "support_url",
+    "link",
+    "auth",
+    "auth_str",
+    "username",
 }
+
+_URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 
 
 def _redact(value):
     if isinstance(value, dict):
         redacted = {}
         for key, item in value.items():
-            if key in REDACT_KEYS:
+            if str(key).casefold() in REDACT_KEYS:
                 redacted[key] = "***"
             else:
                 redacted[key] = _redact(item)
@@ -34,6 +50,10 @@ def _redact(value):
     if isinstance(value, list):
         return [_redact(item) for item in value]
     return value
+
+
+def _redact_log_line(line: str) -> str:
+    return _URL_RE.sub("<URL скрыт>", str(line))
 
 
 def export_diagnostics(zip_path: Path, state: AppState, logs: list[str]) -> Path:
@@ -49,6 +69,6 @@ def export_diagnostics(zip_path: Path, state: AppState, logs: list[str]) -> Path
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("state_redacted.json", json.dumps(safe_state, ensure_ascii=True, indent=2))
         archive.writestr("meta.json", json.dumps(meta, ensure_ascii=True, indent=2))
-        archive.writestr("recent_logs.txt", "\n".join(logs[-2000:]))
+        archive.writestr("recent_logs.txt", "\n".join(_redact_log_line(line) for line in logs[-2000:]))
 
     return zip_path

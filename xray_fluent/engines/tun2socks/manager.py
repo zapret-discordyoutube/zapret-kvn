@@ -127,13 +127,11 @@ class Tun2SocksManager(QObject):
             return True
 
         self._stop_requested = expected
-        self._process.terminate()
-        if wait_for_qprocess_finished(self._process, 2000):
-            self._cleanup_routes()
-            return True
-
+        # На Windows terminate() шлёт WM_CLOSE, консольный tun2socks его игнорирует.
+        # Убиваем сразу: wintun-адаптер освобождается ОС при завершении процесса,
+        # маршруты чистим сами в _cleanup_routes.
         self._process.kill()
-        if wait_for_qprocess_finished(self._process, 1000):
+        if wait_for_qprocess_finished(self._process, 2000):
             self._cleanup_routes()
             return True
 
@@ -219,8 +217,6 @@ class Tun2SocksManager(QObject):
                 cleanup_cmds.append(["route", "delete", self._server_ip])
             for destination, mask, gateway in self._helper_routes:
                 cleanup_cmds.append(["route", "delete", destination, "mask", mask, gateway])
-            for cmd in cleanup_cmds:
-                run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
 
             # Use netsh to add TUN routes — this correctly sets interface metric
             cmds += [
@@ -228,21 +224,59 @@ class Tun2SocksManager(QObject):
                 ["netsh", "interface", "ipv4", "add", "route", "128.0.0.0/1", f"interface={tun_idx}", f"nexthop={TUN_GW}", "metric=0"],
                 ["netsh", "interface", "ipv6", "add", "route", "::/0", f"interface={tun_idx}", "metric=1"],
             ]
-            for cmd in cmds:
-                r = run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
-                self.log_received.emit(f"[tun2socks] {' '.join(cmd)} -> rc={r.returncode}")
-                if r.returncode != 0:
-                    details = result_output_text(r).strip()
-                    if details:
-                        self.log_received.emit(f"[tun2socks] command output: {details}")
-                    self._cleanup_routes()
-                    self.error.emit(f"failed to configure route: {' '.join(cmd)}")
-                    return False
-            return True
+            # One composite cmd /c spawn per phase (deletes, then adds) instead
+            # of ~20 sequential process spawns; the sequential path is kept as a
+            # fallback and reproduces the original per-command semantics.
+            if self._apply_route_plan_batched(cleanup_cmds, cmds):
+                return True
+            return self._apply_route_plan_sequential(cleanup_cmds, cmds)
         except Exception as exc:
             self._cleanup_routes()
             self.log_received.emit(f"[tun2socks] route setup error: {exc}")
             return False
+
+    def _apply_route_plan_batched(self, cleanup_cmds: list[list[str]], add_cmds: list[list[str]]) -> bool:
+        """Run the delete and add phases as composite cmd /c calls.
+
+        Returns False on any problem so the caller can fall back to the
+        sequential per-command mode."""
+        try:
+            if cleanup_cmds:
+                # Best-effort deletes: `&` keeps going regardless of failures.
+                self._run_command_batch(cleanup_cmds, "&")
+            if add_cmds:
+                # `&&` stops at the first failing add, mirroring the sequential abort.
+                result = self._run_command_batch(add_cmds, "&&")
+                if result.returncode != 0:
+                    details = result_output_text(result).strip()
+                    if details:
+                        self.log_received.emit(f"[tun2socks] batch output: {details}")
+                    return False
+            return True
+        except Exception as exc:
+            self.log_received.emit(f"[tun2socks] route batch error: {exc}")
+            return False
+
+    def _run_command_batch(self, commands: list[list[str]], separator: str):
+        script = f" {separator} ".join(" ".join(cmd) for cmd in commands)
+        result = run_text_pumped(["cmd", "/c", script], timeout=30, creationflags=_CREATE_NO_WINDOW)
+        self.log_received.emit(f"[tun2socks] cmd /c {script} -> rc={result.returncode}")
+        return result
+
+    def _apply_route_plan_sequential(self, cleanup_cmds: list[list[str]], add_cmds: list[list[str]]) -> bool:
+        for cmd in cleanup_cmds:
+            run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
+        for cmd in add_cmds:
+            r = run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
+            self.log_received.emit(f"[tun2socks] {' '.join(cmd)} -> rc={r.returncode}")
+            if r.returncode != 0:
+                details = result_output_text(r).strip()
+                if details:
+                    self.log_received.emit(f"[tun2socks] command output: {details}")
+                self._cleanup_routes()
+                self.error.emit(f"failed to configure route: {' '.join(cmd)}")
+                return False
+        return True
 
     def _cleanup_routes(self) -> None:
         """Remove routes added by _setup_routes."""
@@ -263,11 +297,22 @@ class Tun2SocksManager(QObject):
                 cmds.append(["route", "delete", self._server_ip])
             for destination, mask, gateway in self._helper_routes:
                 cmds.append(["route", "delete", destination, "mask", mask, gateway])
-            for cmd in cmds:
-                run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
+            if not self._run_delete_commands_batched(cmds):
+                for cmd in cmds:
+                    run_text_pumped(cmd, timeout=5, creationflags=_CREATE_NO_WINDOW)
             self._helper_routes = []
         except Exception:
             pass
+
+    def _run_delete_commands_batched(self, commands: list[list[str]]) -> bool:
+        """Best-effort deletes in one cmd /c spawn; False → caller falls back."""
+        if not commands:
+            return True
+        try:
+            self._run_command_batch(commands, "&")
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _kill_orphaned() -> None:

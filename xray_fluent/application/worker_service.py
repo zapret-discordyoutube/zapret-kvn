@@ -123,7 +123,7 @@ def on_ping_complete(controller: AppController) -> None:
         return
     controller.bulk_task_progress.emit("ping", controller._ping_completed, controller._ping_total, True)
     controller._ping_worker = None
-    controller.save()
+    controller.schedule_save()
 
 
 def on_speed_result(controller: AppController, node_id: str, speed_mbps: float | None, is_alive: bool) -> None:

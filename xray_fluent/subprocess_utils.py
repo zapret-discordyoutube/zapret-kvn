@@ -142,7 +142,16 @@ def is_same_path(left: str | Path | None, right: str | Path | None) -> bool:
         return False
 
 
-def kill_processes_by_path(process_name: str, executable_path: str | Path, *, timeout: float = 5.0) -> bool:
+def kill_processes_by_path(
+    process_name: str,
+    executable_path: str | Path,
+    *,
+    timeout: float = 5.0,
+    pump: bool = True,
+) -> bool:
+    # pump=False — вызов уже выполняется в worker-потоке (async_steps.run_in_worker):
+    # прокачка событий там не нужна, а вложенный сабмит в _SUBPROCESS_EXECUTOR
+    # рискует дедлоком при исчерпании пула.
     if os.name != "nt":
         return False
     target = Path(executable_path)
@@ -153,11 +162,11 @@ def kill_processes_by_path(process_name: str, executable_path: str | Path, *, ti
         "$matches | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
         "Write-Output $matches.Count"
     )
-    result = run_text_pumped(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        timeout=timeout,
-        creationflags=CREATE_NO_WINDOW,
-    )
+    command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
+    if pump:
+        result = run_text_pumped(command, timeout=timeout, creationflags=CREATE_NO_WINDOW)
+    else:
+        result = run_text(command, timeout=timeout, creationflags=CREATE_NO_WINDOW)
     if result.returncode != 0:
         return False
     return result_output_text(result).strip() not in {"", "0"}

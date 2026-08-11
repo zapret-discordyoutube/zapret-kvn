@@ -3,9 +3,11 @@ from __future__ import annotations
 from PyQt6.QtCore import QRect, Qt
 from PyQt6.QtGui import QPainter, QPalette, QPen
 from PyQt6.QtWidgets import QAbstractItemView, QStyle
-from qfluentwidgets import TableItemDelegate
+from qfluentwidgets import TableItemDelegate, themeColor
 
-from .nodes_table_model import PING_BUSY_ROLE, SPEED_PROGRESS_ROLE
+from .nodes_table_model import ACTIVE_ROLE, COL_NAME, PING_BUSY_ROLE, SPEED_PROGRESS_ROLE
+
+_ACTIVE_STRIPE_WIDTH = 3
 
 
 class NodesActivityDelegate(TableItemDelegate):
@@ -20,10 +22,32 @@ class NodesActivityDelegate(TableItemDelegate):
 
         super().paint(painter, option, index)
 
+        if index.column() == COL_NAME and bool(index.data(ACTIVE_ROLE)):
+            self._paint_active_stripe(painter, option)
+
         if ping_busy:
             self._paint_spinner(painter, option)
         elif speed_progress is not None:
             self._paint_progress(painter, option, int(speed_progress))
+
+    @staticmethod
+    def _paint_active_stripe(painter: QPainter, option) -> None:
+        """Accent bar at the left edge of the active node row."""
+        painter.save()
+        try:
+            color = themeColor()
+        except Exception:
+            color = option.palette.color(QPalette.ColorRole.Highlight)
+        stripe = QRect(
+            option.rect.left(),
+            option.rect.top() + 2,
+            _ACTIVE_STRIPE_WIDTH,
+            option.rect.height() - 4,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRect(stripe)
+        painter.restore()
 
     def _paint_spinner(self, painter: QPainter, option) -> None:
         painter.save()

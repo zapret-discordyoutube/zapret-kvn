@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ...application.async_steps import TransitionSteps, run_steps_blocking
+
 if TYPE_CHECKING:
     from ...app_controller import AppController
     from ...application.session_state import XrayRuntimeConfig
@@ -132,6 +134,12 @@ def start_proxy(
 
 
 def restart_proxy_core(controller: AppController, reason: str) -> bool:
+    # Холодный совместимый путь: синхронный драйвер тех же шагов.
+    # Горячий путь идёт через restart_proxy_core_steps() + TransitionRunner (AC22).
+    return bool(run_steps_blocking(restart_proxy_core_steps(controller, reason)))
+
+
+def restart_proxy_core_steps(controller: AppController, reason: str) -> TransitionSteps:
     node = controller.selected_node
     controller._switching = True
     try:
@@ -148,19 +156,19 @@ def restart_proxy_core(controller: AppController, reason: str) -> bool:
         controller._set_connection_status("starting", f"Переключение на {session_label}...", level="info")
         _notify_proxy_port_change(controller, runtime)
         controller._stop_metrics_worker()
-        if controller.xray.is_running and not controller.xray.stop():
+        if controller.xray.is_running and not (yield from controller.xray.stop_steps()):
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray", level="error")
             return False
 
         controller._xray_api_port = runtime.api_port
-        ok = controller.xray.start(controller.state.settings.xray_path, runtime.config)
+        ok = yield from controller.xray.start_steps(controller.state.settings.xray_path, runtime.config)
         if not ok:
             controller._handle_unexpected_disconnect()
             return False
 
         if controller.state.settings.enable_system_proxy:
             if runtime.http_port <= 0 or runtime.socks_port <= 0:
-                controller.xray.stop()
+                yield from controller.xray.stop_steps()
                 controller._set_connection_status(
                     "error",
                     "В raw xray config нет HTTP/SOCKS inbound портов для включения системного прокси.",
@@ -175,7 +183,7 @@ def restart_proxy_core(controller: AppController, reason: str) -> bool:
                     bypass_lan=controller._system_proxy_bypass_lan(),
                 )
             except Exception as exc:
-                controller.xray.stop()
+                yield from controller.xray.stop_steps()
                 controller._set_connection_status(
                     "error",
                     f"Не удалось включить системный прокси: {exc}",

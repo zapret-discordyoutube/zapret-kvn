@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 import socket
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +14,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from .constants import BASE_DIR
-from .subprocess_utils import decode_output, kill_processes_by_path
+from .subprocess_utils import decode_output, kill_processes_by_path, sleep_with_events
 
 log = logging.getLogger(__name__)
 
@@ -464,7 +463,9 @@ class ZapretManager(QObject):
             except Exception:
                 pass
         if killed:
-            time.sleep(1)
+            # Let the WinDivert driver release its handles without freezing the
+            # GUI: pump Qt events every 100ms instead of a blind time.sleep(1).
+            sleep_with_events(1.0, step_sec=0.1)
         return killed
 
     @staticmethod

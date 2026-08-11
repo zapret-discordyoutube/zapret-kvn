@@ -10,6 +10,7 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
+from ... import win_netinfo
 from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from ...path_utils import resolve_configured_path
 from ...subprocess_utils import (
@@ -181,8 +182,10 @@ class SingBoxManager(QObject):
 
         used_tun = self._uses_tun
         self._stop_requested = expected
+        # Короткий grace на снятие TUN-адаптера: на Windows консольный sing-box
+        # игнорирует terminate() (WM_CLOSE), поэтому ждём не дольше 500мс и убиваем.
         self._process.terminate()
-        if not wait_for_qprocess_finished(self._process, 3000):
+        if not wait_for_qprocess_finished(self._process, 500):
             self._process.kill()
             wait_for_qprocess_finished(self._process, 2000)
 
@@ -202,22 +205,33 @@ class SingBoxManager(QObject):
         """Poll until the TUN adapter is gone, up to max_wait seconds."""
         if os.name != "nt":
             return
-        step = 0.3
         waited = 0.0
         while waited < max_wait:
-            try:
-                result = run_text_pumped(
-                    ["netsh", "interface", "show", "interface"],
-                    timeout=3,
-                    creationflags=_CREATE_NO_WINDOW,
-                )
-                # Check if any xftun* adapter still exists
-                if "xftun" not in result_output_text(result):
-                    return  # TUN adapter gone
-            except Exception:
-                return  # can't check, proceed anyway
+            gone, fast_probe = SingBoxManager._probe_tun_adapter_gone()
+            if gone:
+                return
+            step = 0.1 if fast_probe else 0.3
             sleep_with_events(step)
             waited += step
+
+    @staticmethod
+    def _probe_tun_adapter_gone() -> tuple[bool, bool]:
+        """Return (adapter is gone, fast ctypes path was used)."""
+        if win_netinfo.is_available():
+            try:
+                return (not win_netinfo.any_adapter_name_contains("xftun")), True
+            except Exception:
+                pass  # fall back to netsh below
+        try:
+            result = run_text_pumped(
+                ["netsh", "interface", "show", "interface"],
+                timeout=3,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+            # Check if any xftun* adapter still exists
+            return ("xftun" not in result_output_text(result)), False
+        except Exception:
+            return True, False  # can't check, proceed anyway
 
     def _on_ready_read(self) -> None:
         chunk = self._process.readAllStandardOutput()
@@ -287,19 +301,31 @@ class SingBoxManager(QObject):
     def _wait_until_tun_ready(self, tun_interface_name: str, max_wait: float = 18.0) -> bool:
         if os.name != "nt" or not tun_interface_name:
             return True
-        step = 0.25
         waited = 0.0
         while waited < max_wait:
             if self._process.state() == QProcess.ProcessState.NotRunning:
                 return False
-            if self._tun_interface_has_ipv4(tun_interface_name):
+            has_ipv4, fast_probe = self._probe_tun_interface_has_ipv4(tun_interface_name)
+            if has_ipv4:
                 return True
+            step = 0.1 if fast_probe else 0.25
             sleep_with_events(step)
             waited += step
         return False
 
+    @classmethod
+    def _probe_tun_interface_has_ipv4(cls, tun_interface_name: str) -> tuple[bool, bool]:
+        """Return (interface has an IPv4 address, fast ctypes path was used)."""
+        if win_netinfo.is_available():
+            try:
+                return bool(win_netinfo.adapter_has_ipv4(tun_interface_name)), True
+            except Exception:
+                pass  # fall back to the PowerShell probe below
+        return cls._tun_interface_has_ipv4(tun_interface_name), False
+
     @staticmethod
     def _tun_interface_has_ipv4(tun_interface_name: str) -> bool:
+        """Legacy PowerShell probe, kept as a fallback for the ctypes fast path."""
         escaped_name = tun_interface_name.replace("'", "''")
         script = (
             f"$ipv4 = Get-NetIPAddress -InterfaceAlias '{escaped_name}' -AddressFamily IPv4 -ErrorAction SilentlyContinue "
