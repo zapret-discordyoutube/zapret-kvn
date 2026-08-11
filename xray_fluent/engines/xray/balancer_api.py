@@ -6,7 +6,8 @@
 переключения серверов при активной ротации.
 
 Команда требует ``"RoutingService"`` в секции ``api.services`` конфига; его добавляет
-:func:`xray_fluent.engines.xray.config_builder.build_xray_config` при включённой ротации.
+:func:`xray_fluent.application.outbound_pool_service.ensure_xray_pool_control_plane`
+вместе с самим балансировщиком, когда ноды загружаются в ядро пулом.
 """
 
 from __future__ import annotations

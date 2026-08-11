@@ -111,11 +111,14 @@ class RotateNowTests(unittest.TestCase):
         self.assertTrue(controller.switched)
         self.assertNotIn(latecomer.id, controller.switched)
 
-    def test_rotation_stops_when_the_core_pool_is_unknown(self) -> None:
+    def test_plan_falls_back_to_the_node_list_without_a_session(self) -> None:
+        # Без активной сессии состав ядра неизвестен, и ограничивать пул нечем;
+        # переключение всё равно не состоится, пока нет подключения.
         controller = self._controller()
         controller._active_session = None
-        # Без активной сессии состав ядра неизвестен — политика работает по списку нод.
-        self.assertIsNotNone(controller.rotation_plan())
+        plan = controller.rotation_plan()
+        assert plan is not None
+        self.assertEqual(len(plan.nodes), len(controller.state.nodes))
 
     def test_dead_node_is_skipped_without_breaking_switching(self) -> None:
         nodes = [make_node(1), make_node(2), make_node(3)]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from pathlib import Path
 import unittest
@@ -46,6 +47,14 @@ class HappDecryptTests(unittest.TestCase):
                 self.assertTrue(plaintext)
                 if vector["expected"] is not None:
                     self.assertEqual(plaintext, vector["expected"])
+                else:
+                    # Открытый текст этих векторов — произвольная строка, которую
+                    # незачем держать в репозитории; закрепляем её хешем.
+                    self.assertEqual(len(plaintext), vector["expected_len"])
+                    self.assertEqual(
+                        hashlib.sha256(plaintext.encode("utf-8")).hexdigest(),
+                        vector["expected_sha256"],
+                    )
 
     def test_both_crypt5_layouts_are_covered(self) -> None:
         names = {vector["name"] for vector in VECTORS}

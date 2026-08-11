@@ -2,17 +2,23 @@
   {
     "name": "crypt1-sayoriroom",
     "link": "happ://crypt/F9Qu7ufKVdU/V+lKsPrFdu7aFCF7iMGRkVxanBML9tuIHa/kbMV/pzHcZcTD5E+y/DKAtA9AUvQAdbpSJi/KBHt7vaWNw4JdFbICWYefdS4+gP/zW6ENrLWnVQc66IGZOdmB5pTuw3GIysvqKODQiBKqWC1f3HNwNaqbVbs1DMI=",
-    "expected": null
+    "expected": null,
+    "expected_sha256": "fe76cfe15c5a93fb848f7ac9bcacc83db1d508934759c7d7454dafe98afdcf2e",
+    "expected_len": 34
   },
   {
     "name": "crypt2-sayoriroom",
     "link": "happ://crypt2/q2wszBpTWpLKPL/7Fh4NFkZ90o2Ikhajh/EKeELYdjpEzxhNiJXt/5oUAHNYkDl2Hehf2bysVIUqincnc0hpDBPC9ULq3dXTi6hbVT/aLLWmRkthZNkuyCy6YHwnYcFgqQcZr+kFKnFWHIoTjGtPxFV2uImB0djUu1oHPxfF3xpGtt9Ro84SU9D0eYf+Wlv3CV/uxw8pNIMwvQEQ7T2m0HaQRhiZeOflGAIbNTsjsaepZ6cGkSsa3tge3GbbGgHVAuASbvSrVRvCnK7Ni/KcTdyQeFNeWQprb4oOLzmWYDSxcnAm1006hi9NLvquLAK0m0ETAOWrc9l7ydGqEzivolpf6vBQdyMUbLSHH7m/3pW17j6RhRpsUerNieWoZLR7HspRfrAZ+3fKBA7pTvKxFA359d5QykScuo8Ilv+UgI95VYWiUULHDSxwFze+yR1gElPRt4n0PBvrsaUfEwwM1KBHEqQyNG9qsOnmDUmxfwxZO3qA++TBw23QOhN31FWYshz1gC348OpAYBPciuJXcctVgApCNgesgR5O0gs/UUxiwr4vIibYGNxuSkRPXMyysL+Cu85Ha53fkOMJ+E69VGkCVtkNdP1JBbxk3t8nkzoWA05oGtIUR2U2YvfKYzmZ6b3B9IkzG2/EqAuGI2/oDTCQ25OtcwBFcvltdQ/VyOw=",
-    "expected": null
+    "expected": null,
+    "expected_sha256": "e1bf2621326283956e3d67b029565991f612fff80e586200ff0f181c3b3f3eaf",
+    "expected_len": 148
   },
   {
     "name": "crypt3-sayoriroom",
     "link": "happ://crypt3/XOpbAIYGt5vZwW7cCDP0ZrUpkECBb83Gf7Y9oO1MdpfdXuNktKHcBwmK2xJpEzhNSA/p8DJP27Xr3c12+dMqwHuSrEMMr+JGw6hQZufGf98nyrBWTW9yC3ClsbGqrJF8Pq9LOxpHDkZrxB7SRv5Amx3mQBXjnagcTR19CRQQYb/Q5OpdHanqOSCUrBscXsCfs3SxQyj9dTTq6mtYq/ncQOqxm+Li6AiTNl6aXRg5Zwd8+6xxpw5JNcL7KWzAY05nC/SoduQbCzMqlGnnlFxlBvV1+DIhlid3YNiLShstnI4JkrnI+cbWgtBuEDFe0N+IZcI6h/YqxUc58cVpOsPs3Ehbr05/q1ozAMMtfz26o+nZDlM03RCBXUqplOmHdAS4A0MiUNLi1bvnV/aM16d1p5gg5R0Ooj9g6reBY4ZTvTz7M895X87g9U7Ih1w7wnCpooEA3aIJiBl+l9b7bYS/NqhVVb37h0LQcJzdEnjWuWd5UQMh8Bz4Q9rzm9Is5jFyX8B64uXRqXfOdyZR812LDdPARq1/KnwpMQ3jU1dfvq6lrXLSfxoyT0qfDoPUf1kf8GRYYpxNBVLYeZfaoUPtB0GWMBGapNA8Mu3vFkWDFDgctr5lWKaD9cgnu2APdsSWVhQLMQo6tSbRtvJEIi5fPm/JTimd8aMH8XxWh646K2Y=",
-    "expected": null
+    "expected": null,
+    "expected_sha256": "2a1f97e340e47e6ce45013e608a7c120fd04e8c49bf3b083156de544c2650d69",
+    "expected_len": 139
   },
   {
     "name": "crypt4-happwn-vector",

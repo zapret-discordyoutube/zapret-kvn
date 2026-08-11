@@ -223,7 +223,7 @@ class SettingsPage(ScrollablePage):
 
         self.rotation_card = SwitchSettingCard(
             FIF.ROTATE, "Ротация серверов",
-            "Периодически менять выходной сервер. Работает в режиме TUN (tun2socks)",
+            "Периодически менять выходной сервер без разрыва подключения",
             parent=rotation_group,
         )
         self.rotation_mode_card = _ComboCard(
