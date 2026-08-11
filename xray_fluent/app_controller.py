@@ -175,6 +175,7 @@ from .models import (
     RoutingSettings,
     Subscription,
     SubscriptionUpdateResult,
+    clamp_subscriptions_check_interval,
 )
 from .subscription_http import (
     normalize_client_profile,
@@ -219,6 +220,11 @@ def _find_free_api_port(preferred: int | None = None, excluded: set[int] | None 
                 continue
     raise RuntimeError(f"No free port in range {preferred}-{preferred + 100}")
 
+
+# AC6 (startup-subscription-settings): hard fallback for the
+# "after_subscriptions" startup order — auto-connect proceeds after this delay
+# even if startup subscription updates hang or fail (spec limit: <= 30 s).
+STARTUP_CONNECT_FALLBACK_MS = 20_000
 
 _XRAY_METRICS_API_TAG = "__app_metrics_api"
 _XRAY_METRICS_API_INBOUND_TAG = "__app_metrics_api_in"
@@ -368,6 +374,12 @@ class AppController(QObject):
         self._subscription_timer = QTimer(self)
         self._subscription_timer.setInterval(15 * 60 * 1000)
         self._subscription_timer.timeout.connect(self._check_due_subscriptions)
+        # AC6: deferred auto-connect for startup_connect_order="after_subscriptions"
+        self._startup_connect_pending = False
+        self._startup_connect_timer = QTimer(self)
+        self._startup_connect_timer.setSingleShot(True)
+        self._startup_connect_timer.setInterval(STARTUP_CONNECT_FALLBACK_MS)
+        self._startup_connect_timer.timeout.connect(self._finish_startup_connect)
 
     def load(self) -> bool:
         try:
@@ -400,8 +412,10 @@ class AppController(QObject):
 
         self.network_monitor.start()
         self._lock_timer.start()
+        self._apply_subscription_timer_interval()
         self._subscription_timer.start()
-        QTimer.singleShot(30_000, self._check_due_subscriptions)
+        if self._startup_subscription_check_enabled():
+            QTimer.singleShot(30_000, self._check_due_subscriptions)
         return True
 
     def set_data_passphrase(self, passphrase: str) -> None:
@@ -1757,15 +1771,32 @@ class AppController(QObject):
         self._subscription_check_ids.discard(subscription_id)
         worker.deleteLater()
         self._drain_subscription_update_queue()
+        self._maybe_finish_startup_connect()
 
     def _check_due_subscriptions(self) -> None:
-        if self.locked:
+        # AC3: global toggle is an outer AND-gate on top of per-subscription
+        # auto_update/backoff (subscription_due semantics unchanged).
+        if self.locked or not self.state.settings.subscriptions_auto_update:
             return
         for subscription in self.state.subscriptions:
             if subscription_due(subscription):
                 self._enqueue_subscription_update(
                     subscription, "auto", pending_add=False, apply_result=True
                 )
+
+    def _startup_subscription_check_enabled(self) -> bool:
+        """AC4: gate for the one-shot startup check (load() and startup unlock)."""
+        settings = self.state.settings
+        return bool(settings.subscriptions_auto_update and settings.subscriptions_check_on_startup)
+
+    def _apply_subscription_timer_interval(self) -> None:
+        """AC5: subscription timer interval from settings (minutes, clamped 5..1440)."""
+        interval_ms = clamp_subscriptions_check_interval(
+            self.state.settings.subscriptions_check_interval_min
+        ) * 60_000
+        if self._subscription_timer.interval() != interval_ms:
+            # setInterval on a running QTimer restarts it with the new period.
+            self._subscription_timer.setInterval(interval_ms)
 
     def remove_nodes(self, node_ids: set[str]) -> None:
         remove_nodes_operation(self, node_ids)
@@ -1920,6 +1951,7 @@ class AppController(QObject):
         self.state.settings = settings
         self.settings_changed.emit(self.state.settings)
         self.schedule_save()
+        self._apply_subscription_timer_interval()
 
         if old_launch != settings.launch_on_startup:
             try:
@@ -1985,14 +2017,16 @@ class AppController(QObject):
         if not self.state.security.enabled:
             self.locked = False
             self.lock_state_changed.emit(False)
-            QTimer.singleShot(0, self._check_due_subscriptions)
+            if self._startup_subscription_check_enabled():
+                QTimer.singleShot(0, self._check_due_subscriptions)
             return True
 
         ok = verify_password(password, self.state.security.password_hash, self.state.security.salt)
         if ok:
             self.locked = False
             self.lock_state_changed.emit(False)
-            QTimer.singleShot(0, self._check_due_subscriptions)
+            if self._startup_subscription_check_enabled():
+                QTimer.singleShot(0, self._check_due_subscriptions)
         return ok
 
     def lock(self) -> None:
@@ -2013,9 +2047,50 @@ class AppController(QObject):
             return
         if self.selected_node is None and not self._can_connect_without_selected_node():
             return
+        if (
+            self.state.settings.startup_connect_order == "after_subscriptions"
+            and self._begin_startup_connect_wait()
+        ):
+            return
+        self._perform_auto_connect()
+
+    def _perform_auto_connect(self) -> None:
+        if not self.state.settings.auto_connect_last or self.locked:
+            return
         if self.selected_node is not None or self._can_connect_without_selected_node():
             self._desired_connected = True
             self._request_transition("auto connect")
+
+    def _begin_startup_connect_wait(self) -> bool:
+        """AC6: try deferring auto-connect until startup subscription refresh ends.
+
+        Returns True only when a startup check actually queued work; the armed
+        fallback timer (STARTUP_CONNECT_FALLBACK_MS <= 30 s) guarantees that a
+        failed or hanging subscription update never blocks auto-connect.
+        """
+        if not self._startup_subscription_check_enabled():
+            return False
+        self._check_due_subscriptions()
+        if not self._subscription_workers and not self._subscription_update_queue:
+            return False  # nothing to update -> degenerate to immediate connect
+        self._startup_connect_pending = True
+        self._startup_connect_timer.start()
+        return True
+
+    def _maybe_finish_startup_connect(self) -> None:
+        if (
+            self._startup_connect_pending
+            and not self._subscription_workers
+            and not self._subscription_update_queue
+        ):
+            self._finish_startup_connect()
+
+    def _finish_startup_connect(self) -> None:
+        if not self._startup_connect_pending:
+            return
+        self._startup_connect_pending = False
+        self._startup_connect_timer.stop()
+        self._perform_auto_connect()
 
     def _log(self, line: str) -> None:
         """Send a log line to the UI and write it to the log file."""

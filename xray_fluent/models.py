@@ -326,6 +326,35 @@ class SecuritySettings:
         )
 
 
+# --- Subscription auto-update globals (startup-subscription-settings) ---
+SUBSCRIPTIONS_CHECK_INTERVAL_MIN = 5
+SUBSCRIPTIONS_CHECK_INTERVAL_MAX = 1440
+SUBSCRIPTIONS_CHECK_INTERVAL_DEFAULT = 15
+STARTUP_CONNECT_ORDERS = ("immediate", "after_subscriptions")
+
+
+def clamp_subscriptions_check_interval(value: Any) -> int:
+    """Clamp the global subscription check interval (minutes) to [5, 1440].
+
+    Garbage values (None, non-numeric strings) fall back to the default
+    without raising, so corrupted state files never break loading.
+    """
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return SUBSCRIPTIONS_CHECK_INTERVAL_DEFAULT
+    return max(
+        SUBSCRIPTIONS_CHECK_INTERVAL_MIN,
+        min(SUBSCRIPTIONS_CHECK_INTERVAL_MAX, minutes),
+    )
+
+
+def normalize_startup_connect_order(value: Any) -> str:
+    """Unknown/legacy values read as \"immediate\" (current behaviour)."""
+    text = str(value or "immediate")
+    return text if text in STARTUP_CONNECT_ORDERS else "immediate"
+
+
 @dataclass(slots=True)
 class AppSettings:
     theme: str = "system"  # system | light | dark
@@ -370,6 +399,11 @@ class AppSettings:
     nodes_tag_filter: str = ""
     nodes_source_filter: str = ""
     nodes_visible_columns: list[str] = field(default_factory=list)  # empty = default set
+    # Subscription auto-update globals (additive, defaults keep current behaviour)
+    subscriptions_auto_update: bool = True
+    subscriptions_check_on_startup: bool = True
+    subscriptions_check_interval_min: int = SUBSCRIPTIONS_CHECK_INTERVAL_DEFAULT  # clamp 5..1440
+    startup_connect_order: str = "immediate"  # immediate | after_subscriptions
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -414,6 +448,10 @@ class AppSettings:
             "nodes_tag_filter": self.nodes_tag_filter,
             "nodes_source_filter": self.nodes_source_filter,
             "nodes_visible_columns": list(self.nodes_visible_columns),
+            "subscriptions_auto_update": self.subscriptions_auto_update,
+            "subscriptions_check_on_startup": self.subscriptions_check_on_startup,
+            "subscriptions_check_interval_min": self.subscriptions_check_interval_min,
+            "startup_connect_order": self.startup_connect_order,
         }
 
     @staticmethod
@@ -460,6 +498,12 @@ class AppSettings:
             nodes_tag_filter=str(data.get("nodes_tag_filter") or ""),
             nodes_source_filter=str(data.get("nodes_source_filter") or ""),
             nodes_visible_columns=[str(item) for item in (data.get("nodes_visible_columns") or [])],
+            subscriptions_auto_update=bool(data.get("subscriptions_auto_update", True)),
+            subscriptions_check_on_startup=bool(data.get("subscriptions_check_on_startup", True)),
+            subscriptions_check_interval_min=clamp_subscriptions_check_interval(
+                data.get("subscriptions_check_interval_min", SUBSCRIPTIONS_CHECK_INTERVAL_DEFAULT)
+            ),
+            startup_connect_order=normalize_startup_connect_order(data.get("startup_connect_order")),
         )
 
 

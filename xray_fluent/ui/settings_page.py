@@ -24,7 +24,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.settings.setting_card import ColorPickerButton
 
 from ..constants import SINGBOX_PATH_DEFAULT, XRAY_PATH_DEFAULT
-from ..models import AppSettings, SecuritySettings
+from ..models import AppSettings, SecuritySettings, clamp_subscriptions_check_interval
 from .base_page import ScrollablePage
 from .theme import DEFAULT_ACCENT
 from ..path_utils import normalize_configured_path, resolve_configured_path
@@ -267,9 +267,51 @@ class SettingsPage(ScrollablePage):
             "Автоматически запускать приложение в трее при входе в систему",
             parent=startup_group,
         )
+        self.auto_connect_card = SwitchSettingCard(
+            FIF.PLAY, "Автоподключение при запуске",
+            "Автоматически подключаться к последнему серверу при старте приложения",
+            parent=startup_group,
+        )
+        self.startup_order_card = _ComboCard(
+            FIF.ALIGNMENT, "Порядок при запуске",
+            "Что делать сначала, если включены автоподключение и проверка подписок",
+            [
+                ("Подключаться сразу", "immediate"),
+                ("Сначала обновить подписки", "after_subscriptions"),
+            ],
+            parent=startup_group,
+        )
 
         startup_group.addSettingCard(self.launch_card)
+        startup_group.addSettingCard(self.auto_connect_card)
+        startup_group.addSettingCard(self.startup_order_card)
         root.addWidget(startup_group)
+
+        # ============================================================
+        # Subscriptions
+        # ============================================================
+        subscriptions_group = SettingCardGroup("Подписки", container)
+
+        self.subscriptions_auto_update_card = SwitchSettingCard(
+            FIF.CLOUD, "Автообновление подписок",
+            "Глобально разрешить автоматическую проверку и обновление подписок",
+            parent=subscriptions_group,
+        )
+        self.subscriptions_startup_check_card = SwitchSettingCard(
+            FIF.CLOUD_DOWNLOAD, "Проверять при запуске",
+            "Однократно проверять подписки вскоре после запуска приложения",
+            parent=subscriptions_group,
+        )
+        self.subscriptions_interval_card = _SpinCard(
+            FIF.STOP_WATCH, "Интервал проверки (минуты)",
+            "Как часто проверять подписки в фоне (от 5 минут до 24 часов)",
+            min_val=5, max_val=1440, parent=subscriptions_group,
+        )
+
+        subscriptions_group.addSettingCard(self.subscriptions_auto_update_card)
+        subscriptions_group.addSettingCard(self.subscriptions_startup_check_card)
+        subscriptions_group.addSettingCard(self.subscriptions_interval_card)
+        root.addWidget(subscriptions_group)
 
         # ============================================================
         # Updates
@@ -381,6 +423,11 @@ class SettingsPage(ScrollablePage):
         self.tun_engine_card.combo.currentIndexChanged.connect(self._auto_save)
 
         self.launch_card.checkedChanged.connect(self._auto_save)
+        self.auto_connect_card.checkedChanged.connect(self._auto_save)
+        self.startup_order_card.combo.currentIndexChanged.connect(self._auto_save)
+        self.subscriptions_auto_update_card.checkedChanged.connect(self._auto_save)
+        self.subscriptions_startup_check_card.checkedChanged.connect(self._auto_save)
+        self.subscriptions_interval_card.spin.valueChanged.connect(self._auto_save)
         self.reconnect_card.checkedChanged.connect(self._auto_save)
         self.check_updates_card.checkedChanged.connect(self._auto_save)
         self.allow_updates_card.checkedChanged.connect(self._auto_save)
@@ -424,6 +471,13 @@ class SettingsPage(ScrollablePage):
         self._select_combo_data(self.proxy_engine_card.combo, settings.proxy_engine)
         self._select_combo_data(self.tun_engine_card.combo, settings.tun_engine)
         self.launch_card.setChecked(settings.launch_on_startup)
+        self.auto_connect_card.setChecked(settings.auto_connect_last)
+        self._select_combo_data(self.startup_order_card.combo, settings.startup_connect_order)
+        self.subscriptions_auto_update_card.setChecked(settings.subscriptions_auto_update)
+        self.subscriptions_startup_check_card.setChecked(settings.subscriptions_check_on_startup)
+        self.subscriptions_interval_card.spin.setValue(
+            clamp_subscriptions_check_interval(settings.subscriptions_check_interval_min)
+        )
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)
         self.check_updates_card.setChecked(settings.check_updates)
         self.allow_updates_card.setChecked(settings.allow_updates)
@@ -516,6 +570,11 @@ class SettingsPage(ScrollablePage):
         data.tun_engine = self.tun_engine_card.combo.currentData() or "singbox"
         data.start_minimized = False
         data.launch_on_startup = self.launch_card.isChecked()
+        data.auto_connect_last = self.auto_connect_card.isChecked()
+        data.startup_connect_order = str(self.startup_order_card.combo.currentData() or "immediate")
+        data.subscriptions_auto_update = self.subscriptions_auto_update_card.isChecked()
+        data.subscriptions_check_on_startup = self.subscriptions_startup_check_card.isChecked()
+        data.subscriptions_check_interval_min = int(self.subscriptions_interval_card.spin.value())
         data.reconnect_on_network_change = self.reconnect_card.isChecked()
         data.check_updates = self.check_updates_card.isChecked()
         data.allow_updates = self.allow_updates_card.isChecked()
