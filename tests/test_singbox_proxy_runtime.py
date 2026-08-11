@@ -48,6 +48,8 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             singbox_config={},
             xray_sidecar=None,
             proxy_ports_changed=False,
+            hybrid_relay_selector_tags=(),
+            hybrid_relay_selected_tag="",
         )
         controller = Mock()
         controller.selected_node = node
@@ -212,7 +214,19 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(plan.xray_sidecar)
         self.assertEqual((plan.socks_port, plan.http_port), (1390, 1391))
         proxy = next(item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy")
-        self.assertEqual(proxy["type"], "socks")
+        self.assertEqual(proxy["type"], "selector")
+        self.assertTrue(proxy["interrupt_exist_connections"])
+        self.assertEqual(tuple(proxy["outbounds"]), plan.hybrid_relay_selector_tags)
+        relay_outbounds = [
+            item
+            for item in plan.singbox_config["outbounds"]
+            if item.get("tag") in plan.hybrid_relay_selector_tags
+        ]
+        self.assertEqual(len(relay_outbounds), 2)
+        self.assertTrue(all(item["type"] == "socks" for item in relay_outbounds))
+        self.assertTrue(
+            all(item["server_port"] == plan.xray_sidecar.relay_port for item in relay_outbounds)
+        )
         self.assertEqual(plan.xray_sidecar.config["outbounds"][0]["protocol"], "vless")
 
     def test_xray_sidecar_uses_os_assigned_ports_when_preferred_ranges_are_reserved(self) -> None:

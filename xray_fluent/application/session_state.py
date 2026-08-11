@@ -31,6 +31,8 @@ class ActiveSessionSnapshot:
     ping_host: str
     ping_port: int
     outbound_pool_tags: dict[str, str] | None = None
+    hybrid_relay_selector_tags: tuple[str, ...] = ()
+    hybrid_relay_selected_tag: str = ""
 
 
 @dataclass(slots=True)
@@ -90,6 +92,8 @@ def build_active_session_snapshot(
     ping_host: str,
     ping_port: int,
     outbound_pool_tags: dict[str, str] | None = None,
+    hybrid_relay_selector_tags: tuple[str, ...] = (),
+    hybrid_relay_selected_tag: str = "",
 ) -> ActiveSessionSnapshot:
     return ActiveSessionSnapshot(
         node_id=node_id,
@@ -116,4 +120,6 @@ def build_active_session_snapshot(
         ping_host=ping_host,
         ping_port=ping_port,
         outbound_pool_tags=dict(outbound_pool_tags or {}),
+        hybrid_relay_selector_tags=tuple(hybrid_relay_selector_tags),
+        hybrid_relay_selected_tag=str(hybrid_relay_selected_tag),
     )

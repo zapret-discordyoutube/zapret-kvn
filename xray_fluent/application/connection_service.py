@@ -249,6 +249,12 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
                 )[1]
             ),
             outbound_pool_tags=outbound_pool_tags,
+            hybrid_relay_selector_tags=(
+                singbox_plan.hybrid_relay_selector_tags if singbox_plan is not None else ()
+            ),
+            hybrid_relay_selected_tag=(
+                singbox_plan.hybrid_relay_selected_tag if singbox_plan is not None else ""
+            ),
         )
         controller.schedule_save()
         session_mode = "xray-tun" if tun and controller._active_core == "xray" else controller._active_core

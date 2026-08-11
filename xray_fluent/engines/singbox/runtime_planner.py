@@ -37,6 +37,10 @@ _SS_PROTECT_METHOD = "chacha20-ietf-poly1305"
 _APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG = "__app_hybrid_protect_in"
 _APP_XRAY_SIDECAR_RELAY_INBOUND_TAG = "__app_hybrid_relay_in"
 _APP_XRAY_SIDECAR_PROTECT_OUTBOUND_TAG = "__app_hybrid_protect_out"
+_APP_SINGBOX_HYBRID_RELAY_OUTBOUND_TAGS = (
+    "__app_hybrid_relay_a",
+    "__app_hybrid_relay_b",
+)
 _PUBLIC_PROXY_LISTEN = "0.0.0.0"
 
 
@@ -103,6 +107,8 @@ class SingboxRuntimePlan:
     selector_tags: dict[str, str] | None = None
     provider_payload: dict[str, Any] | None = None
     selected_outbound_tag: str = ""
+    hybrid_relay_selector_tags: tuple[str, ...] = ()
+    hybrid_relay_selected_tag: str = ""
 
     @property
     def is_hybrid(self) -> bool:
@@ -468,9 +474,8 @@ def _plan_hybrid_runtime(
 
     outbounds = runtime_config.setdefault("outbounds", [])
     assert isinstance(outbounds, list)
-    outbounds[proxy_index] = {
+    relay_outbound = {
         "type": "socks",
-        "tag": "proxy",
         "server": PROXY_HOST,
         "server_port": relay_port,
         "username": relay_username,
@@ -479,6 +484,22 @@ def _plan_hybrid_runtime(
         # physical adapter via auto-detect rules.
         "inet4_bind_address": PROXY_HOST,
     }
+    outbounds[proxy_index] = {
+        "type": "selector",
+        "tag": "proxy",
+        "outbounds": list(_APP_SINGBOX_HYBRID_RELAY_OUTBOUND_TAGS),
+        "default": _APP_SINGBOX_HYBRID_RELAY_OUTBOUND_TAGS[0],
+        # Xray's balancer override affects only new connections.  Alternating
+        # between two equivalent loopback relays makes sing-box terminate the
+        # old TCP/UDP generation after Xray accepted the new outbound.
+        "interrupt_exist_connections": True,
+    }
+    for relay_tag in _APP_SINGBOX_HYBRID_RELAY_OUTBOUND_TAGS:
+        _replace_or_append_tagged(
+            outbounds,
+            relay_tag,
+            {**relay_outbound, "tag": relay_tag},
+        )
 
     _replace_or_append_tagged(
         _ensure_list(runtime_config, "inbounds"),
@@ -530,6 +551,8 @@ def _plan_hybrid_runtime(
         clash_api_port=clash_api_port,
         selector_tags=sidecar_tags,
         selected_outbound_tag=sidecar_tags[node.id],
+        hybrid_relay_selector_tags=_APP_SINGBOX_HYBRID_RELAY_OUTBOUND_TAGS,
+        hybrid_relay_selected_tag=_APP_SINGBOX_HYBRID_RELAY_OUTBOUND_TAGS[0],
     )
 
 

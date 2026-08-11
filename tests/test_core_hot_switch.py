@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from xray_fluent.app_controller import AppController
 from xray_fluent.application.node_service import set_selected_node
 from xray_fluent.application.signature_service import transition_signature
 from xray_fluent.application.outbound_pool_service import (
@@ -103,6 +104,12 @@ class SingboxPoolTests(unittest.TestCase):
         self.assertEqual(sidecar["routing"]["balancers"][0]["tag"], XRAY_BALANCER_TAG)
         self.assertIn("RoutingService", sidecar["api"]["services"])
         self.assertIn("HandlerService", sidecar["api"]["services"])
+        selector = next(
+            item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy"
+        )
+        self.assertEqual(selector["type"], "selector")
+        self.assertEqual(tuple(selector["outbounds"]), plan.hybrid_relay_selector_tags)
+        self.assertTrue(selector["interrupt_exist_connections"])
 
     def test_hybrid_signature_is_stable_before_and_after_session_capture(self) -> None:
         nodes = [
@@ -198,6 +205,116 @@ class ManualSelectionTests(unittest.TestCase):
         controller, nodes = self._controller(False)
         set_selected_node(controller, nodes[1].id)
         controller._request_transition.assert_called_once_with("node switched")
+
+
+class LiveConnectionCutoverTests(unittest.TestCase):
+    def _controller(self, *, hybrid: bool, apply_results: list[bool] | None = None):
+        nodes = xray_nodes()
+        tags = {nodes[0].id: "old-tag", nodes[1].id: "new-tag"}
+        session = SimpleNamespace(
+            node_id=nodes[0].id,
+            active_core="singbox" if hybrid else "xray",
+            hybrid=hybrid,
+            outbound_pool_tags=tags,
+            hybrid_relay_selector_tags=("relay-a", "relay-b") if hybrid else (),
+            hybrid_relay_selected_tag="relay-a" if hybrid else "",
+        )
+        controller = Mock()
+        controller.selected_node = nodes[1]
+        controller._active_session = session
+        controller.connected = True
+        controller.zapret.apply_cached_proxy_node.return_value = True
+        if apply_results is None:
+            controller._apply_core_outbound_tag.return_value = True
+        else:
+            controller._apply_core_outbound_tag.side_effect = apply_results
+        controller._capture_hot_switched_session = Mock()
+        return controller, nodes, tags, session
+
+    def test_hybrid_switch_changes_xray_then_interrupts_old_singbox_generation(self) -> None:
+        controller, nodes, tags, session = self._controller(hybrid=True)
+
+        self.assertTrue(AppController._try_hot_switch_selected_node(controller))
+
+        self.assertEqual(
+            controller._apply_core_outbound_tag.call_args_list,
+            [
+                unittest.mock.call("xray", "new-tag"),
+                unittest.mock.call("singbox", "relay-b"),
+            ],
+        )
+        controller._capture_hot_switched_session.assert_called_once_with(
+            nodes[1],
+            session,
+            tags,
+            "new-tag",
+            hybrid_relay_selected_tag="relay-b",
+        )
+
+    def test_hybrid_selector_failure_restores_previous_xray_outbound(self) -> None:
+        controller, _nodes, _tags, _session = self._controller(
+            hybrid=True,
+            apply_results=[True, False, True],
+        )
+
+        self.assertFalse(AppController._try_hot_switch_selected_node(controller))
+
+        self.assertEqual(
+            controller._apply_core_outbound_tag.call_args_list,
+            [
+                unittest.mock.call("xray", "new-tag"),
+                unittest.mock.call("singbox", "relay-b"),
+                unittest.mock.call("xray", "old-tag"),
+            ],
+        )
+        controller._capture_hot_switched_session.assert_not_called()
+
+    def test_xray_only_does_not_report_cutover_without_connection_interrupt_api(self) -> None:
+        controller, _nodes, _tags, _session = self._controller(hybrid=False)
+
+        self.assertFalse(AppController._try_hot_switch_selected_node(controller))
+
+        controller._apply_core_outbound_tag.assert_not_called()
+        controller._capture_hot_switched_session.assert_not_called()
+
+
+class HybridRuntimeStartupTests(unittest.TestCase):
+    def test_start_pins_xray_target_and_known_relay_generation(self) -> None:
+        sidecar = SimpleNamespace(
+            protect_port=19084,
+            protect_password="protect",
+            relay_port=19080,
+            api_port=19085,
+            config={"sidecar": True},
+        )
+        plan = SimpleNamespace(
+            provider_payload=None,
+            xray_sidecar=sidecar,
+            selected_outbound_tag="node-tag",
+            clash_api_port=19090,
+            singbox_config={"main": True},
+            is_hybrid=True,
+            hybrid_relay_selected_tag="relay-a",
+        )
+        controller = Mock()
+        controller.state.settings.xray_path = "xray.exe"
+        controller.state.settings.singbox_path = "sing-box.exe"
+        controller.xray.start.return_value = True
+        controller.xray.is_running = True
+        controller.singbox.start.return_value = True
+        controller._apply_core_outbound_tag.return_value = True
+
+        self.assertTrue(AppController._start_singbox_runtime_plan(controller, plan))
+
+        self.assertEqual(
+            controller._apply_core_outbound_tag.call_args_list,
+            [
+                unittest.mock.call("xray", "node-tag"),
+                unittest.mock.call("singbox", "relay-a"),
+            ],
+        )
+        self.assertEqual(controller._xray_api_port, 19085)
+        self.assertEqual(controller._singbox_clash_api_port, 19090)
 
 
 if __name__ == "__main__":

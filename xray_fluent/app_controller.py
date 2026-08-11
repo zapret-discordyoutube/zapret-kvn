@@ -988,11 +988,17 @@ class AppController(QObject):
         self._log(f"[sing-box] start result: {sb_ok}")
         if sb_ok:
             self._singbox_clash_api_port = plan.clash_api_port
-            if not plan.is_hybrid and plan.selected_outbound_tag and not self._apply_core_outbound_tag(
-                "singbox", plan.selected_outbound_tag
-            ):
+            singbox_start_tag = (
+                plan.hybrid_relay_selected_tag if plan.is_hybrid else plan.selected_outbound_tag
+            )
+            if singbox_start_tag and not self._apply_core_outbound_tag("singbox", singbox_start_tag):
                 self.singbox.stop()
+                if plan.xray_sidecar is not None and self.xray.is_running:
+                    self.xray.stop()
                 self._singbox_clash_api_port = 0
+                self._xray_api_port = 0
+                self._protect_ss_port = 0
+                self._protect_ss_password = ""
                 return False
             return True
 
@@ -1048,6 +1054,8 @@ class AppController(QObject):
         ping_host: str = "",
         ping_port: int = 0,
         outbound_pool_tags: dict[str, str] | None = None,
+        hybrid_relay_selector_tags: tuple[str, ...] = (),
+        hybrid_relay_selected_tag: str = "",
     ) -> None:
         settings = self.state.settings
         routing = self.state.routing
@@ -1087,6 +1095,8 @@ class AppController(QObject):
             ping_host=str(ping_host),
             ping_port=int(ping_port),
             outbound_pool_tags=outbound_pool_tags,
+            hybrid_relay_selector_tags=hybrid_relay_selector_tags,
+            hybrid_relay_selected_tag=hybrid_relay_selected_tag,
         )
         self._blocked_transition_signature = ""
 
@@ -1135,6 +1145,13 @@ class AppController(QObject):
                 protect_ss_password=session.protect_ss_password if session is not None else "",
                 ping_host=session.ping_host if session is not None else "",
                 ping_port=session.ping_port if session is not None else 0,
+                outbound_pool_tags=session.outbound_pool_tags if session is not None else None,
+                hybrid_relay_selector_tags=(
+                    session.hybrid_relay_selector_tags if session is not None else ()
+                ),
+                hybrid_relay_selected_tag=(
+                    session.hybrid_relay_selected_tag if session is not None else ""
+                ),
             )
         return True
 
@@ -1969,16 +1986,49 @@ class AppController(QObject):
                 f"{session.active_core} pool ({len(tags)} tags)"
             )
             return False
+        control_core = "xray" if session.hybrid else session.active_core
+        if control_core != "singbox" and not session.hybrid:
+            # Xray's RoutingService only changes the balancer choice for new
+            # connections.  Without a sing-box selector in front there is no
+            # API capable of invalidating the existing TCP/UDP generation, so
+            # use the normal process transition instead of reporting a false
+            # successful cut-over.
+            self._log("[core-switch] fallback: Xray cannot interrupt existing connections")
+            return False
         # UDP endpoints need the zapret pass profile before new connections are
         # sent to them.  A cache miss falls back to the normal async resolver.
         if not self.zapret.apply_cached_proxy_node(node):
             self._log(f"[core-switch] waiting for UDP endpoint protection: {node.server}")
             return False
-        control_core = "xray" if session.hybrid else session.active_core
+        previous_tag = tags.get(session.node_id or "", "")
         if not self._apply_core_outbound_tag(control_core, tag):
             return False
 
-        self._capture_hot_switched_session(node, session, tags, tag)
+        hybrid_relay_selected_tag = session.hybrid_relay_selected_tag
+        if session.hybrid:
+            relay_tags = session.hybrid_relay_selector_tags
+            if len(relay_tags) < 2:
+                self._log("[core-switch] fallback: hybrid relay generations are unavailable")
+                if previous_tag and previous_tag != tag:
+                    self._apply_core_outbound_tag("xray", previous_tag)
+                return False
+            hybrid_relay_selected_tag = next(
+                (relay_tag for relay_tag in relay_tags if relay_tag != session.hybrid_relay_selected_tag),
+                relay_tags[0],
+            )
+            if not self._apply_core_outbound_tag("singbox", hybrid_relay_selected_tag):
+                self._log("[core-switch] hybrid cut-over rejected; restoring previous Xray outbound")
+                if previous_tag and previous_tag != tag:
+                    self._apply_core_outbound_tag("xray", previous_tag)
+                return False
+
+        self._capture_hot_switched_session(
+            node,
+            session,
+            tags,
+            tag,
+            hybrid_relay_selected_tag=hybrid_relay_selected_tag,
+        )
         self._log(f"[core-switch-perf] total={(time.perf_counter() - started_at) * 1000:.1f}ms")
         return True
 
@@ -1988,6 +2038,8 @@ class AppController(QObject):
         session: ActiveSessionSnapshot,
         tags: dict[str, str],
         tag: str,
+        *,
+        hybrid_relay_selected_tag: str = "",
     ) -> None:
         """Commit GUI/session state only after the core accepted the cut-over."""
 
@@ -2007,6 +2059,8 @@ class AppController(QObject):
             ping_host=node.server,
             ping_port=node.port,
             outbound_pool_tags=tags,
+            hybrid_relay_selector_tags=session.hybrid_relay_selector_tags,
+            hybrid_relay_selected_tag=hybrid_relay_selected_tag,
         )
         self._set_connection_status("running", f"Переключено: {node.name}", level="success")
         self._log(f"[core-switch] {session.active_core} -> {node.name} ({tag})")
