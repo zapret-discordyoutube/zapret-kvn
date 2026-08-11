@@ -14,6 +14,7 @@ from .runtime_planner import (
     plan_singbox_proxy_runtime,
     plan_singbox_runtime,
 )
+from .selector_api import build_selector_url, select_outbound
 
 __all__ = [
     "build_singbox_outbound",
@@ -32,4 +33,6 @@ __all__ = [
     "parse_singbox_document",
     "plan_singbox_proxy_runtime",
     "plan_singbox_runtime",
+    "build_selector_url",
+    "select_outbound",
 ]

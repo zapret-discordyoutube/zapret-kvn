@@ -3,7 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import logging
+import random
 import socket
+import time
 from datetime import datetime, timezone
 import json
 from logging.handlers import RotatingFileHandler
@@ -126,11 +128,24 @@ from .application.subscription_service import (
     subscription_due,
 )
 from .application.async_steps import TransitionRunner, TransitionSteps, run_steps_blocking
+from .application.rotation_service import (
+    RotationPlan,
+    build_rotation_plan,
+    pick_next_node,
+    rotation_interval_ms,
+)
+from .application.outbound_pool_service import (
+    SINGBOX_SELECTOR_TAG,
+    XRAY_BALANCER_TAG,
+    XrayOutboundPool,
+    build_xray_outbound_pool,
+)
 from .country_flags import CountryResolver
 from .background_workers import ProxyProtectionResolver, StateSaveWorker, SubscriptionUpdateWorker
 from .engines.xray import (
     XrayManager,
     XrayTunRouteManager,
+    apply_balancer_override,
     build_xray_config,
     get_windows_default_route_context,
     get_xray_version,
@@ -148,6 +163,7 @@ from .engines.singbox import (
     restart_runtime as restart_singbox_runtime_operation,
     SingboxDocumentState,
     SingboxRuntimePlan,
+    select_outbound as select_singbox_outbound,
 )
 from .constants import (
     APP_NAME,
@@ -158,6 +174,7 @@ from .constants import (
     PROXY_HOST,
     ROUTING_MODES,
     SINGBOX_CLASH_API_PORT,
+    SINGBOX_PROVIDER_FILE,
     SINGBOX_CONFIGS_DIR,
     SINGBOX_DEFAULT_CONFIG_NAME,
     SINGBOX_TEMPLATES_DIR,
@@ -176,6 +193,7 @@ from .models import (
     Subscription,
     SubscriptionUpdateResult,
     clamp_subscriptions_check_interval,
+    utc_now_iso,
 )
 from .subscription_http import (
     normalize_client_profile,
@@ -184,7 +202,7 @@ from .subscription_http import (
 )
 from .subscription_parser import validate_filter_patterns
 from .network_monitor import NetworkMonitor
-from .proxy_manager import ProxyManager
+from .proxy_manager import ProxyManager, SystemProxyState
 from .security import create_password_hash, get_idle_seconds, verify_password
 from .engines.tun2socks import (
     Tun2SocksManager,
@@ -359,6 +377,7 @@ class AppController(QObject):
         self._xray_tun_routes.log_received.connect(self._on_xray_log)
 
         self.network_monitor.network_changed.connect(self._on_network_changed)
+        self.connection_changed.connect(lambda _: self._sync_rotation_timer())
 
         self._lock_timer = QTimer(self)
         self._lock_timer.setInterval(15_000)
@@ -380,6 +399,11 @@ class AppController(QObject):
         self._startup_connect_timer.setSingleShot(True)
         self._startup_connect_timer.setInterval(STARTUP_CONNECT_FALLBACK_MS)
         self._startup_connect_timer.timeout.connect(self._finish_startup_connect)
+        self._rotation_timer = QTimer(self)
+        self._rotation_timer.setSingleShot(True)
+        self._rotation_timer.timeout.connect(self._on_rotation_tick)
+        self._rotation_rng = random.Random()
+        self._rotation_pool_logged = ""
 
     def load(self) -> bool:
         try:
@@ -651,6 +675,14 @@ class AppController(QObject):
     def get_active_xray_template_path(self) -> Path | None:
         return get_active_template_path_operation(self, "xray")
 
+    def query_system_proxy_state(self) -> SystemProxyState:
+        """Быстрый снимок реального состояния системного прокси Windows.
+
+        Только чтение реестра (без WinINet/RAS) — безопасно для UI-потока.
+        На не-Windows возвращает ``supported=False``.
+        """
+        return self.proxy.query_state()
+
     def get_effective_proxy_ports(self) -> tuple[int, int]:
         session = self._active_session
         if session is not None and session.socks_port > 0 and session.http_port > 0:
@@ -877,6 +909,7 @@ class AppController(QObject):
             preferred_relay_port=preferred_relay_port,
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
+            pool_nodes=self.state.nodes,
         )
 
     def _plan_proxy_runtime_singbox(self, node: Node | None = None) -> SingboxRuntimePlan:
@@ -903,9 +936,18 @@ class AppController(QObject):
             preferred_relay_port=preferred_relay_port,
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
+            pool_nodes=self.state.nodes,
         )
 
     def _start_singbox_runtime_plan(self, plan: SingboxRuntimePlan) -> bool:
+        if plan.provider_payload is not None:
+            SINGBOX_PROVIDER_FILE.parent.mkdir(parents=True, exist_ok=True)
+            temporary = SINGBOX_PROVIDER_FILE.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(plan.provider_payload, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+            temporary.replace(SINGBOX_PROVIDER_FILE)
         if plan.xray_sidecar is not None:
             self._protect_ss_port = plan.xray_sidecar.protect_port
             self._protect_ss_password = plan.xray_sidecar.protect_password
@@ -915,6 +957,15 @@ class AppController(QObject):
                 f"protect=127.0.0.1:{plan.xray_sidecar.protect_port}"
             )
             if not self.xray.start(self.state.settings.xray_path, plan.xray_sidecar.config):
+                self._protect_ss_port = 0
+                self._protect_ss_password = ""
+                return False
+            self._xray_api_port = plan.xray_sidecar.api_port
+            if plan.selected_outbound_tag and not self._apply_core_outbound_tag(
+                "xray", plan.selected_outbound_tag
+            ):
+                self.xray.stop()
+                self._xray_api_port = 0
                 self._protect_ss_port = 0
                 self._protect_ss_password = ""
                 return False
@@ -936,6 +987,12 @@ class AppController(QObject):
         self._log(f"[sing-box] start result: {sb_ok}")
         if sb_ok:
             self._singbox_clash_api_port = plan.clash_api_port
+            if not plan.is_hybrid and plan.selected_outbound_tag and not self._apply_core_outbound_tag(
+                "singbox", plan.selected_outbound_tag
+            ):
+                self.singbox.stop()
+                self._singbox_clash_api_port = 0
+                return False
             return True
 
         if plan.xray_sidecar is not None and self.xray.is_running:
@@ -943,6 +1000,7 @@ class AppController(QObject):
         self._protect_ss_port = 0
         self._protect_ss_password = ""
         self._singbox_clash_api_port = 0
+        self._xray_api_port = 0
         return False
 
     def _build_runtime_xray_config(self, node: Node | None = None, *, tun_mode: bool = False) -> XrayRuntimeConfig:
@@ -988,6 +1046,7 @@ class AppController(QObject):
         protect_ss_password: str = "",
         ping_host: str = "",
         ping_port: int = 0,
+        outbound_pool_tags: dict[str, str] | None = None,
     ) -> None:
         settings = self.state.settings
         routing = self.state.routing
@@ -1026,6 +1085,7 @@ class AppController(QObject):
             protect_ss_password=str(protect_ss_password),
             ping_host=str(ping_host),
             ping_port=int(ping_port),
+            outbound_pool_tags=outbound_pool_tags,
         )
         self._blocked_transition_signature = ""
 
@@ -1224,6 +1284,10 @@ class AppController(QObject):
             return
         if error is None:
             self.zapret.apply_cached_proxy_node(self.selected_node)
+            if self.connected and self._try_hot_switch_selected_node():
+                self._transition_pending = False
+                self.transition_state_changed.emit(False, "")
+                return
         if not self._transition_active:
             self._schedule_transition_drain(transition_request_delay_ms(self._transition_reason))
 
@@ -1844,6 +1908,196 @@ class AppController(QObject):
         self.connected = self._compute_connected_state()
         return previous, self.connected
 
+    # --- Rotation -----------------------------------------------------------
+
+    def xray_outbound_pool(self) -> XrayOutboundPool:
+        """All Xray-compatible nodes loaded into the persistent data plane."""
+
+        return build_xray_outbound_pool(self.state.nodes)
+
+    def _apply_core_outbound_tag(self, core: str, outbound_tag: str) -> bool:
+        if core == "singbox":
+            ok, output = select_singbox_outbound(
+                self._singbox_clash_api_port,
+                SINGBOX_SELECTOR_TAG,
+                outbound_tag,
+            )
+        else:
+            xray_path = getattr(self.xray, "_exe_path", None) or self.state.settings.xray_path
+            ok, output = apply_balancer_override(
+                xray_path,
+                self._xray_api_port,
+                XRAY_BALANCER_TAG,
+                outbound_tag,
+            )
+        if not ok:
+            self._log(f"[core-switch] {core} control plane rejected {outbound_tag}: {output}")
+        return ok
+
+    def _pin_started_outbound(
+        self,
+        node: Node | None,
+        core: str,
+        tags: dict[str, str] | None,
+    ) -> bool:
+        if node is None or not tags:
+            return True
+        tag = tags.get(node.id, "")
+        return bool(tag) and self._apply_core_outbound_tag(core, tag)
+
+    def _try_hot_switch_selected_node(self) -> bool:
+        """Switch only the core's proxy transport, preserving the live data plane."""
+
+        node = self.selected_node
+        session = self._active_session
+        started_at = time.perf_counter()
+        if node is None or session is None or not self.connected:
+            return False
+        tags = session.outbound_pool_tags or {}
+        tag = tags.get(node.id, "")
+        if not tag:
+            return False
+        # UDP endpoints need the zapret pass profile before new connections are
+        # sent to them.  A cache miss falls back to the normal async resolver.
+        if not self.zapret.apply_cached_proxy_node(node):
+            return False
+        control_core = "xray" if session.hybrid else session.active_core
+        if not self._apply_core_outbound_tag(control_core, tag):
+            return False
+
+        self._capture_hot_switched_session(node, session, tags, tag)
+        self._log(f"[core-switch-perf] total={(time.perf_counter() - started_at) * 1000:.1f}ms")
+        return True
+
+    def _capture_hot_switched_session(
+        self,
+        node: Node,
+        session: ActiveSessionSnapshot,
+        tags: dict[str, str],
+        tag: str,
+    ) -> None:
+        """Commit GUI/session state only after the core accepted the cut-over."""
+
+        node.last_used_at = utc_now_iso()
+        self._capture_active_session(
+            node,
+            tun=session.tun_mode,
+            core=session.active_core,
+            api_port=session.api_port,
+            hybrid=session.hybrid,
+            socks_port=session.socks_port,
+            http_port=session.http_port,
+            xray_inbound_tags=session.xray_inbound_tags,
+            sidecar_relay_port=session.sidecar_relay_port,
+            protect_ss_port=session.protect_ss_port,
+            protect_ss_password=session.protect_ss_password,
+            ping_host=node.server,
+            ping_port=node.port,
+            outbound_pool_tags=tags,
+        )
+        self._set_connection_status("running", f"Переключено: {node.name}", level="success")
+        self._log(f"[core-switch] {session.active_core} -> {node.name} ({tag})")
+
+    def is_rotation_supported(self, settings: AppSettings | None = None) -> bool:
+        """Ротация живёт только там, где конфиг xray строит само приложение.
+
+        В raw-config и sing-box режимах конфигом владеет пользователь, поэтому
+        подмешивать туда балансировщик нельзя.
+        """
+
+        settings = settings or self.state.settings
+        if not settings.rotation_enabled:
+            return False
+        return self.is_tun2socks_mode(settings)
+
+    def rotation_plan(self, settings: AppSettings | None = None) -> RotationPlan | None:
+        settings = settings or self.state.settings
+        if not self.is_rotation_supported(settings):
+            return None
+        plan = build_rotation_plan(settings, self.state.nodes, self.state.selected_node_id)
+        if plan is not None and plan.truncated:
+            # Метод вызывается часто (в т.ч. при расчёте сигнатур) — логируем факт
+            # усечения один раз на каждый новый размер пула, а не на каждый вызов.
+            mark = f"{plan.candidates}->{len(plan.nodes)}"
+            if mark != self._rotation_pool_logged:
+                self._rotation_pool_logged = mark
+                self._log(
+                    f"[rotation] пул усечён: подходящих серверов {plan.candidates}, "
+                    f"в ротации {len(plan.nodes)} (лимит настройки)"
+                )
+        return plan
+
+    @staticmethod
+    def _rotation_settings_signature(settings: AppSettings) -> tuple:
+        return (
+            bool(settings.rotation_enabled),
+            str(settings.rotation_mode),
+            int(settings.rotation_interval_sec),
+            int(settings.rotation_jitter_pct),
+        )
+
+    def _sync_rotation_timer(self) -> None:
+        plan = self.rotation_plan()
+        if plan is None or not self.connected:
+            if self._rotation_timer.isActive():
+                self._rotation_timer.stop()
+                self._log("[rotation] остановлена")
+            return
+        if not self._rotation_timer.isActive():
+            # Пока выбор не зафиксирован, балансировщик раскидывал бы каждое
+            # соединение по разным серверам — сразу пиним текущий.
+            self._apply_rotation_override(plan, self.state.selected_node_id)
+            self._log(
+                f"[rotation] запущена: серверов в пуле {len(plan.nodes)}, "
+                f"режим {self.state.settings.rotation_mode}"
+            )
+        self._rotation_timer.start(rotation_interval_ms(self.state.settings, self._rotation_rng))
+
+    def _apply_rotation_override(self, plan: RotationPlan, node_id: str | None) -> bool:
+        if not plan.contains(node_id):
+            return False
+        pool = self.xray_outbound_pool()
+        tag = pool.tag_for(node_id)
+        return bool(tag) and self._apply_core_outbound_tag("xray", tag)
+
+    def _on_rotation_tick(self) -> None:
+        self.rotate_now()
+        self._sync_rotation_timer()
+
+    def rotate_now(self) -> bool:
+        """Переключиться на следующий сервер пула без перезапуска ядра."""
+
+        plan = self.rotation_plan()
+        if plan is None or not self.connected:
+            return False
+        node = pick_next_node(
+            plan,
+            self.state.selected_node_id,
+            self.state.settings.rotation_mode,
+            self._rotation_rng,
+        )
+        if node is None or node.id == self.state.selected_node_id:
+            return False
+        if not self._apply_rotation_override(plan, node.id):
+            self.status.emit("warning", f"Ротация: не удалось переключиться на {node.name}")
+            return False
+
+        # Меняем выбор напрямую: состав конфига не изменился, поэтому transition
+        # не нужен — иначе ядро перезапускалось бы на каждом такте ротации.
+        self.state.selected_node_id = node.id
+        session = self._active_session
+        pool = self.xray_outbound_pool()
+        tag = pool.tag_for(node.id)
+        if session is not None and tag:
+            self._capture_hot_switched_session(node, session, pool.tags, tag)
+        else:
+            node.last_used_at = utc_now_iso()
+        self.selection_changed.emit(self.selected_node)
+        self.schedule_save()
+        self._log(f"[rotation] переключение -> {node.name} ({tag or plan.tag_for(node.id)})")
+        self.status.emit("info", f"Ротация: {node.name}")
+        return True
+
     def _reset_auto_switch_state(self, *, reset_cooldown: bool = False, reset_cycle: bool = True) -> None:
         self._auto_switch_low_since = 0.0
         self._auto_switch_high_ticks = 0
@@ -1948,10 +2202,16 @@ class AppController(QObject):
         old_tun = old_settings.tun_mode
         old_proxy_engine = old_settings.proxy_engine
         old_tun_engine = old_settings.tun_engine
+        old_rotation = self._rotation_settings_signature(old_settings)
         self.state.settings = settings
         self.settings_changed.emit(self.state.settings)
         self.schedule_save()
         self._apply_subscription_timer_interval()
+
+        if old_rotation != self._rotation_settings_signature(settings):
+            # Смена интервала/режима не трогает конфиг — достаточно перепланировать таймер.
+            self._rotation_timer.stop()
+            self._sync_rotation_timer()
 
         if old_launch != settings.launch_on_startup:
             try:

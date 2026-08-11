@@ -392,6 +392,15 @@ class AppSettings:
     auto_switch_threshold_kbps: int = 50
     auto_switch_delay_sec: int = 30
     auto_switch_cooldown_sec: int = 60
+    # Rotation: periodic exit-node switching inside a pool (xray balancer override)
+    rotation_enabled: bool = False
+    rotation_mode: str = "random"  # random | sequential
+    rotation_interval_sec: int = 600
+    rotation_jitter_pct: int = 20
+    rotation_pool: str = "all"  # all | group | tag | subscription
+    rotation_pool_value: str = ""
+    rotation_only_alive: bool = True
+    rotation_max_nodes: int = 20
     # Server list view preferences (stable english keys; empty = defaults)
     nodes_sort_key: str = "manual"  # manual | name | group | type | ping | speed | last_used
     nodes_sort_desc: bool = False
@@ -442,6 +451,14 @@ class AppSettings:
             "auto_switch_threshold_kbps": self.auto_switch_threshold_kbps,
             "auto_switch_delay_sec": self.auto_switch_delay_sec,
             "auto_switch_cooldown_sec": self.auto_switch_cooldown_sec,
+            "rotation_enabled": self.rotation_enabled,
+            "rotation_mode": self.rotation_mode,
+            "rotation_interval_sec": self.rotation_interval_sec,
+            "rotation_jitter_pct": self.rotation_jitter_pct,
+            "rotation_pool": self.rotation_pool,
+            "rotation_pool_value": self.rotation_pool_value,
+            "rotation_only_alive": self.rotation_only_alive,
+            "rotation_max_nodes": self.rotation_max_nodes,
             "nodes_sort_key": self.nodes_sort_key,
             "nodes_sort_desc": self.nodes_sort_desc,
             "nodes_group_filter": self.nodes_group_filter,
@@ -492,6 +509,14 @@ class AppSettings:
             auto_switch_threshold_kbps=int(data.get("auto_switch_threshold_kbps") or 50),
             auto_switch_delay_sec=int(data.get("auto_switch_delay_sec") or 30),
             auto_switch_cooldown_sec=int(data.get("auto_switch_cooldown_sec") or 60),
+            rotation_enabled=bool(data.get("rotation_enabled", False)),
+            rotation_mode=str(data.get("rotation_mode") or "random"),
+            rotation_interval_sec=int(data.get("rotation_interval_sec") or 600),
+            rotation_jitter_pct=int(data.get("rotation_jitter_pct") or 0),
+            rotation_pool=str(data.get("rotation_pool") or "all"),
+            rotation_pool_value=str(data.get("rotation_pool_value") or ""),
+            rotation_only_alive=bool(data.get("rotation_only_alive", True)),
+            rotation_max_nodes=int(data.get("rotation_max_nodes") or 20),
             nodes_sort_key=str(data.get("nodes_sort_key") or "manual"),
             nodes_sort_desc=bool(data.get("nodes_sort_desc", False)),
             nodes_group_filter=str(data.get("nodes_group_filter") or ""),

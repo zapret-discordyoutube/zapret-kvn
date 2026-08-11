@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from qfluentwidgets import (
     Action,
     BodyLabel,
+    CardWidget,
     CheckBox,
     ComboBox,
     FluentIcon as FIF,
@@ -29,6 +30,7 @@ from qfluentwidgets import (
     PushButton,
     RoundMenu,
     SpinBox,
+    StrongBodyLabel,
     SubtitleLabel,
     SwitchButton,
     TableWidget,
@@ -46,6 +48,7 @@ from ..subscription_http import (
     validate_hwid,
 )
 from ..subscription_parser import validate_filter_patterns
+from .detail_page import DetailPage, StackedSection
 from .fluent_dialog import FluentDialog
 from .theme import accent_color
 
@@ -115,27 +118,37 @@ class ScreenRegionSelector(QWidget):
         super().keyPressEvent(event)
 
 
-class SubscriptionDialog(FluentDialog):
-    def __init__(
-        self,
-        subscription: Subscription | None = None,
-        parent=None,
-        *,
-        provider_names: list[str] | None = None,
-    ):
-        super().__init__(parent)
-        self._source = subscription
-        self._provider_names = list(provider_names or [])
+class SubscriptionEditPage(DetailPage):
+    """Subscription form shown inside the section instead of a modal dialog."""
+
+    save_requested = pyqtSignal(str)  # subscription id, empty string for a new one
+
+    def __init__(self, parent=None):
+        super().__init__(
+            "Подписки",
+            "Новая подписка",
+            parent,
+            root_key="subscriptions",
+            page_key="subscription-edit",
+        )
+        self._source: Subscription | None = None
+        self._provider_names: list[str] = []
         self._screen_selector: ScreenRegionSelector | None = None
-        self.setModal(True)
-        self.setMinimumWidth(560)
-        self.setWindowTitle("Редактирование подписки" if subscription else "Новая подписка")
+        self._original: dict | None = None
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 22, 22, 22)
+        self.cancel_btn = PushButton("Отмена", self)
+        self.save_btn = PrimaryPushButton(FIF.SAVE, "Сохранить", self)
+        self.add_header_action(self.cancel_btn)
+        self.add_header_action(self.save_btn)
+
+        card = CardWidget(self.body)
+        root = QVBoxLayout(card)
+        root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(9)
-        root.addWidget(SubtitleLabel(self.windowTitle(), self))
+        self.content_layout.addWidget(card)
+        self.content_layout.addStretch(1)
 
+        root.addWidget(StrongBodyLabel("Источник", card))
         root.addWidget(BodyLabel("Название (необязательно)", self))
         self.name_edit = LineEdit(self)
         self.name_edit.setPlaceholderText("Название провайдера будет определено автоматически")
@@ -217,16 +230,8 @@ class SubscriptionDialog(FluentDialog):
         self.match_label = BodyLabel("", self)
         root.addWidget(self.match_label)
 
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        self.cancel_btn = PushButton("Отмена", self)
-        self.save_btn = PrimaryPushButton("Сохранить" if subscription else "Проверить и добавить", self)
-        buttons.addWidget(self.cancel_btn)
-        buttons.addWidget(self.save_btn)
-        root.addLayout(buttons)
-
-        self.cancel_btn.clicked.connect(self.reject)
-        self.save_btn.clicked.connect(self._validate_and_accept)
+        self.cancel_btn.clicked.connect(self.request_back)
+        self.save_btn.clicked.connect(self._validate_and_submit)
         self.paste_btn.clicked.connect(self._paste_url)
         self.qr_file_btn.clicked.connect(self._qr_from_file)
         self.qr_clipboard_btn.clicked.connect(self._qr_from_clipboard)
@@ -235,6 +240,19 @@ class SubscriptionDialog(FluentDialog):
         self.exclude_edit.textChanged.connect(self._update_match_count)
         self.client_profile_combo.currentIndexChanged.connect(self._on_profile_changed)
         self.send_hwid_check.toggled.connect(self.hwid_edit.setEnabled)
+
+        self.load(None)
+
+    # ── Public API ──
+
+    def load(
+        self,
+        subscription: Subscription | None,
+        provider_names: list[str] | None = None,
+    ) -> None:
+        """Fill the form for an existing subscription, or reset it for a new one."""
+        self._source = subscription
+        self._provider_names = list(provider_names or [])
 
         if subscription is not None:
             self.name_edit.setText(subscription.name)
@@ -247,12 +265,31 @@ class SubscriptionDialog(FluentDialog):
             self.interval_spin.setValue(subscription.update_interval_hours or 0)
             self.include_edit.setText(subscription.include_pattern)
             self.exclude_edit.setText(subscription.exclude_pattern)
+            self.save_btn.setText("Сохранить")
+            self.set_page_label(subscription.name or "Подписка")
         else:
+            self.name_edit.clear()
+            self.url_edit.clear()
+            self.user_agent_edit.clear()
+            self.hwid_edit.clear()
+            self.include_edit.clear()
+            self.exclude_edit.clear()
+            self.interval_spin.setValue(0)
             self.auto_update_check.setChecked(True)
             self._set_client_profile("zapret")
             self.send_hwid_check.setChecked(False)
+            self.save_btn.setText("Проверить и добавить")
+            self.set_page_label("Новая подписка")
+
         self.hwid_edit.setEnabled(self.send_hwid_check.isChecked())
         self._update_match_count()
+        self.mark_clean()
+
+    def mark_clean(self) -> None:
+        self._original = self.update_values()
+
+    def is_dirty(self) -> bool:
+        return self._original is not None and self.update_values() != self._original
 
     def subscription_value(self) -> Subscription:
         return Subscription(
@@ -284,7 +321,7 @@ class SubscriptionDialog(FluentDialog):
             "exclude_pattern": value.exclude_pattern,
         }
 
-    def _validate_and_accept(self) -> None:
+    def _validate_and_submit(self) -> None:
         try:
             url, profile_hint = resolve_subscription_source(self.url_edit.text())
             self.url_edit.setText(url)
@@ -294,9 +331,11 @@ class SubscriptionDialog(FluentDialog):
                 validate_hwid(self.hwid_edit.text())
             validate_filter_patterns(self.include_edit.text().strip(), self.exclude_edit.text().strip())
         except Exception as exc:
+            # The form stays open so the entered URL is not lost — the modal
+            # version used to close and discard everything on a failure.
             self._show_error(str(exc))
             return
-        self.accept()
+        self.save_requested.emit(self._source.id if self._source else "")
 
     def _set_client_profile(self, profile: str) -> None:
         normalized = normalize_client_profile(profile)
@@ -343,17 +382,21 @@ class SubscriptionDialog(FluentDialog):
         if screen is None:
             self._show_error("Экран не найден")
             return
-        self.hide()
+        # The form is part of the main window now, so the whole window has to
+        # step aside for the region grab, not just a floating dialog.
+        window = self.window()
+        window.hide()
         selector = ScreenRegionSelector(screen)
         self._screen_selector = selector
         selector.image_selected.connect(self._on_screen_image)
-        selector.destroyed.connect(lambda: self.show())
+        selector.destroyed.connect(window.show)
         selector.show()
         selector.activateWindow()
 
     def _on_screen_image(self, image: QImage) -> None:
-        self.show()
-        self.raise_()
+        window = self.window()
+        window.show()
+        window.raise_()
         self._decode_qr(image)
 
     def _decode_qr(self, image: QImage) -> None:
@@ -412,7 +455,7 @@ class SubscriptionDeleteDialog(FluentDialog):
         delete.clicked.connect(self.accept)
 
 
-class SubscriptionsPage(QWidget):
+class SubscriptionsPage(StackedSection):
     add_requested = pyqtSignal()
     edit_requested = pyqtSignal(str)
     update_requested = pyqtSignal(str, str)
@@ -424,6 +467,7 @@ class SubscriptionsPage(QWidget):
     show_url_requested = pyqtSignal(str)
     reset_hidden_requested = pyqtSignal(str)
     accept_pending_url_requested = pyqtSignal(str)
+    editor_save_requested = pyqtSignal(str)  # subscription id, empty for a new one
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -433,7 +477,8 @@ class SubscriptionsPage(QWidget):
         self._updating: set[str] = set()
         self._nodes: list[Node] = []
 
-        root = QVBoxLayout(self)
+        list_page = QWidget()
+        root = QVBoxLayout(list_page)
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(12)
         root.addWidget(SubtitleLabel("Подписки", self))
@@ -478,6 +523,13 @@ class SubscriptionsPage(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         root.addWidget(self.table, 1)
 
+        self.set_root_page(list_page)
+
+        # Sub-page: the subscription form (replaces the old modal dialog)
+        self.editor = SubscriptionEditPage(self)
+        self.editor.save_requested.connect(self.editor_save_requested)
+        self.add_sub_page(self.editor)
+
         self.add_btn.clicked.connect(self.add_requested)
         self.update_all_btn.clicked.connect(lambda: self.update_all_requested.emit("auto"))
         self.check_btn.clicked.connect(self._emit_check)
@@ -511,7 +563,7 @@ class SubscriptionsPage(QWidget):
             self.table.setItem(row, 1, QTableWidgetItem(_profile_label(subscription.client_profile)))
             self.table.setItem(row, 2, QTableWidgetItem(str(counts.get(subscription.id, 0))))
             self.table.setItem(row, 3, QTableWidgetItem(_format_traffic(subscription)))
-            self.table.setItem(row, 4, QTableWidgetItem(_format_expire(subscription.info.expire)))
+            self.table.setItem(row, 4, QTableWidgetItem(_format_expire(subscription)))
             self.table.setItem(row, 5, QTableWidgetItem(_format_time(subscription.last_checked_at)))
             status = "Обновление…" if subscription.id in self._updating else subscription.last_error or "OK"
             status_item = QTableWidgetItem(status if len(status) <= 80 else f"{status[:77]}…")
@@ -527,6 +579,20 @@ class SubscriptionsPage(QWidget):
         if selected_id in self._row_ids:
             self.table.selectRow(self._row_ids.index(selected_id))
         self._sync_controls()
+
+    def open_editor(
+        self,
+        subscription: Subscription | None = None,
+        provider_names: list[str] | None = None,
+    ) -> None:
+        """Show the subscription form as a breadcrumb sub-page."""
+        self.editor.load(subscription, provider_names)
+        self.show_sub_page(self.editor)
+
+    def close_editor(self) -> None:
+        """Return to the list after a committed save (no dirty prompt)."""
+        self.editor.mark_clean()
+        self.show_root()
 
     def selected_id(self) -> str | None:
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
@@ -641,15 +707,21 @@ def _profile_label(profile: str) -> str:
 
 
 def _format_traffic(subscription: Subscription) -> str:
+    # Панели (в частности Marzban) шлют total=0 и как «безлимит», и как «нет данных».
+    # Отличаем одно от другого по тому, отвечал ли сервер хоть раз успешно.
     info = subscription.info
-    if info.total <= 0:
-        return _format_bytes(info.used) if info.used else "—"
-    return f"{_format_bytes(info.used)} / {_format_bytes(info.total)}"
+    if info.total > 0:
+        return f"{_format_bytes(info.used)} / {_format_bytes(info.total)}"
+    if info.used:
+        return f"{_format_bytes(info.used)} / Безлимит"
+    return "Безлимит" if subscription.last_success_at else "—"
 
 
-def _format_expire(timestamp: int) -> str:
+def _format_expire(subscription: Subscription) -> str:
+    timestamp = subscription.info.expire
     if timestamp <= 0:
-        return "—"
+        # expire=0 — это не 1 января 1970, а отсутствие срока действия.
+        return "Бессрочно" if subscription.last_success_at else "—"
     try:
         return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
     except (OverflowError, OSError, ValueError):

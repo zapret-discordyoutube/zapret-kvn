@@ -162,4 +162,6 @@ def set_selected_node(controller: AppController, node_id: str) -> None:
     controller.schedule_save()
     if controller.connected or controller._desired_connected:
         controller._desired_connected = True
+        if controller.connected and controller._try_hot_switch_selected_node():
+            return
         controller._request_transition("node switched")

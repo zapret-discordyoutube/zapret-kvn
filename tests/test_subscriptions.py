@@ -324,8 +324,14 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         for source, expected in cases:
             with self.subTest(source=source):
                 self.assertEqual(resolve_subscription_source(source), expected)
-        with self.assertRaisesRegex(SubscriptionFetchError, "не расшифровываются"):
+        # happ://crypt* теперь расшифровывается (см. tests/test_happ_crypt.py);
+        # непригодная нагрузка обязана давать доменную ошибку, а не трассировку.
+        with self.assertRaises(SubscriptionFetchError):
             resolve_subscription_source("happ://crypt3/opaque-payload")
+
+        # Зашифрованные deep links других клиентов по-прежнему не поддерживаются.
+        with self.assertRaisesRegex(SubscriptionFetchError, "не расшифровываются"):
+            resolve_subscription_source("v2raytun://crypt/opaque-payload")
 
     def test_client_profiles_send_only_explicit_stable_hwid_headers(self) -> None:
         default_headers = subscription_request_headers(Subscription())

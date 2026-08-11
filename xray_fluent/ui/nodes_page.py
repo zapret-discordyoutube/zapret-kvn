@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize
 from PyQt6.QtGui import QCursor, QKeyEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     ComboBox,
@@ -22,7 +22,10 @@ from qfluentwidgets import (
 from qfluentwidgets import RoundMenu, Action
 
 from ..models import Node, Subscription
+from .bulk_edit_page import BulkEditPage
+from .detail_page import StackedSection
 from .node_detail_widget import NodeDetailWidget
+from .node_edit_page import NodeEditPage
 from .nodes_filter_proxy import NodesFilterProxy, SORT_KEYS
 from .nodes_table_delegate import NodesActivityDelegate
 from .nodes_table_model import (
@@ -83,7 +86,7 @@ _ALL_SOURCES_LABEL = "Все источники"
 _PING_BATCH_INTERVAL_MS = 150
 
 
-class NodesPage(QWidget):
+class NodesPage(StackedSection):
     import_clipboard_requested = pyqtSignal()
     delete_requested = pyqtSignal(object)          # emits set[str] of node IDs
     ping_requested = pyqtSignal(object)             # emits set[str] or empty set
@@ -93,7 +96,9 @@ class NodesPage(QWidget):
     export_runtime_json_requested = pyqtSignal(str)
     selected_node_changed = pyqtSignal(str)
     edit_node_requested = pyqtSignal(str)           # node_id
+    node_edit_saved = pyqtSignal(str, dict)         # node_id, updated fields
     bulk_edit_requested = pyqtSignal(object)        # set[str] of node_ids
+    bulk_edit_applied = pyqtSignal(object, dict)    # set[str] node_ids, operations
     copy_link_requested = pyqtSignal(str)           # node_id
     reorder_requested = pyqtSignal(str, str)        # node_id, direction
     hide_subscription_nodes_requested = pyqtSignal(object)  # set[str]
@@ -120,13 +125,7 @@ class NodesPage(QWidget):
         self._pending_tag_filter: str | None = None
         self._pending_source_filter: str | None = None
 
-        # Stack: page 0 = server list, page 1 = node detail
-        self._stack = QStackedWidget(self)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self._stack)
-
-        # --- Page 0: Server list ---
+        # Root view = server list; sub-pages = detail / edit / bulk edit.
         list_page = QWidget()
         root = QVBoxLayout(list_page)
         root.setContentsMargins(24, 20, 24, 20)
@@ -300,15 +299,24 @@ class NodesPage(QWidget):
 
         root.addWidget(self.table, 1)
 
-        self._stack.addWidget(list_page)
+        self.set_root_page(list_page)
 
-        # --- Page 1: Node detail ---
+        # --- Sub-page: node detail ---
         self._detail_widget = NodeDetailWidget(self)
-        self._detail_widget.back_requested.connect(self._show_list)
         self._detail_widget.ping_node_requested.connect(lambda nid: self.ping_requested.emit({nid}))
         self._detail_widget.speed_test_node_requested.connect(lambda nid: self.speed_test_requested.emit({nid}))
         self._detail_widget.cancel_speed_test_requested.connect(self.cancel_speed_test_requested.emit)
-        self._stack.addWidget(self._detail_widget)
+        self.add_sub_page(self._detail_widget)
+
+        # --- Sub-page: single node editor (replaces the old modal dialog) ---
+        self._edit_page = NodeEditPage(self)
+        self._edit_page.save_requested.connect(self.node_edit_saved)
+        self.add_sub_page(self._edit_page)
+
+        # --- Sub-page: bulk editor (replaces the old modal dialog) ---
+        self._bulk_edit_page = BulkEditPage(self)
+        self._bulk_edit_page.apply_requested.connect(self.bulk_edit_applied)
+        self.add_sub_page(self._bulk_edit_page)
 
         # --- Search debounce ---
         self._search_timer = QTimer(self)
@@ -439,7 +447,7 @@ class NodesPage(QWidget):
 
     def refresh_detail(self, node_id: str | None = None) -> None:
         """Refresh detail view if it is currently visible."""
-        if self._stack.currentIndex() == 1:
+        if self._stack.currentWidget() is self._detail_widget:
             self._detail_widget.refresh(node_id)
 
     # ── Filter combos ──
@@ -864,14 +872,26 @@ class NodesPage(QWidget):
 
         menu.exec(QCursor.pos())
 
-    # ── Navigation (list / detail) ──
+    # ── Navigation (list / sub-pages) ──
+
+    def open_node_editor(self, node: Node, existing_groups: list[str]) -> None:
+        """Show the single-server editor as a breadcrumb sub-page."""
+        self._edit_page.set_node(node, existing_groups)
+        self.show_sub_page(self._edit_page)
+
+    def open_bulk_editor(self, node_ids: set[str], existing_groups: list[str]) -> None:
+        """Show the bulk editor as a breadcrumb sub-page."""
+        self._bulk_edit_page.set_targets(node_ids, existing_groups)
+        self.show_sub_page(self._bulk_edit_page)
+
+    def close_editor(self) -> None:
+        """Return to the list after a committed edit (no dirty prompt)."""
+        self._edit_page.mark_clean()
+        self.show_root()
 
     def _show_detail(self, node: Node) -> None:
         self._detail_widget.set_node(node)
-        self._stack.setCurrentIndex(1)
-
-    def _show_list(self) -> None:
-        self._stack.setCurrentIndex(0)
+        self.show_sub_page(self._detail_widget)
 
     # ── Utilities ──
 

@@ -64,6 +64,11 @@ def start_tun(
     if not controller.xray.start(controller.state.settings.xray_path, runtime.config):
         controller._active_core = prev_active_core
         return None
+    if not controller._pin_started_outbound(node, "xray", runtime.outbound_pool_tags):
+        controller.xray.stop()
+        controller._set_connection_status("error", "Xray не подтвердил выбранный outbound.", level="error")
+        controller._active_core = prev_active_core
+        return None
     route_ok = controller._xray_tun_routes.setup(runtime.tun_interface_name)
     if not route_ok:
         controller.xray.stop()
@@ -103,6 +108,11 @@ def start_proxy(
 
     controller._xray_api_port = runtime.api_port
     if not controller.xray.start(controller.state.settings.xray_path, runtime.config):
+        controller._active_core = prev_active_core
+        return None
+    if not controller._pin_started_outbound(node, "xray", runtime.outbound_pool_tags):
+        controller.xray.stop()
+        controller._set_connection_status("error", "Xray не подтвердил выбранный outbound.", level="error")
         controller._active_core = prev_active_core
         return None
 

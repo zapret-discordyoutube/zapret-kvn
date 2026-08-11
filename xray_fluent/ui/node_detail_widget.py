@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -13,66 +13,49 @@ from PyQt6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
-    BreadcrumbBar,
     CaptionLabel,
     CardWidget,
     FluentIcon as FIF,
     StrongBodyLabel,
-    SubtitleLabel,
     TableWidget,
     TransparentToolButton,
 )
 
-from ..country_flags import get_flag_icon
 from ..models import Node
+from .detail_page import DetailPage
 
 
-class NodeDetailWidget(QWidget):
-    back_requested = pyqtSignal()
+class NodeDetailWidget(DetailPage):
     ping_node_requested = pyqtSignal(str)       # node_id
     speed_test_node_requested = pyqtSignal(str)  # node_id
     cancel_speed_test_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
+        super().__init__(
+            "Серверы",
+            "Детали сервера",
+            parent,
+            root_key="nodes",
+            page_key="node-detail",
+        )
         self._node: Node | None = None
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        root = self.content_layout
 
-        # Breadcrumb navigation
-        self.breadcrumb = BreadcrumbBar(self)
-        self.breadcrumb.addItem("servers", "Серверы")
-        self.breadcrumb.addItem("detail", "Детали сервера")
-        self.breadcrumb.currentItemChanged.connect(self._on_breadcrumb)
-        root.addWidget(self.breadcrumb)
-
-        # Top bar: back button + title
-        top = QHBoxLayout()
-        self.back_btn = TransparentToolButton(FIF.RETURN, self)
-        self.back_btn.setToolTip("Назад к списку")
-        self.back_btn.clicked.connect(self.back_requested)
-        top.addWidget(self.back_btn)
-        self.title_label = SubtitleLabel("Детали сервера", self)
-        top.addWidget(self.title_label)
-        top.addStretch()
-
-        # Action buttons
+        # Action buttons in the shared header row
         self.ping_btn = TransparentToolButton(FIF.SEND, self)
         self.ping_btn.setToolTip("Пинг")
         self.ping_btn.clicked.connect(self._ping)
-        top.addWidget(self.ping_btn)
+        self.add_header_action(self.ping_btn)
         self.speed_btn = TransparentToolButton(FIF.SPEED_HIGH, self)
         self.speed_btn.setToolTip("Тест скорости")
         self.speed_btn.clicked.connect(self._speed_test)
-        top.addWidget(self.speed_btn)
+        self.add_header_action(self.speed_btn)
         self.stop_speed_btn = TransparentToolButton(FIF.PAUSE_BOLD, self)
         self.stop_speed_btn.setToolTip("Остановить тест скорости")
         self.stop_speed_btn.clicked.connect(self.cancel_speed_test_requested.emit)
         self.stop_speed_btn.setVisible(False)
-        top.addWidget(self.stop_speed_btn)
-        root.addLayout(top)
+        self.add_header_action(self.stop_speed_btn)
 
         # Info card
         self.info_card = CardWidget(self)
@@ -129,7 +112,7 @@ class NodeDetailWidget(QWidget):
 
     def set_node(self, node: Node) -> None:
         self._node = node
-        self._reset_breadcrumb()
+        self.set_page_label(node.name or "Без имени")
         self._refresh()
 
     def refresh(self, node_id: str | None = None) -> None:
@@ -148,7 +131,6 @@ class NodeDetailWidget(QWidget):
             return
 
         # Info
-        self.title_label.setText(node.name or "Без имени")
         self.name_label.setText(node.name or "Без имени")
 
         scheme = node.scheme.upper() if node.scheme else "?"
@@ -183,18 +165,6 @@ class NodeDetailWidget(QWidget):
             time_str = self._format_ts(ts)
             self.speed_table.setItem(row, 0, QTableWidgetItem(time_str))
             self.speed_table.setItem(row, 1, QTableWidgetItem("--" if spd is None else f"{spd:.1f} MB/s"))
-
-    def _on_breadcrumb(self, routeKey: str) -> None:
-        if routeKey == "servers":
-            self.back_requested.emit()
-
-    def _reset_breadcrumb(self) -> None:
-        """Reset breadcrumb to initial two-item state."""
-        self.breadcrumb.blockSignals(True)
-        self.breadcrumb.clear()
-        self.breadcrumb.addItem("servers", "Серверы")
-        self.breadcrumb.addItem("detail", "Детали сервера")
-        self.breadcrumb.blockSignals(False)
 
     def _ping(self) -> None:
         if self._node:

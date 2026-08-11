@@ -12,14 +12,12 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QSizePolicy,
-    QStackedWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
-    BreadcrumbBar,
     CaptionLabel,
     CardWidget,
     ComboBox,
@@ -32,7 +30,9 @@ from qfluentwidgets import (
 )
 
 from ..models import AppSettings, Node, RoutingSettings
+from ..proxy_manager import SystemProxyState
 from .base_page import ScrollablePage
+from .detail_page import DetailPage, StackedSection
 from .theme import success_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 
@@ -64,7 +64,7 @@ def _mode_title(mode: str) -> str:
     return mapping.get(mode, mode.title() or "Неизвестно")
 
 
-class DashboardPage(QWidget):
+class DashboardPage(StackedSection):
     toggle_connection_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)
     tun_toggled = pyqtSignal(bool)
@@ -82,6 +82,7 @@ class DashboardPage(QWidget):
         self._mode = "rule"
         self._settings = AppSettings()
         self._routing = RoutingSettings()
+        self._system_proxy_state: SystemProxyState | None = None
         self._selected_latency_ms: int | None = None
         self._live_rtt_ms: int | None = None
         self._proxy_socks_port = 0
@@ -101,16 +102,9 @@ class DashboardPage(QWidget):
         self._refresh_timer.setInterval(30)
         self._refresh_timer.timeout.connect(self._do_refresh_dashboard)
 
-        # ── Outer layout with QStackedWidget ──────────────────
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        self._stack = QStackedWidget(self)
-        outer.addWidget(self._stack)
-
-        # ── Page 0: main dashboard (scrollable, AC7) ──────────
+        # ── Root view: main dashboard (scrollable, AC7) ────────
         self._main_page = ScrollablePage()
-        self._stack.addWidget(self._main_page)
+        self.set_root_page(self._main_page)
 
         container = self._main_page.body
         root = self._main_page.body_layout
@@ -293,17 +287,16 @@ class DashboardPage(QWidget):
         root.addWidget(self._proc_traffic_card)
         root.addStretch(1)
 
-        # ── Page 1: traffic detail subpage (scrollable, AC7) ──
-        self._traffic_detail_page = ScrollablePage()
-        self._stack.addWidget(self._traffic_detail_page)
+        # ── Sub-page: traffic detail (scrollable, AC7) ──
+        self._traffic_detail_page = DetailPage(
+            "Панель управления",
+            "Трафик",
+            root_key="dashboard",
+            page_key="traffic",
+        )
+        self.add_sub_page(self._traffic_detail_page)
 
-        detail_layout = self._traffic_detail_page.body_layout
-
-        self._traffic_breadcrumb = BreadcrumbBar(self._traffic_detail_page)
-        self._traffic_breadcrumb.addItem("dashboard", "Панель управления")
-        self._traffic_breadcrumb.addItem("traffic", "Трафик")
-        self._traffic_breadcrumb.currentItemChanged.connect(self._on_traffic_breadcrumb)
-        detail_layout.addWidget(self._traffic_breadcrumb)
+        detail_layout = self._traffic_detail_page.content_layout
 
         self._detail_graph = DetailTrafficGraphWidget(self._traffic_detail_page)
         detail_layout.addWidget(self._detail_graph, 1)
@@ -321,17 +314,16 @@ class DashboardPage(QWidget):
         detail_stats_row.addStretch(1)
         detail_layout.addLayout(detail_stats_row)
 
-        # ── Page 2: process traffic detail subpage (scrollable, AC7) ──
-        self._proc_detail_page = ScrollablePage()
-        self._stack.addWidget(self._proc_detail_page)
+        # ── Sub-page: process traffic detail (scrollable, AC7) ──
+        self._proc_detail_page = DetailPage(
+            "Панель управления",
+            "Трафик по процессам",
+            root_key="dashboard",
+            page_key="processes",
+        )
+        self.add_sub_page(self._proc_detail_page)
 
-        proc_detail_layout = self._proc_detail_page.body_layout
-
-        self._proc_breadcrumb = BreadcrumbBar(self._proc_detail_page)
-        self._proc_breadcrumb.addItem("dashboard", "Панель управления")
-        self._proc_breadcrumb.addItem("processes", "Трафик по процессам")
-        self._proc_breadcrumb.currentItemChanged.connect(self._on_proc_breadcrumb)
-        proc_detail_layout.addWidget(self._proc_breadcrumb)
+        proc_detail_layout = self._proc_detail_page.content_layout
 
         self._proc_detail_table = TableWidget(self._proc_detail_page)
         self._proc_detail_table.setColumnCount(7)
@@ -364,7 +356,7 @@ class DashboardPage(QWidget):
         self.proxy_switch.checkedChanged.connect(self._on_proxy_toggled)
         self.toggle_btn.clicked.connect(self.toggle_connection_requested)
 
-        self._stack.setCurrentIndex(0)
+        self.show_root()
         self._refresh_dashboard()
 
     # ── Adaptive card grid (AC10) ─────────────────────────────
@@ -471,6 +463,16 @@ class DashboardPage(QWidget):
         self._sync_switches()
         self._refresh_dashboard()
 
+    def set_system_proxy_state(self, state: SystemProxyState | None) -> None:
+        """Реальное состояние системного прокси Windows (снимок из реестра).
+
+        На не-Windows (``supported=False``) переключатель по-прежнему отражает
+        сохранённый флаг ``enable_system_proxy``.
+        """
+        self._system_proxy_state = state
+        self._sync_switches()
+        self._refresh_dashboard()
+
     def set_routing_snapshot(self, routing: RoutingSettings) -> None:
         self._routing = routing
         self.set_mode(routing.mode)
@@ -489,7 +491,7 @@ class DashboardPage(QWidget):
         self._down_history.append(self._last_down_bps)
         self._up_history.append(self._last_up_bps)
         self.traffic_graph.add_point(self._last_down_bps, self._last_up_bps)
-        if self._stack.currentIndex() == 1:
+        if self._stack.currentWidget() is self._traffic_detail_page:
             self._detail_graph.add_point(self._last_down_bps, self._last_up_bps)
         self._refresh_dashboard()
 
@@ -500,7 +502,7 @@ class DashboardPage(QWidget):
             return
         self._last_process_stats = list(stats)
         self._apply_process_stats_to_table(self._proc_traffic_table, stats)
-        if self._stack.currentIndex() == 2:
+        if self._stack.currentWidget() is self._proc_detail_page:
             self._apply_process_stats_to_table(self._proc_detail_table, stats)
 
     def set_transition_busy(self, busy: bool) -> None:
@@ -534,11 +536,14 @@ class DashboardPage(QWidget):
         self._refresh_traffic_card()
         self._refresh_routing_card()
         self._apply_interaction_state()
-        if self._stack.currentIndex() == 1:
+        if self._stack.currentWidget() is self._traffic_detail_page:
             self._refresh_detail_stats()
 
     def _refresh_connection_card(self) -> None:
         state_title, status_text = self._connection_texts()
+        proxy_note = self._system_proxy_note()
+        if proxy_note:
+            status_text = f"{status_text} • {proxy_note}" if status_text else proxy_note
         self.connection_state_label.setText(state_title)
         self.connection_engine_label.setText(self._route_engine_label())
         self.connection_status_label.setText(status_text)
@@ -624,42 +629,17 @@ class DashboardPage(QWidget):
         """Switch to the traffic detail subpage."""
         self._detail_graph.set_data(self._down_history, self._up_history)
         self._refresh_detail_stats()
-        self._reset_traffic_breadcrumb()
-        self._stack.setCurrentIndex(1)
+        self.show_sub_page(self._traffic_detail_page)
 
     def _show_main_page(self) -> None:
         """Switch back to the main dashboard."""
-        self._stack.setCurrentIndex(0)
-
-    def _on_traffic_breadcrumb(self, routeKey: str) -> None:
-        if routeKey == "dashboard":
-            self._show_main_page()
-
-    def _reset_traffic_breadcrumb(self) -> None:
-        """Reset breadcrumb to initial two-item state."""
-        self._traffic_breadcrumb.blockSignals(True)
-        self._traffic_breadcrumb.clear()
-        self._traffic_breadcrumb.addItem("dashboard", "Панель управления")
-        self._traffic_breadcrumb.addItem("traffic", "Трафик")
-        self._traffic_breadcrumb.blockSignals(False)
+        self.show_root()
 
     # ── Process subpage navigation ──────────────────────────
 
     def _show_proc_page(self) -> None:
         self._update_proc_detail_table()
-        self._reset_proc_breadcrumb()
-        self._stack.setCurrentIndex(2)
-
-    def _on_proc_breadcrumb(self, routeKey: str) -> None:
-        if routeKey == "dashboard":
-            self._show_main_page()
-
-    def _reset_proc_breadcrumb(self) -> None:
-        self._proc_breadcrumb.blockSignals(True)
-        self._proc_breadcrumb.clear()
-        self._proc_breadcrumb.addItem("dashboard", "Панель управления")
-        self._proc_breadcrumb.addItem("processes", "Трафик по процессам")
-        self._proc_breadcrumb.blockSignals(False)
+        self.show_sub_page(self._proc_detail_page)
 
     def _update_proc_detail_table(self) -> None:
         """Refresh detail table from the latest cached process stats."""
@@ -738,6 +718,17 @@ class DashboardPage(QWidget):
     def _default_connection_message(self) -> str:
         action = "VPN" if self._settings.tun_mode else "Прокси"
         return f"{action} {'работает' if self._connected else 'остановлен'}"
+
+    def _system_proxy_note(self) -> str:
+        """Пояснение о реальном состоянии прокси Windows (чужой прокси / PAC)."""
+        state = self._system_proxy_state
+        if state is None or not state.supported:
+            return ""
+        if state.autoconfig_url:
+            return "PAC-скрипт активен в Windows"
+        if state.enabled and not state.is_ours:
+            return "Системный прокси: включён (другое приложение)"
+        return ""
 
     def _singbox_editor_summary(self) -> str:
         config_name = Path(self._settings.singbox_config_file or "default.json").name
@@ -820,9 +811,15 @@ class DashboardPage(QWidget):
         self.tun_switch.setText("Вкл" if self._settings.tun_mode else "Выкл")
         self.tun_switch.blockSignals(False)
 
+        proxy_on = self._settings.enable_system_proxy
+        state = self._system_proxy_state
+        if state is not None and state.supported and state.enabled and state.is_ours:
+            # Наш прокси реально активен в Windows — показываем «Вкл»,
+            # даже если сохранённый флаг ещё не синхронизирован.
+            proxy_on = True
         self.proxy_switch.blockSignals(True)
-        self.proxy_switch.setChecked(self._settings.enable_system_proxy)
-        self.proxy_switch.setText("Вкл" if self._settings.enable_system_proxy else "Выкл")
+        self.proxy_switch.setChecked(proxy_on)
+        self.proxy_switch.setText("Вкл" if proxy_on else "Выкл")
         self.proxy_switch.blockSignals(False)
         self._apply_interaction_state()
 

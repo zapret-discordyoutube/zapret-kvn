@@ -19,8 +19,15 @@ from ...constants import (
     PROXY_HOST,
     SINGBOX_CLASH_API_PORT,
     SINGBOX_XRAY_RELAY_PORT,
+    SINGBOX_PROVIDER_FILE,
     SS_PROTECT_PORT_END,
     SS_PROTECT_PORT_START,
+)
+from ...application.outbound_pool_service import (
+    SINGBOX_PROVIDER_TAG,
+    build_xray_outbound_pool,
+    ensure_xray_pool_control_plane,
+    singbox_outbound_tag,
 )
 from ...models import Node
 from .config_builder import build_singbox_outbound, is_singbox_endpoint_node
@@ -75,6 +82,8 @@ class SingboxXraySidecarPlan:
     protect_port: int
     protect_password: str
     config: dict[str, Any]
+    api_port: int = 0
+    outbound_pool_tags: dict[str, str] | None = None
 
 
 @dataclass(slots=True)
@@ -91,6 +100,9 @@ class SingboxRuntimePlan:
     socks_port: int = 0
     http_port: int = 0
     clash_api_port: int = 0
+    selector_tags: dict[str, str] | None = None
+    provider_payload: dict[str, Any] | None = None
+    selected_outbound_tag: str = ""
 
     @property
     def is_hybrid(self) -> bool:
@@ -189,6 +201,7 @@ def plan_singbox_runtime(
     preferred_relay_port: int = 0,
     preferred_protect_port: int = 0,
     preferred_protect_password: str = "",
+    pool_nodes: list[Node] | None = None,
 ) -> SingboxRuntimePlan:
     runtime_config = deepcopy(document.payload)
     strip_singbox_proxy_inbounds(runtime_config)
@@ -203,6 +216,7 @@ def plan_singbox_runtime(
         preferred_protect_port=preferred_protect_port,
         preferred_protect_password=preferred_protect_password,
         clash_api_port=clash_api_port,
+        pool_nodes=pool_nodes,
     )
 
 
@@ -214,6 +228,7 @@ def plan_singbox_proxy_runtime(
     preferred_relay_port: int = 0,
     preferred_protect_port: int = 0,
     preferred_protect_password: str = "",
+    pool_nodes: list[Node] | None = None,
 ) -> SingboxRuntimePlan:
     """Build the app-owned SOCKS/HTTP runtime from a raw sing-box profile."""
     runtime_config = deepcopy(document.payload)
@@ -237,6 +252,7 @@ def plan_singbox_proxy_runtime(
         socks_port=selection.socks_port,
         http_port=selection.http_port,
         clash_api_port=clash_api_port,
+        pool_nodes=pool_nodes,
     )
 
 
@@ -253,6 +269,7 @@ def _plan_runtime_outbound(
     socks_port: int = 0,
     http_port: int = 0,
     clash_api_port: int = 0,
+    pool_nodes: list[Node] | None = None,
 ) -> SingboxRuntimePlan:
 
     outbounds = runtime_config.get("outbounds")
@@ -328,6 +345,64 @@ def _plan_runtime_outbound(
             socks_port=socks_port,
             http_port=http_port,
             clash_api_port=clash_api_port,
+            pool_nodes=pool_nodes,
+        )
+
+    selector_tags: dict[str, str] = {}
+    provider_outbounds: list[dict[str, Any]] = []
+    for pooled in pool_nodes or []:
+        if is_singbox_endpoint_node(pooled):
+            continue
+        tag = singbox_outbound_tag(pooled.id)
+        try:
+            pooled_outbound = build_singbox_outbound(pooled, tag=tag)
+        except ValueError:
+            continue
+        selector_tags[pooled.id] = f"{SINGBOX_PROVIDER_TAG}/{tag}"
+        provider_outbounds.append(pooled_outbound)
+        _ensure_proxy_server_bootstrap_contract(runtime_config, pooled_outbound, pooled.server)
+
+    if node.id in selector_tags and provider_outbounds:
+        assert isinstance(outbounds, list)
+        outbounds[proxy_index] = {
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": ["direct"],
+            "providers": [SINGBOX_PROVIDER_TAG],
+            # Provider members are registered after selector construction, so
+            # startup uses an inert local target and the controller pins the
+            # selected provider member through Clash API before exposing TUN/
+            # system-proxy state.
+            "default": "direct",
+            "interrupt_exist_connections": True,
+        }
+        providers = _ensure_list(runtime_config, "providers")
+        _replace_or_append_tagged(
+            providers,
+            SINGBOX_PROVIDER_TAG,
+            {
+                "type": "local",
+                "tag": SINGBOX_PROVIDER_TAG,
+                "path": str(SINGBOX_PROVIDER_FILE),
+            },
+        )
+        _validate_runtime_dns_contract(runtime_config)
+        return SingboxRuntimePlan(
+            outcome="native_singbox",
+            source_path=document.source_path,
+            text_hash=document.text_hash,
+            singbox_config=runtime_config,
+            has_proxy_outbound=True,
+            used_selected_node=True,
+            xray_sidecar=None,
+            requested_socks_port=requested_socks_port,
+            requested_http_port=requested_http_port,
+            socks_port=socks_port,
+            http_port=http_port,
+            clash_api_port=clash_api_port,
+            selector_tags=selector_tags,
+            provider_payload={"outbounds": provider_outbounds},
+            selected_outbound_tag=selector_tags[node.id],
         )
 
     assert isinstance(outbounds, list)
@@ -364,6 +439,7 @@ def _plan_hybrid_runtime(
     socks_port: int = 0,
     http_port: int = 0,
     clash_api_port: int = 0,
+    pool_nodes: list[Node] | None = None,
 ) -> SingboxRuntimePlan:
     try:
         relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(
@@ -375,6 +451,11 @@ def _plan_hybrid_runtime(
             preferred=SS_PROTECT_PORT_START,
             port_range=range(SS_PROTECT_PORT_START, SS_PROTECT_PORT_END),
             excluded=excluded_ports,
+            allow_ephemeral_fallback=True,
+        )
+        api_port = _find_free_port(
+            preferred=19085,
+            excluded={relay_port, protect_port},
             allow_ephemeral_fallback=True,
         )
     except RuntimeError as exc:
@@ -414,20 +495,25 @@ def _plan_hybrid_runtime(
     _ensure_hybrid_protect_route(runtime_config)
     _validate_runtime_dns_contract(runtime_config)
 
+    sidecar_config, sidecar_tags = _build_xray_sidecar_config(
+        node,
+        pool_nodes=pool_nodes,
+        api_port=api_port,
+        relay_port=relay_port,
+        relay_username=relay_username,
+        relay_password=relay_password,
+        protect_port=protect_port,
+        protect_password=protect_password,
+    )
     sidecar = SingboxXraySidecarPlan(
         relay_port=relay_port,
         relay_username=relay_username,
         relay_password=relay_password,
         protect_port=protect_port,
         protect_password=protect_password,
-        config=_build_xray_sidecar_config(
-            node,
-            relay_port=relay_port,
-            relay_username=relay_username,
-            relay_password=relay_password,
-            protect_port=protect_port,
-            protect_password=protect_password,
-        ),
+        config=sidecar_config,
+        api_port=api_port,
+        outbound_pool_tags=sidecar_tags,
     )
     return SingboxRuntimePlan(
         outcome="hybrid_xray_sidecar",
@@ -442,35 +528,42 @@ def _plan_hybrid_runtime(
         socks_port=socks_port,
         http_port=http_port,
         clash_api_port=clash_api_port,
+        selector_tags=sidecar_tags,
+        selected_outbound_tag=sidecar_tags[node.id],
     )
 
 
 def _build_xray_sidecar_config(
     node: Node,
     *,
+    pool_nodes: list[Node] | None,
+    api_port: int,
     relay_port: int,
     relay_username: str,
     relay_password: str,
     protect_port: int,
     protect_password: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, str]]:
     if not isinstance(node.outbound, dict) or not node.outbound:
         raise ValueError("Выбранный сервер не содержит outbound JSON для xray sidecar.")
     if not str(node.outbound.get("protocol") or "").strip():
         raise ValueError("Выбранный сервер не содержит protocol для xray sidecar.")
-    proxy_outbound = deepcopy(node.outbound)
-    proxy_outbound["tag"] = "proxy"
-    stream_settings = proxy_outbound.get("streamSettings")
-    if not isinstance(stream_settings, dict):
-        stream_settings = {}
-        proxy_outbound["streamSettings"] = stream_settings
-    sockopt = stream_settings.get("sockopt")
-    if not isinstance(sockopt, dict):
-        sockopt = {}
-        stream_settings["sockopt"] = sockopt
-    sockopt["dialerProxy"] = _APP_XRAY_SIDECAR_PROTECT_OUTBOUND_TAG
+    pool = build_xray_outbound_pool(pool_nodes or [node])
+    if not pool.contains(node.id):
+        raise ValueError("Выбранный сервер нельзя добавить в Xray sidecar pool.")
+    proxy_outbounds = pool.outbounds()
+    for proxy_outbound in proxy_outbounds:
+        stream_settings = proxy_outbound.get("streamSettings")
+        if not isinstance(stream_settings, dict):
+            stream_settings = {}
+            proxy_outbound["streamSettings"] = stream_settings
+        sockopt = stream_settings.get("sockopt")
+        if not isinstance(sockopt, dict):
+            sockopt = {}
+            stream_settings["sockopt"] = sockopt
+        sockopt["dialerProxy"] = _APP_XRAY_SIDECAR_PROTECT_OUTBOUND_TAG
 
-    return {
+    config = {
         "log": {"loglevel": "warning"},
         "inbounds": [
             {
@@ -488,10 +581,17 @@ def _build_xray_sidecar_config(
                     "destOverride": ["http", "tls", "quic"],
                     "routeOnly": True,
                 },
-            }
+            },
+            {
+                "tag": "__app_sidecar_api_in",
+                "protocol": "dokodemo-door",
+                "listen": PROXY_HOST,
+                "port": api_port,
+                "settings": {"address": PROXY_HOST},
+            },
         ],
         "outbounds": [
-            proxy_outbound,
+            *proxy_outbounds,
             {
                 "tag": _APP_XRAY_SIDECAR_PROTECT_OUTBOUND_TAG,
                 "protocol": "shadowsocks",
@@ -506,7 +606,12 @@ def _build_xray_sidecar_config(
                     ]
                 },
             },
+            {"tag": "__app_sidecar_api", "protocol": "freedom", "settings": {}},
         ],
+        "api": {
+            "tag": "__app_sidecar_api",
+            "services": ["RoutingService", "HandlerService"],
+        },
         "routing": {
             "domainStrategy": "AsIs",
             "rules": [
@@ -514,10 +619,17 @@ def _build_xray_sidecar_config(
                     "type": "field",
                     "inboundTag": [_APP_XRAY_SIDECAR_RELAY_INBOUND_TAG],
                     "outboundTag": "proxy",
-                }
+                },
+                {
+                    "type": "field",
+                    "inboundTag": ["__app_sidecar_api_in"],
+                    "outboundTag": "__app_sidecar_api",
+                },
             ],
         },
     }
+    ensure_xray_pool_control_plane(config, pool)
+    return config, dict(pool.tags)
 
 
 def _is_domain_name(value: str) -> bool:

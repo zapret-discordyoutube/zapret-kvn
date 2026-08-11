@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BreadcrumbBar,
     BodyLabel,
     CaptionLabel,
     CardWidget,
@@ -12,46 +11,31 @@ from qfluentwidgets import (
     LineEdit,
     PlainTextEdit,
     PrimaryPushButton,
-    StrongBodyLabel,
-    TransparentToolButton,
 )
 
+from .detail_page import DetailPage
 
-class PresetEditWidget(QWidget):
-    back_requested = pyqtSignal()
+
+class PresetEditWidget(DetailPage):
     save_requested = pyqtSignal(str, str, str)  # name, description, content
 
     def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
+        super().__init__(
+            "Zapret",
+            "Редактирование пресета",
+            parent,
+            root_key="zapret",
+            page_key="preset-edit",
+        )
         self._original_content = ""
         self._original_name = ""
         self._original_description = ""
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        root = self.content_layout
 
-        # BreadcrumbBar
-        self.breadcrumb = BreadcrumbBar(self)
-        self.breadcrumb.addItem("zapret", "Zapret")
-        self.breadcrumb.addItem("edit", "Редактирование")
-        self.breadcrumb.currentItemChanged.connect(self._on_breadcrumb)
-        root.addWidget(self.breadcrumb)
-
-        # Top bar: back + title + save
-        top = QHBoxLayout()
-        top.setSpacing(8)
-        self.back_btn = TransparentToolButton(FIF.RETURN, self)
-        self.back_btn.setToolTip("Назад к списку")
-        self.back_btn.clicked.connect(self._on_back)
-        top.addWidget(self.back_btn)
-        self.title_label = StrongBodyLabel("Редактирование пресета", self)
-        top.addWidget(self.title_label)
-        top.addStretch()
         self.save_btn = PrimaryPushButton(FIF.SAVE, "Сохранить", self)
         self.save_btn.clicked.connect(self._on_save)
-        top.addWidget(self.save_btn)
-        root.addLayout(top)
+        self.add_header_action(self.save_btn)
 
         # Metadata card
         meta_card = CardWidget(self)
@@ -95,12 +79,7 @@ class PresetEditWidget(QWidget):
         self.name_edit.setText(name)
         self.desc_edit.setText(description)
         self.editor.setPlainText(content)
-        self.title_label.setText(f"Редактирование: {name}" if name else "Новый пресет")
-
-        # Update breadcrumb
-        self.breadcrumb.clear()
-        self.breadcrumb.addItem("zapret", "Zapret")
-        self.breadcrumb.addItem("edit", name or "Новый пресет")
+        self.set_page_label(name or "Новый пресет")
 
         # Meta info
         parts = []
@@ -130,21 +109,3 @@ class PresetEditWidget(QWidget):
         self._original_name = name
         self._original_description = desc
         self._original_content = content
-
-    def _on_back(self) -> None:
-        if self.is_dirty():
-            from qfluentwidgets import MessageBox
-            box = MessageBox(
-                "Несохранённые изменения",
-                "Выйти без сохранения?",
-                self.window(),
-            )
-            box.yesButton.setText("Выйти")
-            box.cancelButton.setText("Остаться")
-            if not box.exec():
-                return
-        self.back_requested.emit()
-
-    def _on_breadcrumb(self, key: str) -> None:
-        if key == "zapret":
-            self._on_back()

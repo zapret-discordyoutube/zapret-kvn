@@ -21,15 +21,13 @@ from ..models import AppSettings, Node, RoutingSettings, Subscription, Subscript
 from ..subscription_http import mask_subscription_url
 from ..app_updater import AppUpdate, UpdateChecker, UpdateDownloader
 from ..engines.xray import XrayCoreUpdateResult
-from .bulk_edit_dialog import BulkEditDialog
 from .dashboard_page import DashboardPage
 from .lock_dialog import PasswordDialog
 from .logs_page import LogsPage
-from .node_edit_dialog import NodeEditDialog
 from .nodes_page import NodesPage
 from .configs_page import ConfigsPage
 from .settings_page import SettingsPage
-from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionDialog, SubscriptionsPage
+from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
 from .theme import apply_theme, sync_system_theme_listener
@@ -200,11 +198,14 @@ class MainWindow(FluentWindow):
         self.nodes_page.export_outbound_json_requested.connect(self._export_outbound_json)
         self.nodes_page.export_runtime_json_requested.connect(self._export_runtime_json)
         self.nodes_page.edit_node_requested.connect(self._on_edit_node)
+        self.nodes_page.node_edit_saved.connect(self._on_node_edit_saved)
         self.nodes_page.bulk_edit_requested.connect(self._on_bulk_edit_nodes)
+        self.nodes_page.bulk_edit_applied.connect(self._on_bulk_edit_applied)
         self.nodes_page.view_prefs_changed.connect(self._on_nodes_view_prefs_changed)
 
         self.subscriptions_page.add_requested.connect(self._add_subscription)
         self.subscriptions_page.edit_requested.connect(self._edit_subscription)
+        self.subscriptions_page.editor_save_requested.connect(self._save_subscription_from_editor)
         self.subscriptions_page.update_requested.connect(
             lambda sid, mode: self.controller.update_subscription(sid, mode=mode)
         )
@@ -319,16 +320,7 @@ class MainWindow(FluentWindow):
         self.nodes_page.set_subscriptions(subscriptions)
 
     def _add_subscription(self) -> None:
-        dialog = SubscriptionDialog(parent=self)
-        if dialog.exec() != int(QDialog.DialogCode.Accepted):
-            return
-        try:
-            started = self.controller.add_subscription(dialog.subscription_value())
-        except Exception as exc:
-            self._show_status("error", str(exc))
-            return
-        if started:
-            self._show_status("info", "Проверяю подписку…")
+        self.subscriptions_page.open_editor(None)
 
     def _edit_subscription(self, subscription_id: str) -> None:
         subscription = self.controller.get_subscription(subscription_id)
@@ -339,14 +331,33 @@ class MainWindow(FluentWindow):
             for node in self.controller.state.nodes
             if node.subscription_id == subscription_id
         ]
-        dialog = SubscriptionDialog(subscription, self, provider_names=provider_names)
-        if dialog.exec() != int(QDialog.DialogCode.Accepted):
+        self.subscriptions_page.open_editor(subscription, provider_names)
+
+    def _save_subscription_from_editor(self, subscription_id: str) -> None:
+        """Commit the in-page subscription form (empty id = a new subscription).
+
+        On failure the sub-page stays open so the entered URL survives the error.
+        """
+        editor = self.subscriptions_page.editor
+        if not subscription_id:
+            try:
+                started = self.controller.add_subscription(editor.subscription_value())
+            except Exception as exc:
+                self._show_status("error", str(exc))
+                return
+            self.subscriptions_page.close_editor()
+            if started:
+                self._show_status("info", "Проверяю подписку…")
             return
+
         try:
-            changed = self.controller.update_subscription_definition(subscription_id, dialog.update_values())
+            changed = self.controller.update_subscription_definition(
+                subscription_id, editor.update_values()
+            )
         except Exception as exc:
             self._show_status("error", str(exc))
             return
+        self.subscriptions_page.close_editor()
         if changed:
             self.controller.update_subscription(subscription_id)
 
@@ -419,6 +430,8 @@ class MainWindow(FluentWindow):
 
     def _on_connection_changed(self, connected: bool) -> None:
         self.dashboard_page.set_connection(connected)
+        # Подключение/отключение меняет системный прокси — обновляем снимок.
+        self.dashboard_page.set_system_proxy_state(self.controller.query_system_proxy_state())
         if not connected:
             self._deferred_dashboard_metrics = None
             self._deferred_process_stats = None
@@ -444,6 +457,9 @@ class MainWindow(FluentWindow):
     def _on_settings_changed(self, settings: AppSettings) -> None:
         self.settings_page.set_values(settings, self.controller.state.security)
         self.settings_page.set_encryption_active(self.controller.is_data_encrypted())
+        # Сверяем дашборд с реальным состоянием прокси Windows (быстрое
+        # чтение реестра; на не-Windows вернётся supported=False).
+        self.dashboard_page.set_system_proxy_state(self.controller.query_system_proxy_state())
         self.dashboard_page.set_settings_snapshot(settings)
         self._apply_window_geometry(settings)
         self._apply_theme(settings.theme, settings.accent_color)
@@ -627,8 +643,17 @@ class MainWindow(FluentWindow):
         if added:
             self._show_status("success", f"Импортировано серверов: {added}")
         if errors:
-            preview = "; ".join(errors[:2])
-            self._show_status("warning", f"Некоторые ссылки не удалось импортировать: {preview}")
+            # Раньше показывались только первые две ошибки, остальные терялись молча —
+            # при импорте большой подписки это скрывало реальный масштаб проблемы.
+            for line in errors:
+                self.controller._log(f"[import] {line}")
+            preview = "; ".join(errors[:5])
+            if len(errors) > 5:
+                preview = f"{preview}; …ещё {len(errors) - 5} (полный список — на странице логов)"
+            self._show_status(
+                "warning-long",
+                f"Не удалось импортировать ссылок: {len(errors)}. {preview}",
+            )
         if not added and not errors:
             self._show_status("warning", "Новых серверов не импортировано")
 
@@ -665,21 +690,23 @@ class MainWindow(FluentWindow):
         node = self.controller._get_node_by_id(node_id)
         if not node:
             return
-        groups = self.controller.get_all_groups()
-        dialog = NodeEditDialog(node, groups, self)
-        if dialog.exec() == int(QDialog.DialogCode.Accepted):
-            self.controller.update_node(node_id, dialog.get_updated_fields())
+        self.nodes_page.open_node_editor(node, self.controller.get_all_groups())
+
+    def _on_node_edit_saved(self, node_id: str, fields: dict) -> None:
+        self.controller.update_node(node_id, fields)
+        self.nodes_page.close_editor()
+        self._show_status("success", "Сервер обновлён")
 
     def _on_bulk_edit_nodes(self, node_ids: set[str]) -> None:
         if not node_ids:
             return
-        groups = self.controller.get_all_groups()
-        dialog = BulkEditDialog(len(node_ids), groups, self)
-        if dialog.exec() == int(QDialog.DialogCode.Accepted):
-            ops = dialog.get_operations()
-            if ops["group"] or ops["add_tags"] or ops["remove_tags"]:
-                count = self.controller.bulk_update_nodes(node_ids, ops)
-                self._show_status("success", f"Обновлено серверов: {count}")
+        self.nodes_page.open_bulk_editor(node_ids, self.controller.get_all_groups())
+
+    def _on_bulk_edit_applied(self, node_ids: set[str], operations: dict) -> None:
+        self.nodes_page.close_editor()
+        if operations["group"] or operations["add_tags"] or operations["remove_tags"]:
+            count = self.controller.bulk_update_nodes(set(node_ids), operations)
+            self._show_status("success", f"Обновлено серверов: {count}")
 
     def _export_outbound_json(self, node_id: str) -> None:
         payload = self.controller.export_node_outbound_json(node_id)

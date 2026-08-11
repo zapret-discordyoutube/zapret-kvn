@@ -11,6 +11,7 @@ import urllib.request
 from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 from .constants import APP_VERSION, PROXY_HOST
+from .happ_crypt import HappCryptError, decrypt_happ_link, is_happ_crypt_link
 from .http_utils import build_opener
 from .models import Subscription
 
@@ -72,6 +73,9 @@ def resolve_subscription_source(value: str) -> tuple[str, str | None]:
     if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
         return text, None
 
+    if is_happ_crypt_link(text):
+        return _resolve_happ_crypt_source(text)
+
     if parsed.scheme.lower() in {"happ", "incy", "v2raytun"}:
         if "crypt" in parsed.netloc.lower() or parsed.path.lower().lstrip("/").startswith("crypt"):
             raise SubscriptionFetchError(
@@ -97,6 +101,22 @@ def resolve_subscription_source(value: str) -> tuple[str, str | None]:
                 return candidate, hint
     raise SubscriptionFetchError(
         "URL подписки должен использовать HTTP/HTTPS или открытую add/import-ссылку Happ, INCY, v2RayTun"
+    )
+
+
+def _resolve_happ_crypt_source(link: str) -> tuple[str, str]:
+    """Развернуть ``happ://crypt*`` в обычный URL подписки."""
+
+    try:
+        _, payload = decrypt_happ_link(link)
+    except HappCryptError as exc:
+        raise SubscriptionFetchError(str(exc)) from exc
+    candidate = _decode_wrapped_http_url(payload.strip())
+    inner = urlsplit(candidate)
+    if inner.scheme.lower() in {"http", "https"} and inner.hostname:
+        return candidate, "happ"
+    raise SubscriptionFetchError(
+        "Расшифрованная ссылка Happ не содержит адрес подписки HTTP/HTTPS"
     )
 
 
@@ -193,6 +213,28 @@ def mask_subscription_url(url: str) -> str:
     return urlunsplit((parsed.scheme, netloc, path, "", ""))
 
 
+def describe_http_failure(status: int, headers: dict[str, str]) -> str:
+    """Объяснить отказ сервера подписки.
+
+    Панели с лимитом устройств (Remnawave и совместимые) отвечают обычным 404 и
+    сообщают причину отдельным заголовком. Без их разбора пользователь видит
+    «HTTP 404» и не понимает, что упёрся в лимит устройств.
+    """
+
+    normalized = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
+    if "x-hwid-max-devices-reached" in normalized or "x-hwid-limit" in normalized:
+        return (
+            "Достигнут лимит устройств подписки. Отвяжите лишнее устройство "
+            "в личном кабинете или у провайдера"
+        )
+    if "x-hwid-not-supported" in normalized:
+        return (
+            "Провайдер требует идентификатор устройства (HWID). "
+            "Включите отправку HWID в настройках подписки"
+        )
+    return f"HTTP {status}"
+
+
 def sanitize_fetch_error(error: BaseException) -> str:
     text = str(error) or error.__class__.__name__
     text = re.sub(r"https?://[^\s'\"]+", "<URL скрыт>", text)
@@ -271,7 +313,9 @@ def _fetch_once(
                 not_modified=True,
                 via_proxy=via_proxy,
             )
-        raise SubscriptionFetchError(f"HTTP {exc.code}") from exc
+        raise SubscriptionFetchError(
+            describe_http_failure(exc.code, _response_headers(exc.headers))
+        ) from exc
     with response:
         final_url = response.geturl()
         if urlsplit(final_url).scheme.lower() not in {"http", "https"}:

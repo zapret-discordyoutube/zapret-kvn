@@ -249,8 +249,9 @@ def shutdown(controller: AppController) -> None:
     controller._xray_tun_routes.cleanup()
     if controller.zapret.running:
         controller.zapret.stop()
-    if controller.proxy.is_enabled():
-        controller.proxy.disable(restore_previous=True)
+    # Выключаем только наш прокси (или восстанавливаем из бэкапа):
+    # чужой/корпоративный прокси при завершении не трогаем.
+    controller.proxy.release_if_owned(restore_previous=True)
     controller._cleanup_tun_adapter()
     controller.network_monitor.stop()
     controller._lock_timer.stop()

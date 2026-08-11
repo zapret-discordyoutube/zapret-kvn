@@ -142,34 +142,15 @@ def _install_exception_hooks() -> None:
     atexit.register(_log_process_exit)
 
 
-def _looks_like_app_proxy(proxy_server: str) -> bool:
-    value = proxy_server.lower().replace(" ", "")
-    return (
-        "http=127.0.0.1:" in value
-        and "https=127.0.0.1:" in value
-        and "socks=127.0.0.1:" in value
-    )
-
-
 def _disable_system_proxy_on_exit() -> None:
-    """Safety net: always disable system proxy and clean up TUN adapter."""
+    """Safety net: restore OUR system proxy and clean up TUN adapter."""
     if sys.platform != "win32":
         return
-    # Disable system proxy
+    # Disable system proxy only when it is ours (or a backup exists to restore).
     try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                            0, winreg.KEY_READ) as key:
-            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
-            try:
-                proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
-            except FileNotFoundError:
-                proxy_server = ""
-        if int(enabled) == 1 and _looks_like_app_proxy(str(proxy_server or "")):
-            from xray_fluent.proxy_manager import ProxyManager
+        from xray_fluent.proxy_manager import ProxyManager
 
-            ProxyManager().disable(restore_previous=True)
+        if ProxyManager().release_if_owned(restore_previous=True):
             _bootstrap_logger.info("System proxy restored on exit (safety)")
     except Exception:
         pass
@@ -226,22 +207,9 @@ def _recover_system_proxy_from_previous_run() -> None:
     if sys.platform != "win32":
         return
     try:
-        import winreg
         from xray_fluent.proxy_manager import ProxyManager
 
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            0,
-            winreg.KEY_READ,
-        ) as key:
-            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
-            try:
-                proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
-            except FileNotFoundError:
-                proxy_server = ""
-        if int(enabled) == 1 and _looks_like_app_proxy(str(proxy_server or "")):
-            ProxyManager().disable(restore_previous=True)
+        if ProxyManager().release_if_owned(restore_previous=True):
             _bootstrap_logger.info("Recovered leaked system proxy from previous run")
     except Exception:
         _bootstrap_logger.exception("Failed to recover leaked system proxy")

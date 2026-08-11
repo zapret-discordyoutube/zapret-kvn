@@ -217,6 +217,70 @@ class SettingsPage(ScrollablePage):
         root.addWidget(auto_switch_group)
 
         # ============================================================
+        # Rotation
+        # ============================================================
+        rotation_group = SettingCardGroup("Ротация серверов", container)
+
+        self.rotation_card = SwitchSettingCard(
+            FIF.ROTATE, "Ротация серверов",
+            "Периодически менять выходной сервер. Работает в режиме TUN (tun2socks)",
+            parent=rotation_group,
+        )
+        self.rotation_mode_card = _ComboCard(
+            FIF.RIGHT_ARROW, "Порядок",
+            "Как выбирается следующий сервер пула",
+            [("Случайный", "random"), ("По очереди", "sequential")],
+            parent=rotation_group,
+        )
+        self.rotation_interval_card = _SpinCard(
+            FIF.STOP_WATCH, "Интервал (секунды)",
+            "Через сколько переключаться на следующий сервер",
+            min_val=30, max_val=86400, parent=rotation_group,
+        )
+        self.rotation_jitter_card = _SpinCard(
+            FIF.DICTIONARY_ADD, "Разброс интервала (%)",
+            "Случайное отклонение от интервала, чтобы переключения не были строго периодичными",
+            min_val=0, max_val=90, parent=rotation_group,
+        )
+        self.rotation_pool_card = _ComboCard(
+            FIF.FILTER, "Пул серверов",
+            "Из каких серверов набирается ротация",
+            [
+                ("Все серверы", "all"),
+                ("Группа", "group"),
+                ("Тег", "tag"),
+                ("Подписка", "subscription"),
+            ],
+            parent=rotation_group,
+        )
+        self.rotation_pool_value_card = _LineEditCard(
+            FIF.TAG, "Значение пула",
+            "Имя группы, тег или идентификатор подписки; для «Все серверы» не нужно",
+            placeholder="например: Нидерланды",
+            parent=rotation_group,
+        )
+        self.rotation_only_alive_card = SwitchSettingCard(
+            FIF.HEART, "Только живые серверы",
+            "Не брать в ротацию серверы, помеченные недоступными по результатам проверки",
+            parent=rotation_group,
+        )
+        self.rotation_max_nodes_card = _SpinCard(
+            FIF.MENU, "Максимум серверов в пуле",
+            "Все они попадают в конфиг ядра, поэтому размер пула ограничен",
+            min_val=2, max_val=50, parent=rotation_group,
+        )
+
+        rotation_group.addSettingCard(self.rotation_card)
+        rotation_group.addSettingCard(self.rotation_mode_card)
+        rotation_group.addSettingCard(self.rotation_interval_card)
+        rotation_group.addSettingCard(self.rotation_jitter_card)
+        rotation_group.addSettingCard(self.rotation_pool_card)
+        rotation_group.addSettingCard(self.rotation_pool_value_card)
+        rotation_group.addSettingCard(self.rotation_only_alive_card)
+        rotation_group.addSettingCard(self.rotation_max_nodes_card)
+        root.addWidget(rotation_group)
+
+        # ============================================================
         # Core paths
         # ============================================================
         paths_group = SettingCardGroup("Пути к ядрам", container)
@@ -438,6 +502,15 @@ class SettingsPage(ScrollablePage):
         self.auto_switch_delay_card.spin.valueChanged.connect(self._auto_save)
         self.auto_switch_cooldown_card.spin.valueChanged.connect(self._auto_save)
 
+        self.rotation_card.checkedChanged.connect(self._auto_save)
+        self.rotation_mode_card.combo.currentIndexChanged.connect(self._auto_save)
+        self.rotation_interval_card.spin.valueChanged.connect(self._auto_save)
+        self.rotation_jitter_card.spin.valueChanged.connect(self._auto_save)
+        self.rotation_pool_card.combo.currentIndexChanged.connect(self._auto_save)
+        self.rotation_pool_value_card.edit.editingFinished.connect(self._auto_save)
+        self.rotation_only_alive_card.checkedChanged.connect(self._auto_save)
+        self.rotation_max_nodes_card.spin.valueChanged.connect(self._auto_save)
+
         self.auto_lock_card.spin.valueChanged.connect(self._auto_save)
 
     # ================================================================
@@ -487,6 +560,15 @@ class SettingsPage(ScrollablePage):
         self.auto_switch_threshold_card.spin.setValue(settings.auto_switch_threshold_kbps)
         self.auto_switch_delay_card.spin.setValue(settings.auto_switch_delay_sec)
         self.auto_switch_cooldown_card.spin.setValue(settings.auto_switch_cooldown_sec)
+
+        self.rotation_card.setChecked(settings.rotation_enabled)
+        self._select_combo_data(self.rotation_mode_card.combo, settings.rotation_mode)
+        self.rotation_interval_card.spin.setValue(settings.rotation_interval_sec)
+        self.rotation_jitter_card.spin.setValue(settings.rotation_jitter_pct)
+        self._select_combo_data(self.rotation_pool_card.combo, settings.rotation_pool)
+        self.rotation_pool_value_card.edit.setText(settings.rotation_pool_value)
+        self.rotation_only_alive_card.setChecked(settings.rotation_only_alive)
+        self.rotation_max_nodes_card.spin.setValue(settings.rotation_max_nodes)
 
         self.auto_lock_card.spin.setValue(security.auto_lock_minutes)
         self.password_card.edit.clear()
@@ -583,6 +665,14 @@ class SettingsPage(ScrollablePage):
         data.auto_switch_threshold_kbps = int(self.auto_switch_threshold_card.spin.value())
         data.auto_switch_delay_sec = int(self.auto_switch_delay_card.spin.value())
         data.auto_switch_cooldown_sec = int(self.auto_switch_cooldown_card.spin.value())
+        data.rotation_enabled = self.rotation_card.isChecked()
+        data.rotation_mode = str(self.rotation_mode_card.combo.currentData() or "random")
+        data.rotation_interval_sec = int(self.rotation_interval_card.spin.value())
+        data.rotation_jitter_pct = int(self.rotation_jitter_card.spin.value())
+        data.rotation_pool = str(self.rotation_pool_card.combo.currentData() or "all")
+        data.rotation_pool_value = self.rotation_pool_value_card.edit.text().strip()
+        data.rotation_only_alive = self.rotation_only_alive_card.isChecked()
+        data.rotation_max_nodes = int(self.rotation_max_nodes_card.spin.value())
         self.save_requested.emit(data)
         self.auto_lock_minutes_changed.emit(int(self.auto_lock_card.spin.value()))
 

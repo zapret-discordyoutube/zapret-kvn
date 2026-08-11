@@ -30,6 +30,7 @@ class ActiveSessionSnapshot:
     protect_ss_password: str
     ping_host: str
     ping_port: int
+    outbound_pool_tags: dict[str, str] | None = None
 
 
 @dataclass(slots=True)
@@ -49,6 +50,7 @@ class XrayRuntimeConfig:
     inbound_tags: tuple[str, ...]
     ping_host: str
     ping_port: int
+    outbound_pool_tags: dict[str, str] | None = None
 
     @property
     def proxy_ports_changed(self) -> bool:
@@ -87,6 +89,7 @@ def build_active_session_snapshot(
     protect_ss_password: str,
     ping_host: str,
     ping_port: int,
+    outbound_pool_tags: dict[str, str] | None = None,
 ) -> ActiveSessionSnapshot:
     return ActiveSessionSnapshot(
         node_id=node_id,
@@ -112,4 +115,5 @@ def build_active_session_snapshot(
         protect_ss_password=protect_ss_password,
         ping_host=ping_host,
         ping_port=ping_port,
+        outbound_pool_tags=dict(outbound_pool_tags or {}),
     )

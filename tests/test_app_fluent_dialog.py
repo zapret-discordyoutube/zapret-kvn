@@ -30,12 +30,9 @@ app = _existing or QApplication([])
 
 from qfluentwidgets import Theme, qconfig, setTheme
 
-from xray_fluent.models import Node
-from xray_fluent.ui.bulk_edit_dialog import BulkEditDialog
 from xray_fluent.ui.fluent_dialog import FluentDialog
 from xray_fluent.ui.lock_dialog import PasswordDialog
-from xray_fluent.ui.node_edit_dialog import NodeEditDialog
-from xray_fluent.ui.subscriptions_page import SubscriptionDeleteDialog, SubscriptionDialog
+from xray_fluent.ui.subscriptions_page import SubscriptionDeleteDialog
 from xray_fluent.ui.theme import surface_color
 from xray_fluent.ui.traffic_graph import TrafficGraphDialog
 
@@ -50,14 +47,11 @@ class FluentDialogThemeTest(unittest.TestCase):
         setTheme(self._saved_theme)
         QApplication.processEvents()
 
-    def test_all_six_dialogs_inherit_fluent_dialog(self) -> None:
-        node = Node(name="n", server="example.com", port=443, scheme="vless")
+    def test_remaining_dialogs_inherit_fluent_dialog(self) -> None:
+        """Only short prompts stay modal; large forms are breadcrumb sub-pages."""
         dialogs = [
             PasswordDialog(),
-            NodeEditDialog(node, ["g"]),
-            BulkEditDialog(2, []),
             TrafficGraphDialog(deque(), deque()),
-            SubscriptionDialog(),
             SubscriptionDeleteDialog("x"),
         ]
         for dialog in dialogs:

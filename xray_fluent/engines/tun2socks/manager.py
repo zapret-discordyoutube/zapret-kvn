@@ -46,7 +46,9 @@ class Tun2SocksManager(QObject):
         self._process.finished.connect(self._on_finished)
         self._running = False
         self._stop_requested = False
-        self._server_ip: str = ""
+        # Все прокси-серверы, для которых нужен обходной маршрут мимо туннеля.
+        # При активной ротации это весь пул, а не только текущий сервер.
+        self._server_ips: list[str] = []
         self._orig_gateway: str = ""
         self._tun_idx: str = ""
         self._helper_routes: list[list[str]] = []
@@ -55,13 +57,32 @@ class Tun2SocksManager(QObject):
     def is_running(self) -> bool:
         return self._running
 
-    def start(self, socks_port: int, *, username: str = "", password: str = "", server_ip: str = "") -> bool:
+    @staticmethod
+    def _collect_server_ips(server_ip: str, server_ips: list[str] | None) -> list[str]:
+        """Уникальные адреса серверов с сохранением порядка; текущий идёт первым."""
+
+        ordered: list[str] = []
+        for candidate in [server_ip, *(server_ips or [])]:
+            value = str(candidate or "").strip()
+            if value and value not in ordered:
+                ordered.append(value)
+        return ordered
+
+    def start(
+        self,
+        socks_port: int,
+        *,
+        username: str = "",
+        password: str = "",
+        server_ip: str = "",
+        server_ips: list[str] | None = None,
+    ) -> bool:
         exe = TUN2SOCKS_PATH_DEFAULT
         if not exe.is_file():
             self.error.emit(f"tun2socks.exe not found: {exe}")
             return False
 
-        self._server_ip = server_ip
+        self._server_ips = self._collect_server_ips(server_ip, server_ips)
 
         if self._process.state() != QProcess.ProcessState.NotRunning:
             if not self.stop(expected=True):
@@ -192,8 +213,8 @@ class Tun2SocksManager(QObject):
             )
 
             cmds: list[list[str]] = []
-            if self._server_ip:
-                cmds.append(["route", "add", self._server_ip, "mask", "255.255.255.255", orig_gw, "metric", "1"])
+            for server_ip in self._server_ips:
+                cmds.append(["route", "add", server_ip, "mask", "255.255.255.255", orig_gw, "metric", "1"])
             helper_routes = [
                 [orig_gw, "255.255.255.255"],
                 ["192.168.0.0", "255.255.0.0"],
@@ -213,8 +234,8 @@ class Tun2SocksManager(QObject):
                 ["netsh", "interface", "ipv4", "delete", "route", "128.0.0.0/1", f"interface={tun_idx}"],
                 ["netsh", "interface", "ipv6", "delete", "route", "::/0", f"interface={tun_idx}"],
             ]
-            if self._server_ip:
-                cleanup_cmds.append(["route", "delete", self._server_ip])
+            for server_ip in self._server_ips:
+                cleanup_cmds.append(["route", "delete", server_ip])
             for destination, mask, gateway in self._helper_routes:
                 cleanup_cmds.append(["route", "delete", destination, "mask", mask, gateway])
 
@@ -293,8 +314,8 @@ class Tun2SocksManager(QObject):
                     ["netsh", "interface", "ipv4", "delete", "route", "128.0.0.0/1", f"interface={self._tun_idx}"],
                     ["netsh", "interface", "ipv6", "delete", "route", "::/0", f"interface={self._tun_idx}"],
                 ]
-            if self._server_ip:
-                cmds.append(["route", "delete", self._server_ip])
+            for server_ip in self._server_ips:
+                cmds.append(["route", "delete", server_ip])
             for destination, mask, gateway in self._helper_routes:
                 cmds.append(["route", "delete", destination, "mask", mask, gateway])
             if not self._run_delete_commands_batched(cmds):

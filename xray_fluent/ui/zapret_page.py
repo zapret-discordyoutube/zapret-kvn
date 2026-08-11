@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView,
-    QStackedWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
@@ -28,6 +28,7 @@ from qfluentwidgets import (
 from qfluentwidgets import RoundMenu, Action
 
 from ..zapret_manager import PresetInfo, ZapretManager
+from .detail_page import StackedSection
 from .preset_edit_widget import PresetEditWidget
 from .theme import success_color, token_pair
 
@@ -40,7 +41,7 @@ def _status_qss(token: str) -> tuple[str, str]:
     )
 
 
-class ZapretPage(QWidget):
+class ZapretPage(StackedSection):
     start_requested = pyqtSignal(str)   # preset name
     stop_requested = pyqtSignal()
 
@@ -52,13 +53,7 @@ class ZapretPage(QWidget):
         self._running = False
         self._active_preset = ""
 
-        # ── Stack: page 0 = list, page 1 = editor ──
-        self._stack = QStackedWidget(self)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self._stack)
-
-        # ══════════════ Page 0: Preset list ══════════════
+        # ══════════════ Root view: preset list ══════════════
         list_page = QWidget()
         root = QVBoxLayout(list_page)
         root.setContentsMargins(24, 20, 24, 20)
@@ -148,11 +143,11 @@ class ZapretPage(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         root.addWidget(self.table, 1)
 
-        self._stack.addWidget(list_page)
+        self.set_root_page(list_page)
 
-        # ══════════════ Page 1: Editor ══════════════
+        # ══════════════ Sub-page: preset editor ══════════════
         self._editor = PresetEditWidget(self)
-        self._stack.addWidget(self._editor)
+        self.add_sub_page(self._editor)
 
         # ── Signals ──
         self.add_btn.clicked.connect(self._on_create)
@@ -163,7 +158,6 @@ class ZapretPage(QWidget):
         self.stop_btn.clicked.connect(self._on_stop)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
-        self._editor.back_requested.connect(self._show_list)
         self._editor.save_requested.connect(self._on_save_preset)
         # Re-resolve the theme-dependent row brushes on theme change.
         qconfig.themeChanged.connect(self._on_theme_changed)
@@ -275,7 +269,7 @@ class ZapretPage(QWidget):
 
     def _on_create(self) -> None:
         self._editor.set_preset("", "", "")
-        self._stack.setCurrentIndex(1)
+        self.show_sub_page(self._editor)
 
     def _on_import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -305,16 +299,13 @@ class ZapretPage(QWidget):
         ZapretManager.save_preset(name, content, description)
         self.refresh_presets()
         self._reload_table(name)
-        self._show_list()
+        self.show_root()
 
     def _open_editor(self, info: PresetInfo) -> None:
         content = ZapretManager.read_preset(info.name)
         self._editor.set_preset(info.name, info.description, content,
                                 info.created, info.modified)
-        self._stack.setCurrentIndex(1)
-
-    def _show_list(self) -> None:
-        self._stack.setCurrentIndex(0)
+        self.show_sub_page(self._editor)
 
     def _on_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)

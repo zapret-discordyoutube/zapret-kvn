@@ -166,7 +166,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
 
     def test_xray_sidecar_uses_os_assigned_ports_when_preferred_ranges_are_reserved(self) -> None:
         class ReservedRangeSocket:
-            assigned_ports = iter((55000, 55001))
+            assigned_ports = iter((55000, 55001, 55002))
 
             def __init__(self, *_args, **_kwargs) -> None:
                 self.port = 0
@@ -208,6 +208,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(plan.xray_sidecar)
         self.assertEqual(plan.xray_sidecar.relay_port, 55000)
         self.assertEqual(plan.xray_sidecar.protect_port, 55001)
+        self.assertEqual(plan.xray_sidecar.api_port, 55002)
 
     def test_xray_sidecar_port_failure_is_reported_as_planner_error(self) -> None:
         class UnavailableSocket:

@@ -63,6 +63,8 @@ def start_tun(
         )
         controller._active_core = prev_active_core
         return None
+    rotation = controller.rotation_plan()
+    outbound_pool = controller.xray_outbound_pool()
     config = build_xray_config(
         node,
         controller.state.routing,
@@ -70,6 +72,8 @@ def start_tun(
         api_port=controller._xray_api_port,
         socks_port=socks_port,
         http_port=DEFAULT_HTTP_PORT,
+        rotation=rotation,
+        outbound_pool=outbound_pool,
     )
     config["log"] = {"loglevel": "error"}
     proxy_username = controller._tun2socks_proxy_username
@@ -96,14 +100,24 @@ def start_tun(
         controller._tun2socks_proxy_username = ""
         controller._tun2socks_proxy_password = ""
         return None
+    if not controller._pin_started_outbound(node, "xray", outbound_pool.tags):
+        controller.xray.stop()
+        controller._set_connection_status("error", "Xray не подтвердил выбранный outbound.", level="error")
+        controller._active_core = prev_active_core
+        return None
     controller._set_connection_status("starting", "Xray запущен. Создание TUN адаптера...", level="info")
 
     controller._log(f"[tun] starting tun2socks -> SOCKS 127.0.0.1:{socks_port}")
+    # Трафик к самим прокси-серверам обязан идти мимо туннеля, иначе получается петля.
+    # При ротации активным по очереди становится любой сервер пула — обходной маршрут
+    # нужен сразу для всех, а не только для текущего.
+    server_ips = [pooled.server for pooled in outbound_pool.nodes]
     tun_ok = controller.tun2socks.start(
         socks_port,
         username=proxy_username,
         password=proxy_password,
         server_ip=node.server,
+        server_ips=server_ips,
     )
     controller._log(f"[tun] tun2socks start result: {tun_ok}")
     if not tun_ok:
@@ -164,6 +178,8 @@ def hot_swap_steps(controller: AppController, reason: str, node: Node) -> Transi
             api_port=controller._xray_api_port,
             socks_port=socks_port,
             http_port=DEFAULT_HTTP_PORT,
+            rotation=controller.rotation_plan(),
+            outbound_pool=controller.xray_outbound_pool(),
         )
         config["log"] = {"loglevel": "error"}
         strip_xray_proxy_inbounds(config, keep_tags={"socks-in"})

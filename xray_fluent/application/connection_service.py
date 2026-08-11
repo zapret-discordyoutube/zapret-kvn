@@ -115,8 +115,9 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
                 )
                 return False
 
-            if controller.proxy.is_enabled():
-                controller.proxy.disable(restore_previous=True)
+            # Перед TUN принудительно убираем только НАШ системный прокси
+            # (или восстанавливаем бэкап); чужой прокси не отключаем.
+            controller.proxy.release_if_owned(restore_previous=True)
 
             controller._tun_log_count = 0
             engine = controller.state.settings.tun_engine
@@ -170,6 +171,31 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
         if session_node is not None:
             session_node.last_used_at = datetime.now(timezone.utc).isoformat()
 
+        outbound_pool_tags = (
+            runtime_xray.outbound_pool_tags
+            if runtime_xray is not None
+            else singbox_plan.selector_tags
+            if singbox_plan is not None
+            else controller.xray_outbound_pool().tags
+            if controller._active_core == "tun2socks"
+            else None
+        )
+        control_core = (
+            "xray"
+            if singbox_plan is not None and singbox_plan.is_hybrid
+            else "singbox"
+            if controller._active_core == "singbox"
+            else "xray"
+        )
+        if not controller._pin_started_outbound(session_node, control_core, outbound_pool_tags):
+            controller._set_connection_status(
+                "error",
+                "Ядро запущено, но не подтвердило выбор активного сервера.",
+                level="error",
+            )
+            controller._stop_active_connection_processes(disable_proxy=True)
+            return False
+
         controller._set_connection_status(
             "running",
             f"Подключено: {session_label}"
@@ -222,6 +248,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
                     session_node,
                 )[1]
             ),
+            outbound_pool_tags=outbound_pool_tags,
         )
         controller.schedule_save()
         session_mode = "xray-tun" if tun and controller._active_core == "xray" else controller._active_core
