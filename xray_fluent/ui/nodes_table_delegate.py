@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QRect, Qt
-from PyQt6.QtGui import QPainter, QPalette, QPen
-from PyQt6.QtWidgets import QAbstractItemView, QStyle
+from PyQt6.QtGui import QColor, QPainter, QPalette, QPen
+from PyQt6.QtWidgets import QAbstractItemView
 from qfluentwidgets import TableItemDelegate, themeColor
 
 from .nodes_table_model import ACTIVE_ROLE, COL_NAME, PING_BUSY_ROLE, SPEED_PROGRESS_ROLE
+from .theme import text_muted_color
 
 _ACTIVE_STRIPE_WIDTH = 3
 
@@ -40,21 +41,26 @@ class NodesActivityDelegate(TableItemDelegate):
             color = option.palette.color(QPalette.ColorRole.Highlight)
         stripe = QRect(
             option.rect.left(),
-            option.rect.top() + 2,
+            option.rect.top() + 6,
             _ACTIVE_STRIPE_WIDTH,
-            option.rect.height() - 4,
+            option.rect.height() - 12,
         )
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
-        painter.drawRect(stripe)
+        painter.drawRoundedRect(stripe, 1.5, 1.5)
         painter.restore()
 
     def _paint_spinner(self, painter: QPainter, option) -> None:
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        color_role = QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Highlight
-        pen = QPen(option.palette.color(color_role), 2)
+        # option.palette is not synchronized with the fluent theme — use the
+        # accent color from qfluentwidgets instead of QPalette.Highlight.
+        try:
+            color = themeColor()
+        except Exception:
+            color = option.palette.color(QPalette.ColorRole.Highlight)
+        pen = QPen(color, 2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
 
@@ -74,7 +80,7 @@ class NodesActivityDelegate(TableItemDelegate):
         track = QRect(0, 0, bar_width, 6)
         track.moveCenter(option.rect.center())
 
-        track_color = option.palette.color(QPalette.ColorRole.Mid)
+        track_color = QColor(text_muted_color())
         track_color.setAlpha(80)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(track_color)
@@ -84,6 +90,10 @@ class NodesActivityDelegate(TableItemDelegate):
         if fill_width > 0:
             fill = QRect(track)
             fill.setWidth(fill_width)
-            painter.setBrush(option.palette.color(QPalette.ColorRole.Highlight))
+            try:
+                fill_color = themeColor()
+            except Exception:
+                fill_color = option.palette.color(QPalette.ColorRole.Highlight)
+            painter.setBrush(fill_color)
             painter.drawRoundedRect(fill, 3, 3)
         painter.restore()

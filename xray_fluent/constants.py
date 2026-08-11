@@ -5,7 +5,7 @@ import sys
 
 
 APP_NAME = "zapret kvn"
-APP_VERSION = "0.4.78"
+APP_VERSION = "0.4.79"
 STATE_SCHEMA_VERSION = 2
 
 PROXY_HOST = "127.0.0.1"
@@ -28,6 +28,7 @@ def get_base_dir() -> Path:
 
 BASE_DIR = get_base_dir()
 ASSETS_DIR = BASE_DIR / "assets"
+FLAGS_DIR = ASSETS_DIR / "flags"
 APP_ICON_PATH = ASSETS_DIR / "app_icon.png"
 TEMPLATE_UPDATE_BUNDLE_DIR = ASSETS_DIR / "template-update"
 DATA_DIR = BASE_DIR / "data"

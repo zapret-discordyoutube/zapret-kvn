@@ -34,7 +34,9 @@ from xray_fluent.subscription_http import (
     default_subscription_user_agent,
     fetch_subscription,
     mask_subscription_url,
+    resolve_subscription_source,
     sanitize_fetch_error,
+    subscription_request_headers,
 )
 from xray_fluent.subscription_parser import (
     SubscriptionParseError,
@@ -309,6 +311,48 @@ class SubscriptionReconcileTests(unittest.TestCase):
 
 
 class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
+    def test_open_client_deep_links_are_unwrapped_and_encrypted_happ_is_rejected(self) -> None:
+        target = "https://sub.example/list?token=secret"
+        encoded = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+        cases = (
+            (target, (target, None)),
+            (f"happ://add/{target}", (target, "happ")),
+            (f"incy://import/{target}", (target, "incy")),
+            (f"incy://import/{encoded}", (target, "incy")),
+            (f"v2raytun://import/{target}", (target, "v2raytun")),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(resolve_subscription_source(source), expected)
+        with self.assertRaisesRegex(SubscriptionFetchError, "не расшифровываются"):
+            resolve_subscription_source("happ://crypt3/opaque-payload")
+
+    def test_client_profiles_send_only_explicit_stable_hwid_headers(self) -> None:
+        default_headers = subscription_request_headers(Subscription())
+        self.assertEqual(default_headers["User-Agent"], default_subscription_user_agent())
+        self.assertNotIn("X-HWID", default_headers)
+
+        subscription = Subscription(
+            client_profile="incy",
+            send_hwid=True,
+            hwid="DEVICE-ID-123",
+        )
+        headers = subscription_request_headers(subscription)
+        self.assertEqual(headers["User-Agent"], "INCY/1.0/Windows")
+        self.assertEqual(headers["X-HWID"], "DEVICE-ID-123")
+        self.assertEqual(headers["X-Device-ID"], "DEVICE-ID-123")
+        self.assertEqual(headers["X-Client"], "INCY")
+        self.assertEqual(headers["X-Device-OS"], "Windows")
+        self.assertNotIn("X-Real-IP", headers)
+        self.assertNotIn("X-Forwarded-For", headers)
+
+        with self.assertRaises(SubscriptionFetchError):
+            subscription_request_headers(Subscription(user_agent="bad\r\nInjected: yes"))
+        with self.assertRaises(SubscriptionFetchError):
+            subscription_request_headers(
+                Subscription(send_hwid=True, hwid="bad\nvalue")
+            )
+
     def test_interval_override_and_backoff(self) -> None:
         now = datetime.now(timezone.utc)
         subscription = Subscription(
@@ -437,8 +481,21 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
         self.assertEqual(legacy.schema_version, 1)
         self.assertIsNone(legacy.nodes[0].subscription_id)
 
-        subscription = Subscription(id="sub", name="Private", url="https://sub.example/?token=secret")
+        subscription = Subscription(
+            id="sub",
+            name="Private",
+            url="https://sub.example/?token=secret",
+            client_profile="happ",
+            send_hwid=True,
+            hwid="OWN-DEVICE-ID",
+        )
         state = AppState(schema_version=STATE_SCHEMA_VERSION, subscriptions=[subscription])
+        state_data = state.to_dict()
+        restored = AppState.from_dict(state_data)
+        self.assertEqual(restored.subscription_device_id, state.subscription_device_id)
+        self.assertEqual(restored.subscriptions[0].client_profile, "happ")
+        self.assertTrue(restored.subscriptions[0].send_hwid)
+        self.assertEqual(restored.subscriptions[0].hwid, "OWN-DEVICE-ID")
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.enc"
             plain_path = Path(temp_dir) / "state-plain.enc"
@@ -458,7 +515,14 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
 
     def test_diagnostics_redact_subscription_urls_node_credentials_and_log_urls(self) -> None:
         state = AppState(
-            subscriptions=[Subscription(url="https://sub.example/?token=top-secret")],
+            subscription_device_id="INSTALL-DEVICE-SECRET",
+            subscriptions=[
+                Subscription(
+                    url="https://sub.example/?token=top-secret",
+                    send_hwid=True,
+                    hwid="SUBSCRIPTION-HWID-SECRET",
+                )
+            ],
             nodes=[
                 Node(
                     link="vless://private-link",
@@ -478,6 +542,8 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
         self.assertNotIn("top-secret", state_text)
         self.assertNotIn("private-link", state_text)
         self.assertNotIn("private-key", state_text)
+        self.assertNotIn("INSTALL-DEVICE-SECRET", state_text)
+        self.assertNotIn("SUBSCRIPTION-HWID-SECRET", state_text)
         self.assertNotIn("log-secret", logs_text)
 
     def test_qimage_is_passed_directly_and_only_http_is_accepted(self) -> None:
@@ -495,6 +561,15 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
         with patch.dict(sys.modules, {"zxingcpp": fake_module}):
             self.assertEqual(decode_subscription_qr(image), "https://sub.example/list")
         self.assertIs(received[0], image)
+
+        fake_module.read_barcode = lambda *_args, **_kwargs: SimpleNamespace(
+            text="happ://add/https://sub.example/list"
+        )
+        with patch.dict(sys.modules, {"zxingcpp": fake_module}):
+            self.assertEqual(
+                decode_subscription_qr(image),
+                "happ://add/https://sub.example/list",
+            )
 
         fake_module.read_barcode = lambda *_args, **_kwargs: SimpleNamespace(text="vless://secret")
         with patch.dict(sys.modules, {"zxingcpp": fake_module}):

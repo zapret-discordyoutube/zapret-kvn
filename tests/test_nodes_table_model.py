@@ -3,6 +3,7 @@ import unittest
 from PyQt6.QtCore import Qt
 
 from xray_fluent.models import Node
+from xray_fluent.ui.theme import error_color, success_color, warning_color
 from xray_fluent.ui.nodes_table_model import (
     ACTIVE_ROLE,
     COL_ADDRESS,
@@ -188,14 +189,13 @@ class NodesTableModelTests(unittest.TestCase):
         for top_row, bottom_row, roles in changes:
             self.assertEqual(top_row, bottom_row)
             self.assertIn(ACTIVE_ROLE, roles)
-            self.assertIn(Qt.ItemDataRole.FontRole, roles)
+            self.assertIn(Qt.ItemDataRole.DisplayRole, roles)
 
         self.assertTrue(self.model.index(2, COL_NAME).data(ACTIVE_ROLE))
         self.assertFalse(self.model.index(0, COL_NAME).data(ACTIVE_ROLE))
-        font = self.model.index(2, COL_NAME).data(Qt.ItemDataRole.FontRole)
-        self.assertIsNotNone(font)
-        self.assertTrue(font.bold())
-        self.assertIsNone(self.model.index(0, COL_NAME).data(Qt.ItemDataRole.FontRole))
+        # Bold styling now lives in the delegate (view font); the model must
+        # not serve a FontRole snapshot taken before the app font is set.
+        self.assertIsNone(self.model.index(2, COL_NAME).data(Qt.ItemDataRole.FontRole))
 
     # ── Ping cell status semantics (AC7) ──
 
@@ -205,7 +205,7 @@ class NodesTableModelTests(unittest.TestCase):
         index = self.model.index(0, COL_PING)
         brush = index.data(Qt.ItemDataRole.ForegroundRole)
         self.assertIsNotNone(brush)
-        self.assertEqual(brush.color().name(), "#4caf50")
+        self.assertEqual(brush.color().name(), success_color().name())
         self.assertIn("Сервер работает", index.data(Qt.ItemDataRole.ToolTipRole))
 
     def test_ping_cell_is_red_for_dead_node(self) -> None:
@@ -215,7 +215,7 @@ class NodesTableModelTests(unittest.TestCase):
         self.assertEqual(index.data(Qt.ItemDataRole.DisplayRole), "--")
         brush = index.data(Qt.ItemDataRole.ForegroundRole)
         self.assertIsNotNone(brush)
-        self.assertEqual(brush.color().name(), "#dc3232")
+        self.assertEqual(brush.color().name(), error_color().name())
         self.assertIn("Сервер недоступен", index.data(Qt.ItemDataRole.ToolTipRole))
 
     def test_ping_cell_is_orange_for_probably_blocked_node(self) -> None:
@@ -231,7 +231,7 @@ class NodesTableModelTests(unittest.TestCase):
         index = self.model.index(0, COL_PING)
         brush = index.data(Qt.ItemDataRole.ForegroundRole)
         self.assertIsNotNone(brush)
-        self.assertEqual(brush.color().name(), "#ff9800")
+        self.assertEqual(brush.color().name(), warning_color().name())
         self.assertIn("вероятно заблокирован", index.data(Qt.ItemDataRole.ToolTipRole))
 
     # ── Existing activity behaviour ──

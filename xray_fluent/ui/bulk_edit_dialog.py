@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout
-from qfluentwidgets import BodyLabel, EditableComboBox, LineEdit, PrimaryPushButton, PushButton, SubtitleLabel, isDarkTheme
+from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout
+from qfluentwidgets import BodyLabel, EditableComboBox, LineEdit, PrimaryPushButton, PushButton, SubtitleLabel
+
+from .fluent_dialog import FluentDialog
 
 
-class BulkEditDialog(QDialog):
+class BulkEditDialog(FluentDialog):
     def __init__(self, count: int, existing_groups: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Массовое редактирование")
         self.setModal(True)
         self.setMinimumWidth(420)
-        bg = "#2b2b2b" if isDarkTheme() else "#f3f3f3"
-        self.setStyleSheet(f"BulkEditDialog {{ background-color: {bg}; }}")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)

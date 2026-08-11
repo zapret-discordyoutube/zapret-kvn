@@ -3,22 +3,30 @@ from __future__ import annotations
 from datetime import datetime
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtGui import QBrush
+from qfluentwidgets import qconfig
 
 from ..country_flags import get_flag_icon
 from ..models import Node
+from .theme import error_color, success_color, warning_color
 
 PING_BUSY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 SPEED_PROGRESS_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 ACTIVE_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 NODE_ID_ROLE = int(Qt.ItemDataRole.UserRole) + 4
 
-_RED_BRUSH = QBrush(QColor(220, 50, 50))
-_GREEN_BRUSH = QBrush(QColor(76, 175, 80))
-_ORANGE_BRUSH = QBrush(QColor(255, 152, 0))
 
-_BOLD_FONT = QFont()
-_BOLD_FONT.setBold(True)
+def _dead_brush() -> QBrush:
+    """Brush for unreachable nodes; resolved lazily from the theme tokens."""
+    return QBrush(error_color())
+
+
+def _alive_brush() -> QBrush:
+    return QBrush(success_color())
+
+
+def _degraded_brush() -> QBrush:
+    return QBrush(warning_color())
 
 COL_NAME = 0
 COL_TYPE = 1
@@ -88,6 +96,17 @@ class NodesTableModel(QAbstractTableModel):
         self._speed_progress: dict[str, int] = {}
         self._source_names: dict[str, str] = {}
         self._active_node_id: str | None = None
+        # Status brushes depend on the theme: repaint foregrounds on change.
+        qconfig.themeChanged.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self) -> None:
+        if not self._nodes:
+            return
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(len(self._nodes) - 1, len(_HEADERS) - 1),
+            [Qt.ItemDataRole.ForegroundRole],
+        )
 
     def set_source_names(self, names: dict[str, str]) -> None:
         self._source_names = dict(names)
@@ -159,7 +178,7 @@ class NodesTableModel(QAbstractTableModel):
             self.dataChanged.emit(
                 self.index(row, 0),
                 self.index(row, len(_HEADERS) - 1),
-                [Qt.ItemDataRole.FontRole, ACTIVE_ROLE],
+                [Qt.ItemDataRole.DisplayRole, ACTIVE_ROLE],
             )
 
     def active_node_id(self) -> str | None:
@@ -288,11 +307,6 @@ class NodesTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole:
             return self._foreground_brush(node, col)
 
-        if role == Qt.ItemDataRole.FontRole:
-            if col == COL_NAME and self._active_node_id is not None and node.id == self._active_node_id:
-                return _BOLD_FONT
-            return None
-
         if role == Qt.ItemDataRole.TextAlignmentRole and col in _CENTERED_COLUMNS:
             return int(Qt.AlignmentFlag.AlignCenter)
 
@@ -397,7 +411,7 @@ class NodesTableModel(QAbstractTableModel):
     @staticmethod
     def _foreground_brush(node: Node, col: int) -> QBrush | None:
         if node.is_alive is False:
-            return _RED_BRUSH
+            return _dead_brush()
         if col == COL_PING:
             _, brush = NodesTableModel._ping_status_meta(node)
             return brush
@@ -413,14 +427,14 @@ class NodesTableModel(QAbstractTableModel):
             if node.speed_history:
                 return (
                     "Пинг есть, скорость нет — вероятно заблокирован провайдером",
-                    _ORANGE_BRUSH,
+                    _degraded_brush(),
                 )
             return None, None
 
         if node.is_alive:
-            return "Сервер работает", _GREEN_BRUSH
+            return "Сервер работает", _alive_brush()
 
-        return "Сервер недоступен", _RED_BRUSH
+        return "Сервер недоступен", _dead_brush()
 
     @staticmethod
     def _format_time(value: str | None) -> str:

@@ -301,12 +301,25 @@ def main() -> int:
 
     from xray_fluent.constants import APP_ICON_PATH, APP_NAME
     from xray_fluent.ui.main_window import MainWindow
+    from xray_fluent.ui.theme import apply_initial_theme
 
     _bootstrap_logger.info("Creating QApplication")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app_icon = QIcon(str(APP_ICON_PATH))
     app.setWindowIcon(app_icon)
+
+    # Apply the persisted theme BEFORE constructing MainWindow (and before
+    # any PasswordDialog for encrypted state): no light-theme flash and no
+    # dialogs created outside the theme mechanism.  With an encrypted state
+    # file the settings are unreadable here, so defaults apply now and the
+    # real values are re-applied (deduplicated) after unlock/load.
+    initial_theme, initial_accent = apply_initial_theme()
+    _bootstrap_logger.info(
+        "Applied initial theme before window construction: theme=%s accent=%s",
+        initial_theme,
+        initial_accent,
+    )
     tray_available = QSystemTrayIcon.isSystemTrayAvailable()
     app.setQuitOnLastWindowClosed(not tray_available)
 

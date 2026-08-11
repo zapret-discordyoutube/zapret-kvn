@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QHBoxLayout, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -16,6 +16,15 @@ from qfluentwidgets import (
     SegmentedWidget,
     SubtitleLabel,
 )
+
+from .base_page import ScrollablePage
+
+
+def _expand_horizontally(widget) -> None:
+    """Let the widget stretch horizontally on wide windows (AC9)."""
+    policy = widget.sizePolicy()
+    policy.setHorizontalPolicy(QSizePolicy.Policy.Expanding)
+    widget.setSizePolicy(policy)
 
 
 class _RawConfigEditor(QWidget):
@@ -51,12 +60,14 @@ class _RawConfigEditor(QWidget):
         selectors.setSpacing(8)
         selectors.addWidget(BodyLabel("Конфиг", self))
         self.config_combo = ComboBox(self)
-        self.config_combo.setMinimumWidth(280)
+        self.config_combo.setMinimumWidth(200)
+        _expand_horizontally(self.config_combo)
         selectors.addWidget(self.config_combo, 1)
         selectors.addSpacing(12)
         selectors.addWidget(BodyLabel("Шаблон", self))
         self.template_combo = ComboBox(self)
-        self.template_combo.setMinimumWidth(280)
+        self.template_combo.setMinimumWidth(200)
+        _expand_horizontally(self.template_combo)
         selectors.addWidget(self.template_combo, 1)
         root.addLayout(selectors)
 
@@ -295,7 +306,7 @@ class _RawConfigEditor(QWidget):
         self.file_label.setText(f"Файл: {label}{suffix}")
 
 
-class ConfigsPage(QWidget):
+class ConfigsPage(ScrollablePage):
     open_requested = pyqtSignal(str)
     reset_requested = pyqtSignal(str)
     save_requested = pyqtSignal(str, str)
@@ -308,9 +319,8 @@ class ConfigsPage(QWidget):
         super().__init__(parent)
         self.setObjectName("configs")
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        # --- Scrollable body (AC7, base_page.ScrollablePage) ---
+        root = self.body_layout
 
         root.addWidget(SubtitleLabel("Конфиги", self))
 

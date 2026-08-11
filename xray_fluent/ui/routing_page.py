@@ -25,16 +25,18 @@ from qfluentwidgets import (
     PrimaryPushButton,
     SettingCard,
     SettingCardGroup,
-    SmoothScrollArea,
     SubtitleLabel,
     SwitchButton,
     TableWidget,
     TransparentToolButton,
+    setCustomStyleSheet,
 )
 
 from ..models import RoutingSettings
 from ..process_presets import PROCESS_PRESETS
 from ..service_presets import SERVICE_PRESETS
+from .base_page import ScrollablePage
+from .theme import token_pair
 
 _ACTIONS = [
     ("Прямой", "direct"),
@@ -98,7 +100,7 @@ class _ServiceRouteCard(SettingCard):
         return self.switch.isChecked(), self.action_combo.currentData() or "proxy"
 
 
-class RoutingPage(QWidget):
+class RoutingPage(ScrollablePage):
     apply_requested = pyqtSignal(object)  # emits RoutingSettings
 
     def __init__(self, parent: QWidget | None = None):
@@ -111,23 +113,9 @@ class RoutingPage(QWidget):
         self._apply_timer.setInterval(1500)
         self._apply_timer.timeout.connect(self._emit_apply)
 
-        # --- Outer layout with scroll area ---
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        self._scroll = SmoothScrollArea(self)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        outer.addWidget(self._scroll)
-
-        container = QWidget()
-        container.setStyleSheet("QWidget { background: transparent; }")
-        self._scroll.setWidget(container)
-
-        root = QVBoxLayout(container)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        # --- Scrollable body (AC7, base_page.ScrollablePage) ---
+        container = self.body
+        root = self.body_layout
 
         root.addWidget(SubtitleLabel("Маршрутизация", container))
 
@@ -297,7 +285,12 @@ class RoutingPage(QWidget):
             "В системном прокси полный матч по пути/папке недоступен: точный эффект есть только в TUN (sing-box).",
             container,
         )
-        self.proxy_warning.setStyleSheet("color: #e6a700;")
+        warn_light, warn_dark = token_pair("warning")
+        setCustomStyleSheet(
+            self.proxy_warning,
+            f"CaptionLabel {{ color: {warn_light}; }}",
+            f"CaptionLabel {{ color: {warn_dark}; }}",
+        )
         self.proxy_warning.setVisible(False)
         root.addWidget(self.proxy_warning)
 

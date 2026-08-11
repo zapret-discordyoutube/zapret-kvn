@@ -7,7 +7,6 @@ from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
-    QDialog,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -20,6 +19,7 @@ from qfluentwidgets import (
     Action,
     BodyLabel,
     CheckBox,
+    ComboBox,
     FluentIcon as FIF,
     InfoBar,
     InfoBarPosition,
@@ -37,8 +37,17 @@ from qfluentwidgets import (
 
 from ..models import Node, Subscription
 from ..qr_utils import QrDecodeError, decode_subscription_qr
-from ..subscription_http import default_subscription_user_agent, mask_subscription_url, validate_subscription_url
+from ..subscription_http import (
+    default_subscription_user_agent,
+    mask_subscription_url,
+    normalize_client_profile,
+    profile_default_user_agent,
+    resolve_subscription_source,
+    validate_hwid,
+)
 from ..subscription_parser import validate_filter_patterns
+from .fluent_dialog import FluentDialog
+from .theme import accent_color
 
 
 class ScreenRegionSelector(QWidget):
@@ -62,7 +71,7 @@ class ScreenRegionSelector(QWidget):
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
             painter.fillRect(self._selection, Qt.GlobalColor.transparent)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            painter.setPen(QPen(QColor("#0078D4"), 2))
+            painter.setPen(QPen(accent_color(), 2))
             painter.drawRect(self._selection)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -106,7 +115,7 @@ class ScreenRegionSelector(QWidget):
         super().keyPressEvent(event)
 
 
-class SubscriptionDialog(QDialog):
+class SubscriptionDialog(FluentDialog):
     def __init__(
         self,
         subscription: Subscription | None = None,
@@ -147,6 +156,18 @@ class SubscriptionDialog(QDialog):
             import_row.addWidget(button)
         root.addLayout(import_row)
 
+        root.addWidget(BodyLabel("Профиль клиента", self))
+        self.client_profile_combo = ComboBox(self)
+        for label, value in (
+            ("Zapret KVN", "zapret"),
+            ("Happ", "happ"),
+            ("INCY", "incy"),
+            ("v2RayTun", "v2raytun"),
+            ("Произвольный", "custom"),
+        ):
+            self.client_profile_combo.addItem(label, userData=value)
+        root.addWidget(self.client_profile_combo)
+
         root.addWidget(BodyLabel("User-Agent", self))
         self.user_agent_edit = LineEdit(self)
         self.user_agent_edit.setPlaceholderText(default_subscription_user_agent())
@@ -162,6 +183,16 @@ class SubscriptionDialog(QDialog):
             ua_row.addWidget(button)
         ua_row.addStretch(1)
         root.addLayout(ua_row)
+
+        identity_row = QHBoxLayout()
+        self.send_hwid_check = CheckBox("Передавать стабильный HWID", self)
+        self.hwid_edit = LineEdit(self)
+        self.hwid_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.hwid_edit.setPlaceholderText("Пусто — постоянный ID этой установки")
+        self.hwid_edit.setMinimumWidth(280)
+        identity_row.addWidget(self.send_hwid_check)
+        identity_row.addWidget(self.hwid_edit, 1)
+        root.addLayout(identity_row)
 
         options_row = QHBoxLayout()
         self.auto_update_check = CheckBox("Автоматически обновлять", self)
@@ -202,17 +233,25 @@ class SubscriptionDialog(QDialog):
         self.qr_screen_btn.clicked.connect(self._qr_from_screen)
         self.include_edit.textChanged.connect(self._update_match_count)
         self.exclude_edit.textChanged.connect(self._update_match_count)
+        self.client_profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        self.send_hwid_check.toggled.connect(self.hwid_edit.setEnabled)
 
         if subscription is not None:
             self.name_edit.setText(subscription.name)
             self.url_edit.setText(subscription.url)
             self.user_agent_edit.setText(subscription.user_agent)
+            self._set_client_profile(subscription.client_profile)
+            self.send_hwid_check.setChecked(subscription.send_hwid)
+            self.hwid_edit.setText(subscription.hwid)
             self.auto_update_check.setChecked(subscription.auto_update)
             self.interval_spin.setValue(subscription.update_interval_hours or 0)
             self.include_edit.setText(subscription.include_pattern)
             self.exclude_edit.setText(subscription.exclude_pattern)
         else:
             self.auto_update_check.setChecked(True)
+            self._set_client_profile("zapret")
+            self.send_hwid_check.setChecked(False)
+        self.hwid_edit.setEnabled(self.send_hwid_check.isChecked())
         self._update_match_count()
 
     def subscription_value(self) -> Subscription:
@@ -221,6 +260,9 @@ class SubscriptionDialog(QDialog):
             name=self.name_edit.text().strip(),
             url=self.url_edit.text().strip(),
             user_agent=self.user_agent_edit.text().strip(),
+            client_profile=normalize_client_profile(self.client_profile_combo.currentData()),
+            send_hwid=self.send_hwid_check.isChecked(),
+            hwid=self.hwid_edit.text().strip(),
             auto_update=self.auto_update_check.isChecked(),
             update_interval_hours=self.interval_spin.value() or None,
             include_pattern=self.include_edit.text().strip(),
@@ -233,6 +275,9 @@ class SubscriptionDialog(QDialog):
             "name": value.name,
             "url": value.url,
             "user_agent": value.user_agent,
+            "client_profile": value.client_profile,
+            "send_hwid": value.send_hwid,
+            "hwid": value.hwid,
             "auto_update": value.auto_update,
             "update_interval_hours": value.update_interval_hours,
             "include_pattern": value.include_pattern,
@@ -241,12 +286,34 @@ class SubscriptionDialog(QDialog):
 
     def _validate_and_accept(self) -> None:
         try:
-            validate_subscription_url(self.url_edit.text())
+            url, profile_hint = resolve_subscription_source(self.url_edit.text())
+            self.url_edit.setText(url)
+            if profile_hint:
+                self._set_client_profile(profile_hint)
+            if self.send_hwid_check.isChecked() and self.hwid_edit.text().strip():
+                validate_hwid(self.hwid_edit.text())
             validate_filter_patterns(self.include_edit.text().strip(), self.exclude_edit.text().strip())
         except Exception as exc:
             self._show_error(str(exc))
             return
         self.accept()
+
+    def _set_client_profile(self, profile: str) -> None:
+        normalized = normalize_client_profile(profile)
+        for index in range(self.client_profile_combo.count()):
+            if self.client_profile_combo.itemData(index) == normalized:
+                self.client_profile_combo.setCurrentIndex(index)
+                return
+
+    def _on_profile_changed(self, _index: int) -> None:
+        profile = normalize_client_profile(self.client_profile_combo.currentData())
+        current = self.user_agent_edit.text().strip()
+        known_defaults = {
+            profile_default_user_agent(item)
+            for item in ("zapret", "happ", "incy", "v2raytun")
+        }
+        if not current or current in known_defaults:
+            self.user_agent_edit.setText(profile_default_user_agent(profile))
 
     def _paste_url(self) -> None:
         clipboard = QApplication.clipboard()
@@ -322,7 +389,7 @@ class SubscriptionDialog(QDialog):
         self.match_label.setText(f"Совпадений: {count} из {len(self._provider_names)}")
 
 
-class SubscriptionDeleteDialog(QDialog):
+class SubscriptionDeleteDialog(FluentDialog):
     def __init__(self, name: str, parent=None):
         super().__init__(parent)
         self.setModal(True)
@@ -397,16 +464,16 @@ class SubscriptionsPage(QWidget):
         root.addLayout(toolbar)
 
         self.table = TableWidget(self)
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels(
-            ["Название", "Серверы", "Трафик", "Истекает", "Последняя проверка", "Статус", "Авто"]
+            ["Название", "Клиент", "Серверы", "Трафик", "Истекает", "Последняя проверка", "Статус", "Авто"]
         )
         self.table.setEditTriggers(TableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(TableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(TableWidget.SelectionMode.SingleSelection)
         self.table.verticalHeader().hide()
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in range(1, 7):
+        for column in range(1, 8):
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         root.addWidget(self.table, 1)
@@ -441,20 +508,21 @@ class SubscriptionsPage(QWidget):
             name_item = QTableWidgetItem(name)
             name_item.setToolTip(mask_subscription_url(subscription.url))
             self.table.setItem(row, 0, name_item)
-            self.table.setItem(row, 1, QTableWidgetItem(str(counts.get(subscription.id, 0))))
-            self.table.setItem(row, 2, QTableWidgetItem(_format_traffic(subscription)))
-            self.table.setItem(row, 3, QTableWidgetItem(_format_expire(subscription.info.expire)))
-            self.table.setItem(row, 4, QTableWidgetItem(_format_time(subscription.last_checked_at)))
+            self.table.setItem(row, 1, QTableWidgetItem(_profile_label(subscription.client_profile)))
+            self.table.setItem(row, 2, QTableWidgetItem(str(counts.get(subscription.id, 0))))
+            self.table.setItem(row, 3, QTableWidgetItem(_format_traffic(subscription)))
+            self.table.setItem(row, 4, QTableWidgetItem(_format_expire(subscription.info.expire)))
+            self.table.setItem(row, 5, QTableWidgetItem(_format_time(subscription.last_checked_at)))
             status = "Обновление…" if subscription.id in self._updating else subscription.last_error or "OK"
             status_item = QTableWidgetItem(status if len(status) <= 80 else f"{status[:77]}…")
             status_item.setToolTip(status)
-            self.table.setItem(row, 5, status_item)
+            self.table.setItem(row, 6, status_item)
             switch = SwitchButton(self.table)
             switch.setChecked(subscription.auto_update)
             switch.checkedChanged.connect(
                 lambda checked, sid=subscription.id: self.auto_update_changed.emit(sid, bool(checked))
             )
-            self.table.setCellWidget(row, 6, switch)
+            self.table.setCellWidget(row, 7, switch)
 
         if selected_id in self._row_ids:
             self.table.selectRow(self._row_ids.index(selected_id))
@@ -560,6 +628,16 @@ def _format_bytes(value: int) -> str:
             return f"{number:.1f} {unit}" if unit != "Б" else f"{int(number)} {unit}"
         number /= 1024
     return "0 Б"
+
+
+def _profile_label(profile: str) -> str:
+    return {
+        "zapret": "Zapret KVN",
+        "happ": "Happ",
+        "incy": "INCY",
+        "v2raytun": "v2RayTun",
+        "custom": "Произвольный",
+    }.get(normalize_client_profile(profile), "Произвольный")
 
 
 def _format_traffic(subscription: Subscription) -> str:

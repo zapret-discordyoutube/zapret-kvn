@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout
-from qfluentwidgets import BodyLabel, PasswordLineEdit, PrimaryPushButton, PushButton, SubtitleLabel, isDarkTheme
+from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout
+from qfluentwidgets import BodyLabel, PasswordLineEdit, PrimaryPushButton, PushButton, SubtitleLabel
+
+from .fluent_dialog import FluentDialog
 
 
-class PasswordDialog(QDialog):
+class PasswordDialog(FluentDialog):
     def __init__(self, title: str = "Разблокировать", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
         self.setMinimumWidth(360)
-        bg = "#2b2b2b" if isDarkTheme() else "#f3f3f3"
-        self.setStyleSheet(f"PasswordDialog {{ background-color: {bg}; }}")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)

@@ -12,9 +12,19 @@ from qfluentwidgets import (
     PushButton,
     SubtitleLabel,
     TitleLabel,
+    setCustomStyleSheet,
 )
 
 from ..constants import APP_VERSION
+from .theme import token_pair
+
+
+def _muted_caption_qss(extra: str = "") -> tuple[str, str]:
+    light, dark = token_pair("text_muted")
+    return (
+        f"CaptionLabel {{ color: {light};{extra} }}",
+        f"CaptionLabel {{ color: {dark};{extra} }}",
+    )
 
 
 class AboutPage(QWidget):
@@ -31,7 +41,7 @@ class AboutPage(QWidget):
         root.addWidget(title)
 
         version = CaptionLabel(f"v{APP_VERSION}", self)
-        version.setStyleSheet("color: #888; font-size: 13px;")
+        setCustomStyleSheet(version, *_muted_caption_qss(" font-size: 13px;"))
         root.addWidget(version)
 
         # ── Separator ──
@@ -48,7 +58,8 @@ class AboutPage(QWidget):
             self,
         )
         desc1.setWordWrap(True)
-        desc1.setStyleSheet("font-size: 15px;")
+        desc1_qss = "BodyLabel { font-size: 15px; }"
+        setCustomStyleSheet(desc1, desc1_qss, desc1_qss)
         root.addWidget(desc1)
 
         desc2 = BodyLabel(
@@ -96,7 +107,7 @@ class AboutPage(QWidget):
 
         # ── Footer ──
         footer = CaptionLabel("Подробнее здесь @zapretvpns_bot", self)
-        footer.setStyleSheet("color: #888; margin-top: 12px;")
+        setCustomStyleSheet(footer, *_muted_caption_qss(" margin-top: 12px;"))
         root.addWidget(footer)
 
         root.addStretch()

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from urllib.parse import urlsplit
-
 from PyQt6.QtGui import QImage
+
+from .subscription_http import SubscriptionFetchError, resolve_subscription_source
 
 
 class QrDecodeError(ValueError):
@@ -25,7 +25,10 @@ def decode_subscription_qr(image: QImage) -> str:
     if result is None or not str(result.text or "").strip():
         raise QrDecodeError("QR-код не найден")
     text = str(result.text).strip()
-    parsed = urlsplit(text)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        raise QrDecodeError("QR-код не содержит HTTP/HTTPS URL подписки")
+    try:
+        resolve_subscription_source(text)
+    except SubscriptionFetchError as exc:
+        raise QrDecodeError(
+            "QR-код не содержит URL подписки или открытую add/import-ссылку"
+        ) from exc
     return text

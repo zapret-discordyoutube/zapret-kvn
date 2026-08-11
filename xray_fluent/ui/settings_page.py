@@ -4,7 +4,7 @@ from copy import deepcopy
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFileDialog, QSizePolicy, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -18,7 +18,6 @@ from qfluentwidgets import (
     SettingCard,
     SpinBox,
     SettingCardGroup,
-    SmoothScrollArea,
     SubtitleLabel,
     SwitchSettingCard,
 )
@@ -26,7 +25,16 @@ from qfluentwidgets.components.settings.setting_card import ColorPickerButton
 
 from ..constants import SINGBOX_PATH_DEFAULT, XRAY_PATH_DEFAULT
 from ..models import AppSettings, SecuritySettings
+from .base_page import ScrollablePage
+from .theme import DEFAULT_ACCENT
 from ..path_utils import normalize_configured_path, resolve_configured_path
+
+
+def _expand_horizontally(widget) -> None:
+    """Let the widget stretch horizontally on wide windows (AC9)."""
+    policy = widget.sizePolicy()
+    policy.setHorizontalPolicy(QSizePolicy.Policy.Expanding)
+    widget.setSizePolicy(policy)
 
 
 class _ComboCard(SettingCard):
@@ -59,7 +67,7 @@ class _ColorCard(SettingCard):
 
     def __init__(self, icon, title, content, parent=None):
         super().__init__(icon, title, content, parent)
-        self.picker = ColorPickerButton(QColor("#0078D4"), title, self)
+        self.picker = ColorPickerButton(QColor(DEFAULT_ACCENT), title, self)
         self.hBoxLayout.addWidget(self.picker, 0, Qt.AlignmentFlag.AlignRight)
         self.hBoxLayout.addSpacing(16)
 
@@ -71,8 +79,9 @@ class _LineEditCard(SettingCard):
         super().__init__(icon, title, content, parent)
         self.edit = LineEdit(self)
         self.edit.setPlaceholderText(placeholder)
-        self.edit.setMinimumWidth(420)
-        self.hBoxLayout.addWidget(self.edit, 0, Qt.AlignmentFlag.AlignRight)
+        self.edit.setMinimumWidth(240)
+        _expand_horizontally(self.edit)
+        self.hBoxLayout.addWidget(self.edit, 1)
         self.hBoxLayout.addSpacing(16)
 
 
@@ -82,9 +91,10 @@ class _BrowseCard(SettingCard):
     def __init__(self, icon, title, content, parent=None):
         super().__init__(icon, title, content, parent)
         self.edit = LineEdit(self)
-        self.edit.setMinimumWidth(380)
+        self.edit.setMinimumWidth(220)
+        _expand_horizontally(self.edit)
         self.btn = PushButton("Обзор", self)
-        self.hBoxLayout.addWidget(self.edit, 0, Qt.AlignmentFlag.AlignRight)
+        self.hBoxLayout.addWidget(self.edit, 1)
         self.hBoxLayout.addSpacing(8)
         self.hBoxLayout.addWidget(self.btn, 0, Qt.AlignmentFlag.AlignRight)
         self.hBoxLayout.addSpacing(16)
@@ -108,7 +118,7 @@ class _PasswordActionCard(SettingCard):
         self.hBoxLayout.addSpacing(16)
 
 
-class SettingsPage(QWidget):
+class SettingsPage(ScrollablePage):
     save_requested = pyqtSignal(object)
     auto_lock_minutes_changed = pyqtSignal(int)
     set_password_requested = pyqtSignal(str)
@@ -127,22 +137,9 @@ class SettingsPage(QWidget):
         self._security = SecuritySettings()
         self._loading = False
 
-        # --- Outer layout with scroll area ---
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        self._scroll = SmoothScrollArea(self)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        outer.addWidget(self._scroll)
-
-        container = QWidget()
-        container.setStyleSheet("QWidget { background: transparent; }")
-        self._scroll.setWidget(container)
-
-        root = QVBoxLayout(container)
-        root.setContentsMargins(24, 20, 24, 20)
+        # --- Scrollable body (AC7, base_page.ScrollablePage) ---
+        container = self.body
+        root = self.body_layout
         root.setSpacing(4)
 
         root.addWidget(SubtitleLabel("Настройки", container))
@@ -406,7 +403,7 @@ class SettingsPage(QWidget):
         self._security = deepcopy(security)
 
         self._select_combo_data(self.theme_card.combo, settings.theme)
-        self.accent_card.picker.setColor(QColor(settings.accent_color or "#0078D4"))
+        self.accent_card.picker.setColor(QColor(settings.accent_color or DEFAULT_ACCENT))
         self.proxy_bypass_lan_card.setChecked(settings.system_proxy_bypass_lan)
         self.xray_path_card.edit.setText(
             normalize_configured_path(
@@ -499,7 +496,7 @@ class SettingsPage(QWidget):
             return
         data = deepcopy(self._settings)
         data.theme = str(self.theme_card.combo.currentData() or "system")
-        data.accent_color = self.accent_card.picker.color.name() or "#0078D4"
+        data.accent_color = self.accent_card.picker.color.name() or DEFAULT_ACCENT
         data.system_proxy_bypass_lan = self.proxy_bypass_lan_card.isChecked()
         data.xray_path = normalize_configured_path(
             self.xray_path_card.edit.text(),

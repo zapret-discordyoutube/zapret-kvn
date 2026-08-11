@@ -1,21 +1,28 @@
-"""Country detection from node name/server and flag icon generation."""
+"""Country detection from node name/server and flag icon generation.
+
+Flag icons are rendered from real PNG assets (``assets/flags/{code}.png``,
+committed to git; see ``assets/flags/ATTRIBUTION.md``) with a stripe-drawing
+fallback.  No network access happens in this module; async IP-based country
+resolution lives in :mod:`xray_fluent.country_resolver`.
+"""
 
 from __future__ import annotations
 
-import json
 import re
-import socket
-import urllib.request
 
-from .http_utils import urlopen as _urlopen
-
-from PyQt6.QtCore import QRectF, QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
+from qfluentwidgets import isDarkTheme, qconfig
 
-# ── Flag stripe data ────────────────────────────────────────────
+from .constants import FLAGS_DIR
+from .country_resolver import CountryResolver
+
+__all__ = ["CountryResolver", "detect_country", "get_flag_icon"]
+
+# ── Flag stripe data (fallback rendering) ───────────────────────
 # (orientation, [colors])  h = horizontal top→bottom, v = vertical left→right
 
-_W, _H = 20, 14
+_W, _H = 18, 13
 
 _STRIPES: dict[str, tuple[str, list[str]]] = {
     # Horizontal tri-stripes
@@ -119,6 +126,15 @@ _STRIPES: dict[str, tuple[str, list[str]]] = {
 _icon_cache: dict[str, QIcon] = {}
 
 
+def clear_flag_icon_cache() -> None:
+    """Drop cached icons (border color is theme-dependent)."""
+    _icon_cache.clear()
+
+
+# Icons embed a theme-dependent border → invalidate on theme switches.
+qconfig.themeChanged.connect(lambda *_: clear_flag_icon_cache())
+
+
 def get_flag_icon(code: str) -> QIcon | None:
     if not code:
         return None
@@ -126,10 +142,62 @@ def get_flag_icon(code: str) -> QIcon | None:
     cached = _icon_cache.get(code)
     if cached is not None:
         return cached
-    pm = _draw_flag(code)
+    pm = _load_flag_pixmap(code)
+    if pm is None:
+        pm = _draw_flag(code)
     icon = QIcon(pm)
     _icon_cache[code] = icon
     return icon
+
+
+def _border_color() -> QColor:
+    """Thin flag outline: light translucent in dark theme, dark in light theme."""
+    if isDarkTheme():
+        return QColor(255, 255, 255, 60)
+    return QColor(0, 0, 0, 30)
+
+
+def _draw_flag_frame(p: QPainter) -> None:
+    """Rounded-corner thin border shared by asset-based and fallback flags."""
+    p.setClipping(False)
+    p.setPen(_border_color())
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(QRectF(0.5, 0.5, _W - 1, _H - 1), 2, 2)
+
+
+def _load_flag_pixmap(code: str) -> QPixmap | None:
+    """Render a flag from ``assets/flags/{code}.png``; None if unavailable."""
+    path = FLAGS_DIR / f"{code.lower()}.png"
+    try:
+        if not path.is_file():
+            return None
+        source = QPixmap(str(path))
+    except OSError:
+        return None
+    if source.isNull():
+        return None
+
+    scaled = source.scaled(
+        _W,
+        _H,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+    pm = QPixmap(_W, _H)
+    pm.fill(QColor(0, 0, 0, 0))
+
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    clip = QPainterPath()
+    clip.addRoundedRect(QRectF(0, 0, _W, _H), 2, 2)
+    p.setClipPath(clip)
+    p.drawPixmap(0, 0, scaled)
+
+    _draw_flag_frame(p)
+    p.end()
+    return pm
 
 
 def _draw_flag(code: str) -> QPixmap:
@@ -157,10 +225,7 @@ def _draw_flag(code: str) -> QPixmap:
     else:
         p.fillRect(QRectF(0, 0, _W, _H), QColor("#B0BEC5"))
 
-    p.setClipping(False)
-    p.setPen(QColor(0, 0, 0, 30))
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawRoundedRect(QRectF(0.5, 0.5, _W - 1, _H - 1), 2, 2)
+    _draw_flag_frame(p)
     p.end()
     return pm
 
@@ -348,55 +413,3 @@ def _detect_server(server: str) -> str:
     if m and m.group(1) in _COUNTRY_TLDS:
         return _TLD_REMAP.get(m.group(1), m.group(1).upper())
     return ""
-
-
-# ── Async IP-based country resolution ───────────────────────────
-
-class CountryResolver(QThread):
-    resolved = pyqtSignal(dict)  # {node_id: country_code}
-
-    def __init__(self, nodes: list[tuple[str, str]], parent=None):
-        super().__init__(parent)
-        self._nodes = nodes  # [(node_id, server_address), ...]
-
-    def run(self) -> None:
-        results: dict[str, str] = {}
-        ip_map: dict[str, list[str]] = {}  # ip → [node_ids]
-
-        for node_id, server in self._nodes:
-            try:
-                infos = socket.getaddrinfo(server, None, socket.AF_INET, socket.SOCK_STREAM)
-                if infos:
-                    ip = infos[0][4][0]
-                    ip_map.setdefault(ip, []).append(node_id)
-            except Exception:
-                pass
-
-        if not ip_map:
-            self.resolved.emit(results)
-            return
-
-        ips = list(ip_map.keys())
-        for i in range(0, len(ips), 100):
-            batch = ips[i : i + 100]
-            try:
-                payload = json.dumps(
-                    [{"query": ip, "fields": "countryCode,query"} for ip in batch]
-                ).encode()
-                req = urllib.request.Request(
-                    "http://ip-api.com/batch",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                )
-                with _urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read())
-                for item in data:
-                    cc = item.get("countryCode", "")
-                    ip = item.get("query", "")
-                    if cc and ip in ip_map:
-                        for nid in ip_map[ip]:
-                            results[nid] = cc
-            except Exception:
-                pass
-
-        self.resolved.emit(results)

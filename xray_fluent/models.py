@@ -135,6 +135,9 @@ class Subscription:
     name: str = ""
     url: str = ""
     user_agent: str = ""
+    client_profile: str = "zapret"
+    send_hwid: bool = False
+    hwid: str = ""
     auto_update: bool = True
     update_interval_hours: int | None = None
     provider_interval_hours: int | None = None
@@ -164,6 +167,9 @@ class Subscription:
             "name": self.name,
             "url": self.url,
             "user_agent": self.user_agent,
+            "client_profile": self.client_profile,
+            "send_hwid": self.send_hwid,
+            "hwid": self.hwid,
             "auto_update": self.auto_update,
             "update_interval_hours": self.update_interval_hours,
             "provider_interval_hours": self.provider_interval_hours,
@@ -203,6 +209,9 @@ class Subscription:
             name=str(data.get("name") or ""),
             url=str(data.get("url") or ""),
             user_agent=str(data.get("user_agent") or ""),
+            client_profile=str(data.get("client_profile") or "zapret"),
+            send_hwid=bool(data.get("send_hwid", False)),
+            hwid=str(data.get("hwid") or ""),
             auto_update=bool(data.get("auto_update", True)),
             update_interval_hours=_optional_positive_int("update_interval_hours"),
             provider_interval_hours=_optional_positive_int("provider_interval_hours"),
@@ -458,6 +467,7 @@ class AppSettings:
 class AppState:
     schema_version: int = STATE_SCHEMA_VERSION
     selected_node_id: str | None = None
+    subscription_device_id: str = field(default_factory=lambda: str(uuid.uuid4()).upper())
     nodes: list[Node] = field(default_factory=list)
     subscriptions: list[Subscription] = field(default_factory=list)
     routing: RoutingSettings = field(default_factory=RoutingSettings)
@@ -468,6 +478,7 @@ class AppState:
         return {
             "schema_version": self.schema_version,
             "selected_node_id": self.selected_node_id,
+            "subscription_device_id": self.subscription_device_id,
             "nodes": [node.to_dict() for node in self.nodes],
             "subscriptions": [subscription.to_dict() for subscription in self.subscriptions],
             "routing": self.routing.to_dict(),
@@ -486,6 +497,9 @@ class AppState:
         return AppState(
             schema_version=int(data.get("schema_version") or STATE_SCHEMA_VERSION),
             selected_node_id=data.get("selected_node_id"),
+            subscription_device_id=str(
+                data.get("subscription_device_id") or uuid.uuid4()
+            ).upper(),
             nodes=nodes,
             subscriptions=subscriptions,
             routing=RoutingSettings.from_dict(dict(data.get("routing") or {})),

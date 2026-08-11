@@ -176,7 +176,11 @@ from .models import (
     Subscription,
     SubscriptionUpdateResult,
 )
-from .subscription_http import validate_subscription_url
+from .subscription_http import (
+    normalize_client_profile,
+    resolve_subscription_source,
+    validate_hwid,
+)
 from .subscription_parser import validate_filter_patterns
 from .network_monitor import NetworkMonitor
 from .proxy_manager import ProxyManager
@@ -1439,9 +1443,11 @@ class AppController(QObject):
         return f"{base} ({index})"
 
     def add_subscription(self, subscription: Subscription, *, mode: str = "auto") -> bool:
-        validate_subscription_url(subscription.url)
+        subscription.url, profile_hint = resolve_subscription_source(subscription.url)
+        if profile_hint and normalize_client_profile(subscription.client_profile) == "zapret":
+            subscription.client_profile = profile_hint
+        self._normalize_subscription_identity(subscription)
         validate_filter_patterns(subscription.include_pattern, subscription.exclude_pattern)
-        subscription.url = subscription.url.strip()
         if any(item.url == subscription.url for item in self.state.subscriptions):
             self.status.emit("warning", "Эта подписка уже добавлена")
             return False
@@ -1462,7 +1468,7 @@ class AppController(QObject):
         url = str(updates.get("url", subscription.url)).strip()
         include_pattern = str(updates.get("include_pattern", subscription.include_pattern)).strip()
         exclude_pattern = str(updates.get("exclude_pattern", subscription.exclude_pattern)).strip()
-        validate_subscription_url(url)
+        url, profile_hint = resolve_subscription_source(url)
         validate_filter_patterns(include_pattern, exclude_pattern)
         if any(item.id != subscription_id and item.url == url for item in self.state.subscriptions):
             self.status.emit("warning", "Эта подписка уже добавлена")
@@ -1470,19 +1476,47 @@ class AppController(QObject):
         old_url = subscription.url
         old_include_pattern = subscription.include_pattern
         old_exclude_pattern = subscription.exclude_pattern
+        old_identity = (
+            subscription.client_profile,
+            subscription.user_agent,
+            subscription.send_hwid,
+            subscription.hwid,
+        )
+        requested_profile = str(updates.get("client_profile", subscription.client_profile))
+        normalized_profile = normalize_client_profile(
+            profile_hint
+            if profile_hint and normalize_client_profile(requested_profile) == "zapret"
+            else requested_profile
+        )
+        send_hwid = bool(updates.get("send_hwid", subscription.send_hwid))
+        hwid = str(updates.get("hwid", subscription.hwid)).strip()
+        if send_hwid:
+            hwid = validate_hwid(hwid or self.state.subscription_device_id)
+        interval = updates.get("update_interval_hours", subscription.update_interval_hours)
+        normalized_interval = int(interval) if interval else None
+
         requested_name = str(updates.get("name", subscription.name)).strip()
         subscription.name = self._unique_subscription_name(requested_name, exclude_id=subscription_id)
         subscription.url = url
         subscription.user_agent = str(updates.get("user_agent", subscription.user_agent)).strip()
+        subscription.client_profile = normalized_profile
+        subscription.send_hwid = send_hwid
+        subscription.hwid = hwid
         subscription.auto_update = bool(updates.get("auto_update", subscription.auto_update))
-        interval = updates.get("update_interval_hours", subscription.update_interval_hours)
-        subscription.update_interval_hours = int(interval) if interval else None
+        subscription.update_interval_hours = normalized_interval
         subscription.include_pattern = include_pattern
         subscription.exclude_pattern = exclude_pattern
         if (
             old_url != url
             or old_include_pattern != include_pattern
             or old_exclude_pattern != exclude_pattern
+            or old_identity
+            != (
+                subscription.client_profile,
+                subscription.user_agent,
+                subscription.send_hwid,
+                subscription.hwid,
+            )
         ):
             subscription.etag = ""
             subscription.last_modified = ""
@@ -1490,6 +1524,15 @@ class AppController(QObject):
         self.subscriptions_changed.emit(self.state.subscriptions)
         self.save()
         return True
+
+    def _normalize_subscription_identity(self, subscription: Subscription) -> None:
+        subscription.client_profile = normalize_client_profile(subscription.client_profile)
+        if not subscription.send_hwid:
+            subscription.hwid = subscription.hwid.strip()
+            return
+        subscription.hwid = validate_hwid(
+            subscription.hwid or self.state.subscription_device_id
+        )
 
     def update_subscription(self, subscription_id: str, *, mode: str = "auto") -> bool:
         subscription = self.get_subscription(subscription_id)

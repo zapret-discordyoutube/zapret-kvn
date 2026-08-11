@@ -33,6 +33,8 @@ REDACT_KEYS = {
     "auth",
     "auth_str",
     "username",
+    "hwid",
+    "subscription_device_id",
 }
 
 _URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)

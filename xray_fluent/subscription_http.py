@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass, field
+import locale
+import platform
 import re
 import urllib.error
 import urllib.request
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 from .constants import APP_VERSION, PROXY_HOST
 from .http_utils import build_opener
@@ -12,6 +16,18 @@ from .models import Subscription
 
 
 MAX_SUBSCRIPTION_BYTES = 10 * 1024 * 1024
+CLIENT_PROFILES = ("zapret", "happ", "incy", "v2raytun", "custom")
+_PROFILE_DEFAULT_USER_AGENTS = {
+    "happ": "Happ/3.13.0",
+    "incy": "INCY/1.0/Windows",
+    "v2raytun": "v2rayTun/2.3.5",
+}
+_WRAPPED_SOURCE_PREFIXES = {
+    "happ://add/": "happ",
+    "incy://add/": "incy",
+    "incy://import/": "incy",
+    "v2raytun://import/": "v2raytun",
+}
 
 
 class SubscriptionFetchError(RuntimeError):
@@ -38,11 +54,125 @@ def default_subscription_user_agent() -> str:
     return f"ZapretKVN/{APP_VERSION}"
 
 
-def validate_subscription_url(url: str) -> str:
-    text = str(url or "").strip()
+def normalize_client_profile(value: str) -> str:
+    profile = str(value or "").strip().lower()
+    return profile if profile in CLIENT_PROFILES else "custom"
+
+
+def profile_default_user_agent(profile: str) -> str:
+    return _PROFILE_DEFAULT_USER_AGENTS.get(
+        normalize_client_profile(profile), default_subscription_user_agent()
+    )
+
+
+def resolve_subscription_source(value: str) -> tuple[str, str | None]:
+    text = str(value or "").strip()
+    lowered = text.lower()
     parsed = urlsplit(text)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        raise SubscriptionFetchError("URL подписки должен использовать HTTP или HTTPS")
+    if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
+        return text, None
+
+    if parsed.scheme.lower() in {"happ", "incy", "v2raytun"}:
+        if "crypt" in parsed.netloc.lower() or parsed.path.lower().lstrip("/").startswith("crypt"):
+            raise SubscriptionFetchError(
+                "Зашифрованные proprietary deep links этим клиентом не расшифровываются"
+            )
+        query = parse_qs(parsed.query)
+        query_url = (query.get("url") or query.get("data") or [""])[0]
+        if query_url:
+            candidate = unquote(query_url).strip()
+            hint = parsed.scheme.lower()
+        else:
+            candidate = ""
+            hint = None
+            for prefix, profile in _WRAPPED_SOURCE_PREFIXES.items():
+                if lowered.startswith(prefix):
+                    candidate = unquote(text[len(prefix) :]).strip()
+                    hint = profile
+                    break
+        if candidate and hint:
+            candidate = _decode_wrapped_http_url(candidate)
+            inner = urlsplit(candidate)
+            if inner.scheme.lower() in {"http", "https"} and inner.hostname:
+                return candidate, hint
+    raise SubscriptionFetchError(
+        "URL подписки должен использовать HTTP/HTTPS или открытую add/import-ссылку Happ, INCY, v2RayTun"
+    )
+
+
+def _decode_wrapped_http_url(value: str) -> str:
+    if value.lower().startswith(("http://", "https://")):
+        return value
+    compact = "".join(value.split())
+    if not compact or not re.fullmatch(r"[A-Za-z0-9_+/=-]+", compact):
+        return value
+    padded = compact + "=" * ((4 - len(compact) % 4) % 4)
+    try:
+        return base64.b64decode(
+            padded.replace("-", "+").replace("_", "/"), validate=True
+        ).decode("utf-8").strip()
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        return value
+
+
+def validate_subscription_url(url: str) -> str:
+    return resolve_subscription_source(url)[0]
+
+
+def validate_hwid(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise SubscriptionFetchError("HWID не задан")
+    if len(text) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise SubscriptionFetchError("HWID содержит недопустимые символы или слишком длинный")
+    return text
+
+
+def subscription_request_headers(subscription: Subscription) -> dict[str, str]:
+    profile = normalize_client_profile(subscription.client_profile)
+    user_agent = subscription.user_agent.strip() or profile_default_user_agent(profile)
+    headers = {
+        "Accept": "text/plain, application/json;q=0.9, */*;q=0.5",
+        "Accept-Encoding": "identity",
+        "User-Agent": _safe_header_value(user_agent, "User-Agent"),
+    }
+    app_version = {
+        "happ": "3.13.0",
+        "incy": "1.0",
+        "v2raytun": "2.3.5",
+    }.get(profile, APP_VERSION)
+    if profile in {"happ", "incy", "v2raytun"}:
+        headers["Accept"] = "*/*"
+        headers["X-App-Version"] = app_version
+    if profile == "incy":
+        headers["X-Client"] = "INCY"
+        headers["X-Device-Locale"] = _device_locale()
+    if subscription.send_hwid:
+        hwid = validate_hwid(subscription.hwid)
+        headers.update(
+            {
+                "X-HWID": hwid,
+                "X-Device-OS": "Windows",
+                "X-Ver-OS": platform.release() or "Windows",
+                "X-Device-Model": platform.machine() or "Desktop",
+            }
+        )
+        if profile == "incy":
+            headers["X-Device-ID"] = hwid
+        if profile == "happ":
+            headers["X-Device-Locale"] = _device_locale()
+    return headers
+
+
+def _device_locale() -> str:
+    value = locale.getlocale()[0] or "ru_RU"
+    return value.replace("_", "-")
+
+
+def _safe_header_value(value: str, name: str) -> str:
+    text = str(value or "").strip()
+    if not text or any(char in text for char in "\r\n"):
+        raise SubscriptionFetchError(f"{name} содержит недопустимое значение")
     return text
 
 
@@ -125,11 +255,7 @@ def _fetch_once(
         else urllib.request.ProxyHandler({})
     )
     opener = build_opener(proxy_handler, _SafeRedirectHandler())
-    headers = {
-        "Accept": "text/plain, application/json;q=0.9, */*;q=0.5",
-        "Accept-Encoding": "identity",
-        "User-Agent": subscription.user_agent.strip() or default_subscription_user_agent(),
-    }
+    headers = subscription_request_headers(subscription)
     if subscription.etag:
         headers["If-None-Match"] = subscription.etag
     if subscription.last_modified:

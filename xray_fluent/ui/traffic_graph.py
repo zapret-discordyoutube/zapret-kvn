@@ -5,19 +5,23 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QWidget
-from qfluentwidgets import isDarkTheme
+from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from qfluentwidgets import qconfig
+
+from .fluent_dialog import FluentDialog
+from .theme import (
+    graph_bg_color,
+    graph_down_color,
+    graph_grid_color,
+    graph_text_color,
+    graph_up_color,
+)
 
 if TYPE_CHECKING:
     from PyQt6.QtGui import QPaintEvent, QMouseEvent
 
 _MAX_POINTS = 60
 _DETAIL_MAX_POINTS = 300
-
-_COLOR_DOWN = QColor(0, 180, 255)
-_COLOR_UP = QColor(0, 220, 120)
-_COLOR_GRID = QColor(255, 255, 255, 20)
-_COLOR_BG = QColor(0, 0, 0, 30)
 
 
 def _format_speed_short(bps: float) -> str:
@@ -44,6 +48,10 @@ class TrafficGraphWidget(QWidget):
         self.setMaximumHeight(120)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Нажмите для подробного графика")
+        qconfig.themeChanged.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self) -> None:
+        self.update()
 
     def add_point(self, down_bps: float, up_bps: float) -> None:
         self._down_data.append(max(0.0, down_bps))
@@ -75,7 +83,11 @@ class DetailTrafficGraphWidget(QWidget):
         self._down_data: deque[float] = deque(maxlen=_DETAIL_MAX_POINTS)
         self._up_data: deque[float] = deque(maxlen=_DETAIL_MAX_POINTS)
         self.setMinimumHeight(300)
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(240)
+        qconfig.themeChanged.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self) -> None:
+        self.update()
 
     def set_data(self, down: deque[float], up: deque[float]) -> None:
         self._down_data = deque(down, maxlen=_DETAIL_MAX_POINTS)
@@ -94,7 +106,7 @@ class DetailTrafficGraphWidget(QWidget):
         painter.end()
 
 
-class TrafficGraphDialog(QDialog):
+class TrafficGraphDialog(FluentDialog):
     """Dialog showing a detailed traffic graph."""
 
     def __init__(self, down_data: deque[float], up_data: deque[float], parent: QWidget | None = None):
@@ -102,8 +114,6 @@ class TrafficGraphDialog(QDialog):
         self.setWindowTitle("История трафика")
         self.setMinimumSize(700, 420)
         self.resize(800, 480)
-        bg = "#2b2b2b" if isDarkTheme() else "#f3f3f3"
-        self.setStyleSheet(f"TrafficGraphDialog {{ background-color: {bg}; }}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -126,9 +136,16 @@ def _draw_graph(
     r = QRectF(rect)
     w, h = r.width(), r.height()
 
+    # Theme tokens are resolved lazily on every paint (they follow the theme).
+    color_down = graph_down_color()
+    color_up = graph_up_color()
+    color_grid = graph_grid_color()
+    color_bg = graph_bg_color()
+    color_text = graph_text_color()
+
     # background
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(_COLOR_BG)
+    painter.setBrush(color_bg)
     painter.drawRoundedRect(r, 6, 6)
 
     margin_left = 8 if compact else 60
@@ -150,7 +167,7 @@ def _draw_graph(
     max_val *= 1.15  # headroom
 
     # grid lines
-    pen = QPen(_COLOR_GRID)
+    pen = QPen(color_grid)
     pen.setWidthF(0.5)
     painter.setPen(pen)
     grid_lines = 3 if compact else 5
@@ -160,7 +177,7 @@ def _draw_graph(
 
     # axis labels (detail mode only)
     if not compact:
-        painter.setPen(QColor(180, 180, 180))
+        painter.setPen(color_text)
         font = QFont()
         font.setPixelSize(10)
         painter.setFont(font)
@@ -183,15 +200,15 @@ def _draw_graph(
                              Qt.AlignmentFlag.AlignCenter, label)
 
         # title
-        painter.setPen(QColor(200, 200, 200))
+        painter.setPen(color_text)
         font.setPixelSize(12)
         painter.setFont(font)
         painter.drawText(QRectF(graph_x, r.y() + 2, graph_w, 18),
                          Qt.AlignmentFlag.AlignCenter, "История трафика")
 
     # draw lines
-    _draw_line(painter, graph_x, graph_y, graph_w, graph_h, down_data, max_val, _COLOR_DOWN, compact)
-    _draw_line(painter, graph_x, graph_y, graph_w, graph_h, up_data, max_val, _COLOR_UP, compact)
+    _draw_line(painter, graph_x, graph_y, graph_w, graph_h, down_data, max_val, color_down, compact)
+    _draw_line(painter, graph_x, graph_y, graph_w, graph_h, up_data, max_val, color_up, compact)
 
     # legend
     if compact:
@@ -201,9 +218,9 @@ def _draw_graph(
         lx = graph_x + 4
         ly = graph_y + 2
 
-        painter.setPen(_COLOR_DOWN)
+        painter.setPen(color_down)
         painter.drawText(QPointF(lx, ly + 9), "↓ Загрузка")
-        painter.setPen(_COLOR_UP)
+        painter.setPen(color_up)
         painter.drawText(QPointF(lx + 64, ly + 9), "↑ Выгрузка")
     else:
         font = QFont()
@@ -213,15 +230,15 @@ def _draw_graph(
         ly = r.y() + 4
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(_COLOR_DOWN)
+        painter.setBrush(color_down)
         painter.drawRoundedRect(QRectF(lx, ly + 2, 10, 10), 2, 2)
-        painter.setPen(_COLOR_DOWN)
+        painter.setPen(color_down)
         painter.drawText(QPointF(lx + 14, ly + 11), "Загрузка")
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(_COLOR_UP)
+        painter.setBrush(color_up)
         painter.drawRoundedRect(QRectF(lx + 86, ly + 2, 10, 10), 2, 2)
-        painter.setPen(_COLOR_UP)
+        painter.setPen(color_up)
         painter.drawText(QPointF(lx + 100, ly + 11), "Выгрузка")
 
 

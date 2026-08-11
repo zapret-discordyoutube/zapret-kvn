@@ -5,12 +5,13 @@ from collections import deque
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtGui import QBrush
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QSizePolicy,
     QStackedWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -24,7 +25,6 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon as FIF,
     PrimaryPushButton,
-    SmoothScrollArea,
     StrongBodyLabel,
     SubtitleLabel,
     SwitchButton,
@@ -32,6 +32,8 @@ from qfluentwidgets import (
 )
 
 from ..models import AppSettings, Node, RoutingSettings
+from .base_page import ScrollablePage
+from .theme import success_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 
 
@@ -91,6 +93,8 @@ class DashboardPage(QWidget):
         self._down_history: deque[float] = deque(maxlen=300)
         self._up_history: deque[float] = deque(maxlen=300)
         self._last_process_stats: list | None = None
+        self._grid_narrow = False
+        self._in_grid_relayout = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
@@ -104,27 +108,12 @@ class DashboardPage(QWidget):
         self._stack = QStackedWidget(self)
         outer.addWidget(self._stack)
 
-        # ── Page 0: main dashboard ────────────────────────────
-        main_page = QWidget()
-        main_page.setStyleSheet("QWidget { background: transparent; }")
-        self._stack.addWidget(main_page)
+        # ── Page 0: main dashboard (scrollable, AC7) ──────────
+        self._main_page = ScrollablePage()
+        self._stack.addWidget(self._main_page)
 
-        main_outer = QVBoxLayout(main_page)
-        main_outer.setContentsMargins(0, 0, 0, 0)
-
-        self._scroll = SmoothScrollArea(main_page)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        main_outer.addWidget(self._scroll)
-
-        container = QWidget()
-        container.setStyleSheet("QWidget { background: transparent; }")
-        self._scroll.setWidget(container)
-
-        root = QVBoxLayout(container)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        container = self._main_page.body
+        root = self._main_page.body_layout
 
         root.addWidget(SubtitleLabel("Панель управления", container))
         self.summary_label = CaptionLabel("Краткий обзор подключения, профиля, трафика и маршрутизации.", self)
@@ -136,6 +125,7 @@ class DashboardPage(QWidget):
         grid.setVerticalSpacing(12)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
+        self._cards_grid = grid
 
         # ── Connection card ───────────────────────────────────
         self.connection_card = CardWidget(self)
@@ -144,7 +134,9 @@ class DashboardPage(QWidget):
         connection_layout.setSpacing(6)
         connection_layout.addWidget(StrongBodyLabel("Подключение", self.connection_card))
         self.connection_state_label = SubtitleLabel("Ожидание", self.connection_card)
+        self.connection_state_label.setWordWrap(True)
         self.connection_engine_label = BodyLabel("Системный прокси", self.connection_card)
+        self.connection_engine_label.setWordWrap(True)
         self.connection_status_label = CaptionLabel("Прокси остановлен", self.connection_card)
         self.connection_target_label = CaptionLabel("Активный профиль не выбран", self.connection_card)
         self.connection_target_label.setWordWrap(True)
@@ -273,8 +265,11 @@ class DashboardPage(QWidget):
         self.mode_combo.addItem("Прямой", userData="direct")
         routing_layout.addWidget(self.mode_combo)
         self.routing_mode_label = BodyLabel("Правила", self.routing_card)
+        self.routing_mode_label.setWordWrap(True)
         self.routing_dns_label = CaptionLabel("DNS: Системный", self.routing_card)
+        self.routing_dns_label.setWordWrap(True)
         self.routing_rules_label = CaptionLabel("Прямые: 0   Прокси: 0   Блок: 0", self.routing_card)
+        self.routing_rules_label.setWordWrap(True)
         self.routing_bypass_label = CaptionLabel("Обход LAN: включён", self.routing_card)
         self.routing_bypass_label.setWordWrap(True)
         routing_layout.addWidget(self.routing_mode_label)
@@ -283,6 +278,14 @@ class DashboardPage(QWidget):
         routing_layout.addWidget(self.routing_rules_label)
         routing_layout.addWidget(self.routing_bypass_label)
 
+        for card in (
+            self.connection_card,
+            self.routing_card,
+            self.traffic_card,
+            self._proc_traffic_card,
+        ):
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
         grid.addWidget(self.connection_card, 0, 0)
         grid.addWidget(self.routing_card, 0, 1)
         root.addLayout(grid)
@@ -290,14 +293,11 @@ class DashboardPage(QWidget):
         root.addWidget(self._proc_traffic_card)
         root.addStretch(1)
 
-        # ── Page 1: traffic detail subpage ────────────────────
-        self._traffic_detail_page = QWidget()
-        self._traffic_detail_page.setStyleSheet("QWidget { background: transparent; }")
+        # ── Page 1: traffic detail subpage (scrollable, AC7) ──
+        self._traffic_detail_page = ScrollablePage()
         self._stack.addWidget(self._traffic_detail_page)
 
-        detail_layout = QVBoxLayout(self._traffic_detail_page)
-        detail_layout.setContentsMargins(24, 20, 24, 20)
-        detail_layout.setSpacing(12)
+        detail_layout = self._traffic_detail_page.body_layout
 
         self._traffic_breadcrumb = BreadcrumbBar(self._traffic_detail_page)
         self._traffic_breadcrumb.addItem("dashboard", "Панель управления")
@@ -321,14 +321,11 @@ class DashboardPage(QWidget):
         detail_stats_row.addStretch(1)
         detail_layout.addLayout(detail_stats_row)
 
-        # ── Page 2: process traffic detail subpage ─────────────
-        self._proc_detail_page = QWidget()
-        self._proc_detail_page.setStyleSheet("QWidget { background: transparent; }")
+        # ── Page 2: process traffic detail subpage (scrollable, AC7) ──
+        self._proc_detail_page = ScrollablePage()
         self._stack.addWidget(self._proc_detail_page)
 
-        proc_detail_layout = QVBoxLayout(self._proc_detail_page)
-        proc_detail_layout.setContentsMargins(24, 20, 24, 20)
-        proc_detail_layout.setSpacing(12)
+        proc_detail_layout = self._proc_detail_page.body_layout
 
         self._proc_breadcrumb = BreadcrumbBar(self._proc_detail_page)
         self._proc_breadcrumb.addItem("dashboard", "Панель управления")
@@ -369,6 +366,36 @@ class DashboardPage(QWidget):
 
         self._stack.setCurrentIndex(0)
         self._refresh_dashboard()
+
+    # ── Adaptive card grid (AC10) ─────────────────────────────
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_adaptive_grid()
+
+    def _update_adaptive_grid(self) -> None:
+        """Move the routing card to its own row when the viewport is narrow.
+
+        Below 900 px the two top cards no longer fit side by side, so the
+        routing card is re-anchored to a second grid row (spanning both
+        columns); at >= 900 px the original two-column layout is restored.
+        Widgets are moved with removeWidget/addWidget — never recreated.
+        """
+        if self._in_grid_relayout:
+            return
+        narrow = self.width() < 900
+        if narrow == self._grid_narrow:
+            return
+        self._in_grid_relayout = True
+        try:
+            self._grid_narrow = narrow
+            self._cards_grid.removeWidget(self.routing_card)
+            if narrow:
+                self._cards_grid.addWidget(self.routing_card, 1, 0, 1, 2)
+            else:
+                self._cards_grid.addWidget(self.routing_card, 0, 1)
+        finally:
+            self._in_grid_relayout = False
 
     # ── Public API ────────────────────────────────────────────
 
@@ -658,7 +685,7 @@ class DashboardPage(QWidget):
                 self._set_table_text(table, row, 0, ps.exe)
                 self._set_table_text(table, row, 1, speed)
                 vpn_item = self._set_table_text(table, row, 2, self._format_bytes(ps.proxy_bytes))
-                vpn_item.setForeground(QColor("#2ecc71") if ps.proxy_bytes > 0 else QBrush())
+                vpn_item.setForeground(success_color() if ps.proxy_bytes > 0 else QBrush())
                 self._set_table_text(table, row, 3, self._format_bytes(ps.direct_bytes))
                 self._set_table_text(table, row, 4, conn_text)
                 self._set_table_text(table, row, 5, host)

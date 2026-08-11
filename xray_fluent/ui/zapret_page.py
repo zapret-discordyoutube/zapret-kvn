@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import cast
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QCursor
+from PyQt6.QtGui import QBrush, QCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView,
     QStackedWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -22,11 +22,22 @@ from qfluentwidgets import (
     TableWidget,
     TransparentToolButton,
     VerticalSeparator,
+    qconfig,
+    setCustomStyleSheet,
 )
 from qfluentwidgets import RoundMenu, Action
 
 from ..zapret_manager import PresetInfo, ZapretManager
 from .preset_edit_widget import PresetEditWidget
+from .theme import success_color, token_pair
+
+
+def _status_qss(token: str) -> tuple[str, str]:
+    light, dark = token_pair(token)
+    return (
+        f"BodyLabel {{ color: {light}; }}",
+        f"BodyLabel {{ color: {dark}; }}",
+    )
 
 
 class ZapretPage(QWidget):
@@ -154,6 +165,11 @@ class ZapretPage(QWidget):
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self._editor.back_requested.connect(self._show_list)
         self._editor.save_requested.connect(self._on_save_preset)
+        # Re-resolve the theme-dependent row brushes on theme change.
+        qconfig.themeChanged.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self) -> None:
+        self._reload_table(self.current_preset())
 
     # ── Public API ──
 
@@ -166,7 +182,7 @@ class ZapretPage(QWidget):
         if running:
             self._active_preset = preset_name
             self.status_label.setText(f"Работает: {preset_name}")
-            self.status_label.setStyleSheet("color: #4CAF50;")
+            setCustomStyleSheet(self.status_label, *_status_qss("success"))
             self.progress.show()
             self.progress.start()
             self.start_btn.setEnabled(False)
@@ -174,7 +190,7 @@ class ZapretPage(QWidget):
         else:
             self._active_preset = ""
             self.status_label.setText("Остановлен")
-            self.status_label.setStyleSheet("")
+            setCustomStyleSheet(self.status_label, "", "")
             self.progress.stop()
             self.progress.hide()
             self.start_btn.setEnabled(True)
@@ -184,7 +200,7 @@ class ZapretPage(QWidget):
     def set_error(self, message: str) -> None:
         self.set_running(False)
         self.status_label.setText(f"Ошибка: {message}")
-        self.status_label.setStyleSheet("color: #F44336;")
+        setCustomStyleSheet(self.status_label, *_status_qss("error"))
 
     def current_preset(self) -> str:
         row = self.table.currentRow()
@@ -213,7 +229,7 @@ class ZapretPage(QWidget):
 
             # Highlight active preset
             if self._running and p.name == self._active_preset:
-                green = QBrush(QColor(76, 175, 80))
+                green = QBrush(success_color())
                 for item in (name_item, desc_item, args_item, mod_item):
                     item.setForeground(green)
 

@@ -12,9 +12,6 @@ from qfluentwidgets import (
     InfoBarIcon,
     InfoBarPosition,
     NavigationItemPosition,
-    Theme,
-    setTheme,
-    setThemeColor,
 )
 
 from ..app_controller import AppController
@@ -35,6 +32,7 @@ from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionDialog, SubscriptionsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
+from .theme import apply_theme, sync_system_theme_listener
 from .updates_page import UpdatesPage
 from .zapret_page import ZapretPage
 
@@ -285,7 +283,7 @@ class MainWindow(FluentWindow):
         self.stackedWidget.currentChanged.connect(self._on_current_interface_changed)
 
     def _init_window(self) -> None:
-        self.setMinimumSize(600, 450)
+        self.setMinimumSize(860, 560)
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(self._app_icon)
         self._apply_window_geometry(self.controller.state.settings)
@@ -1191,20 +1189,12 @@ class MainWindow(FluentWindow):
         self.controller.run_xray_core_update(True, silent=False)
 
     def _apply_theme(self, theme_name: str, accent_color: str) -> None:
-        normalized = theme_name.lower().strip()
-        if normalized == "dark":
-            setTheme(Theme.DARK)
-        elif normalized == "light":
-            setTheme(Theme.LIGHT)
-        else:
-            setTheme(Theme.AUTO)
-
-        value = accent_color.strip()
-        if value:
-            try:
-                setThemeColor(value)
-            except Exception:
-                pass
+        # Deduplicated: theme.apply_theme skips setTheme/setThemeColor when
+        # the requested values match the last applied ones.
+        apply_theme(theme_name, accent_color)
+        # "system" mode follows the OS via SystemThemeListener; any other
+        # mode stops the listener.
+        sync_system_theme_listener(theme_name, self)
 
     def _refresh_tray_tooltip(self) -> None:
         if self.tray is None:

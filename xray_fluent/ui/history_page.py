@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from qfluentwidgets import qconfig
 from PyQt6.QtWidgets import QHBoxLayout, QHeaderView, QTableWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
@@ -11,37 +10,25 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     PushButton,
     SettingCardGroup,
-    SmoothScrollArea,
     SubtitleLabel,
     TableWidget,
     TitleLabel,
 )
 
 from ..traffic_history import TrafficHistoryStorage, TrafficSession
+from .base_page import ScrollablePage
+from .theme import info_color, success_color
 
 
-class HistoryPage(QWidget):
+class HistoryPage(ScrollablePage):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("history")
         self._storage: TrafficHistoryStorage | None = None
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        scroll = SmoothScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        outer.addWidget(scroll)
-
-        container = QWidget()
-        container.setStyleSheet("QWidget { background: transparent; }")
-        scroll.setWidget(container)
-
-        root = QVBoxLayout(container)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        # --- Scrollable body (AC7, base_page.ScrollablePage) ---
+        container = self.body
+        root = self.body_layout
 
         root.addWidget(SubtitleLabel("История трафика", container))
 
@@ -150,6 +137,10 @@ class HistoryPage(QWidget):
         # Signals
         self._period_combo.currentIndexChanged.connect(self._refresh)
         self._refresh_btn.clicked.connect(self._refresh)
+        qconfig.themeChanged.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self) -> None:
+        self._refresh()
 
     def set_storage(self, storage: TrafficHistoryStorage) -> None:
         self._storage = storage
@@ -189,7 +180,7 @@ class HistoryPage(QWidget):
             }.get(s.mode, s.mode)
             mode_item = QTableWidgetItem(mode_text)
             if "tun" in s.mode.lower() or s.mode == "singbox":
-                mode_item.setForeground(QColor("#3498db"))
+                mode_item.setForeground(info_color())
             self._sessions_table.setItem(row, 2, mode_item)
 
             # Duration
@@ -198,7 +189,7 @@ class HistoryPage(QWidget):
             # Download
             down_item = QTableWidgetItem(_fmt_bytes(s.total_download))
             if s.total_download > 0:
-                down_item.setForeground(QColor("#2ecc71"))
+                down_item.setForeground(success_color())
             self._sessions_table.setItem(row, 4, down_item)
 
             # Upload
@@ -218,7 +209,7 @@ class HistoryPage(QWidget):
             self._daily_table.setItem(row, 0, QTableWidgetItem(date_key))
             down_item = QTableWidgetItem(_fmt_bytes(totals.get("download", 0)))
             if totals.get("download", 0) > 0:
-                down_item.setForeground(QColor("#2ecc71"))
+                down_item.setForeground(success_color())
             self._daily_table.setItem(row, 1, down_item)
             self._daily_table.setItem(row, 2, QTableWidgetItem(_fmt_bytes(totals.get("upload", 0))))
 
@@ -232,7 +223,7 @@ class HistoryPage(QWidget):
 
             down_item = QTableWidgetItem(_fmt_bytes(int(stats["download"])))
             if int(stats["download"]) > 0:
-                down_item.setForeground(QColor("#2ecc71"))
+                down_item.setForeground(success_color())
             self._proc_table.setItem(row, 1, down_item)
 
             self._proc_table.setItem(row, 2, QTableWidgetItem(_fmt_bytes(int(stats["upload"]))))
