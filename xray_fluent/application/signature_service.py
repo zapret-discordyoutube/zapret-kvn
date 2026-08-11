@@ -22,14 +22,12 @@ def node_identity(
 ) -> object:
     """Что именно в конфиге зависит от выбора сервера.
 
-    При активной ротации конфиг содержит весь пул, поэтому смена активного сервера
-    внутри пула конфиг не меняет — сигнатура обязана это отражать, иначе на каждом
-    такте ротации запускался бы полный переход с перезапуском ядра.
+    Ротация ничего сюда не добавляет: она переключает сервер штатным путём, а тот
+    сначала пробует горячий свитч по тегу пула и лишь при неудаче просит переход —
+    и вот тогда `selected` обязан быть частью сигнатуры, иначе переход сочтёт, что
+    менять нечего, и смена сервера потеряется.
     """
 
-    plan = controller.rotation_plan(settings)
-    if plan is not None:
-        return {"rotation_pool": plan.signature_payload()}
     pool_factory = getattr(controller, "xray_outbound_pool", None)
     if callable(pool_factory):
         pool = pool_factory()
@@ -59,6 +57,13 @@ def _singbox_runtime_signature_payload(
         planner_outcome = classify_node_for_singbox(node)
     selector_pool: object | None = None
     active_session = getattr(controller, "_active_session", None)
+    if has_proxy_outbound and node is not None and planner_outcome == "hybrid_xray_sidecar":
+        # Initial capture and all later comparisons must describe the same
+        # runtime.  Previously the pool appeared in the signature only after
+        # _active_session existed, so a successful connect immediately looked
+        # stale and scheduled another full proxy-hot-swap.
+        pool = controller.xray_outbound_pool()
+        selector_pool = {"xray_sidecar": pool.signature_payload()}
     if (
         has_proxy_outbound
         and node is not None
@@ -233,7 +238,6 @@ def tun_layer_signature(
     if controller.is_tun2socks_mode(settings):
         pool_factory = getattr(controller, "xray_outbound_pool", None)
         pool = pool_factory() if callable(pool_factory) else None
-        plan = controller.rotation_plan(settings)
         return signature(
             {
                 "mode": "tun2socks",
@@ -242,8 +246,6 @@ def tun_layer_signature(
                 "server": (
                     sorted({pooled.server for pooled in pool.nodes})
                     if pool is not None and pool.nodes
-                    else sorted({pooled.server for pooled in plan.nodes})
-                    if plan is not None
                     else (node.server if node else "")
                 ),
                 "socks_port": int(DEFAULT_SOCKS_PORT),

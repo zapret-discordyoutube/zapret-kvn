@@ -209,6 +209,7 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
             protect_ss_password=controller._protect_ss_password,
             ping_host=ping_host,
             ping_port=ping_port,
+            outbound_pool_tags=plan.selector_tags,
         )
         controller._set_connection_status(
             "running",
@@ -284,6 +285,7 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
             protect_ss_password=controller._protect_ss_password,
             ping_host=ping_host,
             ping_port=ping_port,
+            outbound_pool_tags=plan.selector_tags,
         )
         suffix = " (sing-box + Xray sidecar)" if plan.is_hybrid else " (sing-box extended)"
         controller._set_connection_status("running", f"Переключено: {session_label}{suffix}", level="success")

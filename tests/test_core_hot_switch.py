@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from xray_fluent.application.node_service import set_selected_node
+from xray_fluent.application.signature_service import transition_signature
 from xray_fluent.application.outbound_pool_service import (
     XRAY_BALANCER_TAG,
     XRAY_OUTBOUND_PREFIX,
@@ -101,6 +103,57 @@ class SingboxPoolTests(unittest.TestCase):
         self.assertEqual(sidecar["routing"]["balancers"][0]["tag"], XRAY_BALANCER_TAG)
         self.assertIn("RoutingService", sidecar["api"]["services"])
         self.assertIn("HandlerService", sidecar["api"]["services"])
+
+    def test_hybrid_signature_is_stable_before_and_after_session_capture(self) -> None:
+        nodes = [
+            parse_single(
+                "vless://11111111-1111-1111-1111-111111111111@one.example:443"
+                "?type=xhttp&security=tls&sni=one.example&path=%2Fapi#xhttp"
+            ),
+            parse_single("trojan://secret@two.example:443?security=tls&sni=two.example#trojan"),
+        ]
+
+        class Controller:
+            def __init__(self):
+                settings = AppSettings()
+                settings.proxy_engine = "singbox"
+                self.state = SimpleNamespace(
+                    settings=settings,
+                    routing=RoutingSettings(),
+                    nodes=nodes,
+                    selected_node_id=nodes[0].id,
+                )
+                self.selected_node = nodes[0]
+                self._active_session = None
+
+            @staticmethod
+            def is_singbox_editor_mode(_settings=None):
+                return True
+
+            @staticmethod
+            def is_singbox_tun_mode(_settings=None):
+                return False
+
+            @staticmethod
+            def is_singbox_proxy_mode(_settings=None):
+                return True
+
+            @staticmethod
+            def _inspect_active_singbox_config():
+                return SINGBOX_TEMPLATE, "config-hash", True
+
+            def xray_outbound_pool(self):
+                return build_xray_outbound_pool(self.state.nodes)
+
+        controller = Controller()
+        before = transition_signature(controller)
+        controller._active_session = SimpleNamespace(
+            hybrid=True,
+            outbound_pool_tags=controller.xray_outbound_pool().tags,
+        )
+        after = transition_signature(controller)
+
+        self.assertEqual(before, after)
 
 
 class SelectorApiTests(unittest.TestCase):

@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 import hashlib
 from typing import Iterable
 
-from ..link_parser import is_native_singbox_outbound
 from ..models import Node
 
 
@@ -36,8 +35,16 @@ def singbox_outbound_tag(node_id: str) -> str:
 
 
 def is_xray_pool_node(node: Node) -> bool:
+    """Any node carrying an Xray outbound can live in the Xray control plane.
+
+    A node may also be convertible to native sing-box; that is not a reason to
+    exclude it from a running hybrid sidecar.  Excluding dual-compatible nodes
+    forced a full sing-box/Xray restart whenever the user moved from XHTTP to a
+    common VLESS/Trojan/VMess server.
+    """
+
     outbound = node.outbound if isinstance(node.outbound, dict) else {}
-    return bool(str(outbound.get("protocol") or "").strip()) and not is_native_singbox_outbound(node)
+    return bool(str(outbound.get("protocol") or "").strip())
 
 
 @dataclass(slots=True)

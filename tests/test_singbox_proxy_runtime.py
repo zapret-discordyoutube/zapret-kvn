@@ -5,8 +5,10 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+from xray_fluent.engines.singbox.operations import restart_proxy_runtime, restart_runtime
 from xray_fluent.engines.singbox.runtime_planner import (
     classify_node_for_singbox,
     parse_singbox_document,
@@ -31,6 +33,55 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             document,
             parse_single(link),
             allowed_proxy_ports={1390, 1391},
+        )
+
+    def _restart_controller(self, *, tun: bool):
+        node = parse_single("hy2://secret@example.com:443/?insecure=1#one")
+        tags = {node.id: "subscription/node"}
+        plan = SimpleNamespace(
+            used_selected_node=True,
+            source_path=TEMPLATE_PATH,
+            is_hybrid=False,
+            selector_tags=tags,
+            socks_port=1390,
+            http_port=1391,
+            singbox_config={},
+            xray_sidecar=None,
+            proxy_ports_changed=False,
+        )
+        controller = Mock()
+        controller.selected_node = node
+        controller.connected = True
+        controller.state.settings.enable_system_proxy = False
+        controller.singbox.is_running = False
+        controller.xray.is_running = False
+        controller._start_singbox_runtime_plan.return_value = True
+        controller._infer_singbox_ping_target.return_value = (node.server, node.port)
+        controller._refresh_connected_state.return_value = (True, True)
+        if tun:
+            controller._plan_runtime_singbox.return_value = plan
+        else:
+            controller._plan_proxy_runtime_singbox.return_value = plan
+        return controller, tags
+
+    def test_proxy_restart_preserves_hot_switch_pool_in_session(self) -> None:
+        controller, tags = self._restart_controller(tun=False)
+
+        self.assertTrue(restart_proxy_runtime(controller, "test"))
+
+        self.assertEqual(
+            controller._capture_active_session.call_args.kwargs["outbound_pool_tags"],
+            tags,
+        )
+
+    def test_tun_restart_preserves_hot_switch_pool_in_session(self) -> None:
+        controller, tags = self._restart_controller(tun=True)
+
+        self.assertTrue(restart_runtime(controller, "test"))
+
+        self.assertEqual(
+            controller._capture_active_session.call_args.kwargs["outbound_pool_tags"],
+            tags,
         )
 
     def test_default_proxy_runtime_replaces_tun_with_public_proxy_inbounds(self) -> None:

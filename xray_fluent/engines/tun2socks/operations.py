@@ -63,7 +63,6 @@ def start_tun(
         )
         controller._active_core = prev_active_core
         return None
-    rotation = controller.rotation_plan()
     outbound_pool = controller.xray_outbound_pool()
     config = build_xray_config(
         node,
@@ -72,7 +71,6 @@ def start_tun(
         api_port=controller._xray_api_port,
         socks_port=socks_port,
         http_port=DEFAULT_HTTP_PORT,
-        rotation=rotation,
         outbound_pool=outbound_pool,
     )
     config["log"] = {"loglevel": "error"}
@@ -178,7 +176,6 @@ def hot_swap_steps(controller: AppController, reason: str, node: Node) -> Transi
             api_port=controller._xray_api_port,
             socks_port=socks_port,
             http_port=DEFAULT_HTTP_PORT,
-            rotation=controller.rotation_plan(),
             outbound_pool=controller.xray_outbound_pool(),
         )
         config["log"] = {"loglevel": "error"}

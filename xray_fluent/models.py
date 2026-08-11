@@ -512,7 +512,7 @@ class AppSettings:
             rotation_enabled=bool(data.get("rotation_enabled", False)),
             rotation_mode=str(data.get("rotation_mode") or "random"),
             rotation_interval_sec=int(data.get("rotation_interval_sec") or 600),
-            rotation_jitter_pct=int(data.get("rotation_jitter_pct") or 0),
+            rotation_jitter_pct=int(data.get("rotation_jitter_pct", 20)),
             rotation_pool=str(data.get("rotation_pool") or "all"),
             rotation_pool_value=str(data.get("rotation_pool_value") or ""),
             rotation_only_alive=bool(data.get("rotation_only_alive", True)),

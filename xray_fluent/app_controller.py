@@ -404,6 +404,7 @@ class AppController(QObject):
         self._rotation_timer.timeout.connect(self._on_rotation_tick)
         self._rotation_rng = random.Random()
         self._rotation_pool_logged = ""
+        self._rotation_running = False
 
     def load(self) -> bool:
         try:
@@ -1951,15 +1952,27 @@ class AppController(QObject):
         node = self.selected_node
         session = self._active_session
         started_at = time.perf_counter()
-        if node is None or session is None or not self.connected:
+        if node is None:
+            self._log("[core-switch] fallback: selected node is missing")
+            return False
+        if session is None:
+            self._log("[core-switch] fallback: active session is missing")
+            return False
+        if not self.connected:
+            self._log("[core-switch] fallback: controller is not connected")
             return False
         tags = session.outbound_pool_tags or {}
         tag = tags.get(node.id, "")
         if not tag:
+            self._log(
+                f"[core-switch] fallback: node {node.id} is not loaded in "
+                f"{session.active_core} pool ({len(tags)} tags)"
+            )
             return False
         # UDP endpoints need the zapret pass profile before new connections are
         # sent to them.  A cache miss falls back to the normal async resolver.
         if not self.zapret.apply_cached_proxy_node(node):
+            self._log(f"[core-switch] waiting for UDP endpoint protection: {node.server}")
             return False
         control_core = "xray" if session.hybrid else session.active_core
         if not self._apply_core_outbound_tag(control_core, tag):
@@ -1999,22 +2012,33 @@ class AppController(QObject):
         self._log(f"[core-switch] {session.active_core} -> {node.name} ({tag})")
 
     def is_rotation_supported(self, settings: AppSettings | None = None) -> bool:
-        """Ротация живёт только там, где конфиг xray строит само приложение.
-
-        В raw-config и sing-box режимах конфигом владеет пользователь, поэтому
-        подмешивать туда балансировщик нельзя.
-        """
+        """Ротация опирается на пул outbound'ов, загруженный в работающее ядро."""
 
         settings = settings or self.state.settings
-        if not settings.rotation_enabled:
-            return False
-        return self.is_tun2socks_mode(settings)
+        return bool(settings.rotation_enabled)
+
+    def _rotation_available_ids(self) -> set[str] | None:
+        """Ноды, которые запущенное ядро реально держит в своём пуле.
+
+        Переключение идёт по тегу, полученному ядром при старте, поэтому предлагать
+        ноду вне этого набора нельзя: свитч просто не состоится.
+        """
+
+        session = self._active_session
+        if session is None:
+            return None
+        return set(session.outbound_pool_tags or {})
 
     def rotation_plan(self, settings: AppSettings | None = None) -> RotationPlan | None:
         settings = settings or self.state.settings
         if not self.is_rotation_supported(settings):
             return None
-        plan = build_rotation_plan(settings, self.state.nodes, self.state.selected_node_id)
+        plan = build_rotation_plan(
+            settings,
+            self.state.nodes,
+            self.state.selected_node_id,
+            available_ids=self._rotation_available_ids(),
+        )
         if plan is not None and plan.truncated:
             # Метод вызывается часто (в т.ч. при расчёте сигнатур) — логируем факт
             # усечения один раз на каждый новый размер пула, а не на каждый вызов.
@@ -2039,33 +2063,28 @@ class AppController(QObject):
     def _sync_rotation_timer(self) -> None:
         plan = self.rotation_plan()
         if plan is None or not self.connected:
-            if self._rotation_timer.isActive():
-                self._rotation_timer.stop()
+            self._rotation_timer.stop()
+            if self._rotation_running:
+                self._rotation_running = False
                 self._log("[rotation] остановлена")
             return
-        if not self._rotation_timer.isActive():
-            # Пока выбор не зафиксирован, балансировщик раскидывал бы каждое
-            # соединение по разным серверам — сразу пиним текущий.
-            self._apply_rotation_override(plan, self.state.selected_node_id)
+        if not self._rotation_running:
+            self._rotation_running = True
             self._log(
-                f"[rotation] запущена: серверов в пуле {len(plan.nodes)}, "
+                f"[rotation] запущена: серверов в ротации {len(plan.nodes)}, "
                 f"режим {self.state.settings.rotation_mode}"
             )
         self._rotation_timer.start(rotation_interval_ms(self.state.settings, self._rotation_rng))
 
-    def _apply_rotation_override(self, plan: RotationPlan, node_id: str | None) -> bool:
-        if not plan.contains(node_id):
-            return False
-        pool = self.xray_outbound_pool()
-        tag = pool.tag_for(node_id)
-        return bool(tag) and self._apply_core_outbound_tag("xray", tag)
-
     def _on_rotation_tick(self) -> None:
+        # Собственный слот single-shot таймера: isActive() здесь уже False, поэтому
+        # состояние «ротация идёт» отслеживается флагом, а не таймером — иначе каждый
+        # тик заново логировался бы как запуск.
         self.rotate_now()
         self._sync_rotation_timer()
 
     def rotate_now(self) -> bool:
-        """Переключиться на следующий сервер пула без перезапуска ядра."""
+        """Переключиться на следующий сервер ротации без перезапуска ядра."""
 
         plan = self.rotation_plan()
         if plan is None or not self.connected:
@@ -2078,23 +2097,11 @@ class AppController(QObject):
         )
         if node is None or node.id == self.state.selected_node_id:
             return False
-        if not self._apply_rotation_override(plan, node.id):
-            self.status.emit("warning", f"Ротация: не удалось переключиться на {node.name}")
-            return False
 
-        # Меняем выбор напрямую: состав конфига не изменился, поэтому transition
-        # не нужен — иначе ядро перезапускалось бы на каждом такте ротации.
-        self.state.selected_node_id = node.id
-        session = self._active_session
-        pool = self.xray_outbound_pool()
-        tag = pool.tag_for(node.id)
-        if session is not None and tag:
-            self._capture_hot_switched_session(node, session, pool.tags, tag)
-        else:
-            node.last_used_at = utc_now_iso()
-        self.selection_changed.emit(self.selected_node)
-        self.schedule_save()
-        self._log(f"[rotation] переключение -> {node.name} ({tag or plan.tag_for(node.id)})")
+        self._log(f"[rotation] переключение -> {node.name}")
+        # Штатный путь смены сервера: он сам делает горячий свитч по тегу, который
+        # ядро получило при запуске, а при неудаче честно переподключается.
+        self.set_selected_node(node.id)
         self.status.emit("info", f"Ротация: {node.name}")
         return True
 

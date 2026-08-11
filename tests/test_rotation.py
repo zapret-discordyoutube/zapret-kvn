@@ -3,15 +3,13 @@ from __future__ import annotations
 import random
 import unittest
 
+from xray_fluent.application.outbound_pool_service import build_xray_outbound_pool
 from xray_fluent.application.rotation_service import (
-    BALANCER_TAG,
     MAX_POOL_NODES,
     MIN_INTERVAL_SEC,
-    PRIMARY_OUTBOUND_TAG,
     build_rotation_plan,
     pick_next_node,
     rotation_interval_ms,
-    rotation_pool_signature,
 )
 from xray_fluent.engines.xray.balancer_api import build_balancer_override_command
 from xray_fluent.engines.xray.config_builder import build_xray_config
@@ -53,29 +51,19 @@ class RotationPlanTests(unittest.TestCase):
         self.assertIsNone(build_rotation_plan(rotation_settings(), [make_node(1)]))
         self.assertIsNotNone(build_rotation_plan(rotation_settings(), [make_node(1), make_node(2)]))
 
-    def test_tag_layout_does_not_depend_on_active_node(self) -> None:
-        # Работающий xray хранит раскладку тегов с момента запуска. Если бы она
-        # зависела от активной ноды, команда `bo proxy-N` после переключения
-        # уводила бы трафик на другой сервер.
+    def test_plan_is_independent_of_active_node(self) -> None:
         nodes = [make_node(1), make_node(2), make_node(3)]
         settings = rotation_settings()
-        layouts = [
-            build_rotation_plan(settings, nodes, node.id).tags  # type: ignore[union-attr]
-            for node in nodes
-        ]
-        self.assertEqual(layouts[0], layouts[1])
-        self.assertEqual(layouts[1], layouts[2])
-        self.assertEqual(
-            sorted(layouts[0].values()),
-            sorted([PRIMARY_OUTBOUND_TAG, f"{PRIMARY_OUTBOUND_TAG}-2", f"{PRIMARY_OUTBOUND_TAG}-3"]),
-        )
+        plans = [build_rotation_plan(settings, nodes, node.id) for node in nodes]
+        ids = [[item.id for item in plan.nodes] for plan in plans]  # type: ignore[union-attr]
+        self.assertEqual(ids[0], ids[1])
+        self.assertEqual(ids[1], ids[2])
 
     def test_pool_order_follows_sort_order(self) -> None:
         nodes = [make_node(3), make_node(1), make_node(2)]
         plan = build_rotation_plan(rotation_settings(), nodes, nodes[0].id)
         assert plan is not None
         self.assertEqual([node.sort_order for node in plan.nodes], [1, 2, 3])
-        self.assertEqual(plan.tag_for(plan.nodes[0].id), PRIMARY_OUTBOUND_TAG)
 
     def test_active_node_survives_truncation(self) -> None:
         nodes = [make_node(i) for i in range(1, 11)]
@@ -84,6 +72,23 @@ class RotationPlanTests(unittest.TestCase):
         assert plan is not None
         self.assertEqual(len(plan.nodes), 3)
         self.assertTrue(plan.contains(outsider.id))
+
+    def test_only_nodes_present_in_the_core_are_offered(self) -> None:
+        # Ядро держит раскладку, полученную при старте. Нода, которой в нём нет,
+        # переключением не активируется, поэтому в ротацию попадать не должна.
+        nodes = [make_node(1), make_node(2), make_node(3)]
+        available = {nodes[0].id, nodes[1].id}
+        plan = build_rotation_plan(
+            rotation_settings(), nodes, nodes[0].id, available_ids=available
+        )
+        assert plan is not None
+        self.assertEqual({node.id for node in plan.nodes}, available)
+
+    def test_empty_core_pool_disables_rotation(self) -> None:
+        nodes = [make_node(1), make_node(2), make_node(3)]
+        self.assertIsNone(
+            build_rotation_plan(rotation_settings(), nodes, nodes[0].id, available_ids=set())
+        )
 
     def test_group_pool_filter(self) -> None:
         nodes = [make_node(1, group="A"), make_node(2, group="B"), make_node(3, group="A")]
@@ -115,19 +120,11 @@ class RotationPlanTests(unittest.TestCase):
         plan = build_rotation_plan(rotation_settings(rotation_only_alive=True), nodes)
         assert plan is not None
         self.assertEqual(len(plan.nodes), 2)
-        self.assertNotIn(nodes[1].id, plan.tags)
+        self.assertFalse(plan.contains(nodes[1].id))
 
         relaxed = build_rotation_plan(rotation_settings(rotation_only_alive=False), nodes)
         assert relaxed is not None
         self.assertEqual(len(relaxed.nodes), 3)
-
-    def test_native_singbox_nodes_never_enter_pool(self) -> None:
-        native = make_node(9)
-        native.outbound = {"type": "hysteria2", "server": "10.0.0.9", "server_port": 443}
-        nodes = [make_node(1), make_node(2), native]
-        plan = build_rotation_plan(rotation_settings(), nodes)
-        assert plan is not None
-        self.assertNotIn(native.id, plan.tags)
 
     def test_pool_is_truncated_and_reports_it(self) -> None:
         nodes = [make_node(i) for i in range(1, 12)]
@@ -144,23 +141,13 @@ class RotationPlanTests(unittest.TestCase):
         self.assertEqual(len(plan.nodes), MAX_POOL_NODES)
         self.assertTrue(plan.truncated)
 
-    def test_signature_ignores_active_node_but_tracks_pool(self) -> None:
+    def test_pool_membership_tracks_the_node_list(self) -> None:
         nodes = [make_node(1), make_node(2), make_node(3)]
         settings = rotation_settings()
-        first = rotation_pool_signature(build_rotation_plan(settings, nodes, nodes[0].id))
-        second = rotation_pool_signature(build_rotation_plan(settings, nodes, nodes[1].id))
-        self.assertEqual(first, second)
-
-        changed = rotation_pool_signature(build_rotation_plan(settings, nodes[:2], nodes[0].id))
-        self.assertNotEqual(first, changed)
-
-    def test_signature_tracks_outbound_edits(self) -> None:
-        nodes = [make_node(1), make_node(2)]
-        settings = rotation_settings()
-        before = rotation_pool_signature(build_rotation_plan(settings, nodes, nodes[0].id))
-        nodes[1].outbound = dict(nodes[1].outbound, protocol="trojan")
-        after = rotation_pool_signature(build_rotation_plan(settings, nodes, nodes[0].id))
-        self.assertNotEqual(before, after)
+        full = build_rotation_plan(settings, nodes, nodes[0].id)
+        shrunk = build_rotation_plan(settings, nodes[:2], nodes[0].id)
+        assert full is not None and shrunk is not None
+        self.assertNotEqual(full.node_ids(), shrunk.node_ids())
 
 
 class PickNextNodeTests(unittest.TestCase):
@@ -217,116 +204,65 @@ class RotationIntervalTests(unittest.TestCase):
 
 class BalancerCommandTests(unittest.TestCase):
     def test_override_command(self) -> None:
-        command = build_balancer_override_command("C:/core/xray.exe", 19085, BALANCER_TAG, "proxy-3")
+        command = build_balancer_override_command("C:/core/xray.exe", 19085, "bal", "proxy-3")
         self.assertEqual(
             command,
-            [
-                "C:/core/xray.exe",
-                "api",
-                "bo",
-                "--server=127.0.0.1:19085",
-                "-b",
-                BALANCER_TAG,
-                "proxy-3",
-            ],
+            ["C:/core/xray.exe", "api", "bo", "--server=127.0.0.1:19085", "-b", "bal", "proxy-3"],
         )
 
     def test_remove_command(self) -> None:
-        command = build_balancer_override_command("xray", 1234, BALANCER_TAG, remove=True)
+        command = build_balancer_override_command("xray", 1234, "bal", remove=True)
         self.assertEqual(command[-1], "-r")
-        self.assertNotIn("proxy", command[-1])
 
     def test_invalid_arguments_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            build_balancer_override_command("", 19085, BALANCER_TAG, "proxy")
+            build_balancer_override_command("", 19085, "bal", "proxy")
         with self.assertRaises(ValueError):
-            build_balancer_override_command("xray", 0, BALANCER_TAG, "proxy")
+            build_balancer_override_command("xray", 0, "bal", "proxy")
         with self.assertRaises(ValueError):
             build_balancer_override_command("xray", 19085, "", "proxy")
         with self.assertRaises(ValueError):
-            build_balancer_override_command("xray", 19085, BALANCER_TAG, "")
+            build_balancer_override_command("xray", 19085, "bal", "")
 
 
-class ConfigBuilderRotationTests(unittest.TestCase):
-    def build(self, rotation=None, node=None):
-        node = node or make_node(1)
-        return build_xray_config(node, RoutingSettings(), AppSettings(), rotation=rotation)
+class ConfigBuilderPoolTests(unittest.TestCase):
+    """Ротация не имеет отдельного транспорта: конфиг зависит только от пула."""
 
-    def test_config_without_rotation_is_unchanged(self) -> None:
-        config = self.build()
+    def build(self, node, pool=None):
+        return build_xray_config(node, RoutingSettings(), AppSettings(), outbound_pool=pool)
+
+    def test_config_without_pool_is_single_node(self) -> None:
+        config = self.build(make_node(1))
         self.assertNotIn("balancers", config["routing"])
         self.assertEqual(config["api"]["services"], ["StatsService"])
         self.assertEqual([out["tag"] for out in config["outbounds"]], ["proxy", "direct", "block", "api"])
         for rule in config["routing"]["rules"]:
             self.assertNotIn("balancerTag", rule)
 
-    def test_rotation_emits_pool_outbounds_and_balancer(self) -> None:
-        nodes = [make_node(i) for i in range(1, 4)]
-        plan = build_rotation_plan(rotation_settings(), nodes, nodes[0].id)
-        assert plan is not None
-        config = self.build(rotation=plan, node=nodes[0])
+    def test_rotation_settings_alone_do_not_change_the_config(self) -> None:
+        node = make_node(1)
+        plain = self.build(node)
+        settings = rotation_settings()
+        rotated = build_xray_config(node, RoutingSettings(), settings)
+        self.assertEqual(plain, rotated)
 
+    def test_pool_config_carries_every_node_and_a_balancer(self) -> None:
+        nodes = [make_node(i) for i in range(1, 4)]
+        pool = build_xray_outbound_pool(nodes)
+        config = self.build(nodes[0], pool=pool)
         tags = [out["tag"] for out in config["outbounds"]]
-        self.assertEqual(tags, ["proxy", "proxy-2", "proxy-3", "direct", "block", "api"])
-        # Первым обязан идти прокси: пустой выбор балансировщика уходит в outbounds[0].
-        self.assertEqual(tags[0], PRIMARY_OUTBOUND_TAG)
-
-        balancers = config["routing"]["balancers"]
-        self.assertEqual(len(balancers), 1)
-        self.assertEqual(balancers[0]["tag"], BALANCER_TAG)
-        self.assertNotIn("fallbackTag", balancers[0])
-        self.assertNotIn("observatory", config)
-        self.assertNotIn("burstObservatory", config)
+        for node in nodes:
+            self.assertIn(pool.tag_for(node.id), tags)
+        self.assertTrue(config["routing"]["balancers"])
         self.assertIn("RoutingService", config["api"]["services"])
-        self.assertIn("StatsService", config["api"]["services"])
 
-    def test_balancer_selector_covers_every_pool_tag(self) -> None:
-        nodes = [make_node(i) for i in range(1, 5)]
-        plan = build_rotation_plan(rotation_settings(), nodes, nodes[0].id)
-        assert plan is not None
-        config = self.build(rotation=plan, node=nodes[0])
-        selector = config["routing"]["balancers"][0]["selector"]
-        pool_tags = set(plan.tags.values())
-        other_tags = {"direct", "block", "api"}
-        for tag in pool_tags:
-            self.assertTrue(any(tag.startswith(prefix) for prefix in selector), tag)
-        for tag in other_tags:
-            self.assertFalse(any(tag.startswith(prefix) for prefix in selector), tag)
-
-    def test_proxy_rules_move_to_balancer(self) -> None:
-        nodes = [make_node(i) for i in range(1, 3)]
-        plan = build_rotation_plan(rotation_settings(), nodes, nodes[0].id)
-        assert plan is not None
-        routing = RoutingSettings()
-        routing.proxy_domains = ["example.com"]
-        routing.direct_domains = ["direct.example"]
-        routing.block_domains = ["ads.example"]
-        config = build_xray_config(nodes[0], routing, AppSettings(), rotation=plan)
-
-        for rule in config["routing"]["rules"]:
-            # outboundTag имеет приоритет над balancerTag — на прокси-правилах его быть не должно.
-            self.assertNotEqual(rule.get("outboundTag"), PRIMARY_OUTBOUND_TAG)
-            if rule.get("balancerTag"):
-                self.assertEqual(rule["balancerTag"], BALANCER_TAG)
-                self.assertNotIn("outboundTag", rule)
-
-        tags = {rule.get("outboundTag") for rule in config["routing"]["rules"]}
-        self.assertIn("direct", tags)
-        self.assertIn("block", tags)
-        balanced = [rule for rule in config["routing"]["rules"] if rule.get("balancerTag")]
-        self.assertTrue(balanced)
-
-    def test_pool_outbounds_carry_distinct_servers(self) -> None:
+    def test_pool_tags_are_stable_across_pool_changes(self) -> None:
+        # Тег выводится из id ноды, поэтому выпадение соседа его не сдвигает —
+        # именно это делает переключение по тегу безопасным.
         nodes = [make_node(i) for i in range(1, 4)]
-        plan = build_rotation_plan(rotation_settings(), nodes, nodes[0].id)
-        assert plan is not None
-        config = self.build(rotation=plan, node=nodes[0])
-        addresses = [
-            out["settings"]["vnext"][0]["address"]
-            for out in config["outbounds"]
-            if out["tag"].startswith(PRIMARY_OUTBOUND_TAG)
-        ]
-        self.assertEqual(len(set(addresses)), 3)
+        full = build_xray_outbound_pool(nodes)
+        without_middle = build_xray_outbound_pool([nodes[0], nodes[2]])
+        self.assertEqual(full.tag_for(nodes[2].id), without_middle.tag_for(nodes[2].id))
 
 
 if __name__ == "__main__":

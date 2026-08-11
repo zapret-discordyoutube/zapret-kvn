@@ -14,12 +14,6 @@ from ...constants import (
     ROUTING_RULE,
     DEFAULT_XRAY_STATS_API_PORT,
 )
-from ...application.rotation_service import (
-    BALANCER_TAG,
-    OUTBOUND_SELECTOR,
-    PRIMARY_OUTBOUND_TAG,
-    RotationPlan,
-)
 from ...application.outbound_pool_service import (
     XrayOutboundPool,
     ensure_xray_pool_control_plane,
@@ -96,37 +90,10 @@ def _resolve_xray_process_name(rule: dict[str, str]) -> str:
     return value
 
 
-def _build_proxy_outbounds(node: Node, rotation: RotationPlan | None) -> list[dict[str, Any]]:
-    """Один outbound на выбранную ноду либо весь пул ротации.
-
-    Первым всегда идёт proxy-outbound: при пустом выборе балансировщика xray отдаёт
-    трафик в первый элемент массива ``outbounds``, и это не должно быть ``freedom``.
-    """
-
-    if rotation is None:
-        primary = deepcopy(node.outbound)
-        primary["tag"] = PRIMARY_OUTBOUND_TAG
-        return [primary]
-
-    outbounds: list[dict[str, Any]] = []
-    for pooled in rotation.nodes:
-        outbound = deepcopy(pooled.outbound)
-        outbound["tag"] = rotation.tag_for(pooled.id)
-        outbounds.append(outbound)
-    return outbounds
-
-
-def _route_proxy_rules_to_balancer(rules: list[dict[str, Any]]) -> None:
-    """Перевести правила с прокси-выхода на балансировщик.
-
-    ``outboundTag`` имеет приоритет над ``balancerTag``, поэтому его обязательно
-    удалять, а не просто дописывать второй ключ.
-    """
-
-    for rule in rules:
-        if rule.get("outboundTag") == PRIMARY_OUTBOUND_TAG:
-            rule.pop("outboundTag")
-            rule["balancerTag"] = BALANCER_TAG
+def _build_proxy_outbounds(node: Node) -> list[dict[str, Any]]:
+    primary = deepcopy(node.outbound)
+    primary["tag"] = "proxy"
+    return [primary]
 
 
 def build_xray_config(
@@ -137,7 +104,6 @@ def build_xray_config(
     *,
     socks_port: int = DEFAULT_SOCKS_PORT,
     http_port: int = DEFAULT_HTTP_PORT,
-    rotation: RotationPlan | None = None,
     outbound_pool: XrayOutboundPool | None = None,
 ) -> dict[str, Any]:
     if not api_port:
@@ -145,7 +111,7 @@ def build_xray_config(
     proxy_outbounds = (
         outbound_pool.outbounds()
         if outbound_pool is not None and outbound_pool.contains(node.id)
-        else _build_proxy_outbounds(node, rotation)
+        else _build_proxy_outbounds(node)
     )
 
     routing_rules: list[dict[str, Any]] = [
@@ -313,19 +279,6 @@ def build_xray_config(
 
     if outbound_pool is not None and outbound_pool.contains(node.id):
         ensure_xray_pool_control_plane(config, outbound_pool)
-    elif rotation is not None:
-        # Стратегия — лишь фолбэк: активный сервер фиксируется командой `xray api bo`,
-        # иначе балансировщик раскидывал бы каждое соединение по разным серверам.
-        # fallbackTag намеренно не задаётся: без observatory он ломает запуск ядра.
-        _route_proxy_rules_to_balancer(routing_rules)
-        config["routing"]["balancers"] = [
-            {
-                "tag": BALANCER_TAG,
-                "selector": [OUTBOUND_SELECTOR],
-                "strategy": {"type": "random"},
-            }
-        ]
-        config["api"]["services"] = ["StatsService", "RoutingService"]
 
     if routing.dns_mode == "builtin":
         config["dns"] = {
