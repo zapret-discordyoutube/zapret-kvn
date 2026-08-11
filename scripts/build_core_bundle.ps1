@@ -120,7 +120,7 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ZapretKVN-core-" + [guid]::NewGuid().ToString("N"))
 $stagingDirectory = Join-Path $temporaryRoot "core"
 New-Item -ItemType Directory -Force -Path $stagingDirectory | Out-Null
-$manifestFiles = @()
+$manifestFilesByName = [ordered]@{}
 
 try {
     foreach ($source in $lock.sources) {
@@ -144,7 +144,10 @@ try {
             $targetName = [string]$mapping.target
             $targetPath = Join-Path $stagingDirectory $targetName
             Copy-Item -LiteralPath $matches[0].FullName -Destination $targetPath -Force
-            $manifestFiles += [ordered]@{
+            # Later sources intentionally overlay files from earlier sources
+            # (for example runetfreedom geoip/geosite over Xray defaults).
+            # Keep one manifest entry for the final staged owner and hash.
+            $manifestFilesByName[$targetName] = [ordered]@{
                 name = $targetName
                 source = [string]$source.id
                 version = [string]$source.version
@@ -166,7 +169,7 @@ try {
                 url = [string]$_.url
             }
         }
-        files = $manifestFiles
+        files = @($manifestFilesByName.Values)
     }
     $manifestPath = Join-Path $stagingDirectory "core-manifest.windows-x64.json"
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8

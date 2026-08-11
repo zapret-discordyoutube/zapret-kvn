@@ -136,6 +136,12 @@ class NativeXrayRoutingTemplateTests(unittest.TestCase):
 
 
 class RoutingAssetOwnershipTests(unittest.TestCase):
+    def test_core_bundle_manifest_records_only_the_final_overlay_owner(self) -> None:
+        script = (ROOT / "scripts" / "build_core_bundle.ps1").read_text(encoding="utf-8")
+        self.assertIn("$manifestFilesByName[$targetName] =", script)
+        self.assertIn("files = @($manifestFilesByName.Values)", script)
+        self.assertNotIn("$manifestFiles +=", script)
+
     def test_core_lock_overlays_pinned_runetfreedom_data_after_xray(self) -> None:
         lock = json.loads(
             (ROOT / "scripts" / "core-lock.windows-x64.json").read_text(encoding="utf-8")
