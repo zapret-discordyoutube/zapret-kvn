@@ -28,10 +28,13 @@ from .constants import APP_VERSION, BASE_DIR
 
 FORGEJO_RELEASE_API = (
     "https://git.zapret.moe/api/v1/repos/"
-    "zapretdiscordyoutube/zapret-kvn/releases/latest"
+    "zapretkvn/zapret-kvn/releases/latest"
 )
-FORGEJO_RELEASE_DOWNLOAD_PREFIX = (
-    "/zapretdiscordyoutube/zapret-kvn/releases/download/"
+# Canonical owner first; legacy owners stay trusted because Forgejo redirects
+# renamed repos, so older releases may still reference them.
+FORGEJO_RELEASE_DOWNLOAD_PREFIXES = (
+    "/zapretkvn/zapret-kvn/releases/download/",
+    "/zapretdiscordyoutube/zapret-kvn/releases/download/",
 )
 FORGEJO_HOST = "git.zapret.moe"
 USER_AGENT = f"ZapretKVN/{APP_VERSION}"
@@ -155,7 +158,7 @@ def _is_trusted_release_url(url: str) -> bool:
     return (
         parsed.scheme.lower() == "https"
         and (parsed.hostname or "").lower() == FORGEJO_HOST
-        and parsed.path.startswith(FORGEJO_RELEASE_DOWNLOAD_PREFIX)
+        and parsed.path.startswith(FORGEJO_RELEASE_DOWNLOAD_PREFIXES)
     )
 
 
