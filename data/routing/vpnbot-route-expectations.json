@@ -1,0 +1,953 @@
+{
+  "schema_version": 1,
+  "policy_id": "vpnbot-network-policy-v2",
+  "policy_version": "2026.08.12.1",
+  "source_policy_sha256": "fae5ed0aa0e7d0d30f588bbc78fd739ba6fbe41503f0234d02c1c71d246b6556",
+  "cases": [
+    {
+      "domain": "mobileproxy.passport.yandex.net",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "relay-api.eu.2gis.com",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "api.ipify.org",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "checkip.amazonaws.com",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "ifconfig.me",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "ip.mail.ru",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "ipv4-internet.yandex.net",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "ipv6-internet.yandex.net",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "trace-flow.ru",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "api.oneme.ru",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "vk-analytics.ru",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "apptracer.ru",
+      "expected_route": "block",
+      "policy_class": "vpn-detection-inline-critical",
+      "inline_required": true,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "gov.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "government.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "kremlin.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "gosuslugi.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "mil.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "fsb.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "sudrf.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "sledcom.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "cikrf.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "mos.ru",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "xn--b1aew.xn--p1ai",
+      "expected_route": "block",
+      "policy_class": "government-destination",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "2gis.com",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "2gis.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "alfabank.com",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "alfabank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "avito.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "clickstream.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "dzen.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "kinopoisk.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "mail.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "max.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "megafon.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "megamarket.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "mironline.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "mts.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "my.com",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "mytracker.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "nspk.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "ok.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "odnoklassniki.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "oneme.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "ozon.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "privetmir.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "rutube.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "rustore.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "samokat.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "sber.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "sberbank.com",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "sberbank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "sbrf.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "tbank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "tinkoff.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "userapi.com",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "vtb.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "vk.com",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "vk.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "vkvideo.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "wb.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "wildberries.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "ya.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "yandex.com",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "yandex.net",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "yandex.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "yastat.net",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "yastatic.net",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "bankdomrf.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "domrfbank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "gazprombank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "gazprompay.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "gpb.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "halvacard.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "home.bank",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "homecredit.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "mkb.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "psbank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "raif.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "raiffeisen.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "raiffeisenbank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "rosbank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "rshb.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "sovcombank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "unicredit.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "unicreditbank.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "akbars.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "bspb.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "tochka.com",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "yoomoney.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "aliexpress.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "kuper.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "lamoda.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "magnitmarket.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "youla.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "beeline.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "rostelecom.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "rt.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "t2.ru",
+      "expected_route": "block",
+      "policy_class": "russian-service-hard-block",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "4pda.to",
+      "expected_route": "proxy",
+      "policy_class": "client-proxy-exception",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "zapret.moe",
+      "expected_route": "proxy",
+      "policy_class": "client-proxy-exception",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "loopy.ru",
+      "expected_route": "direct",
+      "policy_class": "client-direct-exception",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "championat.com",
+      "expected_route": "direct",
+      "policy_class": "client-direct-exception",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
+      "domain": "ibm.com",
+      "expected_route": "proxy",
+      "policy_class": "vpn-default-fallback",
+      "inline_required": false,
+      "profile_modes": [
+        "vpn-default"
+      ]
+    },
+    {
+      "domain": "stackoverflow.com",
+      "expected_route": "proxy",
+      "policy_class": "vpn-default-fallback",
+      "inline_required": false,
+      "profile_modes": [
+        "vpn-default"
+      ]
+    },
+    {
+      "domain": "duolingo.com",
+      "expected_route": "proxy",
+      "policy_class": "vpn-default-fallback",
+      "inline_required": false,
+      "profile_modes": [
+        "vpn-default"
+      ]
+    }
+  ]
+}

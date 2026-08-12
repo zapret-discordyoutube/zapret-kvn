@@ -19,7 +19,7 @@ class ChampionatDirectTemplateTests(unittest.TestCase):
                 direct_index = next(
                     index
                     for index, rule in enumerate(rules)
-                    if rule.get("domain_suffix") == ["championat.com"]
+                    if "championat.com" in rule.get("domain_suffix", [])
                 )
                 direct_rule = rules[direct_index]
 
@@ -44,7 +44,7 @@ class ChampionatDirectTemplateTests(unittest.TestCase):
                 direct_index = next(
                     index
                     for index, rule in enumerate(rules)
-                    if rule.get("domain") == ["domain:championat.com"]
+                    if "domain:championat.com" in rule.get("domain", [])
                 )
                 direct_rule = rules[direct_index]
 

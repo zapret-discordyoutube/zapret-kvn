@@ -58,9 +58,9 @@
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "rules": [
-      {
-        "type": "field",
-        "domain": [
+  {
+    "type": "field",
+    "domain": [
           "domain:mobileproxy.passport.yandex.net",
           "domain:relay-api.eu.2gis.com",
           "domain:api.ipify.org",
@@ -74,9 +74,18 @@
           "domain:vk-analytics.ru",
           "domain:apptracer.ru"
         ],
-        "network": "tcp,udp",
-        "outboundTag": "block"
-      },
+    "network": "tcp,udp",
+    "outboundTag": "block"
+  },
+  {
+    "type": "field",
+    "domain": [
+      "domain:gov.ru", "domain:government.ru", "domain:kremlin.ru", "domain:gosuslugi.ru", "domain:mil.ru", "domain:fsb.ru", "domain:sudrf.ru", "domain:sledcom.ru", "domain:cikrf.ru", "domain:mos.ru", "domain:xn--b1aew.xn--p1ai",
+      "domain:2gis.com", "domain:2gis.ru", "domain:alfabank.com", "domain:alfabank.ru", "domain:avito.ru", "domain:clickstream.ru", "domain:dzen.ru", "domain:kinopoisk.ru", "domain:mail.ru", "domain:max.ru", "domain:megafon.ru", "domain:megamarket.ru", "domain:mironline.ru", "domain:mts.ru", "domain:my.com", "domain:mytracker.ru", "domain:nspk.ru", "domain:ok.ru", "domain:odnoklassniki.ru", "domain:oneme.ru", "domain:ozon.ru", "domain:privetmir.ru", "domain:rutube.ru", "domain:rustore.ru", "domain:samokat.ru", "domain:sber.ru", "domain:sberbank.com", "domain:sberbank.ru", "domain:sbrf.ru", "domain:tbank.ru", "domain:tinkoff.ru", "domain:userapi.com", "domain:vtb.ru", "domain:vk.com", "domain:vk.ru", "domain:vkvideo.ru", "domain:wb.ru", "domain:wildberries.ru", "domain:ya.ru", "domain:yandex.com", "domain:yandex.net", "domain:yandex.ru", "domain:yastat.net", "domain:yastatic.net", "domain:bankdomrf.ru", "domain:domrfbank.ru", "domain:gazprombank.ru", "domain:gazprompay.ru", "domain:gpb.ru", "domain:halvacard.ru", "domain:home.bank", "domain:homecredit.ru", "domain:mkb.ru", "domain:psbank.ru", "domain:raif.ru", "domain:raiffeisen.ru", "domain:raiffeisenbank.ru", "domain:rosbank.ru", "domain:rshb.ru", "domain:sovcombank.ru", "domain:unicredit.ru", "domain:unicreditbank.ru", "domain:akbars.ru", "domain:bspb.ru", "domain:tochka.com", "domain:yoomoney.ru", "domain:aliexpress.ru", "domain:kuper.ru", "domain:lamoda.ru", "domain:magnitmarket.ru", "domain:youla.ru", "domain:beeline.ru", "domain:rostelecom.ru", "domain:rt.ru", "domain:t2.ru"
+    ],
+    "network": "tcp,udp",
+    "outboundTag": "block"
+  },
       {
         "type": "field",
         "process": [
@@ -88,20 +97,22 @@
       },
       {
         "type": "field",
-        "domain": [
-          "domain:championat.com"
+    "domain": [
+      "domain:loopy.ru",
+      "domain:championat.com"
         ],
         "network": "tcp,udp",
         "outboundTag": "direct"
-      },
-      {
-        "type": "field",
-        "domain": [
-          "domain:zapret.moe"
-        ],
-        "network": "tcp,udp",
-        "outboundTag": "proxy"
-      },
+  },
+  {
+    "type": "field",
+    "domain": [
+      "domain:4pda.to",
+      "domain:zapret.moe"
+    ],
+    "network": "tcp,udp",
+    "outboundTag": "proxy"
+  },
       {
         "type": "field",
         "domain": [

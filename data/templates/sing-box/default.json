@@ -76,8 +76,8 @@
         "protocol": "dns",
         "action": "hijack-dns"
       },
-      {
-        "domain_suffix": [
+  {
+    "domain_suffix": [
           "mobileproxy.passport.yandex.net",
           "relay-api.eu.2gis.com",
           "api.ipify.org",
@@ -91,9 +91,17 @@
           "vk-analytics.ru",
           "apptracer.ru"
         ],
-        "action": "route",
-        "outbound": "block"
-      },
+    "action": "route",
+    "outbound": "block"
+  },
+  {
+    "domain_suffix": [
+      "gov.ru", "government.ru", "kremlin.ru", "gosuslugi.ru", "mil.ru", "fsb.ru", "sudrf.ru", "sledcom.ru", "cikrf.ru", "mos.ru", "xn--b1aew.xn--p1ai",
+      "2gis.com", "2gis.ru", "alfabank.com", "alfabank.ru", "avito.ru", "clickstream.ru", "dzen.ru", "kinopoisk.ru", "mail.ru", "max.ru", "megafon.ru", "megamarket.ru", "mironline.ru", "mts.ru", "my.com", "mytracker.ru", "nspk.ru", "ok.ru", "odnoklassniki.ru", "oneme.ru", "ozon.ru", "privetmir.ru", "rutube.ru", "rustore.ru", "samokat.ru", "sber.ru", "sberbank.com", "sberbank.ru", "sbrf.ru", "tbank.ru", "tinkoff.ru", "userapi.com", "vtb.ru", "vk.com", "vk.ru", "vkvideo.ru", "wb.ru", "wildberries.ru", "ya.ru", "yandex.com", "yandex.net", "yandex.ru", "yastat.net", "yastatic.net", "bankdomrf.ru", "domrfbank.ru", "gazprombank.ru", "gazprompay.ru", "gpb.ru", "halvacard.ru", "home.bank", "homecredit.ru", "mkb.ru", "psbank.ru", "raif.ru", "raiffeisen.ru", "raiffeisenbank.ru", "rosbank.ru", "rshb.ru", "sovcombank.ru", "unicredit.ru", "unicreditbank.ru", "akbars.ru", "bspb.ru", "tochka.com", "yoomoney.ru", "aliexpress.ru", "kuper.ru", "lamoda.ru", "magnitmarket.ru", "youla.ru", "beeline.ru", "rostelecom.ru", "rt.ru", "t2.ru"
+    ],
+    "action": "route",
+    "outbound": "block"
+  },
       {
         "process_name": [
           "Яндекс Музыка.exe",
@@ -103,19 +111,21 @@
         "outbound": "direct"
       },
       {
-        "domain_suffix": [
-          "championat.com"
+    "domain_suffix": [
+      "loopy.ru",
+      "championat.com"
         ],
         "action": "route",
         "outbound": "direct"
-      },
-      {
-        "domain_suffix": [
-          "zapret.moe"
-        ],
-        "action": "route",
-        "outbound": "proxy"
-      },
+  },
+  {
+    "domain_suffix": [
+      "4pda.to",
+      "zapret.moe"
+    ],
+    "action": "route",
+    "outbound": "proxy"
+  },
       {
         "rule_set": [
           "geosite-ru-blocked",
