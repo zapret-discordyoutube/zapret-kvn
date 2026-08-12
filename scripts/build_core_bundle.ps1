@@ -185,6 +185,12 @@ try {
     if ($sevenZipProcess.ExitCode -ne 0) {
         throw "7z failed with exit code $($sevenZipProcess.ExitCode)"
     }
+    $lockHash = Get-Sha256 $LockFile
+    [System.IO.File]::WriteAllText(
+        "$OutputArchive.lock.sha256",
+        "$lockHash`n",
+        [System.Text.Encoding]::ASCII
+    )
     Write-Host "[core] bundle ready: $OutputArchive"
     Write-Host "[core] SHA-256: $(Get-Sha256 $OutputArchive)"
 }
