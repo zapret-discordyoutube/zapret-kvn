@@ -583,11 +583,13 @@ def publish_telegram(version: str, changes: list[str]) -> None:
         raise ReleaseError("Telegram publisher did not record the stable installer")
 
 
-def preflight(version: str, changes: list[str], telegram: bool) -> None:
-    expected = next_patch(latest_stable_tag())
+def preflight(version: str | None, changes: list[str], telegram: bool) -> str:
+    latest = latest_stable_tag()
+    expected = next_patch(latest)
+    version = version or expected
     if version != expected:
         raise ReleaseError(f"next stable must be {expected}, not {version}")
-    if current_app_version() != latest_stable_tag().removeprefix("v"):
+    if current_app_version() != latest.removeprefix("v"):
         raise ReleaseError("APP_VERSION must match the latest stable before a fresh release")
     Forgejo.load()
     run(["ssh", WINDOWS_HOST, "powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], capture=True, timeout=30)
@@ -603,6 +605,7 @@ def preflight(version: str, changes: list[str], telegram: bool) -> None:
             ensure_ascii=False,
         )
     )
+    return version
 
 
 def load_or_create_state(args: argparse.Namespace, changes: list[str]) -> dict[str, Any]:
@@ -653,8 +656,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     require_clean_main()
     run(["git", "fetch", "origin", "main", "--tags"])
     if args.preflight:
-        version = args.version or next_patch(latest_stable_tag())
-        preflight(version, changes, not args.no_telegram)
+        version = preflight(args.version, changes, not args.no_telegram)
         return {"status": "ready", "version": version}
 
     state = load_or_create_state(args, changes)
