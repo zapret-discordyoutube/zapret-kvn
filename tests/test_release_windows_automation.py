@@ -64,6 +64,16 @@ class ReleaseStateTests(unittest.TestCase):
                 {"phase": "dev_verified", "version": "0.4.84"},
             )
 
+    def test_execute_checks_clean_tree_before_creating_resume_state(self) -> None:
+        args = release_windows.build_parser().parse_args(["--change", "Ready"])
+        with (
+            patch.object(release_windows, "require_clean_main", side_effect=release_windows.ReleaseError("dirty")),
+            patch.object(release_windows, "load_or_create_state") as create_state,
+        ):
+            with self.assertRaisesRegex(release_windows.ReleaseError, "dirty"):
+                release_windows.execute(args)
+        create_state.assert_not_called()
+
 
 class AppVersionTests(unittest.TestCase):
     def test_version_update_changes_exactly_one_assignment(self) -> None:

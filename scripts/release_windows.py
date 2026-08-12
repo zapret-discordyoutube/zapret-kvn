@@ -584,8 +584,6 @@ def publish_telegram(version: str, changes: list[str]) -> None:
 
 
 def preflight(version: str, changes: list[str], telegram: bool) -> None:
-    require_clean_main()
-    run(["git", "fetch", "origin", "main", "--tags"])
     expected = next_patch(latest_stable_tag())
     if version != expected:
         raise ReleaseError(f"next stable must be {expected}, not {version}")
@@ -649,6 +647,11 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         (args.change or []) + ([args.changes] if args.changes else []),
         allow_empty=not args.preflight,
     )
+    # Refresh release facts before deriving a version or persisting resume state.
+    # This also guarantees that a failed fresh invocation cannot leave a state
+    # file behind merely because the worktree was dirty.
+    require_clean_main()
+    run(["git", "fetch", "origin", "main", "--tags"])
     if args.preflight:
         version = args.version or next_patch(latest_stable_tag())
         preflight(version, changes, not args.no_telegram)
