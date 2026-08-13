@@ -772,10 +772,18 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         mark_phase(state, "telegram_published", telegram_skipped=True)
 
     run(["git", "fetch", "origin", "main", "--tags"])
-    if output(["git", "rev-parse", "HEAD"]) != commit:
-        raise ReleaseError("local HEAD changed during release")
-    if output(["git", "rev-parse", "origin/main"]) != commit:
-        raise ReleaseError("origin/main changed during release")
+    # Follow-up commits on main during the release (e.g. runner fixes) are
+    # legitimate: the published artifacts are pinned to the release commit by
+    # the immutable tag. Finalization only requires that main still contains
+    # the release commit, is synced with origin, and the tree is clean.
+    local_head = output(["git", "rev-parse", "HEAD"])
+    if local_head != output(["git", "rev-parse", "origin/main"]):
+        raise ReleaseError("local main and origin/main diverged during release")
+    contains = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, local_head], cwd=ROOT
+    )
+    if contains.returncode != 0:
+        raise ReleaseError("main no longer contains the release commit")
     require_clean_main()
     mark_phase(state, "complete")
     os.replace(STATE_PATH, LAST_RESULT_PATH)
