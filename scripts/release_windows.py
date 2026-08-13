@@ -252,7 +252,15 @@ def prepare_source(version: str) -> str:
 
 
 def powershell_bootstrap(mode: str, commit: str, version: str) -> None:
-    manifest = rf"{WINDOWS_ROOT}\.cache\release\v{version}\{mode}-manifest.json"
+    release_dir = rf"{WINDOWS_ROOT}\.cache\release\v{version}"
+    manifest = rf"{release_dir}\{mode}-manifest.json"
+    # The gate's full output goes to a remote log file instead of the ssh
+    # channel: PowerShell 5.1 over non-tty ssh wraps host output in CLIXML
+    # records, and a long verbose stream (pip + unittest -v + PyInstaller)
+    # has deadlocked that channel mid-gate. The quiet channel carries only
+    # git bootstrap lines and the log tail; on failure the tail is printed
+    # before rethrowing so the error still reaches the runner output.
+    log_file = rf"{release_dir}\{mode}-gate.log"
     command = (
         "$ErrorActionPreference='Stop';"
         f"$root='{WINDOWS_ROOT}';"
@@ -260,9 +268,17 @@ def powershell_bootstrap(mode: str, commit: str, version: str) -> None:
         "git fetch origin main --tags;"
         f"git switch --detach {commit};"
         "if ($LASTEXITCODE -ne 0) { throw 'git switch failed' };"
+        f"New-Item -ItemType Directory -Force -Path '{release_dir}' | Out-Null;"
+        "try { "
         f"& .\\scripts\\release_windows_gate.ps1 -Mode {mode} "
         f"-Commit {commit} -Version {version} -RepoRoot $root "
-        f"-ManifestPath '{manifest}'"
+        f"-ManifestPath '{manifest}' *> '{log_file}'"
+        " } catch { "
+        f"Write-Output 'GATE-FAILED';"
+        f"Get-Content -LiteralPath '{log_file}' -Tail 60;"
+        "throw };"
+        "Write-Output 'GATE-DONE';"
+        f"Get-Content -LiteralPath '{log_file}' -Tail 3"
     )
     # Windows OpenSSH runs the space-joined argv through cmd.exe, which splits
     # an unquoted payload at '&' — the gate invocation after 'git switch' never
