@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import http.client
 import json
@@ -263,6 +264,11 @@ def powershell_bootstrap(mode: str, commit: str, version: str) -> None:
         f"-Commit {commit} -Version {version} -RepoRoot $root "
         f"-ManifestPath '{manifest}'"
     )
+    # Windows OpenSSH runs the space-joined argv through cmd.exe, which splits
+    # an unquoted payload at '&' — the gate invocation after 'git switch' never
+    # reached PowerShell. -EncodedCommand (base64 of UTF-16LE) is immune to
+    # remote-shell quoting entirely.
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
     run(
         [
             "ssh",
@@ -272,8 +278,8 @@ def powershell_bootstrap(mode: str, commit: str, version: str) -> None:
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-Command",
-            command,
+            "-EncodedCommand",
+            encoded,
         ],
         timeout=3600,
     )
