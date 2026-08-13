@@ -254,13 +254,24 @@ def prepare_source(version: str) -> str:
 def powershell_bootstrap(mode: str, commit: str, version: str) -> None:
     release_dir = rf"{WINDOWS_ROOT}\.cache\release\v{version}"
     manifest = rf"{release_dir}\{mode}-manifest.json"
-    # The gate's full output goes to a remote log file instead of the ssh
-    # channel: PowerShell 5.1 over non-tty ssh wraps host output in CLIXML
-    # records, and a long verbose stream (pip + unittest -v + PyInstaller)
-    # has deadlocked that channel mid-gate. The quiet channel carries only
-    # git bootstrap lines and the log tail; on failure the tail is printed
-    # before rethrowing so the error still reaches the runner output.
+    # The gate runs as a child process with process-level output redirection
+    # to remote log files, keeping the ssh channel down to bootstrap lines
+    # plus a log tail. Two failure classes forced this shape: PowerShell 5.1
+    # over non-tty ssh wraps host output in CLIXML records and a long verbose
+    # stream (pip + unittest -v + PyInstaller) deadlocked that channel
+    # mid-gate; and PowerShell-level stream redirection (*>) converts native
+    # stderr (e.g. "git: warning: redirecting") into terminating
+    # NativeCommandError under the gate's own ErrorActionPreference=Stop.
+    # Start-Process redirection is invisible to the child's PowerShell, so
+    # native stderr lands in the file without conversion.
     log_file = rf"{release_dir}\{mode}-gate.log"
+    err_file = rf"{release_dir}\{mode}-gate.err.log"
+    gate_args = (
+        "'-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',"
+        "'-File','.\\scripts\\release_windows_gate.ps1',"
+        f"'-Mode','{mode}','-Commit','{commit}','-Version','{version}',"
+        f"'-RepoRoot','{WINDOWS_ROOT}','-ManifestPath','{manifest}'"
+    )
     command = (
         "$ErrorActionPreference='Stop';"
         f"$root='{WINDOWS_ROOT}';"
@@ -269,14 +280,15 @@ def powershell_bootstrap(mode: str, commit: str, version: str) -> None:
         f"git switch --detach {commit};"
         "if ($LASTEXITCODE -ne 0) { throw 'git switch failed' };"
         f"New-Item -ItemType Directory -Force -Path '{release_dir}' | Out-Null;"
-        "try { "
-        f"& .\\scripts\\release_windows_gate.ps1 -Mode {mode} "
-        f"-Commit {commit} -Version {version} -RepoRoot $root "
-        f"-ManifestPath '{manifest}' *> '{log_file}'"
-        " } catch { "
-        f"Write-Output 'GATE-FAILED';"
-        f"Get-Content -LiteralPath '{log_file}' -Tail 60;"
-        "throw };"
+        f"$gate = Start-Process -FilePath 'powershell' -ArgumentList @({gate_args}) "
+        "-WorkingDirectory $root -NoNewWindow -Wait -PassThru "
+        f"-RedirectStandardOutput '{log_file}' -RedirectStandardError '{err_file}';"
+        "if ($gate.ExitCode -ne 0) { "
+        "Write-Output ('GATE-FAILED exit=' + $gate.ExitCode);"
+        f"Get-Content -LiteralPath '{log_file}' -Tail 40;"
+        f"if (Test-Path -LiteralPath '{err_file}') "
+        f"{{ Get-Content -LiteralPath '{err_file}' -Tail 40 }};"
+        "exit 1 };"
         "Write-Output 'GATE-DONE';"
         f"Get-Content -LiteralPath '{log_file}' -Tail 3"
     )
