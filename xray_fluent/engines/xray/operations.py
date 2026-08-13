@@ -217,6 +217,10 @@ def restart_proxy_core_steps(controller: AppController, reason: str) -> Transiti
             xray_inbound_tags=runtime.inbound_tags,
             ping_host=runtime.ping_host,
             ping_port=runtime.ping_port,
+            # П1 (AC2): runtime-факт — тот пул, что реально встроен в конфиг
+            # запущенного ядра ({} когда пул не грузился). Без него fallback-
+            # рестарт терял теги, и все последующие свитчи деградировали.
+            outbound_pool_tags=runtime.outbound_pool_tags,
         )
         controller._set_connection_status("running", f"Переключено: {session_label}", level="success")
         controller.schedule_save()

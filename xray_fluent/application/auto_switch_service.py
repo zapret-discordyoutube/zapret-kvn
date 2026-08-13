@@ -10,9 +10,23 @@ if TYPE_CHECKING:
 
 AUTO_SWITCH_HIGH_TICKS_REQUIRED = 10
 AUTO_SWITCH_IDLE_BPS = 1024.0
+# A dead server produces down_bps == 0, which the speed path reads as "user
+# is idle" — so a full outage can never trigger the speed-drop switch. The
+# metrics worker TCP-pings the active node every ~3s; this many seconds of
+# continuously failing pings with no payload traffic mean the link is dead.
+AUTO_SWITCH_DEAD_LINK_SEC = 15.0
 
 
-def check_auto_switch(controller: AppController, down_bps: float) -> None:
+def check_auto_switch(
+    controller: AppController,
+    down_bps: float,
+    link_alive: bool | None = None,
+) -> None:
+    """React to live metrics: speed drops and dead links.
+
+    ``link_alive`` is the last TCP-ping verdict for the active node:
+    True/False when the worker probes it, None when no probe is configured.
+    """
     settings = controller.state.settings
     if not settings.auto_switch_enabled:
         return
@@ -24,6 +38,25 @@ def check_auto_switch(controller: AppController, down_bps: float) -> None:
         return
 
     now = time.monotonic()
+
+    if link_alive is False and down_bps < AUTO_SWITCH_IDLE_BPS:
+        if controller._auto_switch_link_down_since == 0.0:
+            controller._auto_switch_link_down_since = now
+            return
+        down_duration = now - controller._auto_switch_link_down_since
+        if down_duration < AUTO_SWITCH_DEAD_LINK_SEC:
+            return
+        if now - controller._auto_switch_last_switch < settings.auto_switch_cooldown_sec:
+            return
+        controller._auto_switch_link_down_since = 0.0
+        _execute_auto_switch(
+            controller,
+            now,
+            f"[auto-switch] active server unreachable for {down_duration:.0f}s → switching",
+        )
+        return
+    controller._auto_switch_link_down_since = 0.0
+
     threshold_bps = settings.auto_switch_threshold_kbps * 1024.0
 
     if down_bps >= threshold_bps:
@@ -56,6 +89,16 @@ def check_auto_switch(controller: AppController, down_bps: float) -> None:
     if now - controller._auto_switch_last_switch < settings.auto_switch_cooldown_sec:
         return
 
+    _execute_auto_switch(
+        controller,
+        now,
+        f"[auto-switch] speed {down_bps / 1024:.0f} KB/s < {settings.auto_switch_threshold_kbps} KB/s "
+        f"for {low_duration:.0f}s → switching",
+    )
+
+
+def _execute_auto_switch(controller: AppController, now: float, log_message: str) -> None:
+    """Shared tail of both triggers: exhaustion guard, node pick, switch."""
     max_attempts = max(1, len(controller.state.nodes) - 1)
     if controller._auto_switch_cycle_attempts >= max_attempts:
         controller._auto_switch_exhausted = True
@@ -68,6 +111,7 @@ def check_auto_switch(controller: AppController, down_bps: float) -> None:
     controller._auto_switch_low_since = 0.0
     controller._auto_switch_last_switch = now
     controller._auto_switch_active_download = False
+    controller._auto_switch_high_ticks = 0
 
     next_node = get_next_node_for_auto_switch(controller)
     if not next_node:
@@ -75,17 +119,14 @@ def check_auto_switch(controller: AppController, down_bps: float) -> None:
 
     controller._auto_switch_cycle_attempts += 1
     controller._auto_switch_transitioning = True
-    controller._log(
-        f"[auto-switch] speed {down_bps / 1024:.0f} KB/s < {settings.auto_switch_threshold_kbps} KB/s "
-        f"for {low_duration:.0f}s → switching to {next_node.name}"
-    )
+    controller._log(f"{log_message} to {next_node.name}")
     controller.auto_switch_triggered.emit(next_node.name)
 
-    controller.state.selected_node_id = next_node.id
-    controller.selection_changed.emit(next_node)
-    controller.schedule_save()
-    controller._desired_connected = True
-    controller._request_transition("auto-switch: speed drop")
+    # П4 (AC11/AC12): единый путь переключения — set_selected_node сам делает
+    # selection_changed/schedule_save, пробует горячий свитч и при неудаче
+    # честно падает в очередь переходов. reset_auto_switch=False сохраняет
+    # учёт cooldown/cycle (анти-дребезг, A6), выставленный выше.
+    controller.set_selected_node(next_node.id, reset_auto_switch=False)
 
 
 def get_next_node_for_auto_switch(controller: AppController) -> Node | None:

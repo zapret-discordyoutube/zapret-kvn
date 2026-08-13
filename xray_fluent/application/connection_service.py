@@ -259,6 +259,9 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
         controller.schedule_save()
         session_mode = "xray-tun" if tun and controller._active_core == "xray" else controller._active_core
         controller._traffic_history.start_session(session_label, session_mode)
+        # П5 (AC13): подключение состоялось (сессия зафиксирована, статус
+        # running) — фоновый прогрев DNS-кэша zapret для всех нод пула.
+        controller._start_proxy_dns_prewarm()
         return True
     finally:
         controller._connecting = False

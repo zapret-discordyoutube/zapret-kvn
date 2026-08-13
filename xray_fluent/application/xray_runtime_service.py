@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ..constants import PROXY_HOST, XRAY_TUN_DEFAULT_INTERFACE_NAME
 from ..engines.xray import get_windows_default_route_context
 from .connection_service import find_free_api_port
-from .outbound_pool_service import build_xray_outbound_pool, ensure_xray_pool_control_plane
+from .outbound_pool_service import ensure_xray_pool_control_plane
 from .port_allocator import apply_proxy_port_auto_selection
 from .runtime_introspection import extract_xray_runtime_ports
 from .runtime_security import strip_xray_proxy_inbounds
@@ -257,7 +257,8 @@ def build_runtime_xray_config(controller: AppController, node: Node | None = Non
             problem = controller._prepare_node_for_runtime(node)
             if problem:
                 raise ValueError(problem)
-            pool = build_xray_outbound_pool(controller.state.nodes)
+            # Единый источник пула (П1/П3): кэшированный пул контроллера.
+            pool = controller.xray_outbound_pool()
             if pool.contains(node.id):
                 outbounds[index:index + 1] = pool.outbounds()
                 ensure_xray_pool_control_plane(payload, pool)

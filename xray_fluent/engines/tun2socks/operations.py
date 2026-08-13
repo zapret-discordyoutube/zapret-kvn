@@ -169,6 +169,7 @@ def hot_swap_steps(controller: AppController, reason: str, node: Node) -> Transi
             else int(DEFAULT_SOCKS_PORT)
         )
         stage_began = time.monotonic()
+        outbound_pool = controller.xray_outbound_pool()
         config = build_xray_config(
             node,
             controller.state.routing,
@@ -176,7 +177,7 @@ def hot_swap_steps(controller: AppController, reason: str, node: Node) -> Transi
             api_port=controller._xray_api_port,
             socks_port=socks_port,
             http_port=DEFAULT_HTTP_PORT,
-            outbound_pool=controller.xray_outbound_pool(),
+            outbound_pool=outbound_pool,
         )
         config["log"] = {"loglevel": "error"}
         strip_xray_proxy_inbounds(config, keep_tags={"socks-in"})
@@ -208,6 +209,11 @@ def hot_swap_steps(controller: AppController, reason: str, node: Node) -> Transi
                 xray_inbound_tags=("socks-in", "http-in"),
                 ping_host=node.server,
                 ping_port=node.port,
+                # П1 (AC3): пул, реально встроенный в пересобранный конфиг
+                # (build_xray_config грузит его только при contains(node.id)).
+                outbound_pool_tags=(
+                    dict(outbound_pool.tags) if outbound_pool.contains(node.id) else {}
+                ),
             )
             controller._set_connection_status("running", f"Переключено: {node.name} (TUN)", level="success")
             controller.schedule_save()

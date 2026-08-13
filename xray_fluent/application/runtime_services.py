@@ -193,7 +193,13 @@ def on_core_state_changed(controller: AppController, _running: bool) -> None:
 def on_live_metrics(controller: AppController, payload: dict[str, object]) -> None:
     controller.live_metrics_updated.emit(payload)
     down_bps = float(payload.get("down_bps") or 0.0)
-    controller._check_auto_switch(down_bps)
+    # link_alive: вердикт TCP-пинга активной ноды; None — пинг не настроен,
+    # тогда детектор мёртвого сервера не участвует в решении.
+    link_alive: bool | None = None
+    worker = controller._metrics_worker
+    if worker is not None and worker.pings_active_node():
+        link_alive = payload.get("latency_ms") is not None
+    controller._check_auto_switch(down_bps, link_alive)
     process_stats = payload.get("process_stats")
     if process_stats:
         stats_dict = {}

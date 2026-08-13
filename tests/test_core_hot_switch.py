@@ -207,6 +207,27 @@ class ManualSelectionTests(unittest.TestCase):
         controller._request_transition.assert_called_once_with("node switched")
 
 
+def run_hot_switch_generator(controller):
+    """Deliberate async update (hot-switch-hardening, AC7/C1).
+
+    ``_try_hot_switch_selected_node`` больше не выполняет control-plane I/O
+    синхронно: проверки — в ``_hot_switch_precheck``, вызовы ядра — воркер-шаги
+    генератора ``_hot_switch_selected_node_steps``. Семантические контракты
+    (порядок xray→singbox, откат, коммит сессии только после подтверждения)
+    проверяются прогоном генератора с замоканными control-plane шагами; сами
+    шаги замоканы, поэтому генератор обязан завершиться без единого yield.
+    """
+    plan = AppController._hot_switch_precheck(controller)
+    if plan is None:
+        return False
+    generator = AppController._hot_switch_selected_node_steps(controller, plan)
+    try:
+        step = next(generator)
+    except StopIteration as stop:
+        return stop.value
+    raise AssertionError(f"unexpected async step from mocked hot switch: {step!r}")
+
+
 class LiveConnectionCutoverTests(unittest.TestCase):
     def _controller(self, *, hybrid: bool, apply_results: list[bool] | None = None):
         nodes = xray_nodes()
@@ -224,20 +245,27 @@ class LiveConnectionCutoverTests(unittest.TestCase):
         controller._active_session = session
         controller.connected = True
         controller.zapret.apply_cached_proxy_node.return_value = True
-        if apply_results is None:
-            controller._apply_core_outbound_tag.return_value = True
-        else:
-            controller._apply_core_outbound_tag.side_effect = apply_results
+
+        apply_calls: list[unittest.mock._Call] = []
+        results = list(apply_results) if apply_results is not None else None
+
+        def apply_core_outbound_tag_steps(core: str, outbound_tag: str):
+            apply_calls.append(unittest.mock.call(core, outbound_tag))
+            return True if results is None else results.pop(0)
+            yield  # unreachable — сохраняет генераторную форму продуктового метода
+
+        controller._apply_core_outbound_tag_steps = apply_core_outbound_tag_steps
+        controller._apply_core_calls = apply_calls
         controller._capture_hot_switched_session = Mock()
         return controller, nodes, tags, session
 
     def test_hybrid_switch_changes_xray_then_interrupts_old_singbox_generation(self) -> None:
         controller, nodes, tags, session = self._controller(hybrid=True)
 
-        self.assertTrue(AppController._try_hot_switch_selected_node(controller))
+        self.assertTrue(run_hot_switch_generator(controller))
 
         self.assertEqual(
-            controller._apply_core_outbound_tag.call_args_list,
+            controller._apply_core_calls,
             [
                 unittest.mock.call("xray", "new-tag"),
                 unittest.mock.call("singbox", "relay-b"),
@@ -257,10 +285,10 @@ class LiveConnectionCutoverTests(unittest.TestCase):
             apply_results=[True, False, True],
         )
 
-        self.assertFalse(AppController._try_hot_switch_selected_node(controller))
+        self.assertFalse(run_hot_switch_generator(controller))
 
         self.assertEqual(
-            controller._apply_core_outbound_tag.call_args_list,
+            controller._apply_core_calls,
             [
                 unittest.mock.call("xray", "new-tag"),
                 unittest.mock.call("singbox", "relay-b"),
@@ -272,9 +300,9 @@ class LiveConnectionCutoverTests(unittest.TestCase):
     def test_xray_only_does_not_report_cutover_without_connection_interrupt_api(self) -> None:
         controller, _nodes, _tags, _session = self._controller(hybrid=False)
 
-        self.assertFalse(AppController._try_hot_switch_selected_node(controller))
+        self.assertFalse(run_hot_switch_generator(controller))
 
-        controller._apply_core_outbound_tag.assert_not_called()
+        self.assertEqual(controller._apply_core_calls, [])
         controller._capture_hot_switched_session.assert_not_called()
 
 

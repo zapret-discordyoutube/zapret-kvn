@@ -47,6 +47,7 @@ class LiveMetricsWorker(QThread):
         self._ping_interval_sec = max(1.0, ping_interval_sec)
         self._stopped = False
         self._last_ping_ms: int | None = None
+        self._last_ping_ts = 0.0
         self._mode = mode
         self._clash_api_port = clash_api_port
         self._socks_port = socks_port
@@ -61,11 +62,26 @@ class LiveMetricsWorker(QThread):
     def stop(self) -> None:
         self._stopped = True
 
+    def pings_active_node(self) -> bool:
+        """True when the worker actually probes the active node over TCP."""
+        return bool(self._ping_host) and self._ping_port > 0
+
+    def set_ping_target(self, host: str, port: int) -> None:
+        """Re-point the TCP ping after a hot-switch (the worker survives it).
+
+        Plain attribute writes are GIL-atomic; the worst case is one extra
+        ping against the old host. Clearing the timestamp makes the loop
+        probe the new target on its next tick instead of after the interval.
+        """
+        self._ping_host = host
+        self._ping_port = int(port)
+        self._last_ping_ms = None
+        self._last_ping_ts = 0.0
+
     def run(self) -> None:
         prev_uplink: int | None = None
         prev_downlink: int | None = None
         prev_ts: float | None = None
-        last_ping_ts = 0.0
         iteration_count = 0
 
         # Proxy mode: per-process traffic via TCP connection estats
@@ -94,9 +110,9 @@ class LiveMetricsWorker(QThread):
                 prev_downlink = downlink_total
                 prev_ts = now
 
-            if self._ping_host and self._ping_port > 0 and (now - last_ping_ts) >= self._ping_interval_sec:
+            if self.pings_active_node() and (now - self._last_ping_ts) >= self._ping_interval_sec:
                 self._last_ping_ms = tcp_ping(self._ping_host, self._ping_port, timeout=1.6)
-                last_ping_ts = now
+                self._last_ping_ts = now
 
             process_stats = None
             if iteration_count % 2 == 0:

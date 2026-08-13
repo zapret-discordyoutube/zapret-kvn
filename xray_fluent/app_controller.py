@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 import hashlib
 import logging
 import random
@@ -127,7 +128,7 @@ from .application.subscription_service import (
     remove_subscription as remove_subscription_operation,
     subscription_due,
 )
-from .application.async_steps import TransitionRunner, TransitionSteps, run_steps_blocking
+from .application.async_steps import TransitionRunner, TransitionSteps, run_in_worker, run_steps_blocking
 from .application.rotation_service import (
     RotationPlan,
     build_rotation_plan,
@@ -212,6 +213,7 @@ from .storage import PassphraseRequired, StateStorage
 from .startup import build_startup_command, set_startup_enabled
 from .subprocess_utils import result_output_text, run_text
 from .traffic_history import TrafficHistoryStorage
+from .application.zapret_prewarm_service import start_proxy_dns_prewarm
 from .zapret_manager import ZapretManager
 
 if TYPE_CHECKING:
@@ -247,6 +249,24 @@ STARTUP_CONNECT_FALLBACK_MS = 20_000
 _XRAY_METRICS_API_TAG = "__app_metrics_api"
 _XRAY_METRICS_API_INBOUND_TAG = "__app_metrics_api_in"
 _XRAY_TUN_INBOUND_TAG = "__app_tun_in"
+
+
+@dataclass(slots=True)
+class HotSwitchPlan:
+    """Immutable outcome of the pure hot-switch feasibility checks (П2).
+
+    Captured on the GUI thread in the same tick the switch attempt starts, so
+    the async steps operate on a consistent snapshot of session/pool state.
+    """
+
+    node: Node
+    session: ActiveSessionSnapshot
+    tags: dict[str, str]
+    tag: str
+    control_core: str
+    previous_tag: str
+
+
 class AppController(QObject):
     nodes_changed = pyqtSignal(object)
     subscriptions_changed = pyqtSignal(object)
@@ -350,6 +370,7 @@ class AppController(QObject):
         self._auto_switch_cycle_attempts: int = 0
         self._auto_switch_exhausted: bool = False
         self._auto_switch_transitioning: bool = False
+        self._auto_switch_link_down_since: float = 0.0  # monotonic ts of first failed active-node ping
         self._active_session: ActiveSessionSnapshot | None = None
         self._desired_connected = False
         self._transition_active = False
@@ -359,6 +380,14 @@ class AppController(QObject):
         self._transition_generation = 0
         self._blocked_transition_signature = ""
         self._transition_runner: TransitionRunner | None = None
+        # П2 (AC5/AC8): асинхронный горячий свитч — control-plane I/O в воркере,
+        # generation-сериализация запросов, устаревший результат отбрасывается.
+        self._hot_switch_runner: TransitionRunner | None = None
+        self._hot_switch_generation = 0
+        self._hot_switch_pending = False
+        # П3 (AC9/AC10): кэш пула outbound'ов по идентичности списка нод.
+        self._xray_outbound_pool_cache: XrayOutboundPool | None = None
+        self._xray_outbound_pool_cache_key: tuple | None = None
 
         self.xray.log_received.connect(self._on_xray_log)
         self.xray.error.connect(self._on_xray_error)
@@ -378,6 +407,9 @@ class AppController(QObject):
 
         self.network_monitor.network_changed.connect(self._on_network_changed)
         self.connection_changed.connect(lambda _: self._sync_rotation_timer())
+        # П3 (AC10): любое изменение нод инвалидирует кэш пула явно — идентичность
+        # списка не видит in-place правок содержимого outbound-словаря.
+        self.nodes_changed.connect(lambda _nodes: self._invalidate_xray_outbound_pool_cache())
 
         self._lock_timer = QTimer(self)
         self._lock_timer.setInterval(15_000)
@@ -1070,6 +1102,11 @@ class AppController(QObject):
         if ping_port <= 0 and node is not None:
             ping_port = int(node.port)
         proxy_bypass_lan = bool(routing.bypass_lan) if tun else self._system_proxy_bypass_lan(settings)
+        if outbound_pool_tags is None:
+            # П1 (AC1): самодостаточный дефолт — теги выводятся из единого
+            # источника (пула контроллера), а не из памяти вызывающего.
+            # Явно переданный параметр (в т.ч. пустой dict) всегда сильнее.
+            outbound_pool_tags = self._derive_outbound_pool_tags(node, core=core)
         self._active_session = build_active_session_snapshot(
             node_id=node.id if node else None,
             node_server=node.server if node else "",
@@ -1099,6 +1136,24 @@ class AppController(QObject):
             hybrid_relay_selected_tag=hybrid_relay_selected_tag,
         )
         self._blocked_transition_signature = ""
+
+    def _derive_outbound_pool_tags(self, node: Node | None, *, core: str) -> dict[str, str] | None:
+        """П1 (AC1/A2): вывести дефолтные outbound_pool_tags из пула контроллера.
+
+        Теги честны относительно того, что реально загрузило запущенное ядро:
+        xray/tun2socks встраивают пул в конфиг ровно тогда, когда выбранная нода
+        входит в пул (условие сборщиков конфига). Если пул не загружался (нет
+        ноды, нода вне пула) — тегов нет. Для sing-box действует другая схема
+        тегов (selector_tags): их вызывающие обязаны передавать явно, выводить
+        их из Xray-пула нельзя.
+        """
+
+        if node is None or core not in {"xray", "tun2socks"}:
+            return None
+        pool = self.xray_outbound_pool()
+        if not pool.contains(node.id):
+            return None
+        return dict(pool.tags)
 
     def _clear_active_session(self) -> None:
         self._active_session = None
@@ -1145,7 +1200,9 @@ class AppController(QObject):
                 protect_ss_password=session.protect_ss_password if session is not None else "",
                 ping_host=session.ping_host if session is not None else "",
                 ping_port=session.ping_port if session is not None else 0,
-                outbound_pool_tags=session.outbound_pool_tags if session is not None else None,
+                # A2/AC4: без снапшота сессии нельзя утверждать, что ядро грузило
+                # пул — пустое переопределение честнее выведенного дефолта.
+                outbound_pool_tags=session.outbound_pool_tags if session is not None else {},
                 hybrid_relay_selector_tags=(
                     session.hybrid_relay_selector_tags if session is not None else ()
                 ),
@@ -1318,6 +1375,19 @@ class AppController(QObject):
             self._proxy_protection_workers.pop(generation, None)
         worker.deleteLater()
 
+    def _start_proxy_dns_prewarm(self) -> None:
+        """П5 (AC13/AC14): фоновый прогрев DNS-кэша zapret после подключения.
+
+        Батч-резолв всех UDP-прокси нод текущего пула в существующем
+        воркер-пуле; наполняется только ``_proxy_resolution_cache``, winws2 не
+        трогается, ошибки — молча, GUI-поток не блокируется.
+        """
+
+        try:
+            start_proxy_dns_prewarm(self)
+        except Exception:
+            pass
+
     def _schedule_transition_drain(self, delay_ms: int) -> None:
         if self._transition_active or self._proxy_protection_wait_generation == self._transition_generation:
             return
@@ -1447,6 +1517,7 @@ class AppController(QObject):
     def shutdown(self) -> None:
         # Незавершённый асинхронный переход закрывается (finally-блоки операций
         # выполняются) до остановки процессов при выходе.
+        self._cancel_hot_switch_runner()
         runner = self._transition_runner
         if runner is not None:
             runner.cancel()
@@ -1904,8 +1975,8 @@ class AppController(QObject):
     def reorder_nodes(self, node_id: str, direction: str) -> None:
         reorder_nodes_operation(self, node_id, direction)
 
-    def set_selected_node(self, node_id: str) -> None:
-        set_selected_node_operation(self, node_id)
+    def set_selected_node(self, node_id: str, *, reset_auto_switch: bool = True) -> None:
+        set_selected_node_operation(self, node_id, reset_auto_switch=reset_auto_switch)
 
     def _set_connection_status(self, phase: str, message: str, level: str | None = None) -> None:
         self.connection_status_changed.emit(phase, message)
@@ -1929,9 +2000,27 @@ class AppController(QObject):
     # --- Rotation -----------------------------------------------------------
 
     def xray_outbound_pool(self) -> XrayOutboundPool:
-        """All Xray-compatible nodes loaded into the persistent data plane."""
+        """All Xray-compatible nodes loaded into the persistent data plane.
 
-        return build_xray_outbound_pool(self.state.nodes)
+        П3 (AC9/AC10): пул кэшируется по идентичности списка нод. Ключ ловит
+        замену списка, смену состава, переупорядочивание (sort_order) и замену
+        объекта ``node.outbound``; in-place правки содержимого outbound-словаря
+        покрываются явной инвалидацией по сигналу ``nodes_changed``.
+        """
+
+        nodes = self.state.nodes
+        key = (
+            id(nodes),
+            tuple((id(node), id(node.outbound), node.sort_order) for node in nodes),
+        )
+        if self._xray_outbound_pool_cache is None or self._xray_outbound_pool_cache_key != key:
+            self._xray_outbound_pool_cache = build_xray_outbound_pool(nodes)
+            self._xray_outbound_pool_cache_key = key
+        return self._xray_outbound_pool_cache
+
+    def _invalidate_xray_outbound_pool_cache(self) -> None:
+        self._xray_outbound_pool_cache = None
+        self._xray_outbound_pool_cache_key = None
 
     def _apply_core_outbound_tag(self, core: str, outbound_tag: str) -> bool:
         if core == "singbox":
@@ -1963,21 +2052,25 @@ class AppController(QObject):
         tag = tags.get(node.id, "")
         return bool(tag) and self._apply_core_outbound_tag(core, tag)
 
-    def _try_hot_switch_selected_node(self) -> bool:
-        """Switch only the core's proxy transport, preserving the live data plane."""
+    def _hot_switch_precheck(self) -> HotSwitchPlan | None:
+        """Чистые (in-memory) проверки применимости горячего свитча (A3).
+
+        Никакого I/O: control-plane вызовы выполняются воркер-шагами в
+        ``_hot_switch_selected_node_steps``. ``None`` означает фолбэк в очередь
+        переходов (``_request_transition``).
+        """
 
         node = self.selected_node
         session = self._active_session
-        started_at = time.perf_counter()
         if node is None:
             self._log("[core-switch] fallback: selected node is missing")
-            return False
+            return None
         if session is None:
             self._log("[core-switch] fallback: active session is missing")
-            return False
+            return None
         if not self.connected:
             self._log("[core-switch] fallback: controller is not connected")
-            return False
+            return None
         tags = session.outbound_pool_tags or {}
         tag = tags.get(node.id, "")
         if not tag:
@@ -1985,7 +2078,7 @@ class AppController(QObject):
                 f"[core-switch] fallback: node {node.id} is not loaded in "
                 f"{session.active_core} pool ({len(tags)} tags)"
             )
-            return False
+            return None
         control_core = "xray" if session.hybrid else session.active_core
         if control_core != "singbox" and not session.hybrid:
             # Xray's RoutingService only changes the balancer choice for new
@@ -1994,14 +2087,133 @@ class AppController(QObject):
             # use the normal process transition instead of reporting a false
             # successful cut-over.
             self._log("[core-switch] fallback: Xray cannot interrupt existing connections")
-            return False
+            return None
         # UDP endpoints need the zapret pass profile before new connections are
         # sent to them.  A cache miss falls back to the normal async resolver.
         if not self.zapret.apply_cached_proxy_node(node):
             self._log(f"[core-switch] waiting for UDP endpoint protection: {node.server}")
+            return None
+        return HotSwitchPlan(
+            node=node,
+            session=session,
+            tags=dict(tags),
+            tag=tag,
+            control_core=control_core,
+            previous_tag=tags.get(session.node_id or "", ""),
+        )
+
+    def _try_hot_switch_selected_node(self) -> bool:
+        """Request a hot switch of the core's proxy transport (data plane stays alive).
+
+        П2 (AC5/AC8): чистые проверки выполняются синхронно в GUI-потоке,
+        control-plane I/O — шагами ``run_in_worker`` через TransitionRunner.
+        ``True`` = «горячий путь принят» (свитч запущен либо поставлен за уже
+        идущим); ``False`` = вызывающий обязан идти через очередь переходов.
+        Отказ control-plane после принятия сам уводит в ``_request_transition``
+        (см. ``_on_hot_switch_runner_finished``).
+        """
+
+        plan = self._hot_switch_precheck()
+        if plan is None:
             return False
-        previous_tag = tags.get(session.node_id or "", "")
-        if not self._apply_core_outbound_tag(control_core, tag):
+        self._hot_switch_generation += 1
+        if self._hot_switch_runner is not None:
+            # AC8: сериализация — не больше одного control-plane вызова в
+            # полёте. Текущий runner устареет по generation (его результат не
+            # применится), а этот запрос диспетчеризуется по его завершении.
+            self._hot_switch_pending = True
+            return True
+        self._start_hot_switch_runner(plan)
+        return True
+
+    def _start_hot_switch_runner(self, plan: HotSwitchPlan) -> None:
+        generation = self._hot_switch_generation
+        transition_generation = self._transition_generation
+        runner = TransitionRunner(
+            self._hot_switch_selected_node_steps(plan),
+            # Устаревание (AC8): новый свитч, любой новый полный переход или
+            # потеря соединения отменяют текущий свитч до следующего шага;
+            # его результат (сессия/статус) не применяется.
+            is_current=lambda: (
+                self._hot_switch_generation == generation
+                and self._transition_generation == transition_generation
+                and self.connected
+            ),
+            on_finished=self._on_hot_switch_runner_finished,
+        )
+        self._hot_switch_runner = runner
+        runner.start()
+
+    def _on_hot_switch_runner_finished(self, runner: TransitionRunner) -> None:
+        if self._hot_switch_runner is runner:
+            self._hot_switch_runner = None
+        runner.deleteLater()
+        pending = self._hot_switch_pending
+        self._hot_switch_pending = False
+        if runner.cancelled:
+            if pending:
+                self._dispatch_hot_switch_request()
+            return
+        if runner.error is not None:
+            self._log(f"[core-switch] failed with error: {runner.error!r}")
+        ok = bool(runner.result) and runner.error is None
+        if not ok:
+            # AC7/C2: отказ control-plane честно падает в очередь переходов.
+            self._request_transition("node switched")
+            return
+        if pending:
+            self._dispatch_hot_switch_request()
+
+    def _dispatch_hot_switch_request(self) -> None:
+        """Выполнить отложенный (superseded) свитч для актуально выбранной ноды."""
+
+        if not self.connected or not self._desired_connected:
+            return
+        node = self.selected_node
+        session = self._active_session
+        if node is not None and session is not None and session.node_id == node.id:
+            return  # обгоняющий запрос уже удовлетворён завершившимся свитчем
+        if self._try_hot_switch_selected_node():
+            return
+        self._request_transition("node switched")
+
+    def _cancel_hot_switch_runner(self) -> None:
+        self._hot_switch_pending = False
+        runner = self._hot_switch_runner
+        if runner is not None:
+            runner.cancel()
+
+    def _apply_core_outbound_tag_steps(self, core: str, outbound_tag: str) -> TransitionSteps:
+        """Control-plane вызов на воркере (AC5); лог — в GUI-потоке; без pump (AC6).
+
+        Параметры (порты, путь к xray) снимаются в GUI-потоке, воркеру уходит
+        чистый callable без обращения к состоянию контроллера.
+        """
+
+        if core == "singbox":
+            api_port = self._singbox_clash_api_port
+            call = lambda: select_singbox_outbound(api_port, SINGBOX_SELECTOR_TAG, outbound_tag)  # noqa: E731
+        else:
+            xray_path = getattr(self.xray, "_exe_path", None) or self.state.settings.xray_path
+            api_port = self._xray_api_port
+            call = lambda: apply_balancer_override(  # noqa: E731
+                xray_path,
+                api_port,
+                XRAY_BALANCER_TAG,
+                outbound_tag,
+                pump=False,
+            )
+        ok, output = yield run_in_worker(call)
+        if not ok:
+            self._log(f"[core-switch] {core} control plane rejected {outbound_tag}: {output}")
+        return bool(ok)
+
+    def _hot_switch_selected_node_steps(self, plan: HotSwitchPlan) -> TransitionSteps:
+        """Switch only the core's proxy transport, preserving the live data plane."""
+
+        started_at = time.perf_counter()
+        node, session, tags, tag = plan.node, plan.session, plan.tags, plan.tag
+        if not (yield from self._apply_core_outbound_tag_steps(plan.control_core, tag)):
             return False
 
         hybrid_relay_selected_tag = session.hybrid_relay_selected_tag
@@ -2009,19 +2221,20 @@ class AppController(QObject):
             relay_tags = session.hybrid_relay_selector_tags
             if len(relay_tags) < 2:
                 self._log("[core-switch] fallback: hybrid relay generations are unavailable")
-                if previous_tag and previous_tag != tag:
-                    self._apply_core_outbound_tag("xray", previous_tag)
+                if plan.previous_tag and plan.previous_tag != tag:
+                    yield from self._apply_core_outbound_tag_steps("xray", plan.previous_tag)
                 return False
             hybrid_relay_selected_tag = next(
                 (relay_tag for relay_tag in relay_tags if relay_tag != session.hybrid_relay_selected_tag),
                 relay_tags[0],
             )
-            if not self._apply_core_outbound_tag("singbox", hybrid_relay_selected_tag):
+            if not (yield from self._apply_core_outbound_tag_steps("singbox", hybrid_relay_selected_tag)):
                 self._log("[core-switch] hybrid cut-over rejected; restoring previous Xray outbound")
-                if previous_tag and previous_tag != tag:
-                    self._apply_core_outbound_tag("xray", previous_tag)
+                if plan.previous_tag and plan.previous_tag != tag:
+                    yield from self._apply_core_outbound_tag_steps("xray", plan.previous_tag)
                 return False
 
+        # AC7: коммит сессии/GUI-статуса — только после подтверждения ядром.
         self._capture_hot_switched_session(
             node,
             session,
@@ -2063,6 +2276,15 @@ class AppController(QObject):
             hybrid_relay_selected_tag=hybrid_relay_selected_tag,
         )
         self._set_connection_status("running", f"Переключено: {node.name}", level="success")
+        # П4: авто-переключение, завершившееся горячим свитчем (без reconnect),
+        # тоже обязано снять флаг «переход в процессе».
+        self._auto_switch_transitioning = False
+        self._auto_switch_link_down_since = 0.0
+        # Воркер метрик переживает горячий свитч — перенацелить его TCP-пинг,
+        # иначе детектор мёртвого сервера продолжит мерить прежнюю ноду.
+        worker = self._metrics_worker
+        if worker is not None:
+            worker.set_ping_target(node.server, int(node.port))
         self._log(f"[core-switch] {session.active_core} -> {node.name} ({tag})")
 
     def is_rotation_supported(self, settings: AppSettings | None = None) -> bool:
@@ -2163,6 +2385,7 @@ class AppController(QObject):
         self._auto_switch_low_since = 0.0
         self._auto_switch_high_ticks = 0
         self._auto_switch_active_download = False
+        self._auto_switch_link_down_since = 0.0
         if reset_cycle:
             self._auto_switch_cycle_attempts = 0
             self._auto_switch_exhausted = False
@@ -2481,8 +2704,8 @@ class AppController(QObject):
     # Minimum speed to count as "traffic exists" (1 KB/s) vs idle (0)
     _AUTO_SWITCH_IDLE_BPS = 1024.0
 
-    def _check_auto_switch(self, down_bps: float) -> None:
-        check_auto_switch_operation(self, down_bps)
+    def _check_auto_switch(self, down_bps: float, link_alive: bool | None = None) -> None:
+        check_auto_switch_operation(self, down_bps, link_alive)
 
     def _get_next_node_for_auto_switch(self) -> Node | None:
         return get_next_node_for_auto_switch_operation(self)
