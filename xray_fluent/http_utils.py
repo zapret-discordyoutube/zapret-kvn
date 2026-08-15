@@ -6,14 +6,28 @@ import ssl
 import urllib.request
 from urllib.request import Request
 
+try:
+    import truststore as _truststore
+except ImportError:  # Keep source checkouts usable before dependencies are installed.
+    _truststore = None
+
 
 def _make_ssl_context() -> ssl.SSLContext:
-    """Create an SSL context tolerant of abrupt server-side connection closes.
+    """Create a verified SSL context backed by the native system trust store.
 
-    OpenSSL 3.x raises UNEXPECTED_EOF_WHILE_READING when the remote
-    doesn't send close_notify.  Setting OP_IGNORE_UNEXPECTED_EOF avoids that.
+    On Windows, truststore delegates certificate-chain validation to CryptoAPI.
+    This matches native clients and lets Windows build an alternate valid chain
+    or fetch a missing intermediate certificate.  The stdlib context remains a
+    fallback for development environments where dependencies are not installed.
     """
-    ctx = ssl.create_default_context()
+    if _truststore is not None:
+        ctx = _truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    else:
+        ctx = ssl.create_default_context()
+
+    # OpenSSL 3.x raises UNEXPECTED_EOF_WHILE_READING when a remote endpoint
+    # omits close_notify.  This flag affects shutdown handling, not certificate
+    # verification.
     # Available since OpenSSL 3.0 / Python 3.10+
     if hasattr(ssl, "OP_IGNORE_UNEXPECTED_EOF"):
         ctx.options |= ssl.OP_IGNORE_UNEXPECTED_EOF
