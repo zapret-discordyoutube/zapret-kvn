@@ -87,9 +87,15 @@ class NodesTableModelTests(unittest.TestCase):
         )
         self.assertEqual(DEFAULT_VISIBLE_COLUMNS, ["name", "ping", "speed"])
 
-    def test_address_cell_combines_server_and_port(self) -> None:
+    def test_address_cell_masks_server_and_port(self) -> None:
         index = self.model.index(0, COL_ADDRESS)
-        self.assertEqual(index.data(Qt.ItemDataRole.DisplayRole), "example.com:443")
+        self.assertEqual(index.data(Qt.ItemDataRole.DisplayRole), "********")
+        self.assertNotIn("example.com", index.data(Qt.ItemDataRole.DisplayRole))
+
+    def test_name_tooltip_masks_server_and_port(self) -> None:
+        tooltip = self.model.index(0, COL_NAME).data(Qt.ItemDataRole.ToolTipRole)
+        self.assertIn("Адрес: ********", tooltip)
+        self.assertNotIn("example.com", tooltip)
 
     def test_node_id_role_is_available_for_all_columns(self) -> None:
         for col in range(self.model.columnCount()):

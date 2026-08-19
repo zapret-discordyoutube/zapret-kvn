@@ -48,7 +48,7 @@ _ROW_HEIGHT = 30
 _FLAG_ICON_SIZE = QSize(18, 13)
 
 _COLUMN_WIDTHS = {
-    COL_TYPE: 96,
+    COL_TYPE: 72,
     COL_ADDRESS: 180,
     COL_GROUP: 140,
     COL_TAGS: 160,
@@ -264,9 +264,10 @@ class NodesPage(StackedSection):
         horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         horizontal_header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
         for col, width in _COLUMN_WIDTHS.items():
-            horizontal_header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            horizontal_header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(col, width)
         horizontal_header.setSectionsClickable(True)
+        horizontal_header.setSectionsMovable(True)
         horizontal_header.sectionClicked.connect(self._on_header_clicked)
         horizontal_header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         horizontal_header.customContextMenuRequested.connect(self._on_header_context_menu)

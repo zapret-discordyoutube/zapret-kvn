@@ -20,7 +20,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLineEdit
 
 _existing = QApplication.instance()
 if _existing is not None and not isinstance(_existing, QApplication):
@@ -110,6 +110,8 @@ class NodesPageSubPagesTest(unittest.TestCase):
         self.assertIs(page._stack.currentWidget(), page._edit_page)
         self.assertEqual(page._edit_page.name_edit.text(), "Berlin")
         self.assertEqual(page._edit_page.tags_edit.text(), "fast")
+        self.assertEqual(page._edit_page.endpoint_label.text(), "********  (VLESS)")
+        self.assertNotIn("example.com", page._edit_page.endpoint_label.text())
 
         saved: list[tuple[str, dict]] = []
         page.node_edit_saved.connect(lambda nid, fields: saved.append((nid, fields)))
@@ -159,6 +161,8 @@ class NodesPageSubPagesTest(unittest.TestCase):
         page._show_detail(_node("n3"))
         self.assertIs(page._stack.currentWidget(), page._detail_widget)
         self.assertEqual(page._detail_widget.breadcrumb.count(), 2)
+        self.assertEqual(page._detail_widget.endpoint_label.text(), "********  (VLESS)")
+        self.assertNotIn("example.com", page._detail_widget.endpoint_label.text())
         page.show_root()
 
 
@@ -177,6 +181,7 @@ class SubscriptionsPageSubPageTest(unittest.TestCase):
         page.open_editor(subscription, ["DE-1", "NL-1"])
         self.assertEqual(page.editor.name_edit.text(), "Provider")
         self.assertEqual(page.editor.save_btn.text(), "Сохранить")
+        self.assertEqual(page.editor.url_edit.echoMode(), QLineEdit.EchoMode.Password)
 
         emitted: list[str] = []
         page.editor_save_requested.connect(emitted.append)

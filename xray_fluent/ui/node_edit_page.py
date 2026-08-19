@@ -18,6 +18,7 @@ from qfluentwidgets import (
 
 from ..models import Node
 from .detail_page import DetailPage
+from .privacy import masked_endpoint
 
 
 class NodeEditPage(DetailPage):
@@ -72,7 +73,7 @@ class NodeEditPage(DetailPage):
     def set_node(self, node: Node, existing_groups: list[str]) -> None:
         self._node_id = node.id
         scheme = node.scheme.upper() if node.scheme else "?"
-        self.endpoint_label.setText(f"{node.server}:{node.port}  ({scheme})")
+        self.endpoint_label.setText(f"{masked_endpoint()}  ({scheme})")
 
         self.group_combo.clear()
         for group in existing_groups:

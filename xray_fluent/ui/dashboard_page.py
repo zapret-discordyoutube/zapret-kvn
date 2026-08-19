@@ -33,6 +33,7 @@ from ..models import AppSettings, Node, RoutingSettings
 from ..proxy_manager import SystemProxyState
 from .base_page import ScrollablePage
 from .detail_page import DetailPage, StackedSection
+from .privacy import masked_endpoint
 from .theme import success_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 
@@ -563,7 +564,7 @@ class DashboardPage(StackedSection):
 
         self.profile_name_label.setText(selected.name or "Безымянный профиль")
         scheme = selected.scheme.upper() if selected.scheme else "NODE"
-        self.profile_endpoint_label.setText(f"{selected.server or '--'}:{selected.port or '--'}  ({scheme})")
+        self.profile_endpoint_label.setText(f"{masked_endpoint()}  ({scheme})")
         self.profile_group_label.setText(f"Группа: {selected.group or 'По умолчанию'}")
         self.profile_latency_label.setText(f"Задержка: {_format_latency(self._effective_latency())}")
 
@@ -761,9 +762,7 @@ class DashboardPage(StackedSection):
             return "Активный профиль не выбран"
         group = self._selected_node.group or "По умолчанию"
         scheme = self._selected_node.scheme.upper() if self._selected_node.scheme else "NODE"
-        server = self._selected_node.server or "unknown-host"
-        port = self._selected_node.port or "--"
-        return f"{group}  {scheme}  {server}:{port}"
+        return f"{group}  {scheme}  {masked_endpoint()}"
 
     def _summary_text(self) -> str:
         if self._connection_phase in {"starting", "error"}:

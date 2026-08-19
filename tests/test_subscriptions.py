@@ -394,6 +394,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         with self.assertRaises(SubscriptionFetchError):
             fetch_subscription(subscription, mode="proxy", proxy_port=None)
         masked = mask_subscription_url(subscription.url)
+        self.assertEqual(masked, "********")
         self.assertNotIn("token=secret", masked)
         self.assertNotIn("very-long-token-value", masked)
         self.assertNotIn("pass", masked)

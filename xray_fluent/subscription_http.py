@@ -8,7 +8,7 @@ import platform
 import re
 import urllib.error
 import urllib.request
-from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .constants import APP_VERSION, PROXY_HOST
 from .happ_crypt import HappCryptError, decrypt_happ_link, is_happ_crypt_link
@@ -197,20 +197,8 @@ def _safe_header_value(value: str, name: str) -> str:
 
 
 def mask_subscription_url(url: str) -> str:
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return "<скрыто>"
-    hostname = parsed.hostname or ""
-    if ":" in hostname and not hostname.startswith("["):
-        hostname = f"[{hostname}]"
-    try:
-        port = parsed.port
-    except ValueError:
-        port = None
-    netloc = f"{hostname}:{port}" if port else hostname
-    path = "/…" if parsed.path and parsed.path != "/" else parsed.path
-    return urlunsplit((parsed.scheme, netloc, path, "", ""))
+    """Hide the complete subscription URL on screenshot-visible surfaces."""
+    return "********" if str(url or "").strip() else ""
 
 
 def describe_http_failure(status: int, headers: dict[str, str]) -> str:

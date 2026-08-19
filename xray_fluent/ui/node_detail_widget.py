@@ -23,6 +23,7 @@ from qfluentwidgets import (
 
 from ..models import Node
 from .detail_page import DetailPage
+from .privacy import masked_endpoint
 
 
 class NodeDetailWidget(DetailPage):
@@ -134,7 +135,7 @@ class NodeDetailWidget(DetailPage):
         self.name_label.setText(node.name or "Без имени")
 
         scheme = node.scheme.upper() if node.scheme else "?"
-        self.endpoint_label.setText(f"{node.server}:{node.port}  ({scheme})")
+        self.endpoint_label.setText(f"{masked_endpoint()}  ({scheme})")
         self.details_label.setText(
             f"Группа: {node.group or 'Default'}  |  "
             f"Страна: {node.country_code.upper() or '?'}  |  "

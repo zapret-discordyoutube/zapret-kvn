@@ -15,12 +15,12 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QHeaderView
 
 from xray_fluent.models import AppSettings, Node
 from xray_fluent.ui.nodes_filter_proxy import SORT_KEYS
-from xray_fluent.ui.nodes_page import _FLAG_ICON_SIZE, _ROW_HEIGHT, NodesPage
-from xray_fluent.ui.nodes_table_model import DEFAULT_VISIBLE_COLUMNS, NODE_ID_ROLE
+from xray_fluent.ui.nodes_page import _COLUMN_WIDTHS, _FLAG_ICON_SIZE, _ROW_HEIGHT, NodesPage
+from xray_fluent.ui.nodes_table_model import COL_ADDRESS, COL_TYPE, DEFAULT_VISIBLE_COLUMNS, NODE_ID_ROLE
 
 _existing = QApplication.instance()
 if _existing is not None and not isinstance(_existing, QApplication):
@@ -65,6 +65,14 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
     def test_default_visible_columns_are_name_ping_speed(self) -> None:
         self.assertEqual(list(DEFAULT_VISIBLE_COLUMNS), ["name", "ping", "speed"])
         self.assertEqual(self.page.visible_column_keys(), ["name", "ping", "speed"])
+
+    def test_columns_are_movable_and_user_resizable(self) -> None:
+        header = self.page.table.horizontalHeader()
+        self.assertTrue(header.sectionsMovable())
+        self.assertEqual(header.sectionResizeMode(COL_ADDRESS), QHeaderView.ResizeMode.Interactive)
+
+    def test_type_column_has_compact_default_width(self) -> None:
+        self.assertEqual(_COLUMN_WIDTHS[COL_TYPE], 72)
 
 
 class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):

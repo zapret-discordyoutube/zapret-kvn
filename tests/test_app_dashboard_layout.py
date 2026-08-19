@@ -22,7 +22,7 @@ if _existing is not None and not isinstance(_existing, QApplication):
     )
 app = _existing or QApplication([])
 
-from xray_fluent.models import AppSettings
+from xray_fluent.models import AppSettings, Node
 from xray_fluent.ui.dashboard_page import DashboardPage
 
 
@@ -62,6 +62,19 @@ class DashboardWordWrapTest(unittest.TestCase):
         page.set_settings_snapshot(AppSettings())
         page._do_refresh_dashboard()
         self.assertLessEqual(page.minimumSizeHint().width(), 860)
+        page.deleteLater()
+        QApplication.processEvents()
+
+    def test_selected_server_endpoint_is_masked(self) -> None:
+        page = DashboardPage()
+        page.set_selected_node(
+            Node(name="Server", scheme="vless", server="secret.example", port=443)
+        )
+        page._do_refresh_dashboard()
+        self.assertEqual(page.profile_endpoint_label.text(), "********  (VLESS)")
+        self.assertIn("********", page.connection_target_label.text())
+        self.assertNotIn("secret.example", page.profile_endpoint_label.text())
+        self.assertNotIn("secret.example", page.connection_target_label.text())
         page.deleteLater()
         QApplication.processEvents()
 

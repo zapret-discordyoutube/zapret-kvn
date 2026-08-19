@@ -25,6 +25,7 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     LineEdit,
+    PasswordLineEdit,
     PrimaryPushButton,
     PrimaryToolButton,
     PushButton,
@@ -155,9 +156,8 @@ class SubscriptionEditPage(DetailPage):
         root.addWidget(self.name_edit)
 
         root.addWidget(BodyLabel("URL подписки", self))
-        self.url_edit = LineEdit(self)
+        self.url_edit = PasswordLineEdit(self)
         self.url_edit.setPlaceholderText("https://example.com/sub/token")
-        self.url_edit.setEchoMode(QLineEdit.EchoMode.Password)
         root.addWidget(self.url_edit)
 
         import_row = QHBoxLayout()

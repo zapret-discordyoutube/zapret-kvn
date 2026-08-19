@@ -8,6 +8,7 @@ from qfluentwidgets import qconfig
 
 from ..country_flags import get_flag_icon
 from ..models import Node
+from .privacy import masked_endpoint
 from .theme import error_color, success_color, warning_color
 
 PING_BUSY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -359,7 +360,7 @@ class NodesTableModel(QAbstractTableModel):
         if col == COL_TYPE:
             return node.scheme.upper()
         if col == COL_ADDRESS:
-            return f"{node.server}:{node.port}"
+            return masked_endpoint()
         if col == COL_GROUP:
             return node.group
         if col == COL_TAGS:
@@ -386,7 +387,7 @@ class NodesTableModel(QAbstractTableModel):
     def _tooltip_text(self, node: Node, col: int) -> str | None:
         if col == COL_NAME:
             lines = [node.name or "Без имени", f"Тип: {node.scheme.upper()}"]
-            lines.append(f"Адрес: {node.server}:{node.port}")
+            lines.append(f"Адрес: {masked_endpoint()}")
             if node.group:
                 lines.append(f"Группа: {node.group}")
             if node.tags:
