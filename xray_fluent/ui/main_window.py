@@ -1041,25 +1041,52 @@ class MainWindow(FluentWindow):
             return
         self._update_in_progress = True
         self._pending_update: AppUpdate | None = None
-        self._update_checker = UpdateChecker(parent=self)
-        self._update_checker.result.connect(lambda u: self._on_update_check_result(u, silent))
-        self._update_checker.error.connect(lambda e: self._on_update_check_error(e, silent))
-        self._update_checker.start()
+        checker = UpdateChecker(proxy_url=self._active_update_proxy_url(), parent=self)
+        self._update_checker = checker
+        checker.result.connect(
+            lambda update: self._on_update_check_result(update, silent, checker)
+        )
+        checker.error.connect(
+            lambda error: self._on_update_check_error(error, silent, checker)
+        )
+        checker.finished.connect(checker.deleteLater)
+        checker.start()
         if not silent:
             self.updates_page.show_checking()
 
-    def _on_update_check_error(self, err: str, silent: bool) -> None:
+    def _active_update_proxy_url(self) -> str | None:
+        if not self.controller.connected:
+            return None
+        from ..constants import PROXY_HOST
+        port = self.controller.get_effective_http_proxy_port()
+        return f"http://{PROXY_HOST}:{port}" if port else None
+
+    def _on_update_check_error(
+        self,
+        err: str,
+        silent: bool,
+        checker: UpdateChecker | None = None,
+    ) -> None:
+        if checker is not None and checker is not getattr(self, "_update_checker", None):
+            return
         self._update_in_progress = False
         if not silent:
             self.updates_page.show_idle()
             self.updates_page.set_app_error(f"Ошибка проверки: {err}")
             self._show_status("error", f"Ошибка проверки обновлений: {err}")
 
-    def _on_update_check_result(self, update: AppUpdate | None, silent: bool) -> None:
+    def _on_update_check_result(
+        self,
+        update: AppUpdate | None,
+        silent: bool,
+        checker: UpdateChecker | None = None,
+    ) -> None:
+        if checker is not None and checker is not getattr(self, "_update_checker", None):
+            return
         self._update_in_progress = False
         if update is None:
-            self.updates_page.show_up_to_date()
             if not silent:
+                self.updates_page.show_up_to_date()
                 self._show_status("info", "У вас установлена последняя версия")
             return
 
@@ -1141,13 +1168,7 @@ class MainWindow(FluentWindow):
         self.switchTo(self.updates_page)
         self.updates_page.show_download_progress(0)
 
-        # Use proxy if connected
-        proxy_url = None
-        if self.controller.connected:
-            from ..constants import PROXY_HOST
-            port = self.controller.get_effective_http_proxy_port()
-            if port:
-                proxy_url = f"http://{PROXY_HOST}:{port}"
+        proxy_url = self._active_update_proxy_url()
 
         restart_in_tray = self._tray_available and not self.isVisible()
 

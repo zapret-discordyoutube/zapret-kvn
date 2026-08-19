@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
 import urllib.request
 import zipfile  # kept for legacy .zip support
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +21,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request
 
-from .http_utils import build_opener, urlopen
+from .http_utils import (
+    HttpFetchError,
+    HttpResponseTooLarge,
+    build_opener,
+    fetch_bytes,
+)
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -38,6 +44,11 @@ FORGEJO_RELEASE_DOWNLOAD_PREFIXES = (
 )
 FORGEJO_HOST = "git.zapret.moe"
 USER_AGENT = f"ZapretKVN/{APP_VERSION}"
+_UPDATE_CHECK_TIMEOUT = 8
+_MAX_RELEASE_METADATA_BYTES = 1024 * 1024
+_MAX_CHECKSUM_BYTES = 16 * 1024
+
+_log = logging.getLogger(__name__)
 
 
 def _powershell_literal(value: str) -> str:
@@ -127,8 +138,8 @@ def _extract_digest(value: str) -> str:
     text = value.strip().lower()
     if text.startswith("sha256:"):
         text = text.split(":", 1)[1].strip()
-    parts = "".join(ch for ch in text if ch in "0123456789abcdef")
-    return parts if len(parts) == 64 else ""
+    match = re.search(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", text)
+    return match.group(0) if match else ""
 
 
 def _sha256_file(file_path: Path) -> str:
@@ -142,24 +153,172 @@ def _sha256_file(file_path: Path) -> str:
     return digest.hexdigest()
 
 
-def _fetch_text(url: str) -> str:
-    if not _is_trusted_release_url(url):
-        raise ValueError("Forgejo вернул недоверенную ссылку на контрольную сумму")
-    request = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(request, timeout=15) as response:
-        return response.read().decode("utf-8", errors="replace")
-
-
 def _is_trusted_release_url(url: str) -> bool:
     try:
         parsed = urlsplit(url)
+        port = parsed.port
     except ValueError:
         return False
     return (
         parsed.scheme.lower() == "https"
         and (parsed.hostname or "").lower() == FORGEJO_HOST
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
         and parsed.path.startswith(FORGEJO_RELEASE_DOWNLOAD_PREFIXES)
     )
+
+
+def _is_trusted_release_api_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+        expected = urlsplit(FORGEJO_RELEASE_API)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == FORGEJO_HOST
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+        and parsed.path.rstrip("/") == expected.path.rstrip("/")
+    )
+
+
+class _ReleaseClient:
+    """Small, retrying transport for release metadata and checksums."""
+
+    def __init__(self, proxy_url: str | None = None):
+        self._proxy_url = proxy_url
+
+    def _fetch(self, request: Request, *, max_bytes: int):
+        return fetch_bytes(
+            request,
+            timeout=_UPDATE_CHECK_TIMEOUT,
+            max_bytes=max_bytes,
+            proxy_url=self._proxy_url,
+            attempts_per_route=2,
+            # A connected app already has an explicit, verified local route;
+            # use it first so a broken public DNS/backend does not stall UI.
+            prefer_proxy=bool(self._proxy_url),
+            # Forgejo can return a route/region-specific legal-policy response.
+            # Do not retry it on the same route; fail over to the other egress.
+            fallback_http_statuses=frozenset({451}),
+        )
+
+    def fetch_release(self) -> dict:
+        request = Request(
+            FORGEJO_RELEASE_API,
+            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+        )
+        response = self._fetch(request, max_bytes=_MAX_RELEASE_METADATA_BYTES)
+        if not _is_trusted_release_api_url(response.final_url):
+            raise ValueError("Сервер обновлений перенаправил запрос на недоверенный адрес")
+        payload = json.loads(response.data.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Сервер обновлений вернул некорректный ответ")
+        return payload
+
+    def fetch_checksum(self, url: str) -> str:
+        if not _is_trusted_release_url(url):
+            raise ValueError("Forgejo вернул недоверенную ссылку на контрольную сумму")
+        request = Request(url, headers={"User-Agent": USER_AGENT})
+        response = self._fetch(request, max_bytes=_MAX_CHECKSUM_BYTES)
+        if not _is_trusted_release_url(response.final_url):
+            raise ValueError("Forgejo перенаправил контрольную сумму на недоверенный адрес")
+        return response.data.decode("utf-8", errors="replace")
+
+
+def _find_available_update(proxy_url: str | None = None) -> AppUpdate | None:
+    client = _ReleaseClient(proxy_url)
+    data = client.fetch_release()
+    tag = str(data.get("tag_name") or "")
+
+    if not _is_newer_version(tag, APP_VERSION):
+        return None
+
+    asset = None
+    for candidate in data.get("assets", []):
+        name = str(candidate.get("name") or "").lower()
+        if name.endswith(".zip") and "windows" in name and "x64" in name:
+            asset = candidate
+            break
+
+    if not asset:
+        raise ValueError(f"Релиз {tag} найден, но отсутствует Windows zip-архив")
+
+    asset_url = str(asset.get("browser_download_url") or "")
+    if not _is_trusted_release_url(asset_url):
+        raise ValueError(f"Релиз {tag} содержит недоверенную ссылку на архив")
+
+    digest = _extract_digest(str(asset.get("digest") or ""))
+    if not digest:
+        asset_name = str(asset.get("name") or "")
+        sidecar = None
+        for suffix in (".sha256", ".dgst"):
+            expected = f"{asset_name}{suffix}".lower()
+            sidecar = next(
+                (
+                    candidate for candidate in data.get("assets", [])
+                    if str(candidate.get("name") or "").lower() == expected
+                ),
+                None,
+            )
+            if sidecar:
+                break
+        if sidecar:
+            sidecar_url = str(sidecar.get("browser_download_url") or "")
+            digest = _extract_digest(client.fetch_checksum(sidecar_url))
+    if not digest:
+        raise ValueError(f"Релиз {tag} найден, но архив не содержит SHA-256")
+
+    return AppUpdate(
+        version=tag.lstrip("v"),
+        tag=tag,
+        download_url=asset_url,
+        size=int(asset.get("size") or 0),
+        notes=str(data.get("body") or ""),
+        digest_sha256=digest,
+    )
+
+
+def _describe_update_check_error(error: BaseException, *, has_proxy: bool) -> str:
+    if isinstance(error, HttpFetchError):
+        if any(
+            isinstance(cause, urllib.error.HTTPError) and cause.code == 451
+            for cause in error.causes
+        ):
+            if has_proxy:
+                return (
+                    "Сервер обновлений недоступен в текущем регионе. "
+                    "Переключитесь на другой сервер и повторите попытку."
+                )
+            return (
+                "Сервер обновлений недоступен напрямую в текущем регионе. "
+                "Подключитесь к серверу и повторите попытку."
+            )
+        if has_proxy:
+            return (
+                "Не удалось связаться с сервером обновлений напрямую и через прокси. "
+                "Проверьте подключение или переключитесь на рабочий сервер."
+            )
+        return (
+            "Сервер обновлений временно не отвечает. "
+            "Проверьте подключение и повторите попытку."
+        )
+    if isinstance(error, HttpResponseTooLarge):
+        return "Сервер обновлений вернул слишком большой ответ"
+    if isinstance(error, json.JSONDecodeError):
+        return "Сервер обновлений вернул некорректный ответ"
+    if isinstance(error, urllib.error.HTTPError):
+        return f"Сервер обновлений ответил с ошибкой HTTP {error.code}"
+    if isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
+        return (
+            "Не удалось установить защищённое соединение с сервером обновлений. "
+            "Проверьте подключение и повторите попытку."
+        )
+    return str(error) or "Не удалось проверить обновления"
 
 
 class UpdateChecker(QThread):
@@ -168,75 +327,20 @@ class UpdateChecker(QThread):
     result = pyqtSignal(object)  # AppUpdate | None
     error = pyqtSignal(str)
 
+    def __init__(self, proxy_url: str | None = None, parent=None):
+        super().__init__(parent)
+        self._proxy_url = proxy_url
+
     def run(self) -> None:
         try:
-            req = Request(
-                FORGEJO_RELEASE_API,
-                headers={"Accept": "application/json", "User-Agent": USER_AGENT},
-            )
-            with urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
-
-            tag = data.get("tag_name", "")
-
-            if not _is_newer_version(tag, APP_VERSION):
-                self.result.emit(None)
-                return
-
-            asset = None
-            for a in data.get("assets", []):
-                name = a.get("name", "").lower()
-                if name.endswith(".zip") and "windows" in name and "x64" in name:
-                    asset = a
-                    break
-
-            if not asset:
-                self.error.emit(f"Релиз {tag} найден, но отсутствует Windows zip-архив")
-                return
-
-            asset_url = str(asset.get("browser_download_url") or "")
-            if not _is_trusted_release_url(asset_url):
-                self.error.emit(f"Релиз {tag} содержит недоверенную ссылку на архив")
-                return
-
-            digest = _extract_digest(str(asset.get("digest") or ""))
-            if not digest:
-                asset_name = str(asset.get("name") or "")
-                sidecar = None
-                for suffix in (".sha256", ".dgst"):
-                    expected = f"{asset_name}{suffix}".lower()
-                    sidecar = next(
-                        (
-                            candidate for candidate in data.get("assets", [])
-                            if str(candidate.get("name") or "").lower() == expected
-                        ),
-                        None,
-                    )
-                    if sidecar:
-                        break
-                if sidecar:
-                    sidecar_url = str(sidecar.get("browser_download_url") or "")
-                    digest = _extract_digest(
-                        _fetch_text(sidecar_url)
-                    )
-            if not digest:
-                self.error.emit(f"Релиз {tag} найден, но архив не содержит SHA-256")
-                return
-
-            self.result.emit(AppUpdate(
-                version=tag.lstrip("v"),
-                tag=tag,
-                download_url=asset_url,
-                size=asset.get("size", 0),
-                notes=data.get("body", ""),
-                digest_sha256=digest,
-            ))
+            self.result.emit(_find_available_update(self._proxy_url))
         except Exception as exc:
-            self.error.emit(str(exc))
+            _log.warning("Update check failed: %s", exc, exc_info=True)
+            self.error.emit(
+                _describe_update_check_error(exc, has_proxy=bool(self._proxy_url))
+            )
             return
 
-
-_log = logging.getLogger(__name__)
 
 _DOWNLOAD_TIMEOUT = 30  # seconds — per socket operation (connect + each read)
 _NUM_SEGMENTS = 4       # parallel download segments
@@ -269,7 +373,7 @@ class UpdateDownloader(QThread):
         if proxy_url:
             handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
             return build_opener(handler)
-        return build_opener()
+        return build_opener(urllib.request.ProxyHandler({}))
 
     def _supports_range(self, url: str, opener: urllib.request.OpenerDirector) -> tuple[bool, int]:
         """HEAD request to check Range support and get Content-Length."""

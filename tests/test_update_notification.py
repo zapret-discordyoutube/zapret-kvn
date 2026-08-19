@@ -122,6 +122,51 @@ class UpdateNotificationTests(unittest.TestCase):
             open_updates_page=False,
         )
 
+    def test_silent_up_to_date_check_does_not_repaint_updates_page(self) -> None:
+        window = SimpleNamespace(
+            _update_in_progress=True,
+            updates_page=SimpleNamespace(show_up_to_date=Mock()),
+            _show_status=Mock(),
+        )
+
+        MainWindow._on_update_check_result(window, None, silent=True)
+
+        self.assertFalse(window._update_in_progress)
+        window.updates_page.show_up_to_date.assert_not_called()
+        window._show_status.assert_not_called()
+
+    def test_active_update_proxy_url_uses_effective_runtime_port(self) -> None:
+        window = SimpleNamespace(
+            controller=SimpleNamespace(
+                connected=True,
+                get_effective_http_proxy_port=Mock(return_value=1401),
+            )
+        )
+
+        proxy_url = MainWindow._active_update_proxy_url(window)
+
+        self.assertEqual(proxy_url, "http://127.0.0.1:1401")
+
+    def test_stale_checker_result_cannot_overwrite_current_check(self) -> None:
+        current_checker = object()
+        stale_checker = object()
+        window = SimpleNamespace(
+            _update_checker=current_checker,
+            _update_in_progress=True,
+            updates_page=SimpleNamespace(show_up_to_date=Mock()),
+            _show_status=Mock(),
+        )
+
+        MainWindow._on_update_check_result(
+            window,
+            None,
+            silent=False,
+            checker=stale_checker,
+        )
+
+        self.assertTrue(window._update_in_progress)
+        window.updates_page.show_up_to_date.assert_not_called()
+
     def test_hidden_window_is_shown_for_dialog_then_restored_on_later(self) -> None:
         events: list[str] = []
 
