@@ -144,6 +144,19 @@ class TestAwg3ConfImport(unittest.TestCase):
             self.assertEqual(len(errors), 1, extra)
             self.assertIn("не поддерживается ядром", errors[0])
 
+    def test_awg31_keys_fail_closed_when_enabled(self) -> None:
+        # RandomTrailers=on без поддержки ядра означает мёртвый туннель:
+        # сторона без флага отбрасывает удлинённые пакеты рукопожатия.
+        conf = FIXTURE_AWG3_CONF.replace("[Peer]", "RandomTrailers = on\n\n[Peer]")
+        nodes, errors = parse_links_text(conf)
+        assert nodes == [] and len(errors) == 1
+        assert "RandomTrailers" in errors[0]
+        # Выключенное значение безвредно и просто пропускается.
+        conf_off = FIXTURE_AWG3_CONF.replace("[Peer]", "RandomTrailers = off\n\n[Peer]")
+        nodes, errors = parse_links_text(conf_off)
+        assert errors == [] and len(nodes) == 1
+        assert "random_trailers" not in nodes[0].outbound["amnezia"]
+
     def test_json_validator_checks_generation3_values(self) -> None:
         nodes, errors = parse_links_text(FIXTURE_AWG3_CONF)
         self.assertEqual(errors, [])

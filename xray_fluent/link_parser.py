@@ -941,6 +941,11 @@ _AMNEZIA_STR_KEYS = ("i1", "i2", "i3", "i4", "i5")
 # itime (надстройки AWG 1.5): строгий JSON-декодер ядра отверг бы весь
 # профиль с такими ключами, поэтому импорт честно отказывает сразу.
 _AMNEZIA_REMOVED_KEYS = ("j1", "j2", "j3", "itime")
+# Линия AWG 3.1 (RandomTrailers/DisableCookies) в схему amnezia пиненного
+# ядра ещё не входит. Молча отбросить эти строки нельзя: по документации
+# сторона без RandomTrailers отбрасывает удлинённые пакеты рукопожатия, и
+# туннель не поднимется — честная ошибка импорта вместо мёртвого профиля.
+_AMNEZIA_UNSUPPORTED_31_KEYS = ("randomtrailers", "disablecookies")
 
 # AWG 3.0: .conf-ключ (в нижнем регистре) -> поле объекта ``amnezia`` sing-box
 # extended (schema 2.6.x, snake_case). Без переноса этих строк импортированный
@@ -1061,6 +1066,15 @@ def _parse_amnezia_params(interface: dict[str, str]) -> dict[str, Any]:
             raise LinkParseError(
                 f"параметр {key.upper()} не поддерживается ядром sing-box "
                 "extended 2.6.x (AWG 1.5-надстройка удалена из схемы amnezia)"
+            )
+    for key in _AMNEZIA_UNSUPPORTED_31_KEYS:
+        value = interface.get(key, "").strip().lower()
+        if value and value not in ("off", "false", "0"):
+            name = "RandomTrailers" if key == "randomtrailers" else "DisableCookies"
+            raise LinkParseError(
+                f"параметр {name} (AWG 3.1) ещё не поддерживается ядром "
+                "sing-box extended 2.6.x: без него туннель с этим сервером "
+                "не поднимется, импорт остановлен"
             )
     if "headerprotectionkey" in interface:
         amnezia["header_protection_key"] = _wg_header_protection_key(
