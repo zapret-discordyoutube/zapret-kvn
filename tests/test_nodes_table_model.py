@@ -85,12 +85,50 @@ class NodesTableModelTests(unittest.TestCase):
             (COL_NAME, COL_TYPE, COL_ADDRESS, COL_GROUP, COL_TAGS, COL_PING, COL_SPEED, COL_LAST_USED, COL_SOURCE),
             (0, 1, 2, 3, 4, 5, 6, 7, 8),
         )
-        self.assertEqual(DEFAULT_VISIBLE_COLUMNS, ["name", "ping", "speed"])
+        self.assertEqual(
+            DEFAULT_VISIBLE_COLUMNS,
+            ["name", "type", "address", "ping", "speed"],
+        )
 
     def test_address_cell_masks_server_and_port(self) -> None:
         index = self.model.index(0, COL_ADDRESS)
         self.assertEqual(index.data(Qt.ItemDataRole.DisplayRole), "********")
         self.assertNotIn("example.com", index.data(Qt.ItemDataRole.DisplayRole))
+
+    def test_address_is_visible_only_while_model_reveal_is_active(self) -> None:
+        index = self.model.index(0, COL_ADDRESS)
+        self.model.set_endpoints_revealed(True)
+        self.assertEqual(index.data(Qt.ItemDataRole.DisplayRole), "example.com:443")
+        self.assertIn(
+            "Адрес: example.com:443",
+            self.model.index(0, COL_NAME).data(Qt.ItemDataRole.ToolTipRole),
+        )
+
+        self.model.set_endpoints_revealed(False)
+        self.assertEqual(index.data(Qt.ItemDataRole.DisplayRole), "********")
+        self.assertNotIn(
+            "example.com",
+            self.model.index(0, COL_NAME).data(Qt.ItemDataRole.ToolTipRole),
+        )
+
+    def test_ipv6_address_is_bracketed_while_revealed(self) -> None:
+        self.model.set_nodes(
+            [Node(id="ipv6", name="IPv6", server="2001:db8::1", port=443)]
+        )
+        self.model.set_endpoints_revealed(True)
+        self.assertEqual(
+            self.model.index(0, COL_ADDRESS).data(Qt.ItemDataRole.DisplayRole),
+            "[2001:db8::1]:443",
+        )
+
+    def test_type_falls_back_to_native_outbound_for_legacy_node(self) -> None:
+        self.model.set_nodes(
+            [Node(id="legacy", scheme="", outbound={"type": "hysteria2"})]
+        )
+        self.assertEqual(
+            self.model.index(0, COL_TYPE).data(Qt.ItemDataRole.DisplayRole),
+            "HYSTERIA2",
+        )
 
     def test_name_tooltip_masks_server_and_port(self) -> None:
         tooltip = self.model.index(0, COL_NAME).data(Qt.ItemDataRole.ToolTipRole)

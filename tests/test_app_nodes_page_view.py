@@ -15,12 +15,19 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QHeaderView
 
 from xray_fluent.models import AppSettings, Node
 from xray_fluent.ui.nodes_filter_proxy import SORT_KEYS
 from xray_fluent.ui.nodes_page import _COLUMN_WIDTHS, _FLAG_ICON_SIZE, _ROW_HEIGHT, NodesPage
-from xray_fluent.ui.nodes_table_model import COL_ADDRESS, COL_TYPE, DEFAULT_VISIBLE_COLUMNS, NODE_ID_ROLE
+from xray_fluent.ui.nodes_table_model import (
+    COL_ADDRESS,
+    COL_TYPE,
+    DEFAULT_VISIBLE_COLUMNS,
+    NODE_ID_ROLE,
+)
 
 _existing = QApplication.instance()
 if _existing is not None and not isinstance(_existing, QApplication):
@@ -62,9 +69,10 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
         icon_size = self.page.table.iconSize()
         self.assertEqual((icon_size.width(), icon_size.height()), (18, 13))
 
-    def test_default_visible_columns_are_name_ping_speed(self) -> None:
-        self.assertEqual(list(DEFAULT_VISIBLE_COLUMNS), ["name", "ping", "speed"])
-        self.assertEqual(self.page.visible_column_keys(), ["name", "ping", "speed"])
+    def test_default_visible_columns_include_type_and_masked_address(self) -> None:
+        expected = ["name", "type", "address", "ping", "speed"]
+        self.assertEqual(list(DEFAULT_VISIBLE_COLUMNS), expected)
+        self.assertEqual(self.page.visible_column_keys(), expected)
 
     def test_columns_are_movable_and_user_resizable(self) -> None:
         header = self.page.table.horizontalHeader()
@@ -72,7 +80,32 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
         self.assertEqual(header.sectionResizeMode(COL_ADDRESS), QHeaderView.ResizeMode.Interactive)
 
     def test_type_column_has_compact_default_width(self) -> None:
-        self.assertEqual(_COLUMN_WIDTHS[COL_TYPE], 72)
+        self.assertEqual(_COLUMN_WIDTHS[COL_TYPE], 58)
+
+    def test_type_column_is_clamped_to_compact_interactive_range(self) -> None:
+        header = self.page.table.horizontalHeader()
+        header.resizeSection(COL_TYPE, 200)
+        self.assertEqual(header.sectionSize(COL_TYPE), 96)
+        header.resizeSection(COL_TYPE, 20)
+        self.assertEqual(header.sectionSize(COL_TYPE), 44)
+
+    def test_reveal_button_masks_again_after_mouse_and_keyboard_release(self) -> None:
+        self.page.set_nodes(
+            [Node(id="secret", server="secret.example", port=8443, scheme="vless")]
+        )
+        index = self.page._table_model.index(0, COL_ADDRESS)
+        button = self.page.reveal_addresses_btn
+
+        QTest.mousePress(button, Qt.MouseButton.LeftButton)
+        self.assertEqual(index.data(), "secret.example:8443")
+        QTest.mouseRelease(button, Qt.MouseButton.LeftButton)
+        self.assertEqual(index.data(), "********")
+
+        button.setFocus()
+        QTest.keyPress(button, Qt.Key.Key_Space)
+        self.assertEqual(index.data(), "secret.example:8443")
+        QTest.keyRelease(button, Qt.Key.Key_Space)
+        self.assertEqual(index.data(), "********")
 
 
 class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
@@ -96,6 +129,8 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
             nodes_group_filter="EU",
             nodes_tag_filter="fast",
             nodes_visible_columns=["name", "address", "ping"],
+            nodes_column_widths={"type": 52, "address": 240},
+            nodes_column_order=["name", "address", "type", "ping", "speed"],
         )
 
         self.page.apply_view_settings(settings)
@@ -108,6 +143,9 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
         self.assertEqual(self.page.group_filter.currentText(), "EU")
         self.assertEqual(self.page.tag_filter.currentText(), "fast")
         self.assertEqual(self.page.visible_column_keys(), ["name", "address", "ping"])
+        self.assertEqual(self.page.column_widths()["type"], 52)
+        self.assertEqual(self.page.column_widths()["address"], 240)
+        self.assertEqual(self.page.column_order()[:3], ["name", "address", "type"])
 
         # Sort key "ping" descending is applied to the proxy; "d" is filtered
         # out (group US), None-ping stays last even in descending order.
@@ -125,7 +163,21 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
                 "nodes_tag_filter": "fast",
                 "nodes_source_filter": "",
                 "nodes_visible_columns": ["name", "address", "ping"],
+                "nodes_column_widths": self.page.column_widths(),
+                "nodes_column_order": self.page.column_order(),
+                "nodes_column_layout_version": 1,
             },
+        )
+
+    def test_legacy_visibility_is_migrated_to_type_and_address(self) -> None:
+        settings = AppSettings(
+            nodes_visible_columns=["name", "ping", "speed"],
+            nodes_column_layout_version=0,
+        )
+        self.page.apply_view_settings(settings)
+        self.assertEqual(
+            self.page.visible_column_keys(),
+            ["name", "type", "address", "ping", "speed"],
         )
 
     def test_user_sort_change_emits_view_prefs(self) -> None:

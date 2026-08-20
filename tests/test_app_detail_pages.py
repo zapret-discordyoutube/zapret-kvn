@@ -20,6 +20,8 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QLineEdit
 
 _existing = QApplication.instance()
@@ -113,6 +115,11 @@ class NodesPageSubPagesTest(unittest.TestCase):
         self.assertEqual(page._edit_page.endpoint_label.text(), "********  (VLESS)")
         self.assertNotIn("example.com", page._edit_page.endpoint_label.text())
 
+        QTest.keyPress(page._edit_page.reveal_address_btn, Qt.Key.Key_Enter)
+        self.assertEqual(page._edit_page.endpoint_label.text(), "example.com:443  (VLESS)")
+        QTest.keyRelease(page._edit_page.reveal_address_btn, Qt.Key.Key_Enter)
+        self.assertEqual(page._edit_page.endpoint_label.text(), "********  (VLESS)")
+
         saved: list[tuple[str, dict]] = []
         page.node_edit_saved.connect(lambda nid, fields: saved.append((nid, fields)))
         page._edit_page.name_edit.setText("Frankfurt")
@@ -163,6 +170,12 @@ class NodesPageSubPagesTest(unittest.TestCase):
         self.assertEqual(page._detail_widget.breadcrumb.count(), 2)
         self.assertEqual(page._detail_widget.endpoint_label.text(), "********  (VLESS)")
         self.assertNotIn("example.com", page._detail_widget.endpoint_label.text())
+        QTest.keyPress(page._detail_widget.reveal_address_btn, Qt.Key.Key_Space)
+        self.assertEqual(
+            page._detail_widget.endpoint_label.text(), "example.com:443  (VLESS)"
+        )
+        QTest.keyRelease(page._detail_widget.reveal_address_btn, Qt.Key.Key_Space)
+        self.assertEqual(page._detail_widget.endpoint_label.text(), "********  (VLESS)")
         page.show_root()
 
 

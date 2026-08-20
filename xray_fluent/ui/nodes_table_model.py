@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
@@ -8,7 +9,7 @@ from qfluentwidgets import qconfig
 
 from ..country_flags import get_flag_icon
 from ..models import Node
-from .privacy import masked_endpoint
+from .privacy import endpoint_text
 from .theme import error_color, success_color, warning_color
 
 PING_BUSY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -29,44 +30,59 @@ def _alive_brush() -> QBrush:
 def _degraded_brush() -> QBrush:
     return QBrush(warning_color())
 
-COL_NAME = 0
-COL_TYPE = 1
-COL_ADDRESS = 2
-COL_GROUP = 3
-COL_TAGS = 4
-COL_PING = 5
-COL_SPEED = 6
-COL_LAST_USED = 7
-COL_SOURCE = 8
+(
+    COL_NAME,
+    COL_TYPE,
+    COL_ADDRESS,
+    COL_GROUP,
+    COL_TAGS,
+    COL_PING,
+    COL_SPEED,
+    COL_LAST_USED,
+    COL_SOURCE,
+) = range(9)
 
-# Stable english identifiers used for persistence (AppSettings.nodes_visible_columns).
-COLUMN_KEYS = [
-    "name",
-    "type",
-    "address",
-    "group",
-    "tags",
-    "ping",
-    "speed",
-    "last_used",
-    "source",
-]
 
-DEFAULT_VISIBLE_COLUMNS = ["name", "ping", "speed"]
+@dataclass(frozen=True, slots=True)
+class NodeColumnSpec:
+    """Single source of truth for one logical server-table column."""
 
-_HEADERS = [
-    "Имя",
-    "Тип",
-    "Адрес",
-    "Группа",
-    "Теги",
-    "Пинг",
-    "Скорость",
-    "Последнее использование",
-    "Источник",
-]
+    key: str
+    title: str
+    default_visible: bool
+    default_width: int
+    minimum_width: int
+    maximum_width: int
+    sort_key: str | None = None
+    centered: bool = False
+    stretch: bool = False
 
-_CENTERED_COLUMNS = (COL_TYPE, COL_PING, COL_SPEED)
+
+# Logical order is stable for the model; visual order can be moved and saved.
+# Width limits prevent compact value columns from consuming the table while
+# keeping every non-name column interactively resizable.
+COLUMN_SPECS = (
+    NodeColumnSpec("name", "Имя", True, 420, 180, 1600, "name", stretch=True),
+    NodeColumnSpec("type", "Тип", True, 58, 44, 96, "type", centered=True),
+    NodeColumnSpec("address", "Адрес", True, 190, 112, 420),
+    NodeColumnSpec("group", "Группа", False, 140, 80, 320, "group"),
+    NodeColumnSpec("tags", "Теги", False, 160, 90, 420),
+    NodeColumnSpec("ping", "Пинг", True, 82, 64, 120, "ping", centered=True),
+    NodeColumnSpec("speed", "Скорость", True, 106, 82, 150, "speed", centered=True),
+    NodeColumnSpec(
+        "last_used", "Последнее использование", False, 156, 120, 260, "last_used"
+    ),
+    NodeColumnSpec("source", "Источник", False, 150, 90, 360),
+)
+
+# Compatibility exports used throughout the app and in persisted settings.
+COLUMN_KEYS = [spec.key for spec in COLUMN_SPECS]
+DEFAULT_VISIBLE_COLUMNS = [spec.key for spec in COLUMN_SPECS if spec.default_visible]
+COLUMN_BY_KEY = {spec.key: spec for spec in COLUMN_SPECS}
+_HEADERS = [spec.title for spec in COLUMN_SPECS]
+_CENTERED_COLUMNS = tuple(
+    index for index, spec in enumerate(COLUMN_SPECS) if spec.centered
+)
 
 _ROW_ROLES = [
     Qt.ItemDataRole.DisplayRole,
@@ -75,6 +91,16 @@ _ROW_ROLES = [
     PING_BUSY_ROLE,
     SPEED_PROGRESS_ROLE,
 ]
+
+
+def node_type_text(node: Node) -> str:
+    """Return the protocol label, including legacy nodes with no scheme field."""
+    value = (node.scheme or "").strip()
+    if not value and isinstance(node.outbound, dict):
+        value = str(node.outbound.get("type") or "").strip()
+    if not value and "://" in (node.link or ""):
+        value = node.link.split("://", 1)[0].strip()
+    return value.upper() or "—"
 
 
 def _contiguous_ranges(rows: list[int]) -> list[tuple[int, int]]:
@@ -97,6 +123,7 @@ class NodesTableModel(QAbstractTableModel):
         self._speed_progress: dict[str, int] = {}
         self._source_names: dict[str, str] = {}
         self._active_node_id: str | None = None
+        self._endpoints_revealed = False
         # Status brushes depend on the theme: repaint foregrounds on change.
         qconfig.themeChanged.connect(self._on_theme_changed)
 
@@ -184,6 +211,30 @@ class NodesTableModel(QAbstractTableModel):
 
     def active_node_id(self) -> str | None:
         return self._active_node_id
+
+    def set_endpoints_revealed(self, revealed: bool) -> None:
+        """Reveal address data transiently; this state is never persisted."""
+        revealed = bool(revealed)
+        if revealed == self._endpoints_revealed:
+            return
+        self._endpoints_revealed = revealed
+        if not self._nodes:
+            return
+        roles = [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole]
+        self.dataChanged.emit(
+            self.index(0, COL_ADDRESS),
+            self.index(len(self._nodes) - 1, COL_ADDRESS),
+            roles,
+        )
+        # The name tooltip also contains the endpoint.
+        self.dataChanged.emit(
+            self.index(0, COL_NAME),
+            self.index(len(self._nodes) - 1, COL_NAME),
+            [Qt.ItemDataRole.ToolTipRole],
+        )
+
+    def endpoints_revealed(self) -> bool:
+        return self._endpoints_revealed
 
     def set_ping_busy(self, node_id: str, busy: bool) -> None:
         changed = False
@@ -358,9 +409,9 @@ class NodesTableModel(QAbstractTableModel):
         if col == COL_NAME:
             return node.name or "Без имени"
         if col == COL_TYPE:
-            return node.scheme.upper()
+            return node_type_text(node)
         if col == COL_ADDRESS:
-            return masked_endpoint()
+            return endpoint_text(node.server, node.port, self._endpoints_revealed)
         if col == COL_GROUP:
             return node.group
         if col == COL_TAGS:
@@ -386,14 +437,18 @@ class NodesTableModel(QAbstractTableModel):
 
     def _tooltip_text(self, node: Node, col: int) -> str | None:
         if col == COL_NAME:
-            lines = [node.name or "Без имени", f"Тип: {node.scheme.upper()}"]
-            lines.append(f"Адрес: {masked_endpoint()}")
+            lines = [node.name or "Без имени", f"Тип: {node_type_text(node)}"]
+            lines.append(
+                f"Адрес: {endpoint_text(node.server, node.port, self._endpoints_revealed)}"
+            )
             if node.group:
                 lines.append(f"Группа: {node.group}")
             if node.tags:
                 lines.append(f"Теги: {', '.join(node.tags)}")
             lines.append(f"Источник: {self._source_name(node)}")
             return "\n".join(lines)
+        if col == COL_ADDRESS:
+            return endpoint_text(node.server, node.port, self._endpoints_revealed)
         if col == COL_PING:
             if node.id in self._busy_ping_ids:
                 return "Проверка пинга..."

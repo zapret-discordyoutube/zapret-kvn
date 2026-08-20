@@ -23,7 +23,8 @@ from qfluentwidgets import (
 
 from ..models import Node
 from .detail_page import DetailPage
-from .privacy import masked_endpoint
+from .nodes_table_model import node_type_text
+from .privacy import HoldToRevealButton, endpoint_text
 
 
 class NodeDetailWidget(DetailPage):
@@ -40,10 +41,14 @@ class NodeDetailWidget(DetailPage):
             page_key="node-detail",
         )
         self._node: Node | None = None
+        self._endpoint_revealed = False
 
         root = self.content_layout
 
         # Action buttons in the shared header row
+        self.reveal_address_btn = HoldToRevealButton(self)
+        self.reveal_address_btn.revealChanged.connect(self._set_endpoint_revealed)
+        self.add_header_action(self.reveal_address_btn)
         self.ping_btn = TransparentToolButton(FIF.SEND, self)
         self.ping_btn.setToolTip("Пинг")
         self.ping_btn.clicked.connect(self._ping)
@@ -112,6 +117,8 @@ class NodeDetailWidget(DetailPage):
         root.addLayout(tables_row, 1)
 
     def set_node(self, node: Node) -> None:
+        self.reveal_address_btn.reset_reveal()
+        self._endpoint_revealed = False
         self._node = node
         self.set_page_label(node.name or "Без имени")
         self._refresh()
@@ -134,8 +141,10 @@ class NodeDetailWidget(DetailPage):
         # Info
         self.name_label.setText(node.name or "Без имени")
 
-        scheme = node.scheme.upper() if node.scheme else "?"
-        self.endpoint_label.setText(f"{masked_endpoint()}  ({scheme})")
+        scheme = node_type_text(node)
+        self.endpoint_label.setText(
+            f"{endpoint_text(node.server, node.port, self._endpoint_revealed)}  ({scheme})"
+        )
         self.details_label.setText(
             f"Группа: {node.group or 'Default'}  |  "
             f"Страна: {node.country_code.upper() or '?'}  |  "
@@ -174,6 +183,14 @@ class NodeDetailWidget(DetailPage):
     def _speed_test(self) -> None:
         if self._node:
             self.speed_test_node_requested.emit(self._node.id)
+
+    def _set_endpoint_revealed(self, revealed: bool) -> None:
+        self._endpoint_revealed = bool(revealed)
+        if self._node:
+            scheme = node_type_text(self._node)
+            self.endpoint_label.setText(
+                f"{endpoint_text(self._node.server, self._node.port, revealed)}  ({scheme})"
+            )
 
     @staticmethod
     def _format_ts(iso: str) -> str:

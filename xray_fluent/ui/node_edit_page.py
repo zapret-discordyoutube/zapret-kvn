@@ -18,7 +18,8 @@ from qfluentwidgets import (
 
 from ..models import Node
 from .detail_page import DetailPage
-from .privacy import masked_endpoint
+from .nodes_table_model import node_type_text
+from .privacy import HoldToRevealButton, endpoint_text
 
 
 class NodeEditPage(DetailPage):
@@ -35,8 +36,15 @@ class NodeEditPage(DetailPage):
             page_key="node-edit",
         )
         self._node_id = ""
+        self._endpoint_server = ""
+        self._endpoint_port = 0
+        self._endpoint_scheme = "?"
+        self._endpoint_revealed = False
         self._original: dict = {}
 
+        self.reveal_address_btn = HoldToRevealButton(self)
+        self.reveal_address_btn.revealChanged.connect(self._set_endpoint_revealed)
+        self.add_header_action(self.reveal_address_btn)
         self.cancel_btn = PushButton("Отмена", self)
         self.cancel_btn.clicked.connect(self.request_back)
         self.add_header_action(self.cancel_btn)
@@ -71,9 +79,13 @@ class NodeEditPage(DetailPage):
     # ── Public API ──
 
     def set_node(self, node: Node, existing_groups: list[str]) -> None:
+        self.reveal_address_btn.reset_reveal()
+        self._endpoint_revealed = False
         self._node_id = node.id
-        scheme = node.scheme.upper() if node.scheme else "?"
-        self.endpoint_label.setText(f"{masked_endpoint()}  ({scheme})")
+        self._endpoint_server = node.server
+        self._endpoint_port = node.port
+        self._endpoint_scheme = node_type_text(node)
+        self._refresh_endpoint()
 
         self.group_combo.clear()
         for group in existing_groups:
@@ -107,3 +119,13 @@ class NodeEditPage(DetailPage):
         if not self._node_id:
             return
         self.save_requested.emit(self._node_id, self.get_updated_fields())
+
+    def _set_endpoint_revealed(self, revealed: bool) -> None:
+        self._endpoint_revealed = bool(revealed)
+        self._refresh_endpoint()
+
+    def _refresh_endpoint(self) -> None:
+        self.endpoint_label.setText(
+            f"{endpoint_text(self._endpoint_server, self._endpoint_port, self._endpoint_revealed)}  "
+            f"({self._endpoint_scheme})"
+        )

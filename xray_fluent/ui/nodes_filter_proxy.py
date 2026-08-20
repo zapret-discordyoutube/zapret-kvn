@@ -3,7 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 
 from ..models import Node
-from .nodes_table_model import NodesTableModel
+from .nodes_table_model import NodesTableModel, node_type_text
 
 # Stable english sort keys (persisted in AppSettings.nodes_sort_key).
 SORT_KEYS = ("manual", "name", "group", "type", "ping", "speed", "last_used")
@@ -108,7 +108,7 @@ class NodesFilterProxy(QSortFilterProxyModel):
                     haystack = " ".join(
                         [
                             node.name,
-                            node.scheme,
+                            node_type_text(node),
                             node.server,
                             node.group,
                             source_name,
@@ -137,7 +137,7 @@ class NodesFilterProxy(QSortFilterProxyModel):
         if key == "group":
             return a.group.lower() < b.group.lower()
         if key == "type":
-            return a.scheme.lower() < b.scheme.lower()
+            return node_type_text(a).casefold() < node_type_text(b).casefold()
         if key == "ping":
             return self._less_optional(a.ping_ms, b.ping_ms)
         if key == "speed":

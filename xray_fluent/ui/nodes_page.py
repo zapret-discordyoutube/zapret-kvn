@@ -38,24 +38,23 @@ from .nodes_table_model import (
     COL_SPEED,
     COL_TAGS,
     COL_TYPE,
+    COLUMN_BY_KEY,
     COLUMN_KEYS,
+    COLUMN_SPECS,
     DEFAULT_VISIBLE_COLUMNS,
     NODE_ID_ROLE,
     NodesTableModel,
 )
+from .privacy import HoldToRevealButton
 
 _ROW_HEIGHT = 30
 _FLAG_ICON_SIZE = QSize(18, 13)
 
+# Kept as a compatibility export; values come from the column contract above.
 _COLUMN_WIDTHS = {
-    COL_TYPE: 72,
-    COL_ADDRESS: 180,
-    COL_GROUP: 140,
-    COL_TAGS: 160,
-    COL_PING: 92,
-    COL_SPEED: 110,
-    COL_LAST_USED: 156,
-    COL_SOURCE: 150,
+    col: spec.default_width
+    for col, spec in enumerate(COLUMN_SPECS)
+    if not spec.stretch
 }
 
 # Stable english sort keys (persisted); russian labels only in the UI.
@@ -71,12 +70,7 @@ _SORT_KEY_LABELS = {
 }
 
 _COLUMN_SORT_MAP = {
-    COL_NAME: "name",
-    COL_TYPE: "type",
-    COL_GROUP: "group",
-    COL_PING: "ping",
-    COL_SPEED: "speed",
-    COL_LAST_USED: "last_used",
+    col: spec.sort_key for col, spec in enumerate(COLUMN_SPECS) if spec.sort_key
 }
 
 _ALL_GROUPS_LABEL = "Все группы"
@@ -124,6 +118,14 @@ class NodesPage(StackedSection):
         self._pending_group_filter: str | None = None
         self._pending_tag_filter: str | None = None
         self._pending_source_filter: str | None = None
+        self._column_widths = {
+            spec.key: spec.default_width for spec in COLUMN_SPECS if not spec.stretch
+        }
+        self._adjusting_column_width = False
+        self._column_layout_timer = QTimer(self)
+        self._column_layout_timer.setSingleShot(True)
+        self._column_layout_timer.setInterval(200)
+        self._column_layout_timer.timeout.connect(self._emit_view_prefs)
 
         # Root view = server list; sub-pages = detail / edit / bulk edit.
         list_page = QWidget()
@@ -189,6 +191,11 @@ class NodesPage(StackedSection):
         self.bulk_edit_btn.setToolTip("Массовое редактирование")
         self.bulk_edit_btn.setVisible(False)
         toolbar.addWidget(self.bulk_edit_btn)
+
+        toolbar.addWidget(VerticalSeparator(self))
+
+        self.reveal_addresses_btn = HoldToRevealButton(self, plural=True)
+        toolbar.addWidget(self.reveal_addresses_btn)
 
         toolbar.addWidget(VerticalSeparator(self))
 
@@ -261,14 +268,23 @@ class NodesPage(StackedSection):
         vertical_header.setDefaultSectionSize(_ROW_HEIGHT)
 
         horizontal_header = cast(QHeaderView, self.table.horizontalHeader())
-        horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        horizontal_header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
-        for col, width in _COLUMN_WIDTHS.items():
-            horizontal_header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-            self.table.setColumnWidth(col, width)
+        horizontal_header.setMinimumSectionSize(
+            min(spec.minimum_width for spec in COLUMN_SPECS)
+        )
+        for col, spec in enumerate(COLUMN_SPECS):
+            mode = (
+                QHeaderView.ResizeMode.Stretch
+                if spec.stretch
+                else QHeaderView.ResizeMode.Interactive
+            )
+            horizontal_header.setSectionResizeMode(col, mode)
+            if not spec.stretch:
+                horizontal_header.resizeSection(col, spec.default_width)
         horizontal_header.setSectionsClickable(True)
         horizontal_header.setSectionsMovable(True)
         horizontal_header.sectionClicked.connect(self._on_header_clicked)
+        horizontal_header.sectionResized.connect(self._on_column_resized)
+        horizontal_header.sectionMoved.connect(self._on_column_moved)
         horizontal_header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         horizontal_header.customContextMenuRequested.connect(self._on_header_context_menu)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -346,6 +362,9 @@ class NodesPage(StackedSection):
         self.import_btn.clicked.connect(self.import_clipboard_requested)
         self.edit_btn.clicked.connect(self._on_edit)
         self.bulk_edit_btn.clicked.connect(self._on_bulk_edit)
+        self.reveal_addresses_btn.revealChanged.connect(
+            self._table_model.set_endpoints_revealed
+        )
         self.ping_btn.clicked.connect(self._on_ping_selected)
         self.ping_all_btn.clicked.connect(self._on_ping_all)
         self.export_outbound_btn.clicked.connect(self._on_export_outbound)
@@ -421,6 +440,17 @@ class NodesPage(StackedSection):
             self._apply_sort_order()
 
             columns = list(getattr(settings, "nodes_visible_columns", []) or [])
+            if int(getattr(settings, "nodes_column_layout_version", 0) or 0) < 1:
+                # The old default omitted both useful value columns.  Preserve
+                # custom visibility while making the repaired Type/Address
+                # contract available after an upgrade.
+                legacy_visible = set(columns or DEFAULT_VISIBLE_COLUMNS)
+                legacy_visible.update(("type", "address"))
+                columns = [key for key in COLUMN_KEYS if key in legacy_visible]
+            widths = dict(getattr(settings, "nodes_column_widths", {}) or {})
+            order = list(getattr(settings, "nodes_column_order", []) or [])
+            self._apply_column_widths(widths)
+            self._apply_column_order(order)
             self._apply_column_visibility(columns or DEFAULT_VISIBLE_COLUMNS)
 
             self._pending_group_filter = getattr(settings, "nodes_group_filter", "") or None
@@ -647,6 +677,77 @@ class NodesPage(StackedSection):
 
     # ── Column visibility ──
 
+    @staticmethod
+    def _clamp_column_width(key: str, width: int) -> int:
+        spec = COLUMN_BY_KEY[key]
+        return max(spec.minimum_width, min(spec.maximum_width, int(width)))
+
+    def _apply_column_widths(self, widths: dict[str, int]) -> None:
+        header = cast(QHeaderView, self.table.horizontalHeader())
+        for col, spec in enumerate(COLUMN_SPECS):
+            if spec.stretch:
+                continue
+            try:
+                width = self._clamp_column_width(
+                    spec.key, widths.get(spec.key, spec.default_width)
+                )
+            except (TypeError, ValueError):
+                width = spec.default_width
+            self._column_widths[spec.key] = width
+            header.resizeSection(col, width)
+
+    def column_widths(self) -> dict[str, int]:
+        return dict(self._column_widths)
+
+    def _apply_column_order(self, keys: list[str]) -> None:
+        desired: list[str] = []
+        for key in keys:
+            if key in COLUMN_BY_KEY and key not in desired:
+                desired.append(key)
+        desired.extend(key for key in COLUMN_KEYS if key not in desired)
+        header = cast(QHeaderView, self.table.horizontalHeader())
+        for visual_index, key in enumerate(desired):
+            logical_index = COLUMN_KEYS.index(key)
+            current_visual = header.visualIndex(logical_index)
+            if current_visual != visual_index:
+                header.moveSection(current_visual, visual_index)
+
+    def column_order(self) -> list[str]:
+        header = cast(QHeaderView, self.table.horizontalHeader())
+        return [
+            COLUMN_KEYS[header.logicalIndex(visual_index)]
+            for visual_index in range(header.count())
+        ]
+
+    def _on_column_resized(
+        self, logical_index: int, _old_size: int, new_size: int
+    ) -> None:
+        if self._adjusting_column_width or new_size <= 0:
+            return
+        if not 0 <= logical_index < len(COLUMN_SPECS):
+            return
+        spec = COLUMN_SPECS[logical_index]
+        if spec.stretch or self.table.isColumnHidden(logical_index):
+            return
+        width = self._clamp_column_width(spec.key, new_size)
+        if width != new_size:
+            self._adjusting_column_width = True
+            try:
+                self.table.horizontalHeader().resizeSection(logical_index, width)
+            finally:
+                self._adjusting_column_width = False
+        self._column_widths[spec.key] = width
+        self._queue_column_layout_save()
+
+    def _on_column_moved(
+        self, _logical_index: int, _old_visual_index: int, _new_visual_index: int
+    ) -> None:
+        self._queue_column_layout_save()
+
+    def _queue_column_layout_save(self) -> None:
+        if not self._suppress_pref_signals:
+            self._column_layout_timer.start()
+
     def _apply_column_visibility(self, keys: list[str]) -> None:
         visible = set(keys) | {"name"}
         for col, key in enumerate(COLUMN_KEYS):
@@ -657,6 +758,12 @@ class NodesPage(StackedSection):
 
     def _set_column_visible(self, col: int, visible: bool) -> None:
         self.table.setColumnHidden(col, not visible)
+        if visible and 0 <= col < len(COLUMN_SPECS):
+            spec = COLUMN_SPECS[col]
+            if not spec.stretch:
+                self.table.horizontalHeader().resizeSection(
+                    col, self._column_widths[spec.key]
+                )
         self._emit_view_prefs()
 
     def _on_header_context_menu(self, pos) -> None:
@@ -687,6 +794,9 @@ class NodesPage(StackedSection):
                 "nodes_tag_filter": self._combo_filter_value(self.tag_filter),
                 "nodes_source_filter": self._combo_filter_value(self.source_filter),
                 "nodes_visible_columns": self.visible_column_keys(),
+                "nodes_column_widths": self.column_widths(),
+                "nodes_column_order": self.column_order(),
+                "nodes_column_layout_version": 1,
             }
         )
 

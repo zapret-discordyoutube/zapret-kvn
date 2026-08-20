@@ -12,6 +12,17 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _int_mapping(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, item in value.items():
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            continue
+        result[str(key)] = int(item)
+    return result
+
+
 @dataclass(slots=True)
 class Node:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -408,6 +419,9 @@ class AppSettings:
     nodes_tag_filter: str = ""
     nodes_source_filter: str = ""
     nodes_visible_columns: list[str] = field(default_factory=list)  # empty = default set
+    nodes_column_widths: dict[str, int] = field(default_factory=dict)
+    nodes_column_order: list[str] = field(default_factory=list)
+    nodes_column_layout_version: int = 1
     # Subscription auto-update globals (additive, defaults keep current behaviour)
     subscriptions_auto_update: bool = True
     subscriptions_check_on_startup: bool = True
@@ -465,6 +479,9 @@ class AppSettings:
             "nodes_tag_filter": self.nodes_tag_filter,
             "nodes_source_filter": self.nodes_source_filter,
             "nodes_visible_columns": list(self.nodes_visible_columns),
+            "nodes_column_widths": dict(self.nodes_column_widths),
+            "nodes_column_order": list(self.nodes_column_order),
+            "nodes_column_layout_version": self.nodes_column_layout_version,
             "subscriptions_auto_update": self.subscriptions_auto_update,
             "subscriptions_check_on_startup": self.subscriptions_check_on_startup,
             "subscriptions_check_interval_min": self.subscriptions_check_interval_min,
@@ -523,6 +540,9 @@ class AppSettings:
             nodes_tag_filter=str(data.get("nodes_tag_filter") or ""),
             nodes_source_filter=str(data.get("nodes_source_filter") or ""),
             nodes_visible_columns=[str(item) for item in (data.get("nodes_visible_columns") or [])],
+            nodes_column_widths=_int_mapping(data.get("nodes_column_widths")),
+            nodes_column_order=[str(item) for item in (data.get("nodes_column_order") or [])],
+            nodes_column_layout_version=int(data.get("nodes_column_layout_version", 0) or 0),
             subscriptions_auto_update=bool(data.get("subscriptions_auto_update", True)),
             subscriptions_check_on_startup=bool(data.get("subscriptions_check_on_startup", True)),
             subscriptions_check_interval_min=clamp_subscriptions_check_interval(
