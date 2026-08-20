@@ -137,6 +137,20 @@ class MainWindow(FluentWindow):
         xv = get_xray_version(self.controller.state.settings.xray_path)
         self.updates_page.set_xray_version(xv or "")
 
+        from ..engines.singbox.core_updater import installed_version as singbox_installed_version
+        from ..path_utils import resolve_configured_path
+        from ..constants import SINGBOX_PATH_DEFAULT
+
+        singbox_exe = resolve_configured_path(
+            self.controller.state.settings.singbox_path,
+            default_path=SINGBOX_PATH_DEFAULT,
+            use_default_if_empty=True,
+            migrate_default_location=True,
+        ) or SINGBOX_PATH_DEFAULT
+        self.updates_page.set_singbox_version(
+            singbox_installed_version(singbox_exe) if singbox_exe.exists() else ""
+        )
+
         if self.controller.state.settings.xray_auto_update:
             QTimer.singleShot(4500, lambda: self.controller.run_xray_core_update(True, silent=True))
 
@@ -273,6 +287,8 @@ class MainWindow(FluentWindow):
         self.updates_page.check_app_requested.connect(self._check_updates)
         self.updates_page.check_xray_requested.connect(self._check_xray_updates)
         self.updates_page.update_xray_requested.connect(self._update_xray_core)
+        self.updates_page.check_singbox_requested.connect(self._check_singbox_updates)
+        self.updates_page.update_singbox_requested.connect(self._update_singbox_core)
         self.settings_page.export_backup_requested.connect(self._export_backup)
         self.settings_page.import_backup_requested.connect(self._import_backup)
         self.settings_page.set_encryption_requested.connect(self._set_encryption)
@@ -1315,6 +1331,41 @@ class MainWindow(FluentWindow):
     def _update_xray_core(self) -> None:
         self.updates_page.set_xray_status("Обновление Xray...")
         self.controller.run_xray_core_update(True, silent=False)
+
+    def _check_singbox_updates(self) -> None:
+        self.updates_page.set_singbox_status("Проверка обновлений sing-box...")
+        self._start_singbox_core_update(apply_update=False)
+
+    def _update_singbox_core(self) -> None:
+        self.updates_page.set_singbox_status("Обновление sing-box...")
+        self._start_singbox_core_update(apply_update=True)
+
+    def _start_singbox_core_update(self, *, apply_update: bool) -> None:
+        from ..engines.singbox.core_updater import SingboxCoreUpdateWorker
+
+        existing = getattr(self, "_singbox_core_worker", None)
+        if existing is not None and existing.isRunning():
+            return
+        worker = SingboxCoreUpdateWorker(
+            self.controller.state.settings.singbox_path,
+            apply_update,
+            parent=self,
+        )
+        worker.finished_with_result.connect(self._on_singbox_update_result)
+        self._singbox_core_worker = worker
+        worker.start()
+
+    def _on_singbox_update_result(self, result) -> None:
+        self.logs_page.append_line(f"[singbox-core-update] {result.status}: {result.message}")
+        if result.status == "error":
+            self.updates_page.set_singbox_error(result.message)
+        elif result.updated:
+            self.updates_page.set_singbox_success(result.message)
+        else:
+            self.updates_page.set_singbox_status(result.message)
+        version = result.current_version or result.latest_version
+        if version:
+            self.updates_page.set_singbox_version(version)
 
     def _apply_theme(self, theme_name: str, accent_color: str) -> None:
         # Deduplicated: theme.apply_theme skips setTheme/setThemeColor when

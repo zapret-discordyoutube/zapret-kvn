@@ -507,8 +507,10 @@ class SubscriptionsPage(StackedSection):
         self.edit_btn.setToolTip("Редактировать")
         self.update_btn = TransparentToolButton(FIF.DOWNLOAD, self)
         self.update_btn.setToolTip("Обновить выбранную")
-        self.check_btn = PushButton("Проверить", self)
-        self.check_btn.setToolTip("Проверить источник без изменения серверов")
+        # Кнопка читала подписку и ничего не применяла, поэтому свежие серверы
+        # оставались только в отчёте — со стороны это выглядело потерей серверов.
+        self.check_btn = PushButton("Проверить и обновить", self)
+        self.check_btn.setToolTip("Загрузить подписку и применить изменения")
         self.delete_btn = TransparentToolButton(FIF.DELETE, self)
         self.delete_btn.setToolTip("Удалить")
         for button in (
@@ -645,7 +647,8 @@ class SubscriptionsPage(StackedSection):
     def _emit_check(self) -> None:
         subscription_id = self.selected_id()
         if subscription_id:
-            self.check_requested.emit(subscription_id, "auto")
+            # Проверка без применения осталась отдельным пунктом контекстного меню.
+            self.update_requested.emit(subscription_id, "auto")
 
     def _emit_delete(self) -> None:
         subscription_id = self.selected_id()

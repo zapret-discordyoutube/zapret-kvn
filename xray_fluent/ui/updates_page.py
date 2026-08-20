@@ -45,6 +45,8 @@ class UpdatesPage(QWidget):
     check_app_requested = pyqtSignal()
     check_xray_requested = pyqtSignal()
     update_xray_requested = pyqtSignal()
+    check_singbox_requested = pyqtSignal()
+    update_singbox_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -125,12 +127,46 @@ class UpdatesPage(QWidget):
         xray_box.addLayout(xray_btn_row)
 
         root.addLayout(xray_box)
+
+        singbox_sep = QWidget(self)
+        singbox_sep.setFixedHeight(1)
+        singbox_sep.setStyleSheet("background-color: rgba(128,128,128,0.3);")
+        root.addWidget(singbox_sep)
+
+        # ── sing-box core info ──
+        # Ядро приезжало только со сборкой приложения, поэтому исправление в нём
+        # приходилось ждать до следующего релиза Zapret KVN.
+        singbox_box = QVBoxLayout()
+        singbox_box.setSpacing(6)
+        singbox_title = BodyLabel("sing-box Extended", self)
+        setCustomStyleSheet(singbox_title, _SECTION_TITLE_QSS, _SECTION_TITLE_QSS)
+        singbox_box.addWidget(singbox_title)
+
+        self._singbox_version_label = BodyLabel("Версия: загрузка...", self)
+        singbox_box.addWidget(self._singbox_version_label)
+
+        self._singbox_status = CaptionLabel("", self)
+        _set_status_style(self._singbox_status, "neutral")
+        singbox_box.addWidget(self._singbox_status)
+
+        singbox_btn_row = QHBoxLayout()
+        singbox_btn_row.setSpacing(10)
+        self.check_singbox_btn = PushButton(FIF.SYNC, "Проверить обновления sing-box", self)
+        self.update_singbox_btn = PrimaryPushButton(FIF.DOWNLOAD, "Обновить sing-box core", self)
+        singbox_btn_row.addWidget(self.check_singbox_btn)
+        singbox_btn_row.addWidget(self.update_singbox_btn)
+        singbox_btn_row.addStretch()
+        singbox_box.addLayout(singbox_btn_row)
+
+        root.addLayout(singbox_box)
         root.addStretch()
 
         # ── Connections ──
         self.check_app_btn.clicked.connect(self.check_app_requested)
         self.check_xray_btn.clicked.connect(self.check_xray_requested)
         self.update_xray_btn.clicked.connect(self.update_xray_requested)
+        self.check_singbox_btn.clicked.connect(self.check_singbox_requested)
+        self.update_singbox_btn.clicked.connect(self.update_singbox_requested)
 
     # ── Public API ──
 
@@ -144,6 +180,23 @@ class UpdatesPage(QWidget):
     def set_xray_status(self, text: str) -> None:
         _set_status_style(self._xray_status, "neutral")
         self._xray_status.setText(text)
+
+    def set_singbox_version(self, version: str) -> None:
+        self._singbox_version_label.setText(
+            f"Версия: {version}" if version else "Версия: не найдена"
+        )
+
+    def set_singbox_status(self, text: str) -> None:
+        _set_status_style(self._singbox_status, "neutral")
+        self._singbox_status.setText(text)
+
+    def set_singbox_error(self, text: str) -> None:
+        _set_status_style(self._singbox_status, "error")
+        self._singbox_status.setText(text)
+
+    def set_singbox_success(self, text: str) -> None:
+        _set_status_style(self._singbox_status, "success")
+        self._singbox_status.setText(text)
 
     def set_app_error(self, text: str) -> None:
         _set_status_style(self._app_status, "error")
