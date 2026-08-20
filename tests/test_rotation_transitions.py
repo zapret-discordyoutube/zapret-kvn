@@ -39,13 +39,15 @@ class StubController:
         self._active_session = StubSession(build_xray_outbound_pool(nodes).tags)
         self.logs: list[str] = []
         self.switched: list[str] = []
+        self.switch_reset_flags: list[bool] = []
         self.status_messages: list[tuple[str, str]] = []
 
     def _log(self, line: str) -> None:
         self.logs.append(line)
 
-    def set_selected_node(self, node_id: str) -> None:
+    def set_selected_node(self, node_id: str, *, reset_auto_switch: bool = True) -> None:
         self.switched.append(node_id)
+        self.switch_reset_flags.append(reset_auto_switch)
         self.state.selected_node_id = node_id
 
     @property
@@ -87,6 +89,7 @@ class RotateNowTests(unittest.TestCase):
         self.assertEqual(len(controller.switched), 1)
         self.assertNotEqual(controller.switched[0], first)
         self.assertEqual(controller.state.selected_node_id, controller.switched[0])
+        self.assertEqual(controller.switch_reset_flags, [False])
 
     def test_rotation_does_nothing_while_disconnected(self) -> None:
         controller = self._controller(connected=False)

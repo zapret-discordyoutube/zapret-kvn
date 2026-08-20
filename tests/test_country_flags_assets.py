@@ -156,16 +156,16 @@ class FlagThemeTests(unittest.TestCase):
 
 
 class FlagPackagingTests(unittest.TestCase):
-    """AC14 — dev-mode path via constants.ASSETS_DIR, build.py merge."""
+    """AC14 — dev-mode path via constants.ASSETS_DIR, clean build staging."""
 
     def test_flags_dir_derives_from_assets_dir(self) -> None:
         self.assertEqual(constants.FLAGS_DIR, constants.ASSETS_DIR / "flags")
         self.assertEqual(country_flags.FLAGS_DIR, constants.FLAGS_DIR)
         self.assertTrue(constants.FLAGS_DIR.is_dir())
 
-    def test_build_merges_assets_tree(self) -> None:
+    def test_build_stages_assets_tree_into_a_clean_destination(self) -> None:
         source = (ROOT / "build.py").read_text(encoding="utf-8")
-        self.assertIn("_copy_tree_merge(ASSETS_DIR, dst_assets)", source)
+        self.assertIn("_copy_tree_strict(ASSETS_DIR, dst_assets)", source)
 
 
 if __name__ == "__main__":

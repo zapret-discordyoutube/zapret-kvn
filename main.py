@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import threading
 
+from xray_fluent.constants import APP_VERSION
 from xray_fluent.subprocess_utils import result_output_text, run_text
 
 
@@ -59,6 +60,22 @@ _bootstrap_logger = logging.getLogger("xray_fluent.bootstrap")
 _bootstrap_stream = None
 
 
+def _runtime_identity_message() -> str:
+    """Return non-secret identity fields for the startup log.
+
+    The application version is the version compiled into the running
+    executable.  The executable and base-directory paths let support match a
+    report to one concrete portable copy when several copies exist on disk.
+    """
+    executable = Path(sys.executable).resolve()
+    base_dir = BASE_DIR.resolve()
+    return (
+        f"app_version={APP_VERSION} "
+        f"executable={executable} "
+        f"base_dir={base_dir}"
+    )
+
+
 def _setup_bootstrap_logging() -> None:
     global _bootstrap_stream
 
@@ -88,6 +105,7 @@ def _setup_bootstrap_logging() -> None:
     _bootstrap_logger.info("----- startup begin -----")
     _bootstrap_logger.info("argv=%s", sys.argv)
     _bootstrap_logger.info("frozen=%s executable=%s", getattr(sys, "frozen", False), sys.executable)
+    _bootstrap_logger.info("runtime %s", _runtime_identity_message())
     if sys.platform == "win32":
         try:
             version = sys.getwindowsversion()

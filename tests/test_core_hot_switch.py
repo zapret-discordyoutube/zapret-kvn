@@ -305,6 +305,97 @@ class LiveConnectionCutoverTests(unittest.TestCase):
         self.assertEqual(controller._apply_core_calls, [])
         controller._capture_hot_switched_session.assert_not_called()
 
+    def test_udp_hot_switch_waits_for_zapret_pass_restart_readiness(self) -> None:
+        controller, _nodes, _tags, _session = self._controller(hybrid=True)
+        controller.zapret.proxy_protection_is_ready.return_value = False
+
+        self.assertFalse(run_hot_switch_generator(controller))
+
+        self.assertEqual(controller._apply_core_calls, [])
+        controller._capture_hot_switched_session.assert_not_called()
+
+
+class ProxyProtectionTransitionTests(unittest.TestCase):
+    def test_transition_waits_for_cached_pass_restart_readiness(self) -> None:
+        node = parse_single("hy2://secret@one.example:443/?insecure=1#one")
+        controller = Mock()
+        controller.selected_node = node
+        controller.zapret.apply_cached_proxy_node.return_value = True
+        controller.zapret.proxy_protection_is_ready.return_value = False
+        controller.zapret.proxy_protection_generation = 7
+        controller._proxy_protection_wait_generation = 0
+        controller._proxy_protection_wait_token = 0
+
+        def wait_for_protection(generation: int) -> None:
+            controller._proxy_protection_wait_generation = generation
+            controller._proxy_protection_wait_token = 7
+            controller.transition_state_changed.emit(
+                True,
+                "Ожидание перезапуска UDP-защиты...",
+            )
+
+        controller._wait_for_proxy_protection = wait_for_protection
+
+        self.assertTrue(AppController._prepare_proxy_protection(controller, 11))
+
+        self.assertEqual(controller._proxy_protection_wait_generation, 11)
+        self.assertEqual(controller._proxy_protection_wait_token, 7)
+        controller.transition_state_changed.emit.assert_called_once_with(
+            True,
+            "Ожидание перезапуска UDP-защиты...",
+        )
+
+    def test_readiness_failure_keeps_existing_connection_and_fences_transition(self) -> None:
+        controller = Mock()
+        controller._proxy_protection_wait_generation = 11
+        controller._proxy_protection_wait_token = 7
+        controller._transition_generation = 11
+        controller._transition_pending = True
+        controller.connected = True
+        controller._transition_signature.return_value = "blocked-signature"
+
+        AppController._on_proxy_protection_failed(controller, 7, "timeout")
+
+        self.assertFalse(controller._transition_pending)
+        self.assertTrue(controller._desired_connected)
+        self.assertEqual(controller._blocked_transition_signature, "blocked-signature")
+        controller.status.emit.assert_called_once_with(
+            "warning",
+            "Не удалось подтвердить UDP-защиту; переход отменён",
+        )
+        controller.transition_state_changed.emit.assert_called_once_with(False, "")
+
+    def test_dns_failure_with_running_zapret_keeps_existing_connection(self) -> None:
+        node = parse_single("hy2://secret@one.example:443/?insecure=1#one")
+        controller = Mock()
+        controller.selected_node = node
+        controller.zapret.running = True
+        controller.zapret.proxy_protection_server.return_value = "one.example"
+        controller._transition_generation = 11
+        controller._proxy_protection_wait_generation = 11
+        controller._proxy_protection_wait_token = 0
+        controller._desired_connected = True
+        controller.connected = True
+        controller._transition_pending = True
+        controller._transition_signature.return_value = "blocked-dns"
+
+        AppController._on_proxy_protection_resolved(
+            controller,
+            11,
+            "one.example",
+            set(),
+            OSError("temporary DNS failure"),
+        )
+
+        self.assertFalse(controller._transition_pending)
+        self.assertTrue(controller._desired_connected)
+        self.assertEqual(controller._blocked_transition_signature, "blocked-dns")
+        controller.status.emit.assert_called_once_with(
+            "warning",
+            "Не удалось подготовить UDP-защиту: адрес сервера не определён",
+        )
+        controller._schedule_transition_drain.assert_not_called()
+
 
 class HybridRuntimeStartupTests(unittest.TestCase):
     def test_start_pins_xray_target_and_known_relay_generation(self) -> None:

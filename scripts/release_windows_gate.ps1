@@ -30,6 +30,40 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Assert-StableCoreLock([string]$LockFile) {
+    $lock = Get-Content -LiteralPath $LockFile -Raw | ConvertFrom-Json
+    if ([int]$lock.schema -ne 1 -or [string]$lock.platform -ne "windows-x64") {
+        throw "Unsupported core lock format: $LockFile"
+    }
+    $required = @{
+        "xray-core" = "XTLS/Xray-core"
+        "sing-box-extended" = "shtorm-7/sing-box-extended"
+    }
+    foreach ($entry in $required.GetEnumerator()) {
+        $matches = @($lock.sources | Where-Object { [string]$_.id -eq $entry.Key })
+        if ($matches.Count -ne 1) {
+            throw "Core lock must contain exactly one $($entry.Key) source"
+        }
+        $source = $matches[0]
+        if ([string]$source.repository -ne $entry.Value -or [string]$source.channel -ne "stable") {
+            throw "Core lock source $($entry.Key) is not from the approved stable channel"
+        }
+        if ($source.release_prerelease -ne $false) {
+            throw "Stable release cannot use prerelease core source $($entry.Key)"
+        }
+        if ([string]$source.release_tag -ne [string]$source.version) {
+            throw "Core release tag/version mismatch for $($entry.Key)"
+        }
+        if ([string]$source.asset_name -ne [string]$source.archive) {
+            throw "Core asset/archive mismatch for $($entry.Key)"
+        }
+        if ([int64]$source.asset_size -le 0) {
+            throw "Core source $($entry.Key) has no verified asset size"
+        }
+    }
+    return $lock
+}
+
 function Stop-ReleaseProcesses([string]$Root) {
     $ownedRoots = @(
         [IO.Path]::GetFullPath((Join-Path $Root "dist\ZapretKVN")),
@@ -79,6 +113,7 @@ function Assert-Workspace([string]$Root, [string]$ExpectedCommit, [string]$Expec
 
 function Install-VerifiedCore([string]$Root) {
     $lockFile = Join-Path $Root "scripts\core-lock.windows-x64.json"
+    $null = Assert-StableCoreLock $lockFile
     $archive = Join-Path $Root ".cache\core-bundle\core-windows-x64.7z"
     $stamp = "$archive.lock.sha256"
     $lockHash = Get-Sha256 $lockFile
@@ -92,6 +127,34 @@ function Install-VerifiedCore([string]$Root) {
         Write-Host "[release] reusing pinned core bundle for lock $lockHash"
     }
     & (Join-Path $Root "scripts\install_core_bundle.ps1")
+}
+
+function Get-CoreProof([string]$Root) {
+    $lockFile = Join-Path $Root "scripts\core-lock.windows-x64.json"
+    $lock = Assert-StableCoreLock $lockFile
+    $manifestPath = Join-Path $Root "core\core-manifest.windows-x64.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Installed core manifest is missing: $manifestPath"
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $sources = @($lock.sources | Where-Object {
+        [string]$_.id -in @("xray-core", "sing-box-extended")
+    } | ForEach-Object {
+        [ordered]@{
+            id = [string]$_.id
+            version = [string]$_.version
+            repository = [string]$_.repository
+            channel = [string]$_.channel
+            release_prerelease = [bool]$_.release_prerelease
+            archive_sha256 = [string]$_.sha256
+            asset_size = [int64]$_.asset_size
+        }
+    })
+    return [ordered]@{
+        lock_sha256 = Get-Sha256 $lockFile
+        manifest_sha256 = Get-Sha256 $manifestPath
+        sources = $sources
+    }
 }
 
 function Ensure-DependenciesAndTests([string]$Root) {
@@ -113,6 +176,39 @@ function Build-Application([string]$Root) {
         throw "Built ZapretKVN.exe is missing"
     }
     return $exe
+}
+
+function Assert-CleanPayload([string]$Root) {
+    $portable = Join-Path $Root "dist\ZapretKVN"
+    if (-not (Test-Path -LiteralPath $portable -PathType Container)) {
+        throw "Clean release payload is missing: $portable"
+    }
+
+    $allowedTopLevel = @("ZapretKVN.exe", "_internal", "assets", "core", "data", "zapret")
+    $unexpectedTopLevel = @(
+        Get-ChildItem -LiteralPath $portable -Force |
+            Where-Object { $allowedTopLevel -notcontains $_.Name }
+    )
+    if ($unexpectedTopLevel.Count -ne 0) {
+        $unexpectedTopLevel | ForEach-Object { Write-Host $_.FullName }
+        throw "Release payload contains unexpected top-level files"
+    }
+
+    $data = Join-Path $portable "data"
+    if (-not (Test-Path -LiteralPath $data -PathType Container)) {
+        throw "Release payload is missing data/templates"
+    }
+    $unexpectedData = @(
+        Get-ChildItem -LiteralPath $data -Force |
+            Where-Object { $_.Name -ne "templates" }
+    )
+    if ($unexpectedData.Count -ne 0) {
+        $unexpectedData | ForEach-Object { Write-Host $_.FullName }
+        throw "Release payload contains runtime data; only data/templates is allowed"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $data "templates") -PathType Container)) {
+        throw "Release payload is missing data/templates"
+    }
 }
 
 function Test-ShippedTemplates([string]$Root) {
@@ -193,8 +289,10 @@ function New-StableAssets([string]$Root, [string]$ReleaseVersion) {
 Assert-Workspace $RepoRoot $Commit $Version
 Stop-ReleaseProcesses $RepoRoot
 Install-VerifiedCore $RepoRoot
+$coreProof = Get-CoreProof $RepoRoot
 Ensure-DependenciesAndTests $RepoRoot
 $exePath = Build-Application $RepoRoot
+Assert-CleanPayload $RepoRoot
 $templateCount = Test-ShippedTemplates $RepoRoot
 $assets = if ($Mode -eq "stable") { @(New-StableAssets $RepoRoot $Version) } else { @() }
 
@@ -215,6 +313,7 @@ $manifest = [ordered]@{
         sha256 = Get-Sha256 $exePath
     }
     templates_verified = $templateCount
+    core = $coreProof
     assets = $assets
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ManifestPath -Encoding utf8

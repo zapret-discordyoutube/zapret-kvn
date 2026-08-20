@@ -41,6 +41,13 @@ _PROFILE_ARGUMENT_PREFIXES = (
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
+# WinDivert/winws2 normally restarts quickly, but the process can spend a
+# bounded amount of time releasing the previous driver handles before the new
+# pass profile is actually active.  A proxy transition must not race that
+# window forever or assume that the old process is already using the new IP
+# list.
+PROXY_PROTECTION_READY_TIMEOUT_MS = 5_000
+
 
 @dataclass
 class PresetInfo:
@@ -59,6 +66,11 @@ class ZapretManager(QObject):
     stopped = pyqtSignal()
     error = pyqtSignal(str)
     log_line = pyqtSignal(str)
+    # Emitted only after the winws2 process carrying the requested pass profile
+    # has reported QProcess.started.  The generation prevents a late signal
+    # from an older restart from unblocking a newer transition.
+    proxy_protection_ready = pyqtSignal(int)
+    proxy_protection_failed = pyqtSignal(int, str)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -69,6 +81,9 @@ class ZapretManager(QObject):
         self._proxy_resolution_cache: dict[str, set[str]] = {}
         self._pending_restart_preset = ""
         self._stop_expected = False
+        self._proxy_protection_generation = 0
+        self._proxy_protection_ready_generation = 0
+        self._proxy_protection_pending_generation = 0
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(3000)
         self._health_timer.timeout.connect(self._check_health)
@@ -78,6 +93,29 @@ class ZapretManager(QObject):
     @property
     def running(self) -> bool:
         return self._process is not None and self._process.state() == QProcess.ProcessState.Running
+
+    @property
+    def proxy_protection_generation(self) -> int:
+        """Generation of the currently requested protected UDP endpoint set."""
+
+        return self._proxy_protection_generation
+
+    def proxy_protection_is_ready(self, node: object | None = None) -> bool:
+        """Whether a transition may use the current UDP pass configuration.
+
+        A stopped Zapret manager is an intentional no-op: there is no WinDivert
+        process to restart or wait for.  When a running manager is replacing
+        its profile, however, readiness remains false until the new process
+        emits ``started`` for the current generation.
+        """
+
+        if self._proxy_protection_pending_generation:
+            return False
+        if not self.running:
+            return True
+        if not self.proxy_protection_server(node):
+            return True
+        return self._proxy_protection_ready_generation == self._proxy_protection_generation
 
     @staticmethod
     def list_presets() -> list[str]:
@@ -205,23 +243,69 @@ class ZapretManager(QObject):
             return
 
         self._protected_proxy_ips = set(protected_ips)
+        self._proxy_protection_generation += 1
+        generation = self._proxy_protection_generation
+        self._proxy_protection_ready_generation = generation - 1
         if protected_ips:
             joined = ", ".join(sorted(protected_ips))
             self.log_line.emit(f"[zapret] Для сервера UDP-прокси включён профиль pass: {joined}")
         else:
             self.log_line.emit("[zapret] Профиль pass для UDP-прокси отключён")
 
-        if self.running and self._current_preset:
+        # If a previous restart has already killed the process, retain the
+        # pending generation and let that restart's eventual start event prove
+        # readiness.  Starting a second overlapping QProcess would make the
+        # generation contract meaningless and can also race WinDivert handles.
+        # ``_pending_restart_preset`` covers the stop/start handoff; the
+        # pending generation also covers the short QProcess.Starting window
+        # after start() has consumed that marker but before ``started`` fires.
+        restart_in_flight = bool(
+            self._pending_restart_preset
+            or self._proxy_protection_pending_generation
+        )
+        if (self.running and self._current_preset) or restart_in_flight:
+            self._proxy_protection_pending_generation = generation
+            self._arm_proxy_protection_timeout(generation)
+        else:
+            # Zapret is not running.  There is no pass process whose readiness
+            # could be awaited, so this is deliberately a ready/no-op state.
+            self._proxy_protection_pending_generation = 0
+            self._proxy_protection_ready_generation = generation
+            self.proxy_protection_ready.emit(generation)
+
+        if self.running and self._current_preset and not restart_in_flight:
             preset = self._current_preset
             self.log_line.emit("[zapret] Перезапуск с обновлённым профилем pass")
             self._restart_for_proxy_protection(preset)
+
+    def _arm_proxy_protection_timeout(self, generation: int) -> None:
+        QTimer.singleShot(
+            PROXY_PROTECTION_READY_TIMEOUT_MS,
+            lambda generation=generation: self._on_proxy_protection_timeout(generation),
+        )
+
+    def _on_proxy_protection_timeout(self, generation: int) -> None:
+        if generation != self._proxy_protection_pending_generation:
+            return
+        self._proxy_protection_pending_generation = 0
+        self.log_line.emit(
+            "[zapret] Не удалось подтвердить перезапуск UDP-профиля pass "
+            f"за {PROXY_PROTECTION_READY_TIMEOUT_MS} мс"
+        )
+        self.proxy_protection_failed.emit(generation, "timeout")
+
+    def _fail_pending_proxy_protection(self, reason: str) -> None:
+        generation = self._proxy_protection_pending_generation
+        if not generation:
+            return
+        self._proxy_protection_pending_generation = 0
+        self.proxy_protection_failed.emit(generation, reason)
 
     def _restart_for_proxy_protection(self, preset: str) -> None:
         """Restart winws2 through QProcess signals instead of waitForFinished()."""
         self._pending_restart_preset = preset
         process = self._process
         if process is None or process.state() == QProcess.ProcessState.NotRunning:
-            self._pending_restart_preset = ""
             QTimer.singleShot(0, lambda preset=preset: self.start(preset))
             return
         self._health_timer.stop()
@@ -369,6 +453,10 @@ class ZapretManager(QObject):
                          arg_count=arg_count, file_path=target)
 
     def start(self, preset_name: str) -> None:
+        # A pending-restart marker only protects the gap before this launch.
+        # Clear it once QProcess.start() is being attempted so a crash of the
+        # replacement process cannot recursively schedule an unbounded restart.
+        self._pending_restart_preset = ""
         if self._process is not None and self._process.state() != QProcess.ProcessState.NotRunning:
             self.stop()
 
@@ -379,11 +467,13 @@ class ZapretManager(QObject):
         exe = WINWS2_EXE
         if not exe.exists():
             self.error.emit(f"winws2.exe не найден: {exe}")
+            self._fail_pending_proxy_protection("missing_executable")
             return
 
         preset = self.preset_path(preset_name)
         if not preset.exists():
             self.error.emit(f"Пресет не найден: {preset}")
+            self._fail_pending_proxy_protection("missing_preset")
             return
 
         # Parse preset and pass args directly (winws2 @file can't handle spaces in path)
@@ -393,6 +483,7 @@ class ZapretManager(QObject):
         )
         if not args:
             self.error.emit(f"Пресет пустой: {preset_name}")
+            self._fail_pending_proxy_protection("empty_preset")
             return
 
         self._current_preset = preset_name
@@ -414,6 +505,11 @@ class ZapretManager(QObject):
 
     def _on_started(self) -> None:
         self._health_timer.start()
+        generation = self._proxy_protection_pending_generation
+        if generation:
+            self._proxy_protection_pending_generation = 0
+            self._proxy_protection_ready_generation = generation
+            self.proxy_protection_ready.emit(generation)
         self.started.emit()
 
     def _on_process_error(self, process_error: QProcess.ProcessError) -> None:
@@ -426,6 +522,7 @@ class ZapretManager(QObject):
             self._process = None
             self._current_preset = ""
             self._start_args = []
+            self._fail_pending_proxy_protection("start_failed")
             self.stopped.emit()
 
     def stop(self) -> None:
@@ -433,6 +530,11 @@ class ZapretManager(QObject):
         self._health_timer.stop()
         process = self._process
         if process is None:
+            generation = self._proxy_protection_pending_generation
+            if generation:
+                self._proxy_protection_pending_generation = 0
+                self._proxy_protection_ready_generation = generation
+                self.proxy_protection_ready.emit(generation)
             return
 
         if process.state() != QProcess.ProcessState.NotRunning:
@@ -446,6 +548,11 @@ class ZapretManager(QObject):
             self._current_preset = ""
             self._start_args = []
             self._stop_expected = False
+            generation = self._proxy_protection_pending_generation
+            if generation:
+                self._proxy_protection_pending_generation = 0
+                self._proxy_protection_ready_generation = generation
+                self.proxy_protection_ready.emit(generation)
             self.stopped.emit()
 
     # ── internals ───────────────────────────────────────────────
@@ -551,6 +658,9 @@ class ZapretManager(QObject):
         self._pending_restart_preset = ""
         self.stopped.emit()
         if pending_restart:
+            # Keep the generation pending while the replacement process is
+            # being created.  _on_started is the only readiness proof.
+            self._pending_restart_preset = pending_restart
             QTimer.singleShot(0, lambda preset=pending_restart: self.start(preset))
 
     def _check_health(self) -> None:

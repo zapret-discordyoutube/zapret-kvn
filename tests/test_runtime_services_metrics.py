@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
 
-from xray_fluent.application.runtime_services import stop_metrics_worker
+from xray_fluent.application.runtime_services import on_live_metrics, stop_metrics_worker
 
 _APP = QCoreApplication.instance() or QCoreApplication([])
 
@@ -104,6 +105,34 @@ class StopMetricsWorkerTests(unittest.TestCase):
         controller = _make_controller(None)
         stop_metrics_worker(controller)
         self.assertIsNone(controller._metrics_worker)
+
+
+class LiveMetricsValidityTests(unittest.TestCase):
+    def test_invalid_sample_is_forwarded_as_invalid_not_zero_speed(self) -> None:
+        payloads: list[dict] = []
+        worker = SimpleNamespace(pings_active_node=lambda: False)
+        controller = SimpleNamespace(
+            _metrics_worker=worker,
+            live_metrics_updated=SimpleNamespace(emit=payloads.append),
+            _check_auto_switch=Mock(),
+        )
+
+        on_live_metrics(
+            controller,
+            {
+                "down_bps": None,
+                "up_bps": None,
+                "traffic_valid": False,
+                "latency_ms": None,
+            },
+        )
+
+        controller._check_auto_switch.assert_called_once_with(
+            0.0,
+            None,
+            traffic_valid=False,
+        )
+        self.assertIsNone(payloads[0]["down_bps"])
 
 
 if __name__ == "__main__":

@@ -160,8 +160,10 @@ def set_selected_node(controller: AppController, node_id: str, *, reset_auto_swi
     if reset_auto_switch:
         # Ручной выбор сбрасывает cooldown/cycle авто-переключения; сам
         # auto_switch_service выбирает ноду с reset_auto_switch=False, чтобы
-        # не обнулять свой учёт анти-дребезга (П4/A6).
+        # не обнулять свой учёт анти-дребезга (П4/A6).  Заодно ручной выбор
+        # фиксирует сервер до явного повторного включения авто-переключения.
         controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
+        controller._auto_switch_manual_hold = True
     controller.selection_changed.emit(controller.selected_node)
     controller.schedule_save()
     if controller.connected or controller._desired_connected:

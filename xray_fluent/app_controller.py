@@ -70,6 +70,10 @@ from .application.nodes import (
     start_country_ip_resolution as start_country_ip_resolution_operation,
     update_node as update_node_operation,
 )
+from .application.auto_switch_service import (
+    begin_auto_switch_warmup,
+    transport_kind_for_node,
+)
 from .application.singbox_config_recovery import (
     SingboxConfigRepair,
     repair_singbox_config_file,
@@ -340,6 +344,7 @@ class AppController(QObject):
         self._subscription_check_ids: set[str] = set()
         self._proxy_protection_workers: dict[int, ProxyProtectionResolver] = {}
         self._proxy_protection_wait_generation = 0
+        self._proxy_protection_wait_token = 0
         self._singbox_documents = SingboxDocumentCache()
         self._ping_total = 0
         self._ping_completed = 0
@@ -371,6 +376,9 @@ class AppController(QObject):
         self._auto_switch_exhausted: bool = False
         self._auto_switch_transitioning: bool = False
         self._auto_switch_link_down_since: float = 0.0  # monotonic ts of first failed active-node ping
+        self._auto_switch_manual_hold: bool = False
+        self._auto_switch_warmup_until: float = 0.0
+        self._auto_switch_health_node_id: str | None = None
         self._active_session: ActiveSessionSnapshot | None = None
         self._desired_connected = False
         self._transition_active = False
@@ -404,6 +412,8 @@ class AppController(QObject):
         self.tun2socks.state_changed.connect(self._on_core_state_changed)
         self.tun2socks.stopped.connect(lambda code: self._on_core_stopped("tun2socks", code))
         self._xray_tun_routes.log_received.connect(self._on_xray_log)
+        self.zapret.proxy_protection_ready.connect(self._on_proxy_protection_ready)
+        self.zapret.proxy_protection_failed.connect(self._on_proxy_protection_failed)
 
         self.network_monitor.network_changed.connect(self._on_network_changed)
         self.connection_changed.connect(lambda _: self._sync_rotation_timer())
@@ -1136,6 +1146,7 @@ class AppController(QObject):
             hybrid_relay_selected_tag=hybrid_relay_selected_tag,
         )
         self._blocked_transition_signature = ""
+        begin_auto_switch_warmup(self, node)
 
     def _derive_outbound_pool_tags(self, node: Node | None, *, core: str) -> dict[str, str] | None:
         """П1 (AC1/A2): вывести дефолтные outbound_pool_tags из пула контроллера.
@@ -1298,6 +1309,7 @@ class AppController(QObject):
         self._transition_generation += 1
         generation = self._transition_generation
         self._proxy_protection_wait_generation = 0
+        self._proxy_protection_wait_token = 0
         if self._desired_connected and self._prepare_proxy_protection(generation):
             if self._transition_timer.isActive():
                 self._transition_timer.stop()
@@ -1310,7 +1322,11 @@ class AppController(QObject):
     def _prepare_proxy_protection(self, generation: int) -> bool:
         node = self.selected_node
         if self.zapret.apply_cached_proxy_node(node):
-            return False
+            readiness = getattr(self.zapret, "proxy_protection_is_ready", None)
+            if readiness is None or readiness(node):
+                return False
+            self._wait_for_proxy_protection(generation)
+            return True
         server = self.zapret.proxy_protection_server(node)
         if not server:
             return False
@@ -1323,6 +1339,7 @@ class AppController(QObject):
         )
         self._proxy_protection_workers[generation] = worker
         self._proxy_protection_wait_generation = generation
+        self._proxy_protection_wait_token = 0
         worker.resolved.connect(self._on_proxy_protection_resolved)
         worker.finished.connect(
             lambda generation=generation, worker=worker: self._forget_proxy_protection_worker(generation, worker)
@@ -1330,6 +1347,11 @@ class AppController(QObject):
         self.transition_state_changed.emit(True, "Определение адреса сервера...")
         worker.start()
         return True
+
+    def _wait_for_proxy_protection(self, generation: int) -> None:
+        self._proxy_protection_wait_generation = generation
+        self._proxy_protection_wait_token = self.zapret.proxy_protection_generation
+        self.transition_state_changed.emit(True, "Ожидание перезапуска UDP-защиты...")
 
     def _on_proxy_protection_resolved(
         self,
@@ -1346,6 +1368,7 @@ class AppController(QObject):
         if generation != self._transition_generation:
             return
         self._proxy_protection_wait_generation = 0
+        self._proxy_protection_wait_token = 0
         if not self._desired_connected:
             self.transition_state_changed.emit(False, "")
             return
@@ -1357,14 +1380,81 @@ class AppController(QObject):
             current_server=self.zapret.proxy_protection_server(self.selected_node),
         ):
             return
+        if error is not None and self.zapret.running:
+            # A running WinDivert profile without the exact UDP endpoint
+            # exclusion can break the new Hysteria/TUIC connection.  Preserve
+            # the existing link instead of continuing an unprotected switch.
+            self._transition_pending = False
+            self._blocked_transition_signature = self._transition_signature()
+            self._desired_connected = self.connected
+            self.status.emit(
+                "warning",
+                "Не удалось подготовить UDP-защиту: адрес сервера не определён",
+            )
+            self.transition_state_changed.emit(False, "")
+            return
         if error is None:
-            self.zapret.apply_cached_proxy_node(self.selected_node)
+            if not self.zapret.apply_cached_proxy_node(self.selected_node):
+                if not self._transition_active:
+                    self._schedule_transition_drain(transition_request_delay_ms(self._transition_reason))
+                return
+            readiness = getattr(self.zapret, "proxy_protection_is_ready", None)
+            if readiness is not None and not readiness(self.selected_node):
+                self._wait_for_proxy_protection(generation)
+                return
             if self.connected and self._try_hot_switch_selected_node():
                 self._transition_pending = False
                 self.transition_state_changed.emit(False, "")
                 return
         if not self._transition_active:
             self._schedule_transition_drain(transition_request_delay_ms(self._transition_reason))
+
+    def _on_proxy_protection_ready(self, protection_generation: int) -> None:
+        transition_generation = self._proxy_protection_wait_generation
+        if not transition_generation:
+            return
+        if transition_generation != self._transition_generation:
+            return
+        if protection_generation != self._proxy_protection_wait_token:
+            return
+        if not self._desired_connected:
+            self._proxy_protection_wait_generation = 0
+            self._proxy_protection_wait_token = 0
+            self.transition_state_changed.emit(False, "")
+            return
+        readiness = getattr(self.zapret, "proxy_protection_is_ready", None)
+        if readiness is not None and not readiness(self.selected_node):
+            return
+
+        self._proxy_protection_wait_generation = 0
+        self._proxy_protection_wait_token = 0
+        if self.connected and self._try_hot_switch_selected_node():
+            self._transition_pending = False
+            self.transition_state_changed.emit(False, "")
+            return
+        if not self._transition_active:
+            self._schedule_transition_drain(transition_request_delay_ms(self._transition_reason))
+
+    def _on_proxy_protection_failed(self, protection_generation: int, reason: str) -> None:
+        transition_generation = self._proxy_protection_wait_generation
+        if not transition_generation:
+            return
+        if transition_generation != self._transition_generation:
+            return
+        if protection_generation != self._proxy_protection_wait_token:
+            return
+
+        self._proxy_protection_wait_generation = 0
+        self._proxy_protection_wait_token = 0
+        self._transition_pending = False
+        # Keep the current connection (if any) instead of aggressively starting
+        # a UDP core while pass-profile readiness is unknown.  This mirrors the
+        # failed-transition fence used by the normal transition runner.
+        self._blocked_transition_signature = self._transition_signature()
+        self._desired_connected = self.connected
+        self._log(f"[zapret] UDP-защита не подтверждена: {reason}; переход отменён")
+        self.status.emit("warning", "Не удалось подтвердить UDP-защиту; переход отменён")
+        self.transition_state_changed.emit(False, "")
 
     def _forget_proxy_protection_worker(
         self,
@@ -2093,6 +2183,10 @@ class AppController(QObject):
         if not self.zapret.apply_cached_proxy_node(node):
             self._log(f"[core-switch] waiting for UDP endpoint protection: {node.server}")
             return None
+        readiness = getattr(self.zapret, "proxy_protection_is_ready", None)
+        if readiness is not None and not readiness(node):
+            self._log(f"[core-switch] waiting for UDP pass profile restart: {node.server}")
+            return None
         return HotSwitchPlan(
             node=node,
             session=session,
@@ -2284,7 +2378,11 @@ class AppController(QObject):
         # иначе детектор мёртвого сервера продолжит мерить прежнюю ноду.
         worker = self._metrics_worker
         if worker is not None:
-            worker.set_ping_target(node.server, int(node.port))
+            worker.set_ping_target(
+                node.server,
+                int(node.port),
+                transport_kind_for_node(node),
+            )
         self._log(f"[core-switch] {session.active_core} -> {node.name} ({tag})")
 
     def is_rotation_supported(self, settings: AppSettings | None = None) -> bool:
@@ -2377,7 +2475,7 @@ class AppController(QObject):
         self._log(f"[rotation] переключение -> {node.name}")
         # Штатный путь смены сервера: он сам делает горячий свитч по тегу, который
         # ядро получило при запуске, а при неудаче честно переподключается.
-        self.set_selected_node(node.id)
+        self.set_selected_node(node.id, reset_auto_switch=False)
         self.status.emit("info", f"Ротация: {node.name}")
         return True
 
@@ -2391,6 +2489,22 @@ class AppController(QObject):
             self._auto_switch_exhausted = False
         if reset_cooldown:
             self._auto_switch_last_switch = 0.0
+
+    def _handle_auto_switch_setting_change(self, old_enabled: bool, new_enabled: bool) -> None:
+        """Apply the explicit auto-switch toggle to the session guard."""
+
+        if bool(old_enabled) == bool(new_enabled):
+            return
+        if new_enabled:
+            # Re-enabling the setting is the explicit user action that releases
+            # the manual-selection hold.  A threshold/cooldown edit alone must
+            # not silently override a manually chosen server.
+            self._auto_switch_manual_hold = False
+            self._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
+            if self.connected:
+                begin_auto_switch_warmup(self, self.selected_node)
+            return
+        self._reset_auto_switch_state(reset_cooldown=False, reset_cycle=True)
 
     def _cleanup_connection_runtime_state(
         self,
@@ -2487,10 +2601,16 @@ class AppController(QObject):
         old_proxy_engine = old_settings.proxy_engine
         old_tun_engine = old_settings.tun_engine
         old_rotation = self._rotation_settings_signature(old_settings)
+        old_auto_switch_enabled = old_settings.auto_switch_enabled
         self.state.settings = settings
         self.settings_changed.emit(self.state.settings)
         self.schedule_save()
         self._apply_subscription_timer_interval()
+
+        self._handle_auto_switch_setting_change(
+            old_auto_switch_enabled,
+            settings.auto_switch_enabled,
+        )
 
         if old_rotation != self._rotation_settings_signature(settings):
             # Смена интервала/режима не трогает конфиг — достаточно перепланировать таймер.
@@ -2704,8 +2824,19 @@ class AppController(QObject):
     # Minimum speed to count as "traffic exists" (1 KB/s) vs idle (0)
     _AUTO_SWITCH_IDLE_BPS = 1024.0
 
-    def _check_auto_switch(self, down_bps: float, link_alive: bool | None = None) -> None:
-        check_auto_switch_operation(self, down_bps, link_alive)
+    def _check_auto_switch(
+        self,
+        down_bps: float,
+        link_alive: bool | None = None,
+        *,
+        traffic_valid: bool = True,
+    ) -> None:
+        check_auto_switch_operation(
+            self,
+            down_bps,
+            link_alive,
+            traffic_valid=traffic_valid,
+        )
 
     def _get_next_node_for_auto_switch(self) -> Node | None:
         return get_next_node_for_auto_switch_operation(self)

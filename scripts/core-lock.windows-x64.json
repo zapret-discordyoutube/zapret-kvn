@@ -4,15 +4,21 @@
   "sources": [
     {
       "id": "sing-box-extended",
-      "version": "v1.13.14-extended-2.5.2",
-      "archive": "sing-box-1.13.14-extended-2.5.2-windows-amd64-purego.zip",
-      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.13.14-extended-2.5.2/sing-box-1.13.14-extended-2.5.2-windows-amd64-purego.zip",
-      "sha256": "6525ff0effa82e8131cc01bc32ce56d6fa0f03c7975bdbb57efdd706425b2579",
+      "version": "v1.13.18-extended-2.6.5",
+      "archive": "sing-box-1.13.18-extended-2.6.5-windows-amd64-purego.zip",
+      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.13.18-extended-2.6.5/sing-box-1.13.18-extended-2.6.5-windows-amd64-purego.zip",
+      "sha256": "572b464fedfff5b5da8836baf53b071ffcad2de929176ae6eb1352846da283a3",
       "files": [
         { "match": "(^|/)sing-box\\.exe$", "target": "sing-box.exe" },
         { "match": "(^|/)libcronet\\.dll$", "target": "libcronet.dll" },
         { "match": "(^|/)LICENSE$", "target": "LICENSE-sing-box-extended.txt" }
-      ]
+      ],
+      "repository": "shtorm-7/sing-box-extended",
+      "channel": "stable",
+      "release_tag": "v1.13.18-extended-2.6.5",
+      "release_prerelease": false,
+      "asset_name": "sing-box-1.13.18-extended-2.6.5-windows-amd64-purego.zip",
+      "asset_size": 33905599
     },
     {
       "id": "xray-core",
@@ -25,7 +31,13 @@
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
         { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
         { "match": "(^|/)LICENSE$", "target": "LICENSE-Xray.txt" }
-      ]
+      ],
+      "repository": "XTLS/Xray-core",
+      "channel": "stable",
+      "release_tag": "v26.3.27",
+      "release_prerelease": false,
+      "asset_name": "Xray-windows-64.zip",
+      "asset_size": 20913304
     },
     {
       "id": "runetfreedom-routing-data",

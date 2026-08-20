@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ctypes
+import inspect
+from pathlib import Path
 import sys
 import unittest
 from types import SimpleNamespace
@@ -28,18 +30,30 @@ class _FakeWindll:
 
 if sys.platform == "win32":
     from xray_fluent.app_updater import AppUpdate
-    from xray_fluent.ui.main_window import MainWindow
+    from xray_fluent.ui.main_window import (
+        APP_UPDATE_INITIAL_DELAY_MS,
+        APP_UPDATE_INTERVAL_MS,
+        MainWindow,
+        _runtime_identity_log_line,
+    )
 else:
     _original_windll = getattr(ctypes, "windll", None)
     ctypes.windll = _FakeWindll()  # type: ignore[attr-defined]
     try:
         from xray_fluent.app_updater import AppUpdate
-        from xray_fluent.ui.main_window import MainWindow
+        from xray_fluent.ui.main_window import (
+            APP_UPDATE_INITIAL_DELAY_MS,
+            APP_UPDATE_INTERVAL_MS,
+            MainWindow,
+            _runtime_identity_log_line,
+        )
     finally:
         if _original_windll is None:
             del ctypes.windll
         else:
             ctypes.windll = _original_windll  # type: ignore[attr-defined]
+
+from main import _runtime_identity_message, _setup_bootstrap_logging
 
 
 class _FakeSignal:
@@ -86,6 +100,32 @@ class _FakeMessageBox:
         return self.result
 
 
+class _FakeTimer:
+    def __init__(self) -> None:
+        self.interval = None
+        self.active = False
+        self.single_shot = None
+        self.start_count = 0
+        self.stop_count = 0
+
+    def setSingleShot(self, value: bool) -> None:
+        self.single_shot = value
+
+    def setInterval(self, value: int) -> None:
+        self.interval = value
+
+    def start(self) -> None:
+        self.active = True
+        self.start_count += 1
+
+    def stop(self) -> None:
+        self.active = False
+        self.stop_count += 1
+
+    def isActive(self) -> bool:
+        return self.active
+
+
 def _update() -> AppUpdate:
     return AppUpdate(
         version="0.4.67",
@@ -98,6 +138,121 @@ def _update() -> AppUpdate:
 
 
 class UpdateNotificationTests(unittest.TestCase):
+    def test_runtime_identity_logs_version_executable_and_base_dir(self) -> None:
+        from xray_fluent.constants import APP_VERSION, BASE_DIR
+
+        startup_line = _runtime_identity_message()
+        app_line = _runtime_identity_log_line()
+        expected = (
+            f"app_version={APP_VERSION} "
+            f"executable={Path(sys.executable).resolve()} "
+            f"base_dir={BASE_DIR.resolve()}"
+        )
+
+        self.assertIn(expected, startup_line)
+        self.assertIn(f"[runtime] {expected}", app_line)
+        self.assertIn("_runtime_identity_message()", inspect.getsource(_setup_bootstrap_logging))
+        self.assertIn("_runtime_identity_log_line()", inspect.getsource(MainWindow.initialize))
+        self.assertNotIn("token=", startup_line.lower())
+        self.assertNotIn("token=", app_line.lower())
+
+    def test_startup_update_timer_uses_one_timer_then_switches_to_30_minutes(self) -> None:
+        timer = _FakeTimer()
+        settings = SimpleNamespace(check_updates=True)
+        window = SimpleNamespace(
+            _app_update_timer=timer,
+            _app_update_scheduler_ready=True,
+            _quitting=False,
+            controller=SimpleNamespace(
+                state=SimpleNamespace(settings=settings),
+            ),
+            _check_updates=Mock(),
+        )
+
+        MainWindow._sync_app_update_timer(window, settings)
+        self.assertEqual(timer.interval, APP_UPDATE_INITIAL_DELAY_MS)
+        self.assertEqual(timer.start_count, 1)
+        self.assertTrue(timer.active)
+
+        # A second synchronisation while the initial timer is active must not
+        # reset its deadline or create another timer.
+        MainWindow._sync_app_update_timer(window, settings)
+        self.assertEqual(timer.start_count, 1)
+
+        MainWindow._on_app_update_timer_timeout(window)
+        window._check_updates.assert_called_once_with(silent=True)
+        self.assertEqual(timer.interval, APP_UPDATE_INTERVAL_MS)
+        self.assertEqual(timer.start_count, 2)
+        self.assertTrue(timer.active)
+
+    def test_disabling_update_checks_stops_the_timer(self) -> None:
+        timer = _FakeTimer()
+        timer.active = True
+        window = SimpleNamespace(
+            _app_update_timer=timer,
+            _quitting=False,
+        )
+
+        MainWindow._sync_app_update_timer(
+            window,
+            SimpleNamespace(check_updates=False),
+        )
+
+        self.assertFalse(timer.active)
+        self.assertEqual(timer.stop_count, 1)
+
+    def test_timer_callback_does_not_start_after_quit(self) -> None:
+        timer = _FakeTimer()
+        window = SimpleNamespace(
+            _app_update_timer=timer,
+            _app_update_scheduler_ready=True,
+            _quitting=True,
+            _check_updates=Mock(),
+        )
+
+        MainWindow._on_app_update_timer_timeout(window)
+
+        window._check_updates.assert_not_called()
+        self.assertEqual(timer.start_count, 0)
+
+    def test_update_check_guard_rejects_a_concurrent_checker(self) -> None:
+        window = SimpleNamespace(_update_in_progress=True)
+
+        # This is the guard at the top of _check_updates; both the manual
+        # button and the periodic timer use the same method.
+        MainWindow._check_updates(window, silent=True)
+
+        self.assertTrue(window._update_in_progress)
+
+    def test_silent_update_error_is_logged_without_ui_notification(self) -> None:
+        logger = Mock()
+        page = SimpleNamespace(
+            show_idle=Mock(),
+            set_app_error=Mock(),
+        )
+        window = SimpleNamespace(
+            _update_in_progress=True,
+            controller=SimpleNamespace(_logger=logger),
+            updates_page=page,
+            _show_status=Mock(),
+        )
+
+        MainWindow._on_update_check_error(
+            window,
+            "Сервер обновлений временно не отвечает.",
+            silent=True,
+        )
+
+        self.assertFalse(window._update_in_progress)
+        logger.warning.assert_called_once()
+        self.assertIn(
+            "Фоновая проверка обновлений не выполнена",
+            logger.warning.call_args.args[0],
+        )
+        page.show_idle.assert_not_called()
+        page.set_app_error.assert_not_called()
+        window._show_status.assert_not_called()
+
     def test_silent_automatic_check_still_requests_update_dialog(self) -> None:
         page = _FakeUpdatesPage()
         window = SimpleNamespace(

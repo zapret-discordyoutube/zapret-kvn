@@ -119,6 +119,7 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ZapretKVN-core-" + [guid]::NewGuid().ToString("N"))
 $stagingDirectory = Join-Path $temporaryRoot "core"
+$partialOutputArchive = "$OutputArchive.partial"
 New-Item -ItemType Directory -Force -Path $stagingDirectory | Out-Null
 $manifestFilesByName = [ordered]@{}
 
@@ -162,11 +163,17 @@ try {
         generated_at_utc = [DateTime]::UtcNow.ToString("o")
         lock_sha256 = Get-Sha256 $LockFile
         sources = $lock.sources | ForEach-Object {
+            $repository = if ($_.PSObject.Properties.Name -contains "repository") { [string]$_.repository } else { "" }
+            $channel = if ($_.PSObject.Properties.Name -contains "channel") { [string]$_.channel } else { "" }
+            $releasePrerelease = if ($_.PSObject.Properties.Name -contains "release_prerelease") { [bool]$_.release_prerelease } else { $false }
             [ordered]@{
                 id = [string]$_.id
                 version = [string]$_.version
                 archive_sha256 = [string]$_.sha256
                 url = [string]$_.url
+                repository = $repository
+                channel = $channel
+                release_prerelease = $releasePrerelease
             }
         }
         files = @($manifestFilesByName.Values)
@@ -174,10 +181,10 @@ try {
     $manifestPath = Join-Path $stagingDirectory "core-manifest.windows-x64.json"
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 
-    Remove-Item -LiteralPath $OutputArchive -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $partialOutputArchive -Force -ErrorAction SilentlyContinue
     $sevenZipArguments = @(
         "a", "-t7z", "-mx=7", "-y",
-        $OutputArchive,
+        $partialOutputArchive,
         (Join-Path $stagingDirectory "*")
     )
     $sevenZipProcess = Start-Process -FilePath $sevenZipPath -ArgumentList $sevenZipArguments `
@@ -185,6 +192,12 @@ try {
     if ($sevenZipProcess.ExitCode -ne 0) {
         throw "7z failed with exit code $($sevenZipProcess.ExitCode)"
     }
+    $testProcess = Start-Process -FilePath $sevenZipPath -ArgumentList @("t", "-y", $partialOutputArchive) `
+        -NoNewWindow -Wait -PassThru
+    if ($testProcess.ExitCode -ne 0) {
+        throw "7z verification failed with exit code $($testProcess.ExitCode)"
+    }
+    Move-Item -LiteralPath $partialOutputArchive -Destination $OutputArchive -Force
     $lockHash = Get-Sha256 $LockFile
     [System.IO.File]::WriteAllText(
         "$OutputArchive.lock.sha256",
@@ -195,5 +208,6 @@ try {
     Write-Host "[core] SHA-256: $(Get-Sha256 $OutputArchive)"
 }
 finally {
+    Remove-Item -LiteralPath $partialOutputArchive -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

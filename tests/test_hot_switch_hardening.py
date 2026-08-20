@@ -707,6 +707,7 @@ class AutoSwitchController:
 
     set_selected_node = AppController.set_selected_node
     _reset_auto_switch_state = AppController._reset_auto_switch_state
+    _handle_auto_switch_setting_change = AppController._handle_auto_switch_setting_change
 
     def __init__(self, nodes, *, hot_switch_result: bool):
         settings = AppSettings()
@@ -817,6 +818,17 @@ class AutoSwitchSinglePathTests(unittest.TestCase):
         controller.set_selected_node(nodes[2].id)  # ручной путь — дефолт
 
         self.assertEqual(controller._auto_switch_last_switch, 0.0)
+        self.assertEqual(controller._auto_switch_cycle_attempts, 0)
+        self.assertTrue(controller._auto_switch_manual_hold)
+
+    def test_explicit_auto_switch_toggle_releases_manual_hold(self) -> None:
+        nodes = self._nodes()
+        controller = AutoSwitchController(nodes, hot_switch_result=True)
+        controller._auto_switch_manual_hold = True
+
+        controller._handle_auto_switch_setting_change(False, True)
+
+        self.assertFalse(controller._auto_switch_manual_hold)
         self.assertEqual(controller._auto_switch_cycle_attempts, 0)
 
 

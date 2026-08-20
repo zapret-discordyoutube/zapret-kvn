@@ -37,6 +37,7 @@ class LiveMetricsWorker(QThread):
         socks_port: int = DEFAULT_SOCKS_PORT,
         http_port: int = DEFAULT_HTTP_PORT,
         xray_inbound_tags: list[str] | None = None,
+        transport_kind: str = "tcp",
     ):
         super().__init__()
         self._xray_path = xray_path
@@ -52,6 +53,7 @@ class LiveMetricsWorker(QThread):
         self._clash_api_port = clash_api_port
         self._socks_port = socks_port
         self._http_port = http_port
+        self._transport_kind = str(transport_kind or "tcp").strip().lower() or "tcp"
         normalized_inbound_tags: list[str] = []
         for tag in xray_inbound_tags or []:
             clean = str(tag).strip()
@@ -63,10 +65,19 @@ class LiveMetricsWorker(QThread):
         self._stopped = True
 
     def pings_active_node(self) -> bool:
-        """True when the worker actually probes the active node over TCP."""
-        return bool(self._ping_host) and self._ping_port > 0
+        """True when the worker actually probes the active node over TCP.
 
-    def set_ping_target(self, host: str, port: int) -> None:
+        UDP/QUIC protocols such as Hysteria 2 and TUIC must not use a TCP
+        connect as their health verdict: the port can have different TCP and
+        UDP behaviour, while neither one alone proves the tunnel works.
+        """
+        return (
+            self._transport_kind != "udp"
+            and bool(self._ping_host)
+            and self._ping_port > 0
+        )
+
+    def set_ping_target(self, host: str, port: int, transport_kind: str | None = None) -> None:
         """Re-point the TCP ping after a hot-switch (the worker survives it).
 
         Plain attribute writes are GIL-atomic; the worst case is one extra
@@ -75,6 +86,8 @@ class LiveMetricsWorker(QThread):
         """
         self._ping_host = host
         self._ping_port = int(port)
+        if transport_kind is not None:
+            self._transport_kind = str(transport_kind or "tcp").strip().lower() or "tcp"
         self._last_ping_ms = None
         self._last_ping_ts = 0.0
 
@@ -92,11 +105,11 @@ class LiveMetricsWorker(QThread):
             now = time.perf_counter()
             uplink_total, downlink_total = self._query_inbound_totals()
 
-            down_bps = 0.0
-            up_bps = 0.0
+            traffic_valid = uplink_total is not None and downlink_total is not None
+            down_bps: float | None = None
+            up_bps: float | None = None
             if (
-                uplink_total is not None
-                and downlink_total is not None
+                traffic_valid
                 and prev_uplink is not None
                 and prev_downlink is not None
                 and prev_ts is not None
@@ -104,6 +117,13 @@ class LiveMetricsWorker(QThread):
                 dt = max(0.001, now - prev_ts)
                 up_bps = max(0.0, (uplink_total - prev_uplink) / dt)
                 down_bps = max(0.0, (downlink_total - prev_downlink) / dt)
+
+            if traffic_valid and down_bps is None:
+                # The first valid counter sample establishes a baseline but is
+                # not yet a measured speed.  It is still a valid observation;
+                # the next sample can calculate the delta.
+                down_bps = 0.0
+                up_bps = 0.0
 
             if uplink_total is not None and downlink_total is not None:
                 prev_uplink = uplink_total
@@ -127,7 +147,14 @@ class LiveMetricsWorker(QThread):
                 {
                     "down_bps": down_bps,
                     "up_bps": up_bps,
+                    "traffic_valid": traffic_valid,
                     "latency_ms": self._last_ping_ms,
+                    "probe_kind": "tcp_connect" if self.pings_active_node() else "none",
+                    "probe_valid": (
+                        self._last_ping_ms is not None
+                        if self.pings_active_node()
+                        else None
+                    ),
                     "process_stats": process_stats,
                 }
             )

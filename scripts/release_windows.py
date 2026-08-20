@@ -25,6 +25,8 @@ from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 CONSTANTS_PATH = ROOT / "xray_fluent" / "constants.py"
+CORE_LOCK_PATH = ROOT / "scripts" / "core-lock.windows-x64.json"
+CORE_RESOLVER_PATH = ROOT / "scripts" / "resolve_core_versions.py"
 STATE_PATH = ROOT / ".git" / "zapret-kvn-release-state.json"
 LAST_RESULT_PATH = ROOT / ".git" / "zapret-kvn-release-last.json"
 WINDOWS_HOST = os.getenv("ZAPRETKVN_WINDOWS_REMOTE_HOST", "win10")
@@ -225,6 +227,26 @@ def require_clean_main() -> None:
         raise ReleaseError("working tree must be clean before starting the release:\n" + status)
 
 
+def refresh_stable_core_lock(*, write: bool) -> None:
+    """Resolve exact stable Windows cores before the release source is pinned.
+
+    The online resolver is the only moving boundary.  Once it has verified the
+    upstream bytes and atomically updated the lock, every Windows build remains
+    fully lock-driven and reproducible from the release commit.
+    """
+
+    if not CORE_RESOLVER_PATH.is_file():
+        raise ReleaseError(f"core resolver is missing: {CORE_RESOLVER_PATH}")
+    command = [
+        sys.executable,
+        str(CORE_RESOLVER_PATH.relative_to(ROOT)),
+        "--write" if write else "--check",
+    ]
+    if not write:
+        command.append("--require-current")
+    run(command)
+
+
 def prepare_source(version: str) -> str:
     require_clean_main()
     run(["git", "fetch", "origin", "main", "--tags"])
@@ -236,12 +258,18 @@ def prepare_source(version: str) -> str:
     )
     if ancestor.returncode != 0:
         raise ReleaseError("local main does not contain origin/main; reconcile it first")
+    refresh_stable_core_lock(write=True)
     set_app_version(version)
     run(["git", "diff", "--check"])
     run([sys.executable, "-m", "compileall", "-q", "xray_fluent", "tests"])
-    run(["git", "add", str(CONSTANTS_PATH.relative_to(ROOT))])
+    release_paths = [
+        str(CONSTANTS_PATH.relative_to(ROOT)),
+        str(CORE_LOCK_PATH.relative_to(ROOT)),
+    ]
+    run(["git", "add", "--", *release_paths])
     staged = output(["git", "diff", "--cached", "--name-only"]).splitlines()
-    if staged != [str(CONSTANTS_PATH.relative_to(ROOT))]:
+    allowed = set(release_paths)
+    if str(CONSTANTS_PATH.relative_to(ROOT)) not in staged or not set(staged).issubset(allowed):
         raise ReleaseError(f"unexpected staged release files: {staged}")
     run(["git", "commit", "-m", f"release: prepare v{version}"])
     run(["git", "push", "origin", "main"])
@@ -335,6 +363,20 @@ def verify_gate_manifest(
             raise ReleaseError(f"{mode} manifest mismatch for {key}")
     if int(manifest.get("templates_verified") or 0) <= 0:
         raise ReleaseError(f"{mode} manifest did not verify templates")
+    core = manifest.get("core") or {}
+    for digest_key in ("lock_sha256", "manifest_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(core.get(digest_key) or "")):
+            raise ReleaseError(f"{mode} manifest contains an invalid core {digest_key}")
+    core_sources = core.get("sources") or []
+    if {str(item.get("id")) for item in core_sources} != {"xray-core", "sing-box-extended"}:
+        raise ReleaseError(f"{mode} manifest core source set mismatch")
+    for source in core_sources:
+        if source.get("channel") != "stable" or source.get("release_prerelease") is not False:
+            raise ReleaseError(f"{mode} manifest contains a non-stable core source")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(source.get("archive_sha256") or "")):
+            raise ReleaseError(f"{mode} manifest contains an invalid core archive digest")
+        if int(source.get("asset_size") or 0) <= 0:
+            raise ReleaseError(f"{mode} manifest contains an invalid core asset size")
     executable = manifest.get("executable") or {}
     if int(executable.get("size") or 0) <= 0 or not re.fullmatch(
         r"[0-9a-f]{64}", str(executable.get("sha256") or "")
@@ -625,6 +667,7 @@ def preflight(version: str | None, changes: list[str], telegram: bool) -> str:
         raise ReleaseError(f"next stable must be {expected}, not {version}")
     if current_app_version() != latest.removeprefix("v"):
         raise ReleaseError("APP_VERSION must match the latest stable before a fresh release")
+    refresh_stable_core_lock(write=False)
     Forgejo.load()
     run(["ssh", WINDOWS_HOST, "powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], capture=True, timeout=30)
     if telegram:

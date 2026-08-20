@@ -72,10 +72,105 @@ class ZapretManagerTests(unittest.TestCase):
         with (
             patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
             patch.object(manager, "_restart_for_proxy_protection") as restart,
+            patch.object(manager, "_arm_proxy_protection_timeout"),
         ):
             manager.protect_proxy_node(node)
 
         restart.assert_called_once_with("Default")
+
+    def test_running_zapret_is_not_ready_until_replacement_starts(self) -> None:
+        manager = ZapretManager()
+        manager._current_preset = "Default"
+        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
+        manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
+        ready: list[int] = []
+        manager.proxy_protection_ready.connect(ready.append)
+
+        with (
+            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
+            patch.object(manager, "_restart_for_proxy_protection") as restart,
+            patch.object(manager, "_arm_proxy_protection_timeout"),
+            patch.object(manager._health_timer, "start"),
+        ):
+            self.assertTrue(manager.apply_cached_proxy_node(node))
+            generation = manager.proxy_protection_generation
+            self.assertGreater(generation, 0)
+            self.assertFalse(manager.proxy_protection_is_ready(node))
+            restart.assert_called_once_with("Default")
+
+            manager._on_started()
+
+        self.assertTrue(manager.proxy_protection_is_ready(node))
+        self.assertEqual(ready, [generation])
+
+    def test_stopped_zapret_is_ready_noop_without_restart(self) -> None:
+        manager = ZapretManager()
+        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
+        manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
+
+        with (
+            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=False),
+            patch.object(manager, "_restart_for_proxy_protection") as restart,
+        ):
+            self.assertTrue(manager.apply_cached_proxy_node(node))
+            self.assertTrue(manager.proxy_protection_is_ready(node))
+
+        restart.assert_not_called()
+
+    def test_proxy_protection_timeout_emits_failure_generation(self) -> None:
+        manager = ZapretManager()
+        manager._current_preset = "Default"
+        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
+        manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
+        failed: list[tuple[int, str]] = []
+        manager.proxy_protection_failed.connect(lambda generation, reason: failed.append((generation, reason)))
+
+        with (
+            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
+            patch.object(manager, "_restart_for_proxy_protection"),
+            patch.object(manager, "_arm_proxy_protection_timeout"),
+        ):
+            self.assertTrue(manager.apply_cached_proxy_node(node))
+            generation = manager.proxy_protection_generation
+            self.assertFalse(manager.proxy_protection_is_ready(node))
+
+            manager._on_proxy_protection_timeout(generation)
+
+            self.assertFalse(manager.proxy_protection_is_ready(node))
+
+        self.assertEqual(failed, [(generation, "timeout")])
+
+    def test_second_endpoint_during_process_start_remains_pending(self) -> None:
+        manager = ZapretManager()
+        manager._current_preset = "Default"
+        first = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
+        second = parse_single("hy2://secret@203.0.113.8:443/?insecure=1")
+        manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
+        manager.cache_proxy_resolution("203.0.113.8", {"203.0.113.8"})
+
+        with (
+            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
+            patch.object(manager, "_restart_for_proxy_protection"),
+            patch.object(manager, "_arm_proxy_protection_timeout"),
+        ):
+            self.assertTrue(manager.apply_cached_proxy_node(first))
+            first_generation = manager.proxy_protection_generation
+
+        # Model the QProcess.Starting gap: start() consumed the restart marker,
+        # the old process is gone, and the replacement has not emitted started.
+        manager._pending_restart_preset = ""
+        with (
+            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=False),
+            patch.object(manager, "_arm_proxy_protection_timeout"),
+        ):
+            self.assertTrue(manager.apply_cached_proxy_node(second))
+            second_generation = manager.proxy_protection_generation
+            self.assertGreater(second_generation, first_generation)
+            self.assertFalse(manager.proxy_protection_is_ready(second))
+            self.assertEqual(
+                manager._proxy_protection_pending_generation,
+                second_generation,
+            )
 
     def test_cached_endpoint_is_applied_without_dns(self) -> None:
         manager = ZapretManager()

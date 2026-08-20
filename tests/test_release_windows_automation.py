@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import build
 from scripts import release_windows
 
 
@@ -74,6 +75,67 @@ class ReleaseStateTests(unittest.TestCase):
                 release_windows.execute(args)
         create_state.assert_not_called()
 
+    def test_core_refresh_uses_verified_write_or_nonmutating_current_check(self) -> None:
+        with patch.object(release_windows, "run") as run:
+            release_windows.refresh_stable_core_lock(write=True)
+            release_windows.refresh_stable_core_lock(write=False)
+
+        resolver = str(release_windows.CORE_RESOLVER_PATH.relative_to(release_windows.ROOT))
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            [release_windows.sys.executable, resolver, "--write"],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [release_windows.sys.executable, resolver, "--check", "--require-current"],
+        )
+
+    @staticmethod
+    def _gate_manifest(*, prerelease: bool = False) -> dict:
+        return {
+            "schema": 1,
+            "mode": "stable",
+            "version": "0.4.95",
+            "commit": "a" * 40,
+            "templates_verified": 4,
+            "executable": {"size": 1, "sha256": "b" * 64},
+            "core": {
+                "lock_sha256": "c" * 64,
+                "manifest_sha256": "d" * 64,
+                "sources": [
+                    {
+                        "id": "xray-core",
+                        "channel": "stable",
+                        "release_prerelease": prerelease,
+                        "archive_sha256": "e" * 64,
+                        "asset_size": 1,
+                    },
+                    {
+                        "id": "sing-box-extended",
+                        "channel": "stable",
+                        "release_prerelease": False,
+                        "archive_sha256": "f" * 64,
+                        "asset_size": 1,
+                    },
+                ],
+            },
+        }
+
+    def test_gate_manifest_requires_exact_stable_core_proof(self) -> None:
+        release_windows.verify_gate_manifest(
+            self._gate_manifest(),
+            "stable",
+            "0.4.95",
+            "a" * 40,
+        )
+        with self.assertRaisesRegex(release_windows.ReleaseError, "non-stable core"):
+            release_windows.verify_gate_manifest(
+                self._gate_manifest(prerelease=True),
+                "stable",
+                "0.4.95",
+                "a" * 40,
+            )
+
 
 class AppVersionTests(unittest.TestCase):
     def test_version_update_changes_exactly_one_assignment(self) -> None:
@@ -84,6 +146,90 @@ class AppVersionTests(unittest.TestCase):
                 self.assertEqual(release_windows.current_app_version(), "0.4.83")
                 release_windows.set_app_version("0.4.84")
                 self.assertEqual(release_windows.current_app_version(), "0.4.84")
+
+
+class BuildPayloadTests(unittest.TestCase):
+    def _make_clean_payload(self, root: Path) -> Path:
+        app_dir = root / "dist" / "ZapretKVN"
+        (app_dir / "data" / "templates" / "xray").mkdir(parents=True)
+        (app_dir / "data" / "templates" / "xray" / "default.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        return app_dir
+
+    def test_clean_payload_allows_only_source_owned_templates_under_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app_dir = self._make_clean_payload(Path(directory))
+            build.assert_clean_payload(app_dir)
+
+    def test_clean_payload_rejects_runtime_data_and_orphan_files(self) -> None:
+        forbidden = ("state.enc", "configs", "runtime", "logs")
+        for name in forbidden:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                app_dir = self._make_clean_payload(Path(directory))
+                path = app_dir / "data" / name
+                if "." in name:
+                    path.write_bytes(b"runtime")
+                else:
+                    path.mkdir()
+                with self.assertRaisesRegex(RuntimeError, "runtime data"):
+                    build.assert_clean_payload(app_dir)
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_dir = self._make_clean_payload(Path(directory))
+            (app_dir / "old-orphan.bin").write_bytes(b"stale")
+            with self.assertRaisesRegex(RuntimeError, "unexpected top-level"):
+                build.assert_clean_payload(app_dir)
+
+    def test_clean_removes_the_entire_previous_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dist_dir = root / "dist"
+            app_dir = dist_dir / "ZapretKVN"
+            (app_dir / "data" / "runtime").mkdir(parents=True)
+            (app_dir / "data" / "runtime" / "old.json").write_text("{}")
+            (app_dir / "legacy-orphan.bin").write_bytes(b"stale")
+            (root / "build" / "old").mkdir(parents=True)
+            (dist_dir / "_build_tmp" / "old").mkdir(parents=True)
+
+            with (
+                patch.object(build, "DIST_DIR", dist_dir),
+                patch.object(build, "APP_DIR", app_dir),
+                patch.object(build, "BUILD_DIR", root / "build"),
+            ):
+                build.clean()
+
+            self.assertFalse(app_dir.exists())
+            self.assertFalse((root / "build").exists())
+            self.assertFalse((dist_dir / "_build_tmp").exists())
+
+    def test_copy_tree_does_not_suppress_permission_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            destination = root / "destination"
+            with patch.object(build.shutil, "copytree", side_effect=PermissionError("locked")):
+                with self.assertRaisesRegex(RuntimeError, "Cannot stage build files"):
+                    build._copy_tree_strict(source, destination)
+
+    def test_remove_path_does_not_suppress_permission_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "locked"
+            path.mkdir()
+            with patch.object(build.shutil, "rmtree", side_effect=PermissionError("locked")):
+                with self.assertRaisesRegex(RuntimeError, "Cannot remove build path"):
+                    build._remove_path_strict(path)
+
+    def test_release_gate_asserts_clean_payload(self) -> None:
+        source = (Path(__file__).parents[1] / "scripts" / "release_windows_gate.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function Assert-CleanPayload", source)
+        self.assertIn("only data/templates is allowed", source)
+        self.assertIn("Assert-CleanPayload $RepoRoot", source)
+        self.assertIn("function Assert-StableCoreLock", source)
+        self.assertIn("release_prerelease", source)
 
 
 if __name__ == "__main__":

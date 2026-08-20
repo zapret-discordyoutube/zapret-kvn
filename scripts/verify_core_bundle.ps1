@@ -35,14 +35,24 @@ if (-not $singBoxSource -or [string]$singBoxSource.version -notmatch "extended")
     throw "Core manifest does not identify an extended sing-box build"
 }
 $singBoxPath = Join-Path $CoreDirectory "sing-box.exe"
-$singBoxProcess = Start-Process -FilePath $singBoxPath -ArgumentList @("version") -NoNewWindow -Wait -PassThru
-if ($singBoxProcess.ExitCode -ne 0) {
-    throw "Bundled sing-box failed its version command with exit code $($singBoxProcess.ExitCode)"
+$singBoxVersionOutput = (& $singBoxPath version 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    throw "Bundled sing-box failed its version command with exit code $LASTEXITCODE"
 }
+$expectedSingBoxVersion = ([string]$singBoxSource.version).TrimStart("v")
+if ($singBoxVersionOutput -notmatch [regex]::Escape($expectedSingBoxVersion)) {
+    throw "Bundled sing-box version output does not match $($singBoxSource.version)"
+}
+$xraySource = $manifest.sources | Where-Object { [string]$_.id -eq "xray-core" } | Select-Object -First 1
+if (-not $xraySource) { throw "Core manifest does not identify Xray" }
 $xrayPath = Join-Path $CoreDirectory "xray.exe"
-$xrayProcess = Start-Process -FilePath $xrayPath -ArgumentList @("version") -NoNewWindow -Wait -PassThru
-if ($xrayProcess.ExitCode -ne 0) {
-    throw "Bundled Xray failed its version command with exit code $($xrayProcess.ExitCode)"
+$xrayVersionOutput = (& $xrayPath version 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    throw "Bundled Xray failed its version command with exit code $LASTEXITCODE"
+}
+$expectedXrayVersion = ([string]$xraySource.version).TrimStart("v")
+if ($xrayVersionOutput -notmatch [regex]::Escape($expectedXrayVersion)) {
+    throw "Bundled Xray version output does not match $($xraySource.version)"
 }
 
 Write-Host "[core] verified $($manifest.files.Count) files"

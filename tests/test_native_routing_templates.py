@@ -141,6 +141,8 @@ class RoutingAssetOwnershipTests(unittest.TestCase):
         self.assertIn("$manifestFilesByName[$targetName] =", script)
         self.assertIn("files = @($manifestFilesByName.Values)", script)
         self.assertNotIn("$manifestFiles +=", script)
+        self.assertIn("$partialOutputArchive", script)
+        self.assertIn("7z verification failed", script)
 
     def test_core_lock_overlays_pinned_runetfreedom_data_after_xray(self) -> None:
         lock = json.loads(
@@ -155,6 +157,15 @@ class RoutingAssetOwnershipTests(unittest.TestCase):
             {mapping["target"] for mapping in source["files"]},
             {"geoip.dat", "geosite.dat"},
         )
+        protected = {
+            item["id"]: item
+            for item in sources
+            if item["id"] in {"xray-core", "sing-box-extended"}
+        }
+        self.assertEqual(protected["xray-core"]["channel"], "stable")
+        self.assertFalse(protected["xray-core"]["release_prerelease"])
+        self.assertEqual(protected["sing-box-extended"]["channel"], "stable")
+        self.assertFalse(protected["sing-box-extended"]["release_prerelease"])
 
     def test_core_only_update_preserves_application_owned_geo_data(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

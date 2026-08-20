@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..constants import SINGBOX_CLASH_API_PORT
+from .auto_switch_service import transport_kind_for_node
 
 if TYPE_CHECKING:
     from ..app_controller import AppController
@@ -16,6 +17,7 @@ def start_metrics_worker(controller: AppController) -> None:
     node = controller.selected_node
     ping_host = session.ping_host if session is not None else (node.server if node else "")
     ping_port = session.ping_port if session is not None else (node.port if node else 0)
+    transport_kind = transport_kind_for_node(node)
     controller._log(f"[metrics] starting worker, active_core={controller._active_core}")
 
     stop_metrics_worker(controller)
@@ -37,6 +39,7 @@ def start_metrics_worker(controller: AppController) -> None:
         socks_port=socks_port,
         http_port=http_port,
         xray_inbound_tags=list(inbound_tags),
+        transport_kind=transport_kind,
     )
     controller._metrics_worker.metrics.connect(controller._on_live_metrics)
     controller._metrics_worker.start()
@@ -179,7 +182,16 @@ def on_core_state_changed(controller: AppController, _running: bool) -> None:
     elif not is_connected:
         stop_metrics_worker(controller)
         if was_connected and not controller._switching:
-            controller.live_metrics_updated.emit({"down_bps": 0.0, "up_bps": 0.0, "latency_ms": None})
+            controller.live_metrics_updated.emit(
+                {
+                    "down_bps": None,
+                    "up_bps": None,
+                    "traffic_valid": False,
+                    "latency_ms": None,
+                    "probe_kind": "none",
+                    "probe_valid": None,
+                }
+            )
             if not controller._disconnecting:
                 handle_unexpected_disconnect(controller)
     if (
@@ -192,14 +204,19 @@ def on_core_state_changed(controller: AppController, _running: bool) -> None:
 
 def on_live_metrics(controller: AppController, payload: dict[str, object]) -> None:
     controller.live_metrics_updated.emit(payload)
-    down_bps = float(payload.get("down_bps") or 0.0)
+    raw_down_bps = payload.get("down_bps")
+    traffic_valid = bool(payload.get("traffic_valid", raw_down_bps is not None))
+    # Keep an invalid sample distinct from a real zero-speed sample.  The UI
+    # may still render the fallback zero, but auto-switch receives the validity
+    # bit and will not treat a failed stats/API read as degradation.
+    down_bps = float(raw_down_bps) if raw_down_bps is not None else 0.0
     # link_alive: вердикт TCP-пинга активной ноды; None — пинг не настроен,
     # тогда детектор мёртвого сервера не участвует в решении.
     link_alive: bool | None = None
     worker = controller._metrics_worker
     if worker is not None and worker.pings_active_node():
         link_alive = payload.get("latency_ms") is not None
-    controller._check_auto_switch(down_bps, link_alive)
+    controller._check_auto_switch(down_bps, link_alive, traffic_valid=traffic_valid)
     process_stats = payload.get("process_stats")
     if process_stats:
         stats_dict = {}

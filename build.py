@@ -37,6 +37,16 @@ ASSETS_DIR = ROOT / "assets"
 APP_ICON = ASSETS_DIR / "app_icon.ico"
 TEMPLATE_UPDATE_BUNDLE_NAME = "template-update"
 
+# A release build is a payload, not an installed application.  Only these
+# directories are allowed to be copied from the source tree into the portable
+# application directory.  Runtime state (``data/state.enc``, active configs,
+# logs and generated runtime files) belongs to an installed copy and must
+# never become part of a new release.
+PAYLOAD_TOP_LEVEL_NAMES = frozenset(
+    {"ZapretKVN.exe", "_internal", "assets", "core", "data", "zapret"}
+)
+PAYLOAD_DATA_NAMES = frozenset({"templates"})
+
 
 def _print(msg: str) -> None:
     print(f"[build] {msg}", flush=True)
@@ -61,18 +71,62 @@ def _run(cmd: list[str], **kwargs) -> None:
     subprocess.run(cmd, check=True, **kwargs)
 
 
-def _copy_tree_merge(src: Path, dst: Path) -> None:
-    """Copy src tree into dst, overwriting files where possible and skipping locked ones."""
-    dst.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
-        target = dst / item.name
-        if item.is_dir():
-            _copy_tree_merge(item, target)
+def _remove_path_strict(path: Path) -> None:
+    """Remove a build path and fail if Windows still has a file locked."""
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
         else:
-            try:
-                shutil.copy2(str(item), str(target))
-            except PermissionError:
-                _print(f"  skipped (locked): {target.name}")
+            path.unlink()
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"Cannot remove build path because it is locked: {path}"
+        ) from exc
+
+
+def _copy_tree_strict(src: Path, dst: Path) -> None:
+    """Copy a source tree into an empty destination without hiding failures."""
+    if not src.is_dir():
+        raise FileNotFoundError(f"Build source directory is missing: {src}")
+    if dst.exists() or dst.is_symlink():
+        raise RuntimeError(f"Build staging destination is not empty: {dst}")
+    try:
+        shutil.copytree(src, dst)
+    except (PermissionError, shutil.Error) as exc:
+        raise RuntimeError(
+            f"Cannot stage build files because a source or destination is locked: {dst}"
+        ) from exc
+
+
+def assert_clean_payload(app_dir: Path = APP_DIR) -> None:
+    """Reject runtime data or unexpected top-level files in a release payload."""
+    if not app_dir.is_dir():
+        raise RuntimeError(f"Build payload directory is missing: {app_dir}")
+
+    unexpected = sorted(
+        path.name for path in app_dir.iterdir() if path.name not in PAYLOAD_TOP_LEVEL_NAMES
+    )
+    if unexpected:
+        raise RuntimeError(
+            "Build payload contains unexpected top-level files: "
+            + ", ".join(unexpected)
+        )
+
+    data_dir = app_dir / "data"
+    if not data_dir.is_dir():
+        raise RuntimeError(f"Build payload is missing data/templates: {data_dir}")
+    unexpected_data = sorted(
+        path.name for path in data_dir.iterdir() if path.name not in PAYLOAD_DATA_NAMES
+    )
+    if unexpected_data:
+        raise RuntimeError(
+            "Build payload contains runtime data under data/: "
+            + ", ".join(unexpected_data)
+        )
+    if not (data_dir / "templates").is_dir():
+        raise RuntimeError(f"Build payload is missing data/templates: {data_dir}")
 
 
 def stage_template_update_bundle(
@@ -81,11 +135,10 @@ def stage_template_update_bundle(
 ) -> Path:
     """Mirror versioned native JSON templates outside preserved data/."""
     destination = app_dir / "assets" / TEMPLATE_UPDATE_BUNDLE_NAME
-    if destination.exists():
-        shutil.rmtree(destination)
+    _remove_path_strict(destination)
     if source_dir.is_dir():
         _print(f"Staging template update bundle -> {destination}")
-        _copy_tree_merge(source_dir, destination)
+        _copy_tree_strict(source_dir, destination)
     return destination
 
 
@@ -101,43 +154,25 @@ def ensure_venv() -> None:
 
 
 def clean() -> None:
-    # build/ is purely temporary — safe to nuke
-    if BUILD_DIR.exists():
-        _print(f"Removing {BUILD_DIR}")
-        try:
-            shutil.rmtree(BUILD_DIR)
-        except PermissionError:
-            _print(f"ERROR: Cannot remove {BUILD_DIR} — is XrayFluent.exe still running?")
-            _print("Close the app (tray -> Quit) and try again.")
-            raise SystemExit(1)
-
-    # dist/XrayFluent/ — remove everything EXCEPT data/, core/, zapret/
-    # core/ and zapret/ are kept because running binaries (xray.exe) lock them;
-    # they will be merged/overwritten in build_exe() instead.
-    keep_dirs = {"data", "core", "zapret"}
-    if APP_DIR.exists():
-        for child in APP_DIR.iterdir():
-            if child.name in keep_dirs:
-                _print(f"Keeping {child}")
-                continue
-            try:
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-            except PermissionError:
-                _print(f"WARNING: Cannot remove {child}, skipping")
-        _print(f"Cleaned {APP_DIR} (data/, core/, zapret/ preserved)")
+    # Both the old payload and PyInstaller's temporary output are disposable.
+    # Removing the complete application directory is what prevents stale
+    # runtime files, orphaned source files and locked old binaries from being
+    # silently carried into the next archive.
+    for path in (BUILD_DIR, APP_DIR, DIST_DIR / "_build_tmp"):
+        if path.exists() or path.is_symlink():
+            _print(f"Removing {path}")
+            _remove_path_strict(path)
 
 
 def build_exe() -> None:
     ensure_venv()
 
     # Build into a temporary directory so PyInstaller doesn't touch the live
-    # APP_DIR (which may contain locked files like running xray.exe).
+    # APP_DIR while it is being assembled.  The destination was removed by
+    # clean(); it must remain empty so copy failures cannot leave an older file
+    # behind for packaging.
     temp_dist = DIST_DIR / "_build_tmp"
-    if temp_dist.exists():
-        shutil.rmtree(temp_dist)
+    _remove_path_strict(temp_dist)
 
     cmd = [
         str(VENV_PYTHON), "-m", "PyInstaller",
@@ -161,40 +196,40 @@ def build_exe() -> None:
     ]
     _run(cmd, cwd=str(ROOT))
 
-    # Merge PyInstaller output into the real APP_DIR (skip locked files)
     temp_app = temp_dist / APP_NAME
-    _print(f"Merging build output -> {APP_DIR}")
-    _copy_tree_merge(temp_app, APP_DIR)
-    shutil.rmtree(temp_dist, ignore_errors=True)
+    _print(f"Staging fresh application payload -> {APP_DIR}")
+    _copy_tree_strict(temp_app, APP_DIR)
+    _remove_path_strict(temp_dist)
 
-    # Copy core/ into dist (merge, skip locked files like running xray.exe)
+    # Every copied tree targets a new destination.  There is no merge fallback:
+    # a locked file is a failed build, never permission to keep its old copy.
     dst_core = APP_DIR / "core"
-    _print(f"Merging core -> {dst_core}")
-    _copy_tree_merge(CORE_DIR, dst_core)
+    _print(f"Staging core -> {dst_core}")
+    _copy_tree_strict(CORE_DIR, dst_core)
 
-    # Copy zapret/ into dist (merge, skip locked files)
     dst_zapret = APP_DIR / "zapret"
-    if ZAPRET_DIR.is_dir():
-        _print(f"Merging zapret -> {dst_zapret}")
-        _copy_tree_merge(ZAPRET_DIR, dst_zapret)
+    _print(f"Staging zapret -> {dst_zapret}")
+    _copy_tree_strict(ZAPRET_DIR, dst_zapret)
 
-    # Copy tracked raw config templates for first-run users
+    # Ship only source-owned templates under data/. Active configs, encrypted
+    # state, logs and runtime output are deliberately absent from a release.
     dst_templates = APP_DIR / "data" / "templates"
-    if DATA_TEMPLATES_DIR.is_dir():
-        _print(f"Merging templates -> {dst_templates}")
-        _copy_tree_merge(DATA_TEMPLATES_DIR, dst_templates)
+    _print(f"Staging templates -> {dst_templates}")
+    dst_templates.parent.mkdir(parents=True, exist_ok=True)
+    _copy_tree_strict(DATA_TEMPLATES_DIR, dst_templates)
 
     # Keep the high-resolution PNG available to Qt for the window, splash,
     # and tray while the multi-size ICO is embedded into the executable.
     dst_assets = APP_DIR / "assets"
-    if ASSETS_DIR.is_dir():
-        _print(f"Merging assets -> {dst_assets}")
-        _copy_tree_merge(ASSETS_DIR, dst_assets)
+    _print(f"Staging assets -> {dst_assets}")
+    _copy_tree_strict(ASSETS_DIR, dst_assets)
 
     # app_updater.py preserves the installed data/ directory. Carry a second,
     # generated copy outside data/ so the updated executable can safely merge
     # shipped templates and untouched active configs on first launch.
     stage_template_update_bundle()
+
+    assert_clean_payload()
 
     _print(f"Build complete: {APP_DIR / (APP_NAME + '.exe')}")
 

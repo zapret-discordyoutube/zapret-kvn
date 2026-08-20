@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QGuiApplication, QIcon
@@ -16,7 +17,7 @@ from qfluentwidgets import (
 
 from ..app_controller import AppController
 from ..storage import PassphraseRequired
-from ..constants import APP_ICON_PATH, APP_NAME, APP_VERSION, LOG_DIR
+from ..constants import APP_ICON_PATH, APP_NAME, APP_VERSION, BASE_DIR, LOG_DIR
 from ..models import AppSettings, Node, RoutingSettings, Subscription, SubscriptionUpdateResult
 from ..subscription_http import mask_subscription_url
 from ..app_updater import AppUpdate, UpdateChecker, UpdateDownloader
@@ -35,6 +36,21 @@ from .updates_page import UpdatesPage
 from .zapret_page import ZapretPage
 
 
+APP_UPDATE_INITIAL_DELAY_MS = 2500
+APP_UPDATE_INTERVAL_MS = 30 * 60 * 1000
+
+
+def _runtime_identity_log_line() -> str:
+    """Return the non-secret runtime identity written to the regular app log."""
+    executable = Path(sys.executable).resolve()
+    base_dir = BASE_DIR.resolve()
+    return (
+        f"[runtime] app_version={APP_VERSION} "
+        f"executable={executable} "
+        f"base_dir={base_dir}"
+    )
+
+
 class MainWindow(FluentWindow):
     def __init__(self, defer_init: bool = False):
         super().__init__()
@@ -49,6 +65,10 @@ class MainWindow(FluentWindow):
         self._deferred_process_stats: list | None = None
         self._has_deferred_process_stats = False
         self._geometry_persistence_ready = False
+        self._app_update_scheduler_ready = False
+        self._app_update_timer = QTimer(self)
+        self._app_update_timer.setSingleShot(True)
+        self._app_update_timer.timeout.connect(self._on_app_update_timer_timeout)
         self.tray: QSystemTrayIcon | None = None
         self.tray_show_action: QAction | None = None
         self.tray_connect_action: QAction | None = None
@@ -89,6 +109,9 @@ class MainWindow(FluentWindow):
         self._create_navigation()
         self._create_tray()
         self._connect_signals()
+        # Keep this in the ordinary application log as well as startup.log so
+        # a support report can identify the exact portable copy in use.
+        self.controller._log(_runtime_identity_log_line())
         self._init_window()
 
         loaded = self._load_with_passphrase()
@@ -103,6 +126,8 @@ class MainWindow(FluentWindow):
         if loaded and unlocked:
             self.history_page.set_storage(self.controller.traffic_history)
             self.controller.auto_connect_if_needed()
+            self._app_update_scheduler_ready = True
+            self._sync_app_update_timer(self.controller.state.settings)
 
         self._consume_update_error_log()
 
@@ -110,9 +135,6 @@ class MainWindow(FluentWindow):
         from ..engines.xray import get_xray_version
         xv = get_xray_version(self.controller.state.settings.xray_path)
         self.updates_page.set_xray_version(xv or "")
-
-        if self.controller.state.settings.check_updates:
-            QTimer.singleShot(2500, lambda: self._check_updates(silent=True))
 
         if self.controller.state.settings.xray_auto_update:
             QTimer.singleShot(4500, lambda: self.controller.run_xray_core_update(True, silent=True))
@@ -468,6 +490,8 @@ class MainWindow(FluentWindow):
             if action is not None:
                 action.setEnabled(routing_controls_enabled)
         self._refresh_tray_tooltip()
+        if self._app_update_scheduler_ready:
+            self._sync_app_update_timer(settings)
 
     def _on_ping_updated(self, node_id: str, ping_ms: int | None) -> None:
         self.nodes_page.update_ping(node_id, ping_ms)
@@ -1054,6 +1078,40 @@ class MainWindow(FluentWindow):
         if not silent:
             self.updates_page.show_checking()
 
+    def _sync_app_update_timer(self, settings: AppSettings) -> None:
+        """Keep the one-shot/periodic application update timer in sync."""
+        if self._quitting or not settings.check_updates:
+            self._app_update_timer.stop()
+            return
+        if self._app_update_timer.isActive():
+            return
+        # The first check remains the existing startup check.  After it fires,
+        # _on_app_update_timer_timeout switches this same timer to the 30-minute
+        # cadence instead of creating another timer.
+        self._app_update_timer.setInterval(APP_UPDATE_INITIAL_DELAY_MS)
+        self._app_update_timer.start()
+
+    def _on_app_update_timer_timeout(self) -> None:
+        if self._quitting or not self._app_update_scheduler_ready:
+            return
+        settings = self.controller.state.settings
+        if not settings.check_updates:
+            return
+
+        # _check_updates owns the concurrent-check guard.  Even if a user
+        # started a manual check at the same moment, this timer callback cannot
+        # create a second UpdateChecker thread.
+        self._check_updates(silent=True)
+
+        if self._quitting or not self.controller.state.settings.check_updates:
+            return
+        self._app_update_timer.setInterval(APP_UPDATE_INTERVAL_MS)
+        self._app_update_timer.start()
+
+    def _stop_app_update_timer(self) -> None:
+        self._app_update_scheduler_ready = False
+        self._app_update_timer.stop()
+
     def _active_update_proxy_url(self) -> str | None:
         if not self.controller.connected:
             return None
@@ -1070,6 +1128,16 @@ class MainWindow(FluentWindow):
         if checker is not None and checker is not getattr(self, "_update_checker", None):
             return
         self._update_in_progress = False
+        if silent:
+            message = " ".join(str(err).split()) or "неизвестная ошибка"
+            # Use the file logger directly: the failure is retained in
+            # data/logs/app.log without producing a toast or a repeated UI
+            # notification for every 30-minute background attempt.
+            self.controller._logger.warning(
+                "[update] Фоновая проверка обновлений не выполнена: %s",
+                message,
+            )
+            return
         if not silent:
             self.updates_page.show_idle()
             self.updates_page.set_app_error(f"Ошибка проверки: {err}")
@@ -1374,6 +1442,7 @@ class MainWindow(FluentWindow):
 
     def _quit_app(self) -> None:
         self._quitting = True
+        self._stop_app_update_timer()
         self._save_geometry()
         self.controller.shutdown()
         app = QApplication.instance()
@@ -1410,6 +1479,7 @@ class MainWindow(FluentWindow):
 
         if not self._tray_available:
             self._quitting = True
+            self._stop_app_update_timer()
             self._save_geometry()
             self.controller.shutdown()
             e.accept()
