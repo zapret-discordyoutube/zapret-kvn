@@ -347,6 +347,32 @@ _NUM_SEGMENTS = 4       # parallel download segments
 _CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
+def _purge_stale_update_dirs(prefix: str = "zapretkvn_update_", keep: int = 0) -> int:
+    """Удалить каталоги прерванных обновлений.
+
+    Скрипт замены файлов удаляет свой каталог только на успешном пути, поэтому
+    каждое неудавшееся обновление оставляло распакованную сборку и архив —
+    сотни мегабайт за раз, и у пользователя набралось больше двух гигабайт.
+    """
+
+    root = Path(tempfile.gettempdir())
+    removed = 0
+    try:
+        candidates = sorted(
+            (item for item in root.glob(f"{prefix}*") if item.is_dir()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return 0
+    for stale in candidates[keep:]:
+        before = stale.exists()
+        shutil.rmtree(stale, ignore_errors=True)
+        if before and not stale.exists():
+            removed += 1
+    return removed
+
+
 def _build_update_script(
     *,
     current_pid: int,
@@ -441,14 +467,23 @@ def _build_update_script(
         "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
         "}",
         "catch {",
+        "    $restoreError = $_",
         "    Get-ChildItem -LiteralPath $appDir -Force -ErrorAction SilentlyContinue | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
         "        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue",
         "    }",
-        "    Get-ChildItem -LiteralPath $backupReplaceDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
-        "        Move-WithRetry -path $_.FullName -destination $appDir",
+        # Один невосстановимый файл не должен обрывать возврат остальных: иначе
+        # каталог приложения остаётся без exe, и запускать становится нечего.
+        "    foreach ($backupSource in @($backupReplaceDir, $backupStaleDir)) {",
+        "        Get-ChildItem -LiteralPath $backupSource -Force -ErrorAction SilentlyContinue | ForEach-Object {",
+        "            try { Move-WithRetry -path $_.FullName -destination $appDir } catch { }",
+        "        }",
         "    }",
-        "    Get-ChildItem -LiteralPath $backupStaleDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
-        "        Move-WithRetry -path $_.FullName -destination $appDir",
+        # Последняя линия обороны: работоспособный exe важнее того, чьей он версии.
+        "    if (-not (Test-Path -LiteralPath $exePath)) {",
+        "        $rescue = Join-Path $sourceDir (Split-Path -Leaf $exePath)",
+        "        if (Test-Path -LiteralPath $rescue) {",
+        "            Copy-Item -LiteralPath $rescue -Destination $appDir -Force -ErrorAction SilentlyContinue",
+        "        }",
         "    }",
         (
             "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
@@ -456,7 +491,7 @@ def _build_update_script(
             else "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
         ),
         "    New-Item -ItemType Directory -Path $logDir -Force | Out-Null",
-        "    ($_ | Out-String) | Set-Content -LiteralPath $errorLog -Encoding UTF8",
+        "    ($restoreError | Out-String) | Set-Content -LiteralPath $errorLog -Encoding UTF8",
         "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
         "    throw",
         "}",
@@ -631,6 +666,8 @@ class UpdateDownloader(QThread):
     def run(self) -> None:
         tmp_dir: Path | None = None
         try:
+            # Каталоги прошлых прерванных попыток чистятся до распаковки новой.
+            _purge_stale_update_dirs()
             tmp_dir = Path(tempfile.mkdtemp(prefix="zapretkvn_update_"))
             zip_path = tmp_dir / "update.zip"
 
