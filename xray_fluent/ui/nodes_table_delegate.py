@@ -6,9 +6,10 @@ from PyQt6.QtWidgets import QAbstractItemView
 from qfluentwidgets import TableItemDelegate, themeColor
 
 from .nodes_table_model import ACTIVE_ROLE, COL_NAME, PING_BUSY_ROLE, SPEED_PROGRESS_ROLE
-from .theme import text_muted_color
+from .theme import accent_soft_bg, text_muted_color
 
 _ACTIVE_STRIPE_WIDTH = 3
+_ACTIVE_FILL_RADIUS = 5
 
 
 class NodesActivityDelegate(TableItemDelegate):
@@ -20,6 +21,10 @@ class NodesActivityDelegate(TableItemDelegate):
     def paint(self, painter: QPainter, option, index) -> None:
         ping_busy = bool(index.data(PING_BUSY_ROLE))
         speed_progress = index.data(SPEED_PROGRESS_ROLE)
+
+        fill_color = self.row_fill_color(index)
+        if fill_color is not None:
+            self._paint_active_row_fill(painter, option, index, fill_color)
 
         super().paint(painter, option, index)
 
@@ -34,6 +39,52 @@ class NodesActivityDelegate(TableItemDelegate):
             self._paint_spinner(painter, option)
         elif speed_progress is not None:
             self._paint_progress(painter, option, int(speed_progress))
+
+    @staticmethod
+    def row_fill_color(index) -> QColor | None:
+        """Soft accent fill for the active node row; None for other rows (AC5).
+
+        Resolved lazily on every call so it always matches the current accent.
+        """
+        if bool(index.data(ACTIVE_ROLE)):
+            return accent_soft_bg()
+        return None
+
+    def _row_fill_span(self, index) -> tuple[bool, bool]:
+        """(is_first_visible, is_last_visible) for the cell's column."""
+        header = self.parent().horizontalHeader()
+        visual = header.visualIndex(index.column())
+        first = last = True
+        for logical in range(header.count()):
+            if header.isSectionHidden(logical):
+                continue
+            other = header.visualIndex(logical)
+            if other < visual:
+                first = False
+            elif other > visual:
+                last = False
+        return first, last
+
+    def _paint_active_row_fill(self, painter: QPainter, option, index, color: QColor) -> None:
+        """Soft accent fill under the whole active row, rounded at row edges (D5)."""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        radius = _ACTIVE_FILL_RADIUS
+        first, last = self._row_fill_span(index)
+        rect = option.rect
+        # Edge insets follow qfluentwidgets' TableItemDelegate._drawBackground
+        # so the fill lines up with the stock selection/hover background.
+        if first and last:
+            painter.drawRoundedRect(rect.adjusted(4, 0, -4, 0), radius, radius)
+        elif first:
+            painter.drawRoundedRect(rect.adjusted(4, 0, radius + 1, 0), radius, radius)
+        elif last:
+            painter.drawRoundedRect(rect.adjusted(-radius - 1, 0, -4, 0), radius, radius)
+        else:
+            painter.drawRect(rect.adjusted(-1, 0, 1, 0))
+        painter.restore()
 
     def _selection_indicator_visible(self, index) -> bool:
         # qfluentwidgets' TableItemDelegate draws its own selection pill on

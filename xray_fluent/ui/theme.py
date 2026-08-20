@@ -30,7 +30,23 @@ from qfluentwidgets import (
     themeColor,
 )
 
-DEFAULT_ACCENT = "#0078D4"
+from ..constants import DEFAULT_ACCENT_COLOR
+
+# Re-export: the single default accent value lives in constants.py (D1).
+DEFAULT_ACCENT = DEFAULT_ACCENT_COLOR
+
+# Accent presets for the settings page (ordered, exactly 8; D6).  Hex
+# literals of the accent palette are allowed only here inside ui/ (C3).
+ACCENT_PRESETS: list[tuple[str, str]] = [
+    (DEFAULT_ACCENT, "Windows-синий"),
+    ("#00B7C3", "Бирюза"),
+    ("#107C10", "Зелёный"),
+    ("#744DA9", "Фиолетовый"),
+    ("#E3008C", "Розовый"),
+    ("#E81123", "Красный"),
+    ("#F76B0C", "Оранжевый"),
+    ("#5D5A58", "Графит"),
+]
 
 # Semantic tokens as (light, dark) hex pairs.  Values are plain strings — the
 # QColor objects are built lazily inside the token functions (C7).
@@ -46,7 +62,6 @@ _PALETTE: dict[str, tuple[str, str]] = {
 
 # Graph colors as (light, dark) RGBA tuples (alpha channels matter here).
 _GRAPH: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = {
-    "graph_down": ((0, 103, 192, 255), (0, 180, 255, 255)),
     "graph_up": ((15, 123, 15, 255), (0, 220, 120, 255)),
     "graph_grid": ((0, 0, 0, 40), (255, 255, 255, 20)),
     "graph_bg": ((0, 0, 0, 12), (0, 0, 0, 30)),
@@ -74,11 +89,45 @@ def _graph_color(name: str) -> QColor:
 
 
 def accent_color() -> QColor:
-    """Current accent color (falls back to qfluentwidgets themeColor)."""
+    """Current accent color (falls back to qfluentwidgets themeColor).
+
+    Returns a copy — callers may mutate it (alpha, lighter, ...) without
+    corrupting the color stored inside qconfig.
+    """
     try:
-        return themeColor()
+        return QColor(themeColor())
     except Exception:
         return QColor(DEFAULT_ACCENT)
+
+
+def accent_soft_bg() -> QColor:
+    """Soft accent fill for "active" rows/cells (accent at alpha 38 ≈ 0.15)."""
+    color = accent_color()
+    color.setAlpha(38)
+    return color
+
+
+def accent_soft_bg_hover() -> QColor:
+    """Hover variant of :func:`accent_soft_bg` (accent at alpha 51 = 0.20)."""
+    color = accent_color()
+    color.setAlpha(51)
+    return color
+
+
+def normalize_accent(value) -> str:
+    """Normalize any accent input to "#RRGGBB" (upper case).
+
+    Invalid input (empty, None, garbage, short hex) → ``DEFAULT_ACCENT``.
+    """
+    if not value:
+        return DEFAULT_ACCENT
+    try:
+        color = QColor(str(value))
+    except Exception:
+        return DEFAULT_ACCENT
+    if not color.isValid():
+        return DEFAULT_ACCENT
+    return color.name().upper()
 
 
 def success_color() -> QColor:
@@ -117,7 +166,13 @@ def placeholder_text_color() -> QColor:
 
 
 def graph_down_color() -> QColor:
-    return _graph_color("graph_down")
+    """Download line color: follows the accent (D3, AC7).
+
+    Light theme — the accent as is; dark theme — a lightened accent, so the
+    token stays theme-dependent (dark != light for any accent).
+    """
+    accent = accent_color()
+    return accent.lighter(130) if isDarkTheme() else accent
 
 
 def graph_up_color() -> QColor:
@@ -147,6 +202,28 @@ def on_theme_changed(callback: Callable) -> Callable:
     return callback
 
 
+def on_accent_changed(callback: Callable) -> Callable:
+    """Invoke *callback* whenever the accent (theme color) changes (AC1).
+
+    A thin wrapper over ``qconfig.themeColorChanged.connect``; the callback
+    must accept one positional argument (a ``QColor``).  Returns the callback
+    so callers can later ``qconfig.themeColorChanged.disconnect(cb)``.
+    """
+    qconfig.themeColorChanged.connect(callback)
+    return callback
+
+
+def on_theme_or_accent_changed(callback: Callable) -> Callable:
+    """Invoke *callback* on any theme mode or accent change (AC1).
+
+    The callback must accept one positional argument (``Theme`` or
+    ``QColor`` depending on the signal).
+    """
+    qconfig.themeChanged.connect(callback)
+    qconfig.themeColorChanged.connect(callback)
+    return callback
+
+
 # ── Theme application (deduplicated) ─────────────────────────────────────
 
 _THEME_MAP = {"dark": Theme.DARK, "light": Theme.LIGHT}
@@ -168,7 +245,9 @@ def apply_theme(theme_name: str, accent_color: str, *, force: bool = False) -> b
     """
     global _applied
     normalized = (theme_name or "system").lower().strip() or "system"
-    accent = (accent_color or "").strip() or DEFAULT_ACCENT
+    # Normalization makes deduplication case-insensitive (AC4): "#0078d4"
+    # and "#0078D4" are the same accent.
+    accent = normalize_accent(accent_color)
 
     previous = _applied
     if not force and previous == (normalized, accent):

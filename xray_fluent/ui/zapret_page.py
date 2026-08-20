@@ -22,7 +22,6 @@ from qfluentwidgets import (
     TableWidget,
     TransparentToolButton,
     VerticalSeparator,
-    qconfig,
     setCustomStyleSheet,
 )
 from qfluentwidgets import RoundMenu, Action
@@ -30,7 +29,7 @@ from qfluentwidgets import RoundMenu, Action
 from ..zapret_manager import PresetInfo, ZapretManager
 from .detail_page import StackedSection
 from .preset_edit_widget import PresetEditWidget
-from .theme import success_color, token_pair
+from .theme import accent_color, accent_soft_bg, on_theme_or_accent_changed, token_pair
 
 
 def _status_qss(token: str) -> tuple[str, str]:
@@ -159,10 +158,10 @@ class ZapretPage(StackedSection):
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self._editor.save_requested.connect(self._on_save_preset)
-        # Re-resolve the theme-dependent row brushes on theme change.
-        qconfig.themeChanged.connect(self._on_theme_changed)
+        # Re-resolve the theme/accent-dependent row brushes on any change (AC6).
+        on_theme_or_accent_changed(self._on_theme_changed)
 
-    def _on_theme_changed(self) -> None:
+    def _on_theme_changed(self, *args) -> None:
         self._reload_table(self.current_preset())
 
     # ── Public API ──
@@ -221,11 +220,13 @@ class ZapretPage(StackedSection):
             args_item = QTableWidgetItem(str(p.arg_count))
             mod_item = QTableWidgetItem(self._format_date(p.modified))
 
-            # Highlight active preset
+            # Highlight active preset: soft accent fill on the whole row,
+            # solid accent on the name cell (active state, not "success"; D4).
             if self._running and p.name == self._active_preset:
-                green = QBrush(success_color())
+                soft = QBrush(accent_soft_bg())
                 for item in (name_item, desc_item, args_item, mod_item):
-                    item.setForeground(green)
+                    item.setBackground(soft)
+                name_item.setForeground(QBrush(accent_color()))
 
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, desc_item)

@@ -46,6 +46,7 @@ from .nodes_table_model import (
     NodesTableModel,
 )
 from .privacy import HoldToRevealButton
+from .theme import on_accent_changed
 
 _ROW_HEIGHT = 30
 _FLAG_ICON_SIZE = QSize(18, 13)
@@ -304,6 +305,10 @@ class NodesPage(StackedSection):
 
         self._activity_delegate = NodesActivityDelegate(self.table)
         self.table.setItemDelegate(self._activity_delegate)
+
+        # The delegate paints the active-row fill/stripe with the accent —
+        # repaint the viewport live when only the accent changes (AC6).
+        on_accent_changed(self._on_accent_changed)
 
         # Prevent deselection on empty area click
         orig_mouse_press = self.table.mousePressEvent
@@ -734,6 +739,12 @@ class NodesPage(StackedSection):
         if obj is self.table.viewport() and event.type() == QEvent.Type.Resize:
             self._relayout_flex_column()
         return super().eventFilter(obj, event)
+
+    def _on_accent_changed(self, *args) -> None:
+        """Repaint delegate-painted accents when only the accent changes (AC6)."""
+        viewport = self.table.viewport()
+        if viewport is not None:
+            viewport.update()
 
     def _apply_column_widths(self, widths: dict[str, int]) -> None:
         for col, spec in enumerate(COLUMN_SPECS):

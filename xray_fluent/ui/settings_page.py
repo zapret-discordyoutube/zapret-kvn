@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QFileDialog, QSizePolicy, QWidget
+from PyQt6.QtCore import QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtWidgets import QFileDialog, QPushButton, QSizePolicy, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -26,7 +26,7 @@ from qfluentwidgets.components.settings.setting_card import ColorPickerButton
 from ..constants import SINGBOX_PATH_DEFAULT, XRAY_PATH_DEFAULT
 from ..models import AppSettings, SecuritySettings, clamp_subscriptions_check_interval
 from .base_page import ScrollablePage
-from .theme import DEFAULT_ACCENT
+from .theme import ACCENT_PRESETS, DEFAULT_ACCENT, normalize_accent, text_color
 from ..path_utils import normalize_configured_path, resolve_configured_path
 
 
@@ -62,14 +62,81 @@ class _SpinCard(SettingCard):
         self.hBoxLayout.addSpacing(16)
 
 
+class _AccentSwatch(QPushButton):
+    """Round preset-color swatch inside the accent card (AC9, no dialogs)."""
+
+    def __init__(self, color_hex: str, name: str, parent=None):
+        super().__init__(parent)
+        self._color_hex = color_hex
+        self.setCheckable(True)
+        self.setFixedSize(24, 24)
+        self.setToolTip(name)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    @property
+    def color_hex(self) -> str:
+        return self._color_hex
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.isChecked():
+            # Selection ring around the checked swatch (A5).
+            painter.setPen(QPen(text_color(), 1.6))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self._color_hex))
+        painter.drawEllipse(QRectF(self.rect()).adjusted(4.0, 4.0, -4.0, -4.0))
+        painter.end()
+
+
 class _ColorCard(SettingCard):
-    """Setting card with a color picker button on the right."""
+    """Setting card with preset accent swatches and a color picker button."""
 
     def __init__(self, icon, title, content, parent=None):
         super().__init__(icon, title, content, parent)
+        self.swatches: list[_AccentSwatch] = []
+        for color_hex, name in ACCENT_PRESETS:
+            swatch = _AccentSwatch(color_hex, name, self)
+            swatch.clicked.connect(
+                lambda _checked=False, value=color_hex: self._on_swatch_clicked(value)
+            )
+            self.hBoxLayout.addWidget(swatch, 0, Qt.AlignmentFlag.AlignRight)
+            self.hBoxLayout.addSpacing(4)
+            self.swatches.append(swatch)
+        self.hBoxLayout.addSpacing(8)
         self.picker = ColorPickerButton(QColor(DEFAULT_ACCENT), title, self)
+        self.picker.colorChanged.connect(self._on_picker_color_changed)
         self.hBoxLayout.addWidget(self.picker, 0, Qt.AlignmentFlag.AlignRight)
         self.hBoxLayout.addSpacing(16)
+        self._sync_swatches()
+
+    def current_hex(self) -> str:
+        """Normalized (#RRGGBB, upper case) color of the picker."""
+        return normalize_accent(self.picker.color.name())
+
+    def set_color(self, color) -> None:
+        """Set the picker color without emitting colorChanged (loading path)."""
+        self.picker.setColor(QColor(color))
+        self._sync_swatches()
+
+    def _on_swatch_clicked(self, color_hex: str) -> None:
+        color = QColor(color_hex)
+        self.picker.setColor(color)
+        # ColorPickerButton.setColor does not emit colorChanged itself; the
+        # page's auto-save listens on that signal, so emit it explicitly.
+        self.picker.colorChanged.emit(color)
+        self._sync_swatches()
+
+    def _on_picker_color_changed(self, _color) -> None:
+        self._sync_swatches()
+
+    def _sync_swatches(self) -> None:
+        current = self.current_hex()
+        for swatch in self.swatches:
+            swatch.setChecked(normalize_accent(swatch.color_hex) == current)
+            swatch.update()
 
 
 class _LineEditCard(SettingCard):
@@ -523,7 +590,7 @@ class SettingsPage(ScrollablePage):
         self._security = deepcopy(security)
 
         self._select_combo_data(self.theme_card.combo, settings.theme)
-        self.accent_card.picker.setColor(QColor(settings.accent_color or DEFAULT_ACCENT))
+        self.accent_card.set_color(QColor(settings.accent_color or DEFAULT_ACCENT))
         self.proxy_bypass_lan_card.setChecked(settings.system_proxy_bypass_lan)
         self.xray_path_card.edit.setText(
             normalize_configured_path(
@@ -632,7 +699,7 @@ class SettingsPage(ScrollablePage):
             return
         data = deepcopy(self._settings)
         data.theme = str(self.theme_card.combo.currentData() or "system")
-        data.accent_color = self.accent_card.picker.color.name() or DEFAULT_ACCENT
+        data.accent_color = self.accent_card.current_hex()
         data.system_proxy_bypass_lan = self.proxy_bypass_lan_card.isChecked()
         data.xray_path = normalize_configured_path(
             self.xray_path_card.edit.text(),

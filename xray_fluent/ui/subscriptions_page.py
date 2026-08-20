@@ -51,7 +51,7 @@ from ..subscription_http import (
 from ..subscription_parser import validate_filter_patterns
 from .detail_page import DetailPage, StackedSection
 from .fluent_dialog import FluentDialog
-from .theme import accent_color
+from .theme import accent_color, on_accent_changed
 
 
 class ScreenRegionSelector(QWidget):
@@ -67,6 +67,12 @@ class ScreenRegionSelector(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setGeometry(screen.geometry())
+        # The selection frame is painted with the accent — repaint live when
+        # the accent changes (AC6).
+        on_accent_changed(self._on_accent_changed)
+
+    def _on_accent_changed(self, *args) -> None:
+        self.update()
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)

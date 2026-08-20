@@ -3,9 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+import re
 import uuid
 
-from .constants import ROUTING_RULE, STATE_SCHEMA_VERSION
+from .constants import DEFAULT_ACCENT_COLOR, ROUTING_RULE, STATE_SCHEMA_VERSION
+
+# Model-level accent validation (no Qt imports here, D2): the color picker
+# only ever produces "#RRGGBB" strings; anything else falls back to the
+# default.  Full QColor-based normalization lives in ui/theme.py.
+_ACCENT_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def normalize_accent_color(value: Any) -> str:
+    """Return *value* if it looks like "#RRGGBB", else the default accent."""
+    text = str(value or "")
+    return text if _ACCENT_COLOR_RE.fullmatch(text) else DEFAULT_ACCENT_COLOR
 
 
 def utc_now_iso() -> str:
@@ -369,7 +381,7 @@ def normalize_startup_connect_order(value: Any) -> str:
 @dataclass(slots=True)
 class AppSettings:
     theme: str = "system"  # system | light | dark
-    accent_color: str = "#0078D4"
+    accent_color: str = DEFAULT_ACCENT_COLOR
     auto_connect_last: bool = True
     start_minimized: bool = False
     enable_system_proxy: bool = True
@@ -492,7 +504,7 @@ class AppSettings:
     def from_dict(data: dict[str, Any]) -> "AppSettings":
         return AppSettings(
             theme=str(data.get("theme") or "system"),
-            accent_color=str(data.get("accent_color") or "#0078D4"),
+            accent_color=normalize_accent_color(data.get("accent_color")),
             auto_connect_last=bool(data.get("auto_connect_last", True)),
             start_minimized=bool(data.get("start_minimized", False)),
             enable_system_proxy=bool(data.get("enable_system_proxy", True)),

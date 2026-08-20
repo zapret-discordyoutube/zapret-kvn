@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
-from qfluentwidgets import qconfig
 
 from .fluent_dialog import FluentDialog
 from .theme import (
@@ -15,6 +14,7 @@ from .theme import (
     graph_grid_color,
     graph_text_color,
     graph_up_color,
+    on_theme_or_accent_changed,
 )
 
 if TYPE_CHECKING:
@@ -48,9 +48,9 @@ class TrafficGraphWidget(QWidget):
         self.setMaximumHeight(120)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Нажмите для подробного графика")
-        qconfig.themeChanged.connect(self._on_theme_changed)
+        on_theme_or_accent_changed(self._on_theme_changed)
 
-    def _on_theme_changed(self) -> None:
+    def _on_theme_changed(self, *args) -> None:
         self.update()
 
     def add_point(self, down_bps: float, up_bps: float) -> None:
@@ -84,9 +84,9 @@ class DetailTrafficGraphWidget(QWidget):
         self._up_data: deque[float] = deque(maxlen=_DETAIL_MAX_POINTS)
         self.setMinimumHeight(300)
         self.setMinimumWidth(240)
-        qconfig.themeChanged.connect(self._on_theme_changed)
+        on_theme_or_accent_changed(self._on_theme_changed)
 
-    def _on_theme_changed(self) -> None:
+    def _on_theme_changed(self, *args) -> None:
         self.update()
 
     def set_data(self, down: deque[float], up: deque[float]) -> None:

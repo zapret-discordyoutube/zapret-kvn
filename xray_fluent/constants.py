@@ -14,6 +14,11 @@ DEFAULT_HTTP_PORT = 1391
 DEFAULT_XRAY_STATS_API_PORT = 19085
 XRAY_RELEASES_API = "https://api.github.com/repos/XTLS/Xray-core/releases"
 
+# Default UI accent color (single source of truth; re-exported by ui/theme.py
+# as DEFAULT_ACCENT).  Hex literals of the accent palette live only here and
+# in xray_fluent/ui/theme.py (C3).
+DEFAULT_ACCENT_COLOR = "#0078D4"
+
 ROUTING_GLOBAL = "global"
 ROUTING_RULE = "rule"
 ROUTING_DIRECT = "direct"
