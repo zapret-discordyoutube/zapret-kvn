@@ -9,7 +9,7 @@ import re
 from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
 
-from .link_parser import parse_single, validate_node_outbound
+from .link_parser import link_import_warnings, parse_single, validate_node_outbound
 from .models import Node, SubscriptionInfo
 
 
@@ -237,6 +237,8 @@ def _parse_nodes(text: str, *, max_nodes: int) -> tuple[list[Node], list[str], i
             warnings.append(f"Строка {index}: {exc}")
             continue
         nodes.append(node)
+        for warning in link_import_warnings(line):
+            warnings.append(f"Строка {index}: {warning}")
         if len(nodes) > max_nodes:
             raise SubscriptionParseError(f"Подписка содержит больше {max_nodes} серверов")
     return nodes, warnings, skipped
@@ -286,6 +288,8 @@ def _parse_json_nodes(payload: Any, *, max_nodes: int) -> tuple[list[Node], list
             warnings.append(f"JSON #{index}: {exc}")
             continue
         nodes.append(node)
+        for warning in link_import_warnings(raw):
+            warnings.append(f"JSON #{index}: {warning}")
         if len(nodes) > max_nodes:
             raise SubscriptionParseError(f"Подписка содержит больше {max_nodes} серверов")
     return nodes, warnings, skipped

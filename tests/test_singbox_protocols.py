@@ -6,6 +6,7 @@ import unittest
 
 from xray_fluent.link_parser import (
     LinkParseError,
+    link_import_warnings,
     is_native_singbox_outbound,
     parse_links_text,
     parse_single,
@@ -143,8 +144,15 @@ class SingboxProtocolParserTests(unittest.TestCase):
         self.assertEqual(node.outbound["tag"], "saved")
 
     def test_hysteria2_certificate_pin_is_not_silently_dropped(self) -> None:
+        # Рядом с insecure проверка отключена самой ссылкой, поэтому сервер
+        # импортируется, но потеря пина обязана быть названа.
+        link = "hy2://secret@example.com:443/?insecure=1&pinSHA256=deadbeef"
+        self.assertTrue(parse_single(link).outbound["tls"]["insecure"])
+        self.assertTrue(any("pinSHA256" in item for item in link_import_warnings(link)))
+
+        # Без insecure пин — единственная аутентификация сервера.
         with self.assertRaisesRegex(LinkParseError, "pinSHA256"):
-            parse_single("hy2://secret@example.com:443/?insecure=1&pinSHA256=deadbeef")
+            parse_single("hy2://secret@example.com:443/?pinSHA256=deadbeef")
 
     def test_hysteria2_salamander_requires_password(self) -> None:
         with self.assertRaisesRegex(LinkParseError, "obfs-password"):

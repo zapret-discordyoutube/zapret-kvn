@@ -411,6 +411,19 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
                 "vless://11111111-1111-1111-1111-111111111111@a.example:443?security=xtls#Bad"
             )
 
+
+    def test_certificate_pin_next_to_insecure_keeps_the_server(self) -> None:
+        # Пин рядом с insecure ничего не добавляет: проверка отключена самой
+        # ссылкой, и отказ отнимал бы у пользователя рабочий сервер.
+        node = parse_single(
+            "hysteria2://secret@a.example:8443"
+            "?insecure=1&pinSHA256=0E%3AD6%3A04&obfs=salamander&obfs-password=pw&sni=a.example#Pin"
+        )
+        self.assertTrue(node.outbound["tls"]["insecure"])
+
+        with self.assertRaises(LinkParseError):
+            parse_single("hysteria2://secret@a.example:8443?pinSHA256=0E%3AD6%3A04#Pin")
+
     def test_interval_override_and_backoff(self) -> None:
         now = datetime.now(timezone.utc)
         subscription = Subscription(

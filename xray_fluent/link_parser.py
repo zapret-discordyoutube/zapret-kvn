@@ -43,6 +43,27 @@ def parse_links_text(text: str) -> tuple[list[Node], list[str]]:
     return nodes, errors
 
 
+def link_import_warnings(raw: str) -> list[str]:
+    """Назвать то, что ссылка просит, а конвертация выполнить не может.
+
+    Предупреждения возвращаются отдельно от Node: Node сохраняется в состоянии
+    приложения, а это свойство самой ссылки, нужное один раз при импорте.
+    """
+
+    text = str(raw or "").strip()
+    parsed = urlsplit(text)
+    if parsed.scheme.lower() not in {"hy2", "hysteria2"}:
+        return []
+    params = {key: _first(parse_qs(parsed.query, keep_blank_values=True), key)
+              for key in parse_qs(parsed.query, keep_blank_values=True)}
+    if not _get_param(params, "pinSHA256", "pin_sha256"):
+        return []
+    return [
+        "закрепление сертификата (pinSHA256) не перенесено, "
+        "проверка сертификата отключена самой ссылкой"
+    ]
+
+
 def parse_single(raw: str) -> Node:
     text = raw.strip()
     if not text:
@@ -712,7 +733,13 @@ def _parse_hysteria2(link: str) -> Node:
         )
 
     certificate_pin = _get_param(params, "pinSHA256", "pin_sha256")
-    if certificate_pin:
+    if certificate_pin and not _to_bool(
+        _get_param(params, "insecure", "skip-cert-verify", "allow_insecure", "allowInsecure")
+    ):
+        # Пин закрепляет весь сертификат, а sing-box — только публичный ключ, так что
+        # перенести его нельзя. Рядом с insecure проверка отключена самой ссылкой и пин
+        # уже ничего не добавляет: отказ отнял бы рабочий сервер, ничего не защитив.
+        # Без insecure пин — единственная аутентификация сервера, и терять его нельзя.
         raise LinkParseError(
             "Hysteria2 pinSHA256 pins the whole certificate and cannot be safely converted "
             "to sing-box certificate_public_key_sha256"
