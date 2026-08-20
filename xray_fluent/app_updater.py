@@ -347,6 +347,124 @@ _NUM_SEGMENTS = 4       # parallel download segments
 _CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
+def _build_update_script(
+    *,
+    current_pid: int,
+    source_dir: Path,
+    app_dir: Path,
+    exe_name: str,
+    tmp_dir: Path,
+    restart_in_tray: bool,
+) -> str:
+    """Собрать PowerShell-скрипт, который заменяет файлы после выхода приложения."""
+
+    return "\r\n".join([
+        "$ErrorActionPreference = 'Stop'",
+        f"$pidToWait = {current_pid}",
+        f"$sourceDir = {_powershell_literal(str(source_dir))}",
+        f"$appDir = {_powershell_literal(str(app_dir))}",
+        f"$exePath = {_powershell_literal(str(app_dir / exe_name))}",
+        f"$tempDir = {_powershell_literal(str(tmp_dir))}",
+        "$logDir = Join-Path (Join-Path $appDir 'data') 'logs'",
+        "$runtimeDir = Join-Path (Join-Path $appDir 'data') 'runtime'",
+        "$errorLog = Join-Path $logDir 'update_error.log'",
+        "$preserveNames = @('data')",
+        "$backupDir = Join-Path $runtimeDir 'update_backup'",
+        "$backupReplaceDir = Join-Path $backupDir 'replace'",
+        "$backupStaleDir = Join-Path $backupDir 'stale'",
+        "Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
+        "New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null",
+        "New-Item -ItemType Directory -Path $backupReplaceDir -Force | Out-Null",
+        "New-Item -ItemType Directory -Path $backupStaleDir -Force | Out-Null",
+        # Ядра живут отдельными процессами внутри каталога приложения и
+        # держат core\ открытым, поэтому ожидания одного лишь основного
+        # процесса не хватало: перемещение падало на занятом каталоге.
+        "function Stop-AppProcesses {",
+        "    param([string] $root, [int] $timeoutMs)",
+        "    $deadline = (Get-Date).AddMilliseconds($timeoutMs)",
+        "    while ((Get-Date) -lt $deadline) {",
+        "        $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {",
+        "            if ($_.Id -eq $PID) { return $false }",
+        "            try { $path = $_.Path } catch { return $false }",
+        "            $path -and $path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)",
+        "        })",
+        "        if ($running.Count -eq 0) { return }",
+        "        foreach ($item in $running) {",
+        "            Stop-Process -Id $item.Id -Force -ErrorAction SilentlyContinue",
+        "        }",
+        "        Start-Sleep -Milliseconds 300",
+        "    }",
+        "}",
+        # Даже после завершения процесса Windows освобождает файл не мгновенно.
+        "function Move-WithRetry {",
+        "    param([string] $path, [string] $destination, [int] $attempts = 20)",
+        # -ErrorAction Stop обязателен: без него Move-Item сообщает об
+        # ошибке не-терминирующим способом, catch не срабатывает, и функция
+        # отчитывается об успехе, оставив файл на месте.
+        "    for ($try = 1; $try -lt $attempts; $try++) {",
+        "        try {",
+        "            Move-Item -LiteralPath $path -Destination $destination -Force -ErrorAction Stop",
+        "            return",
+        "        } catch {",
+        "            Start-Sleep -Milliseconds 500",
+        "        }",
+        "    }",
+        "    Move-Item -LiteralPath $path -Destination $destination -Force -ErrorAction Stop",
+        "}",
+        "for ($i = 0; $i -lt 120; $i++) {",
+        "    if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { break }",
+        "    Start-Sleep -Milliseconds 500",
+        "}",
+        "$proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue",
+        "if ($proc) { Stop-Process -Id $pidToWait -Force }",
+        "$appRoot = [System.IO.Path]::GetFullPath($appDir).TrimEnd('\\') + '\\'",
+        "Stop-AppProcesses -root $appRoot -timeoutMs 30000",
+        "$sourceItems = @(Get-ChildItem -LiteralPath $sourceDir -Force | Where-Object { $preserveNames -notcontains $_.Name })",
+        "$sourceNames = @($sourceItems | ForEach-Object { $_.Name })",
+        "try {",
+        "    Get-ChildItem -LiteralPath $appDir -Force | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
+        "        $backupTarget = if ($sourceNames -contains $_.Name) { $backupReplaceDir } else { $backupStaleDir }",
+        "        Move-WithRetry -path $_.FullName -destination $backupTarget",
+        "    }",
+        "    foreach ($item in $sourceItems) {",
+        "        Copy-Item -LiteralPath $item.FullName -Destination $appDir -Recurse -Force",
+        "    }",
+        (
+            "    $started = Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
+            if restart_in_tray
+            else "    $started = Start-Process -FilePath $exePath -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
+        ),
+        "    Start-Sleep -Seconds 5",
+        "    if ($started.HasExited) {",
+        "        throw ('Updated application exited immediately with code ' + $started.ExitCode)",
+        "    }",
+        "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
+        "}",
+        "catch {",
+        "    Get-ChildItem -LiteralPath $appDir -Force -ErrorAction SilentlyContinue | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
+        "        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue",
+        "    }",
+        "    Get-ChildItem -LiteralPath $backupReplaceDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
+        "        Move-WithRetry -path $_.FullName -destination $appDir",
+        "    }",
+        "    Get-ChildItem -LiteralPath $backupStaleDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
+        "        Move-WithRetry -path $_.FullName -destination $appDir",
+        "    }",
+        (
+            "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
+            if restart_in_tray
+            else "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
+        ),
+        "    New-Item -ItemType Directory -Path $logDir -Force | Out-Null",
+        "    ($_ | Out-String) | Set-Content -LiteralPath $errorLog -Encoding UTF8",
+        "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
+        "    throw",
+        "}",
+        "Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue",
+        "",
+    ])
+
+
 class UpdateDownloader(QThread):
     """Download and extract update, then launch restart script."""
 
@@ -590,74 +708,14 @@ class UpdateDownloader(QThread):
             current_pid = os.getpid()
             app_dir = BASE_DIR
             script = tmp_dir / "_update.ps1"
-            script_text = "\r\n".join([
-                "$ErrorActionPreference = 'Stop'",
-                f"$pidToWait = {current_pid}",
-                f"$sourceDir = {_powershell_literal(str(source_dir))}",
-                f"$appDir = {_powershell_literal(str(app_dir))}",
-                f"$exePath = {_powershell_literal(str(app_dir / exe_name))}",
-                f"$tempDir = {_powershell_literal(str(tmp_dir))}",
-                "$logDir = Join-Path (Join-Path $appDir 'data') 'logs'",
-                "$runtimeDir = Join-Path (Join-Path $appDir 'data') 'runtime'",
-                "$errorLog = Join-Path $logDir 'update_error.log'",
-                "$preserveNames = @('data')",
-                "$backupDir = Join-Path $runtimeDir 'update_backup'",
-                "$backupReplaceDir = Join-Path $backupDir 'replace'",
-                "$backupStaleDir = Join-Path $backupDir 'stale'",
-                "Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
-                "New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null",
-                "New-Item -ItemType Directory -Path $backupReplaceDir -Force | Out-Null",
-                "New-Item -ItemType Directory -Path $backupStaleDir -Force | Out-Null",
-                "for ($i = 0; $i -lt 120; $i++) {",
-                "    if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { break }",
-                "    Start-Sleep -Milliseconds 500",
-                "}",
-                "$proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue",
-                "if ($proc) { Stop-Process -Id $pidToWait -Force }",
-                "$sourceItems = @(Get-ChildItem -LiteralPath $sourceDir -Force | Where-Object { $preserveNames -notcontains $_.Name })",
-                "$sourceNames = @($sourceItems | ForEach-Object { $_.Name })",
-                "try {",
-                "    Get-ChildItem -LiteralPath $appDir -Force | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
-                "        $backupTarget = if ($sourceNames -contains $_.Name) { $backupReplaceDir } else { $backupStaleDir }",
-                "        Move-Item -LiteralPath $_.FullName -Destination $backupTarget -Force",
-                "    }",
-                "    foreach ($item in $sourceItems) {",
-                "        Copy-Item -LiteralPath $item.FullName -Destination $appDir -Recurse -Force",
-                "    }",
-                (
-                    "    $started = Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
-                    if self._restart_in_tray
-                    else "    $started = Start-Process -FilePath $exePath -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
-                ),
-                "    Start-Sleep -Seconds 5",
-                "    if ($started.HasExited) {",
-                "        throw ('Updated application exited immediately with code ' + $started.ExitCode)",
-                "    }",
-                "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
-                "}",
-                "catch {",
-                "    Get-ChildItem -LiteralPath $appDir -Force -ErrorAction SilentlyContinue | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
-                "        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue",
-                "    }",
-                "    Get-ChildItem -LiteralPath $backupReplaceDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
-                "        Move-Item -LiteralPath $_.FullName -Destination $appDir -Force",
-                "    }",
-                "    Get-ChildItem -LiteralPath $backupStaleDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
-                "        Move-Item -LiteralPath $_.FullName -Destination $appDir -Force",
-                "    }",
-                (
-                    "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
-                    if self._restart_in_tray
-                    else "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
-                ),
-                "    New-Item -ItemType Directory -Path $logDir -Force | Out-Null",
-                "    ($_ | Out-String) | Set-Content -LiteralPath $errorLog -Encoding UTF8",
-                "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
-                "    throw",
-                "}",
-                "Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue",
-                "",
-            ])
+            script_text = _build_update_script(
+                current_pid=current_pid,
+                source_dir=source_dir,
+                app_dir=app_dir,
+                exe_name=exe_name,
+                tmp_dir=tmp_dir,
+                restart_in_tray=self._restart_in_tray,
+            )
             _write_utf8_bom_text(script, script_text)
 
             # Launch script and exit
