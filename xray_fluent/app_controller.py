@@ -1956,13 +1956,19 @@ class AppController(QObject):
                 if fetched.not_modified
                 else parsed.nodes
             )
+            stored_count = len(
+                [node for node in self.state.nodes if node.subscription_id == subscription.id]
+            )
             result = SubscriptionUpdateResult(
                 subscription_id=subscription.id,
                 success=True,
-                message=f"Проверка успешна: серверов {node_count}",
+                message=f"Проверка успешна: в подписке серверов {node_count}",
                 skipped=0 if parsed is None else parsed.skipped,
                 warnings=[] if parsed is None else list(parsed.warnings),
                 not_modified=fetched.not_modified,
+                check_only=True,
+                source_count=node_count,
+                stored_count=stored_count,
             )
             self.subscriptions_changed.emit(self.state.subscriptions)
             self.save()

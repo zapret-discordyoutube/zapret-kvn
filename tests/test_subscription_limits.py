@@ -65,3 +65,25 @@ class SubscriptionLimitFormatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckResultPresentationTests(unittest.TestCase):
+    """Проверка читает подписку и ничего не сохраняет, поэтому её результат
+    нельзя показывать теми же счётчиками, что и результат обновления."""
+
+    def test_check_reports_both_counts(self) -> None:
+        from xray_fluent.models import SubscriptionUpdateResult
+
+        result = SubscriptionUpdateResult(
+            subscription_id="s1",
+            success=True,
+            message="Проверка успешна: в подписке серверов 42",
+            check_only=True,
+            source_count=42,
+            stored_count=21,
+        )
+
+        self.assertTrue(result.check_only)
+        self.assertNotEqual(result.source_count, result.stored_count)
+        # Счётчики изменений у проверки бессмысленны и обязаны остаться нулевыми.
+        self.assertEqual((0, 0, 0), (result.added, result.updated, result.removed))

@@ -13,6 +13,7 @@ from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 from ... import win_netinfo
 from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from ...path_utils import resolve_configured_path
+from .config_check import check_config
 from ...subprocess_utils import (
     decode_output,
     kill_processes_by_path,
@@ -74,6 +75,16 @@ class SingBoxManager(QObject):
         SINGBOX_CONFIG_FILE.write_text(
             json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8"
         )
+
+        # Ядро отвергает негодную конфигурацию уже после старта процесса, печатая
+        # её причину в свой лог вперемешку с ANSI-кодами. Спросим его заранее,
+        # чтобы пользователь увидел, какое именно поле не принято.
+        config_ok, config_problem = check_config(exe, SINGBOX_CONFIG_FILE)
+        if not config_ok:
+            self.error.emit(config_problem)
+            return False
+        if config_problem:
+            self.log_received.emit(f"[singbox] {config_problem}")
 
         if self._process.state() != QProcess.ProcessState.NotRunning:
             if not self.stop(expected=True):

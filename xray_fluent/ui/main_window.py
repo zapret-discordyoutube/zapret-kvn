@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 from pathlib import Path
 import sys
 
@@ -420,7 +421,18 @@ class MainWindow(FluentWindow):
         self.subscriptions_page.set_updating(result.subscription_id, False)
         if result.success:
             message = result.message
-            if not result.not_modified:
+            if result.check_only:
+                # Проверка ничего не сохраняет: счётчики изменений у неё всегда
+                # нулевые, а расхождение с сохранённым списком выглядело как
+                # потерянные серверы.
+                if not result.not_modified and result.stored_count != result.source_count:
+                    message += (
+                        f"; сохранено {result.stored_count} — "
+                        "нажмите «Обновить», чтобы применить"
+                    )
+                if result.skipped:
+                    message += f"; пропущено {result.skipped}"
+            elif not result.not_modified:
                 message += (
                     f"; добавлено {result.added}, обновлено {result.updated}, "
                     f"удалено {result.removed}, пропущено {result.skipped}"

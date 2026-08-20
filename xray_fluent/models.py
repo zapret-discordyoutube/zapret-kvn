@@ -267,6 +267,12 @@ class SubscriptionUpdateResult:
     warnings: list[str] = field(default_factory=list)
     not_modified: bool = False
     reconnect_required: bool = False
+    #: Проверка только читает подписку и ничего не сохраняет, поэтому счётчики
+    #: изменений у неё всегда нулевые и показывать их нельзя.
+    check_only: bool = False
+    #: Сколько серверов отдала подписка и сколько уже сохранено локально.
+    source_count: int = 0
+    stored_count: int = 0
 
 
 @dataclass(slots=True)
