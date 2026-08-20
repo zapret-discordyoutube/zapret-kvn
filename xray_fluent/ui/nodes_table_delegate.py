@@ -23,13 +23,26 @@ class NodesActivityDelegate(TableItemDelegate):
 
         super().paint(painter, option, index)
 
-        if index.column() == COL_NAME and bool(index.data(ACTIVE_ROLE)):
+        if (
+            index.column() == COL_NAME
+            and bool(index.data(ACTIVE_ROLE))
+            and not self._selection_indicator_visible(index)
+        ):
             self._paint_active_stripe(painter, option)
 
         if ping_busy:
             self._paint_spinner(painter, option)
         elif speed_progress is not None:
             self._paint_progress(painter, option, int(speed_progress))
+
+    def _selection_indicator_visible(self, index) -> bool:
+        # qfluentwidgets' TableItemDelegate draws its own selection pill on
+        # column 0 of selected rows (only while hscroll is at 0); painting the
+        # active stripe on top of it doubles the marker.
+        return (
+            index.row() in self.selectedRows
+            and self.parent().horizontalScrollBar().value() == 0
+        )
 
     @staticmethod
     def _paint_active_stripe(painter: QPainter, option) -> None:
@@ -39,8 +52,10 @@ class NodesActivityDelegate(TableItemDelegate):
             color = themeColor()
         except Exception:
             color = option.palette.color(QPalette.ColorRole.Highlight)
+        # x offset 4 matches the qfluentwidgets selection pill, so the marker
+        # keeps its position when the active row gets selected/deselected.
         stripe = QRect(
-            option.rect.left(),
+            option.rect.left() + 4,
             option.rect.top() + 6,
             _ACTIVE_STRIPE_WIDTH,
             option.rect.height() - 12,

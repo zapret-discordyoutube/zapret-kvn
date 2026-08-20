@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import QApplication, QHeaderView
 from xray_fluent.models import AppSettings, Node
 from xray_fluent.ui.nodes_filter_proxy import SORT_KEYS
 from xray_fluent.ui.nodes_page import _COLUMN_WIDTHS, _FLAG_ICON_SIZE, _ROW_HEIGHT, NodesPage
+from xray_fluent.ui.nodes_table_delegate import NodesActivityDelegate
 from xray_fluent.ui.nodes_table_model import (
     COL_ADDRESS,
     COL_NAME,
@@ -353,6 +354,32 @@ class NodesPageFlexLayoutTests(NodesPageViewTestCase):
         self.assertFalse(self.page._column_layout_timer.isActive())
         QTest.qWait(250)  # let any (wrongly) armed debounce timer fire
         self.assertEqual(prefs, [])
+
+
+class NodesActivityDelegateStripeTests(NodesPageViewTestCase):
+    """Active-node stripe must not double the qfluentwidgets selection pill."""
+
+    def test_stripe_yields_to_selection_pill(self) -> None:
+        self.page.set_nodes(
+            [Node(id="a", name="A", server="s.example", port=1, scheme="vless")]
+        )
+        delegate = self.page.table.itemDelegate()
+        self.assertIsInstance(delegate, NodesActivityDelegate)
+        index = self.page._proxy.index(0, COL_NAME)
+
+        # Unselected row: no pill, the stripe may paint.
+        self.assertFalse(delegate._selection_indicator_visible(index))
+
+        # Selected row at hscroll 0: qfluentwidgets paints its pill instead.
+        delegate.selectedRows.add(index.row())
+        self.assertTrue(delegate._selection_indicator_visible(index))
+
+        # qfluentwidgets hides the pill while scrolled horizontally, so the
+        # stripe must take over again.
+        bar = self.page.table.horizontalScrollBar()
+        bar.setRange(0, 100)
+        bar.setValue(50)
+        self.assertFalse(delegate._selection_indicator_visible(index))
 
 
 if __name__ == "__main__":
