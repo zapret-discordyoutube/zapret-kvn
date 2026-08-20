@@ -249,11 +249,18 @@ def _native_node(link: str, scheme: str, outbound: dict[str, Any], server: str, 
     )
 
 
+_KNOWN_SECURITY_MODES = frozenset({"none", "tls", "reality"})
+
+
 def _build_stream_settings(params: dict[str, str], default_network: str = "tcp", default_security: str = "none") -> dict[str, Any]:
     network = (_get_param(params, "type", "net", default=default_network or "tcp") or "tcp").lower()
     security = (_get_param(params, "security", "tls", default=default_security or "none") or "none").lower()
     if security == "none" and _get_param(params, "tls") == "tls":
         security = "tls"
+    if security not in _KNOWN_SECURITY_MODES:
+        # Неизвестный режим иначе прочитался бы как «без TLS», и ссылка,
+        # обещавшая шифрование, молча дала бы открытый канал.
+        raise LinkParseError(f"unsupported security mode: {security}")
 
     stream: dict[str, Any] = {
         "network": network,

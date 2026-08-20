@@ -27,6 +27,7 @@ from xray_fluent.diagnostics import export_diagnostics
 from xray_fluent.models import AppState, Node, Subscription
 from xray_fluent.qr_utils import QrDecodeError, decode_subscription_qr
 from xray_fluent.storage import StateStorage
+from xray_fluent.link_parser import LinkParseError, parse_single
 from xray_fluent.subscription_http import (
     SubscriptionFetchError,
     SubscriptionFetchResult,
@@ -393,6 +394,22 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         self.assertTrue(is_panel_compatible_hwid("aBc123XyZ0"))
         self.assertFalse(is_panel_compatible_hwid("short"))
         self.assertFalse(is_panel_compatible_hwid("has spaces inside"))
+
+
+    def test_vendor_specific_parameters_do_not_block_the_import(self) -> None:
+        # Панели добавляют собственные параметры быстрее, чем их можно перечислить:
+        # fm и vcn у 3x-ui появились после spx.
+        node = parse_single(
+            "vless://11111111-1111-1111-1111-111111111111@a.example:443"
+            "?security=tls&sni=a.example&spx=%2F&fm=%7B%22a%22%3A1%7D&vcn=1#Vendor"
+        )
+        self.assertEqual(node.outbound["protocol"], "vless")
+
+    def test_unknown_security_mode_is_refused(self) -> None:
+        with self.assertRaises(LinkParseError):
+            parse_single(
+                "vless://11111111-1111-1111-1111-111111111111@a.example:443?security=xtls#Bad"
+            )
 
     def test_interval_override_and_backoff(self) -> None:
         now = datetime.now(timezone.utc)
