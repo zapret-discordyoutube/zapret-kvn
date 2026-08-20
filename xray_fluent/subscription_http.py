@@ -17,6 +17,8 @@ from .models import Subscription
 
 
 MAX_SUBSCRIPTION_BYTES = 10 * 1024 * 1024
+_LOCALE_CODE = re.compile(r"[A-Za-z]{2,3}(?:[_-][A-Za-z0-9]{2,8})*")
+_PANEL_HWID = re.compile(r"[A-Za-z0-9=-]{10,64}")
 CLIENT_PROFILES = ("zapret", "happ", "incy", "v2raytun", "custom")
 _PROFILE_DEFAULT_USER_AGENTS = {
     "happ": "Happ/3.13.0",
@@ -148,45 +150,105 @@ def validate_hwid(value: str) -> str:
     return text
 
 
+def is_panel_compatible_hwid(value: str) -> bool:
+    """Проверить идентификатор по образцу Happ, который принимают панели.
+
+    Панель с лимитом устройств принимает латиницу, цифры, ``-`` и ``=`` длиной
+    10..64 символа. Идентификатор вне этого образца она молча игнорирует, и
+    лимит устройств перестаёт работать вместо явной ошибки, поэтому несовпадение
+    стоит показать пользователю до отправки.
+    """
+
+    return bool(_PANEL_HWID.fullmatch(str(value or "").strip()))
+
+
 def subscription_request_headers(subscription: Subscription) -> dict[str, str]:
+    """Собрать заголовки запроса подписки.
+
+    Имитация клиента должна совпадать с оригиналом, а не быть похожей: панели
+    сопоставляют запрос правилами по заголовкам, и лишний заголовок выдаёт
+    подделку не хуже отсутствующего. Набор Happ снят с реального клиента — там
+    нет ни ``Accept``, ни ``X-App-Version``, а локаль короткая (``ru``).
+    """
+
     profile = normalize_client_profile(subscription.client_profile)
     user_agent = subscription.user_agent.strip() or profile_default_user_agent(profile)
     headers = {
-        "Accept": "text/plain, application/json;q=0.9, */*;q=0.5",
         "Accept-Encoding": "identity",
         "User-Agent": _safe_header_value(user_agent, "User-Agent"),
     }
     app_version = {
-        "happ": "3.13.0",
         "incy": "1.0",
         "v2raytun": "2.3.5",
     }.get(profile, APP_VERSION)
-    if profile in {"happ", "incy", "v2raytun"}:
+    if profile in {"incy", "v2raytun"}:
         headers["Accept"] = "*/*"
         headers["X-App-Version"] = app_version
+    elif profile != "happ":
+        headers["Accept"] = "text/plain, application/json;q=0.9, */*;q=0.5"
     if profile == "incy":
         headers["X-Client"] = "INCY"
-        headers["X-Device-Locale"] = _device_locale()
+        headers["X-Device-Locale"] = _safe_header_value(_device_locale(), "X-Device-Locale")
     if subscription.send_hwid:
         hwid = validate_hwid(subscription.hwid)
         headers.update(
             {
                 "X-HWID": hwid,
                 "X-Device-OS": "Windows",
-                "X-Ver-OS": platform.release() or "Windows",
-                "X-Device-Model": platform.machine() or "Desktop",
+                "X-Ver-OS": _safe_header_value(platform.release() or "Windows", "X-Ver-OS"),
+                "X-Device-Model": _safe_header_value(
+                    platform.machine() or "Desktop", "X-Device-Model"
+                ),
             }
         )
         if profile == "incy":
             headers["X-Device-ID"] = hwid
         if profile == "happ":
-            headers["X-Device-Locale"] = _device_locale()
+            headers["X-Device-Locale"] = _safe_header_value(
+                _short_locale(_device_locale()), "X-Device-Locale"
+            )
     return headers
 
 
 def _device_locale() -> str:
+    """Вернуть локаль в форме ``ru-RU``.
+
+    На Windows ``locale.getlocale()`` отдаёт человекочитаемое имя вида
+    ``Russian_Russia``, которое ни один клиент в заголовок не пишет, поэтому
+    оно переводится в код языка через таблицу ``locale.windows_locale``.
+    """
+
     value = locale.getlocale()[0] or "ru_RU"
+    if not _LOCALE_CODE.fullmatch(value):
+        value = _windows_locale_code(value) or "ru_RU"
     return value.replace("_", "-")
+
+
+def _windows_locale_code(value: str) -> str | None:
+    """Перевести ``Russian_Russia`` в ``ru_RU`` через таблицу псевдонимов locale.
+
+    Полное имя в таблице обычно отсутствует, поэтому запасной путь — имя языка:
+    регион при этом может огрубиться (``English_United States`` -> ``en_EN``),
+    но Happ всё равно берёт из локали только язык.
+    """
+
+    text = value.strip()
+    for candidate in (text, text.split("_")[0]):
+        if not candidate:
+            continue
+        try:
+            normalized = locale.normalize(candidate).split(".")[0]
+        except (TypeError, ValueError):
+            continue
+        if normalized and _LOCALE_CODE.fullmatch(normalized):
+            return normalized
+    return None
+
+
+def _short_locale(value: str) -> str:
+    """Happ передаёт только язык: ``ru``, а не ``ru-RU``."""
+
+    return value.split("-")[0].split("_")[0] or "ru"
 
 
 def _safe_header_value(value: str, name: str) -> str:
@@ -219,6 +281,19 @@ def describe_http_failure(status: int, headers: dict[str, str]) -> str:
         return (
             "Провайдер требует идентификатор устройства (HWID). "
             "Включите отправку HWID в настройках подписки"
+        )
+    if status == 403:
+        # Панели сопоставляют запрос правилами по заголовкам и отвечают 403, когда
+        # ни одно правило не подошло либо сработало правило блокировки клиента.
+        # Cloudflare перед панелью отдаёт тот же код, но со своей HTML-страницей.
+        if "cf-ray" in normalized or "cf-mitigated" in normalized:
+            return (
+                "Защита сайта провайдера отклонила запрос (HTTP 403). "
+                "Попробуйте обновить подписку через прокси"
+            )
+        return (
+            "Провайдер отклонил запрос клиента (HTTP 403). "
+            "Смените профиль клиента или User-Agent в настройках подписки"
         )
     return f"HTTP {status}"
 

@@ -46,6 +46,7 @@ from ..subscription_http import (
     normalize_client_profile,
     profile_default_user_agent,
     resolve_subscription_source,
+    is_panel_compatible_hwid,
     validate_hwid,
 )
 from ..subscription_parser import validate_filter_patterns
@@ -335,6 +336,14 @@ class SubscriptionEditPage(DetailPage):
                 self._set_client_profile(profile_hint)
             if self.send_hwid_check.isChecked() and self.hwid_edit.text().strip():
                 validate_hwid(self.hwid_edit.text())
+                if not is_panel_compatible_hwid(self.hwid_edit.text()):
+                    # Панель принимает идентификатор только по образцу Happ, а
+                    # непохожий молча игнорирует: лимит устройств тогда не работает,
+                    # и пользователь узнаёт об этом лишь по отсутствию эффекта.
+                    raise ValueError(
+                        "HWID должен состоять из латиницы, цифр, «-» и «=» "
+                        "длиной от 10 до 64 символов"
+                    )
             validate_filter_patterns(self.include_edit.text().strip(), self.exclude_edit.text().strip())
         except Exception as exc:
             # The form stays open so the entered URL is not lost — the modal

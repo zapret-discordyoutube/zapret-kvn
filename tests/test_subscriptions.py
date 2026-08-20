@@ -31,8 +31,13 @@ from xray_fluent.subscription_http import (
     SubscriptionFetchError,
     SubscriptionFetchResult,
     _SafeRedirectHandler,
+    _device_locale,
+    _short_locale,
+    _windows_locale_code,
     default_subscription_user_agent,
+    describe_http_failure,
     fetch_subscription,
+    is_panel_compatible_hwid,
     mask_subscription_url,
     resolve_subscription_source,
     sanitize_fetch_error,
@@ -352,12 +357,42 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         self.assertNotIn("X-Real-IP", headers)
         self.assertNotIn("X-Forwarded-For", headers)
 
+        # Набор Happ снят с реального клиента: лишний заголовок выдаёт подделку
+        # панели не хуже отсутствующего, поэтому Accept и X-App-Version не шлём.
+        happ = subscription_request_headers(
+            Subscription(client_profile="happ", send_hwid=True, hwid="DEVICE-ID-123")
+        )
+        self.assertEqual(happ["User-Agent"], "Happ/3.13.0")
+        self.assertNotIn("X-App-Version", happ)
+        self.assertNotIn("Accept", happ)
+        self.assertEqual(happ["X-Device-Locale"], _short_locale(_device_locale()))
+        self.assertNotIn("-", happ["X-Device-Locale"])
+
         with self.assertRaises(SubscriptionFetchError):
             subscription_request_headers(Subscription(user_agent="bad\r\nInjected: yes"))
         with self.assertRaises(SubscriptionFetchError):
             subscription_request_headers(
                 Subscription(send_hwid=True, hwid="bad\nvalue")
             )
+
+
+    def test_windows_locale_name_becomes_a_language_code(self) -> None:
+        # На Windows locale.getlocale() отдаёт Russian_Russia, которое ни один
+        # клиент в заголовок не пишет.
+        self.assertEqual(_windows_locale_code("Russian_Russia"), "ru_RU")
+        self.assertEqual(_short_locale("ru-RU"), "ru")
+
+    def test_forbidden_is_explained_and_separates_the_site_protection(self) -> None:
+        panel = describe_http_failure(403, {})
+        self.assertIn("профиль клиента", panel)
+        protected = describe_http_failure(403, {"CF-Ray": "abc"})
+        self.assertIn("прокси", protected)
+
+    def test_panel_compatible_hwid_follows_the_happ_format(self) -> None:
+        self.assertTrue(is_panel_compatible_hwid("aaaaaaaaa-537f-4c45-a479-ee0b6cf035f7"))
+        self.assertTrue(is_panel_compatible_hwid("aBc123XyZ0"))
+        self.assertFalse(is_panel_compatible_hwid("short"))
+        self.assertFalse(is_panel_compatible_hwid("has spaces inside"))
 
     def test_interval_override_and_backoff(self) -> None:
         now = datetime.now(timezone.utc)
