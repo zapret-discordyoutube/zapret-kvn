@@ -758,10 +758,13 @@ class AwgOddHexValidationTests(unittest.TestCase):
         problem = validate_node_outbound(self._awg_node(i1="<b 0xf6ab5>"))
         self.assertEqual(problem, "AWG: нечётное число hex-символов в I1.")
 
+        # j1-j3 удалены из схемы amnezia ядра 2.6.x: любое значение —
+        # неподдерживаемый ключ ещё до проверки hex-тегов.
         problem = validate_node_outbound(
             self._awg_node(j2="<b 0xaa><b 0xbbb>")
         )
-        self.assertEqual(problem, "AWG: нечётное число hex-символов в J2.")
+        self.assertIsNotNone(problem)
+        self.assertIn("не поддерживается ядром", problem)
 
     def test_fac5_even_or_absent_hex_passes(self) -> None:
         self.assertIsNone(validate_node_outbound(self._awg_node(i1="<b 0xf6ab5b>")))

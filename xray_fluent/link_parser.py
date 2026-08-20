@@ -473,6 +473,12 @@ def validate_node_outbound(node: Node) -> str | None:
                         _wg_uint32_range(str(value), key)
                     except LinkParseError as exc:
                         return f"Сервер {node_label}: {exc}"
+                for key in _AMNEZIA_REMOVED_KEYS:
+                    if amnezia.get(key) not in (None, ""):
+                        return (
+                            f"Сервер {node_label}: параметр amnezia `{key}` "
+                            "не поддерживается ядром sing-box extended 2.6.x."
+                        )
                 # Нечётное число hex-символов в тегах <b 0x...> валидно для
                 # `sing-box check`, но роняет рантайм (IPC error -22).
                 for key in _AMNEZIA_STR_KEYS:
@@ -928,15 +934,18 @@ def _parse_http_proxy(link: str) -> Node:
     )
 
 
-_AMNEZIA_INT_KEYS = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "itime")
+_AMNEZIA_INT_KEYS = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4")
 _AMNEZIA_INT_OR_STR_KEYS = ("h1", "h2", "h3", "h4")
-_AMNEZIA_STR_KEYS = ("i1", "i2", "i3", "i4", "i5", "j1", "j2", "j3")
+_AMNEZIA_STR_KEYS = ("i1", "i2", "i3", "i4", "i5")
+# Схема amnezia ядра sing-box extended 2.6.x больше не содержит j1-j3 и
+# itime (надстройки AWG 1.5): строгий JSON-декодер ядра отверг бы весь
+# профиль с такими ключами, поэтому импорт честно отказывает сразу.
+_AMNEZIA_REMOVED_KEYS = ("j1", "j2", "j3", "itime")
 
 # AWG 3.0: .conf-ключ (в нижнем регистре) -> поле объекта ``amnezia`` sing-box
 # extended (schema 2.6.x, snake_case). Без переноса этих строк импортированный
 # профиль формально валиден, но сервер AWG 3.0 не отвечает на рукопожатие.
 _AMNEZIA_AWG3_CONF_NAMES = {
-    "headerprotectionkey": "HeaderProtectionKey",
     "contentpaddingaddition": "ContentPaddingAddition",
     "rekeyaftertime": "RekeyAfterTime",
     "rekeytimeout": "RekeyTimeout",
@@ -1011,7 +1020,10 @@ def _wg_header_protection_key(value: str) -> str:
 def _wg_uint32_range(value: str, field: str) -> int | str:
     """AWG 3.0 диапазон: одно число или "A-B" в пределах uint32, A <= B."""
     text = str(value or "").strip()
-    if text.isdigit():
+    # Только ASCII-цифры: str.isdigit() пропускает надстрочные и обведённые
+    # юникод-символы, на которых int() бросает сырое ValueError мимо
+    # LinkParseError-контракта валидатора.
+    if re.fullmatch(r"[0-9]+", text):
         number = int(text)
         if number > _AWG_UINT32_MAX:
             raise LinkParseError(f"слишком большое значение в поле {field}: {value}")
@@ -1044,6 +1056,12 @@ def _parse_amnezia_params(interface: dict[str, str]) -> dict[str, Any]:
     for key in _AMNEZIA_STR_KEYS:
         if key in interface:
             amnezia[key] = interface[key].strip()
+    for key in _AMNEZIA_REMOVED_KEYS:
+        if key in interface and interface[key].strip():
+            raise LinkParseError(
+                f"параметр {key.upper()} не поддерживается ядром sing-box "
+                "extended 2.6.x (AWG 1.5-надстройка удалена из схемы amnezia)"
+            )
     if "headerprotectionkey" in interface:
         amnezia["header_protection_key"] = _wg_header_protection_key(
             interface["headerprotectionkey"]

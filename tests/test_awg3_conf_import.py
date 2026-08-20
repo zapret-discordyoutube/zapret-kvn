@@ -122,6 +122,28 @@ class TestAwg3ConfImport(unittest.TestCase):
             self.assertEqual(len(errors), 1, f"{field}={bad}")
             self.assertIn(field, errors[0])
 
+    def test_unicode_digits_give_domain_error_not_valueerror(self) -> None:
+        nodes, errors = parse_links_text(_conf(RekeyTimeout="²"))
+        self.assertEqual(nodes, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("RekeyTimeout", errors[0])
+        # И в валидаторе сырых JSON-узлов ValueError не протекает наружу.
+        ok_nodes, ok_errors = parse_links_text(FIXTURE_AWG3_CONF)
+        self.assertEqual(ok_errors, [])
+        node = ok_nodes[0]
+        node.outbound["amnezia"]["rekey_timeout"] = "²"
+        message = validate_node_outbound(node)
+        self.assertIsNotNone(message)
+        self.assertIn("rekey_timeout", message)
+
+    def test_removed_awg15_keys_are_rejected_explicitly(self) -> None:
+        for extra in ("Itime = 120", "J1 = <b 0xf6ab5b>"):
+            conf = FIXTURE_AWG3_CONF.replace("[Peer]", extra + "\n\n[Peer]")
+            nodes, errors = parse_links_text(conf)
+            self.assertEqual(nodes, [], extra)
+            self.assertEqual(len(errors), 1, extra)
+            self.assertIn("не поддерживается ядром", errors[0])
+
     def test_json_validator_checks_generation3_values(self) -> None:
         nodes, errors = parse_links_text(FIXTURE_AWG3_CONF)
         self.assertEqual(errors, [])
