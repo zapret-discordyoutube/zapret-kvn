@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import re
 from typing import Any
@@ -453,6 +454,25 @@ def validate_node_outbound(node: Node) -> str | None:
                     value = amnezia.get(key)
                     if value is not None and not isinstance(value, int):
                         return f"Сервер {node_label}: параметр amnezia `{key}` должен быть числом."
+                hpk = amnezia.get("header_protection_key")
+                if hpk is not None:
+                    try:
+                        _wg_header_protection_key(str(hpk))
+                    except LinkParseError as exc:
+                        return f"Сервер {node_label}: {exc}"
+                for key in _AMNEZIA_JSON_RANGE_KEYS:
+                    value = amnezia.get(key)
+                    if value is None:
+                        continue
+                    if isinstance(value, bool) or not isinstance(value, (int, str)):
+                        return (
+                            f"Сервер {node_label}: параметр amnezia `{key}` должен "
+                            "быть числом или диапазоном \"A-B\"."
+                        )
+                    try:
+                        _wg_uint32_range(str(value), key)
+                    except LinkParseError as exc:
+                        return f"Сервер {node_label}: {exc}"
                 # Нечётное число hex-символов в тегах <b 0x...> валидно для
                 # `sing-box check`, но роняет рантайм (IPC error -22).
                 for key in _AMNEZIA_STR_KEYS:
@@ -912,6 +932,31 @@ _AMNEZIA_INT_KEYS = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "itime")
 _AMNEZIA_INT_OR_STR_KEYS = ("h1", "h2", "h3", "h4")
 _AMNEZIA_STR_KEYS = ("i1", "i2", "i3", "i4", "i5", "j1", "j2", "j3")
 
+# AWG 3.0: .conf-ключ (в нижнем регистре) -> поле объекта ``amnezia`` sing-box
+# extended (schema 2.6.x, snake_case). Без переноса этих строк импортированный
+# профиль формально валиден, но сервер AWG 3.0 не отвечает на рукопожатие.
+_AMNEZIA_AWG3_CONF_NAMES = {
+    "headerprotectionkey": "HeaderProtectionKey",
+    "contentpaddingaddition": "ContentPaddingAddition",
+    "rekeyaftertime": "RekeyAfterTime",
+    "rekeytimeout": "RekeyTimeout",
+    "rejectaftertime": "RejectAfterTime",
+    "keepalivetimeout": "KeepaliveTimeout",
+    "maxhandshakeattempts": "MaxHandshakeAttempts",
+}
+_AMNEZIA_AWG3_RANGE_KEYS = {
+    "contentpaddingaddition": "content_padding_addition",
+    "rekeyaftertime": "rekey_after_time",
+    "rekeytimeout": "rekey_timeout",
+    "rejectaftertime": "reject_after_time",
+    "keepalivetimeout": "keepalive_timeout",
+    "maxhandshakeattempts": "max_handshake_attempts",
+}
+# Поля snake_case, которые ядро принимает как число или диапазон "A-B".
+_AMNEZIA_JSON_RANGE_KEYS = tuple(_AMNEZIA_AWG3_RANGE_KEYS.values())
+_AWG_UINT32_MAX = 0xFFFFFFFF
+_AWG_RANGE_RE = re.compile(r"^(\d+)-(\d+)$")
+
 # Тег <b 0xHEX> внутри amnezia i1..i5 / j1..j3.
 _AWG_BYTES_TAG_RE = re.compile(r"<b\s+0x([0-9A-Fa-f]*)>")
 
@@ -942,6 +987,48 @@ def _split_endpoint(value: str) -> tuple[str, int]:
     return host, _wg_int(port_text, "Endpoint")
 
 
+def _wg_header_protection_key(value: str) -> str:
+    """Строгая проверка HeaderProtectionKey: base64 ровно 32 байт.
+
+    Ключ обязан совпадать на обоих концах; молча пропущенное или искажённое
+    значение означает мёртвый туннель без внятной ошибки, поэтому проверяем
+    при импорте, а не оставляем ядру.
+    """
+    text = str(value or "").strip()
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise LinkParseError(
+            f"некорректный HeaderProtectionKey: не base64 ({value})"
+        ) from exc
+    if len(raw) != 32:
+        raise LinkParseError(
+            f"некорректный HeaderProtectionKey: {len(raw)} байт вместо 32"
+        )
+    return text
+
+
+def _wg_uint32_range(value: str, field: str) -> int | str:
+    """AWG 3.0 диапазон: одно число или "A-B" в пределах uint32, A <= B."""
+    text = str(value or "").strip()
+    if text.isdigit():
+        number = int(text)
+        if number > _AWG_UINT32_MAX:
+            raise LinkParseError(f"слишком большое значение в поле {field}: {value}")
+        return number
+    match = _AWG_RANGE_RE.fullmatch(text)
+    if match is None:
+        raise LinkParseError(
+            f"некорректный диапазон в поле {field}: {value} (ожидается число или A-B)"
+        )
+    low, high = int(match.group(1)), int(match.group(2))
+    if high > _AWG_UINT32_MAX:
+        raise LinkParseError(f"слишком большое значение в поле {field}: {value}")
+    if low > high:
+        raise LinkParseError(f"перевёрнутый диапазон в поле {field}: {value}")
+    return f"{low}-{high}"
+
+
 def _parse_amnezia_params(interface: dict[str, str]) -> dict[str, Any]:
     amnezia: dict[str, Any] = {}
     for key in _AMNEZIA_INT_KEYS:
@@ -957,6 +1044,15 @@ def _parse_amnezia_params(interface: dict[str, str]) -> dict[str, Any]:
     for key in _AMNEZIA_STR_KEYS:
         if key in interface:
             amnezia[key] = interface[key].strip()
+    if "headerprotectionkey" in interface:
+        amnezia["header_protection_key"] = _wg_header_protection_key(
+            interface["headerprotectionkey"]
+        )
+    for conf_key, json_key in _AMNEZIA_AWG3_RANGE_KEYS.items():
+        if conf_key in interface:
+            amnezia[json_key] = _wg_uint32_range(
+                interface[conf_key], _AMNEZIA_AWG3_CONF_NAMES[conf_key]
+            )
     return amnezia
 
 
