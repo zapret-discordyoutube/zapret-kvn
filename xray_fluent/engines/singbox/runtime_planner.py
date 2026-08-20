@@ -306,6 +306,7 @@ def _plan_runtime_outbound(
         proxy_endpoint = build_singbox_outbound(node, tag="proxy")
         assert isinstance(outbounds, list)
         del outbounds[proxy_index]
+        ensure_awg3_windows_bind_workaround(runtime_config, proxy_endpoint)
         _replace_or_append_tagged(_ensure_list(runtime_config, "endpoints"), "proxy", proxy_endpoint)
         _ensure_proxy_server_bootstrap_contract(runtime_config, proxy_endpoint, node.server)
         # Обычный WireGuard обязан уважать первый DNS из .conf. Только AWG
@@ -845,6 +846,52 @@ def _ensure_singbox_proxy_runtime_contract(
         ]
     )
     return selection
+
+
+#: Тег служебного direct-outbound, через который AWG 3.0 обходит дефолтный
+#: Windows-bind ядра (см. ensure_awg3_windows_bind_workaround).
+AWG3_DIRECT_DETOUR_TAG = "awg3-direct"
+
+
+def endpoint_needs_windows_bind_workaround(endpoint: dict[str, Any]) -> bool:
+    """AWG 3.0 (защита заголовков) на Windows требует обхода дефолтного bind.
+
+    В sing-box extended 2.6.5 дефолтный Windows-bind (WinRingBind) обнуляет
+    байты 1-3 каждого принятого UDP-пакета: у обычного WireGuard там всегда
+    нули (старшие байты типа сообщения), у AWG 2.0 это безобидный мусорный
+    паддинг, а у AWG 3.0 ровно эти байты входят в 12-байтовую соль шифра
+    защиты заголовка. Соль расходится с отправителем, заголовок
+    расшифровывается в мусор, и ядро молча отбрасывает ответ сервера
+    ("received message with unknown type") — туннель не поднимается никогда.
+
+    Ядро выбирает дефолтный bind только когда диалер endpoint'а является
+    системным WireGuardListener; с любым detour используется ClientBind,
+    свободный от этого дефекта.
+    """
+    amnezia = endpoint.get("amnezia")
+    if not isinstance(amnezia, dict):
+        return False
+    return bool(str(amnezia.get("header_protection_key") or "").strip())
+
+
+def ensure_awg3_windows_bind_workaround(
+    runtime_config: dict[str, Any], endpoint: dict[str, Any]
+) -> bool:
+    """Направить AWG 3.0-endpoint через direct-detour. Возвращает True, если применено."""
+
+    if not endpoint_needs_windows_bind_workaround(endpoint):
+        return False
+    if str(endpoint.get("detour") or "").strip():
+        # Пользовательский detour уже уводит endpoint с дефолтного bind.
+        return False
+    outbounds = _ensure_list(runtime_config, "outbounds")
+    if not any(
+        isinstance(item, dict) and item.get("tag") == AWG3_DIRECT_DETOUR_TAG
+        for item in outbounds
+    ):
+        outbounds.append({"type": "direct", "tag": AWG3_DIRECT_DETOUR_TAG})
+    endpoint["detour"] = AWG3_DIRECT_DETOUR_TAG
+    return True
 
 
 def endpoint_proxy_dns_policy(endpoint: dict[str, Any]) -> EndpointProxyDnsPolicy:
