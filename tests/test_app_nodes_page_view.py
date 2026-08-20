@@ -356,6 +356,56 @@ class NodesPageFlexLayoutTests(NodesPageViewTestCase):
         self.assertEqual(prefs, [])
 
 
+class NodesActiveRowFillSeamTests(NodesPageViewTestCase):
+    """The translucent active-row fill must not double up at column edges."""
+
+    def test_fill_has_no_alpha_doubling_at_column_boundaries(self) -> None:
+        nodes = [
+            Node(id=f"n{i}", name=f"Node {i}", server=f"s{i}.example", port=443, scheme="vless")
+            for i in range(6)
+        ]
+        self.page.set_nodes(nodes)
+        self.page._table_model.set_active_node_id("n2")
+        self.page.resize(1000, 400)
+        self.page.show()
+        _APP.processEvents()
+
+        table = self.page.table
+        proxy = self.page._proxy
+        row = next(
+            r for r in range(proxy.rowCount()) if proxy.index(r, 0).data(NODE_ID_ROLE) == "n2"
+        )
+        rect = table.visualRect(proxy.index(row, 0))
+        image = table.viewport().grab().toImage()
+
+        header = table.horizontalHeader()
+        boundaries = [
+            header.sectionPosition(col)
+            for col in range(header.count())
+            if not header.isSectionHidden(col)
+            and 0 < header.sectionPosition(col) < image.width() - 8
+        ]
+        self.assertTrue(boundaries)
+
+        # Scan just inside the fill's top edge, above flag icons and glyphs.
+        y = rect.top() + 4
+        reference = image.pixelColor(boundaries[0] // 2, y)
+        for boundary in boundaries:
+            for x in range(boundary - 6, boundary + 7):
+                color = image.pixelColor(x, y)
+                deviation = max(
+                    abs(color.red() - reference.red()),
+                    abs(color.green() - reference.green()),
+                    abs(color.blue() - reference.blue()),
+                )
+                self.assertLessEqual(
+                    deviation,
+                    3,
+                    f"seam at x={x} near boundary {boundary}: "
+                    f"{color.getRgb()} vs {reference.getRgb()}",
+                )
+
+
 class NodesActivityDelegateStripeTests(NodesPageViewTestCase):
     """Active-node stripe must not double the qfluentwidgets selection pill."""
 

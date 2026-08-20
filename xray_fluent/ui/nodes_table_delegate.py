@@ -66,24 +66,29 @@ class NodesActivityDelegate(TableItemDelegate):
         return first, last
 
     def _paint_active_row_fill(self, painter: QPainter, option, index, color: QColor) -> None:
-        """Soft accent fill under the whole active row, rounded at row edges (D5)."""
+        """Soft accent fill under the whole active row, rounded at row edges (D5).
+
+        Each cell paints its own segment clipped exactly to the cell rect:
+        the rounded rect extends past interior edges but the clip cuts it
+        flush, so translucent segments never overlap (overlap doubles the
+        alpha and shows as bright seams at column boundaries).
+        """
         painter.save()
+        painter.setClipRect(option.rect, Qt.ClipOperation.IntersectClip)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         radius = _ACTIVE_FILL_RADIUS
         first, last = self._row_fill_span(index)
-        rect = option.rect
-        # Edge insets follow qfluentwidgets' TableItemDelegate._drawBackground
-        # so the fill lines up with the stock selection/hover background.
-        if first and last:
-            painter.drawRoundedRect(rect.adjusted(4, 0, -4, 0), radius, radius)
-        elif first:
-            painter.drawRoundedRect(rect.adjusted(4, 0, radius + 1, 0), radius, radius)
-        elif last:
-            painter.drawRoundedRect(rect.adjusted(-radius - 1, 0, -4, 0), radius, radius)
-        else:
-            painter.drawRect(rect.adjusted(-1, 0, 1, 0))
+        # Vertical inset and 4px row-edge insets follow qfluentwidgets'
+        # TableItemDelegate so the fill lines up with the stock selection
+        # and hover backgrounds.
+        rect = option.rect.adjusted(0, self.margin, 0, -self.margin)
+        left = rect.left() + 4 if first else rect.left() - radius - 1
+        right = rect.right() - 4 if last else rect.right() + radius + 1
+        painter.drawRoundedRect(
+            QRect(left, rect.top(), right - left + 1, rect.height()), radius, radius
+        )
         painter.restore()
 
     def _selection_indicator_visible(self, index) -> bool:
