@@ -15,7 +15,9 @@ from xray_fluent.ui.nodes_table_model import (
     COL_SPEED,
     COL_TAGS,
     COL_TYPE,
+    COLUMN_BY_KEY,
     COLUMN_KEYS,
+    COLUMN_SPECS,
     DEFAULT_VISIBLE_COLUMNS,
     NODE_ID_ROLE,
     PING_BUSY_ROLE,
@@ -345,6 +347,30 @@ class NodesTableModelTests(unittest.TestCase):
 
         self.assertEqual(self.model.index(0, COL_SOURCE).data(Qt.ItemDataRole.DisplayRole), "Локальные")
         self.assertEqual(self.model.index(1, COL_SOURCE).data(Qt.ItemDataRole.DisplayRole), "Provider")
+
+
+class ColumnSpecsTests(unittest.TestCase):
+    """AC7: generous maximum widths; "name" stays the single flex column."""
+
+    def test_maximum_widths_match_flex_layout_spec(self) -> None:
+        expected = {
+            "type": 200,
+            "address": 1000,
+            "group": 800,
+            "tags": 1000,
+            "ping": 240,
+            "speed": 300,
+            "last_used": 480,
+            "source": 1000,
+        }
+        for key, maximum in expected.items():
+            self.assertEqual(
+                COLUMN_BY_KEY[key].maximum_width, maximum, f"maximum_width of {key}"
+            )
+
+    def test_name_is_the_single_flex_column(self) -> None:
+        flex = [spec.key for spec in COLUMN_SPECS if spec.stretch]
+        self.assertEqual(flex, ["name"])
 
 
 if __name__ == "__main__":

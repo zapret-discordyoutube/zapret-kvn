@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal, QSize
 from PyQt6.QtGui import QCursor, QKeyEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView,
@@ -272,14 +272,12 @@ class NodesPage(StackedSection):
             min(spec.minimum_width for spec in COLUMN_SPECS)
         )
         for col, spec in enumerate(COLUMN_SPECS):
-            mode = (
-                QHeaderView.ResizeMode.Stretch
-                if spec.stretch
-                else QHeaderView.ResizeMode.Interactive
+            # All columns are Interactive; the "name" flex column is sized by
+            # _relayout_flex_column() to absorb the leftover viewport width.
+            horizontal_header.setSectionResizeMode(
+                col, QHeaderView.ResizeMode.Interactive
             )
-            horizontal_header.setSectionResizeMode(col, mode)
-            if not spec.stretch:
-                horizontal_header.resizeSection(col, spec.default_width)
+            horizontal_header.resizeSection(col, spec.default_width)
         horizontal_header.setSectionsClickable(True)
         horizontal_header.setSectionsMovable(True)
         horizontal_header.sectionClicked.connect(self._on_header_clicked)
@@ -298,6 +296,11 @@ class NodesPage(StackedSection):
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
         self._apply_column_visibility(DEFAULT_VISIBLE_COLUMNS)
+
+        # Recompute the flex column whenever the table viewport is resized.
+        viewport = self.table.viewport()
+        if viewport is not None:
+            viewport.installEventFilter(self)
 
         self._activity_delegate = NodesActivityDelegate(self.table)
         self.table.setItemDelegate(self._activity_delegate)
@@ -452,6 +455,7 @@ class NodesPage(StackedSection):
             self._apply_column_widths(widths)
             self._apply_column_order(order)
             self._apply_column_visibility(columns or DEFAULT_VISIBLE_COLUMNS)
+            self._relayout_flex_column()
 
             self._pending_group_filter = getattr(settings, "nodes_group_filter", "") or None
             self._pending_tag_filter = getattr(settings, "nodes_tag_filter", "") or None
@@ -682,8 +686,56 @@ class NodesPage(StackedSection):
         spec = COLUMN_BY_KEY[key]
         return max(spec.minimum_width, min(spec.maximum_width, int(width)))
 
-    def _apply_column_widths(self, widths: dict[str, int]) -> None:
+    def _resize_section_quietly(self, col: int, width: int) -> None:
+        """Programmatic resizeSection guarded against the sectionResized handler."""
+        previous = self._adjusting_column_width
+        self._adjusting_column_width = True
+        try:
+            cast(QHeaderView, self.table.horizontalHeader()).resizeSection(col, width)
+        finally:
+            self._adjusting_column_width = previous
+
+    def _visible_columns_right_of(self, logical_index: int) -> list[int]:
+        """Visible logical columns to the right of ``logical_index`` in VISUAL order."""
         header = cast(QHeaderView, self.table.horizontalHeader())
+        columns: list[int] = []
+        for visual in range(header.visualIndex(logical_index) + 1, header.count()):
+            col = header.logicalIndex(visual)
+            if not self.table.isColumnHidden(col):
+                columns.append(col)
+        return columns
+
+    def _relayout_flex_column(self) -> None:
+        """Size "name" so the visible columns fill the viewport exactly.
+
+        width(name) = max(minimum, viewport - sum(other visible columns)).
+        When the minimums overflow the viewport, "name" stays at its minimum
+        and the horizontal scrollbar takes over (by design).
+        """
+        viewport = self.table.viewport()
+        if viewport is None:
+            return
+        viewport_width = viewport.width()
+        if viewport_width <= 0:
+            return
+        header = cast(QHeaderView, self.table.horizontalHeader())
+        others = sum(
+            header.sectionSize(col)
+            for col in range(len(COLUMN_SPECS))
+            if col != COL_NAME and not self.table.isColumnHidden(col)
+        )
+        target = max(
+            COLUMN_BY_KEY["name"].minimum_width, viewport_width - others
+        )
+        if header.sectionSize(COL_NAME) != target:
+            self._resize_section_quietly(COL_NAME, target)
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.table.viewport() and event.type() == QEvent.Type.Resize:
+            self._relayout_flex_column()
+        return super().eventFilter(obj, event)
+
+    def _apply_column_widths(self, widths: dict[str, int]) -> None:
         for col, spec in enumerate(COLUMN_SPECS):
             if spec.stretch:
                 continue
@@ -694,7 +746,7 @@ class NodesPage(StackedSection):
             except (TypeError, ValueError):
                 width = spec.default_width
             self._column_widths[spec.key] = width
-            header.resizeSection(col, width)
+            self._resize_section_quietly(col, width)
 
     def column_widths(self) -> dict[str, int]:
         return dict(self._column_widths)
@@ -720,24 +772,70 @@ class NodesPage(StackedSection):
         ]
 
     def _on_column_resized(
-        self, logical_index: int, _old_size: int, new_size: int
+        self, logical_index: int, old_size: int, new_size: int
     ) -> None:
         if self._adjusting_column_width or new_size <= 0:
             return
         if not 0 <= logical_index < len(COLUMN_SPECS):
             return
-        spec = COLUMN_SPECS[logical_index]
-        if spec.stretch or self.table.isColumnHidden(logical_index):
+        if self.table.isColumnHidden(logical_index):
             return
+        spec = COLUMN_SPECS[logical_index]
+        if spec.stretch:
+            self._on_flex_column_dragged(old_size, new_size)
+        else:
+            self._on_fixed_column_dragged(logical_index, spec, old_size, new_size)
+        self._queue_column_layout_save()
+
+    def _on_fixed_column_dragged(
+        self, logical_index: int, spec, old_size: int, new_size: int
+    ) -> None:
+        """User drag of a non-flex column: "name" absorbs the opposite delta."""
         width = self._clamp_column_width(spec.key, new_size)
         if width != new_size:
-            self._adjusting_column_width = True
-            try:
-                self.table.horizontalHeader().resizeSection(logical_index, width)
-            finally:
-                self._adjusting_column_width = False
+            self._resize_section_quietly(logical_index, width)
         self._column_widths[spec.key] = width
-        self._queue_column_layout_save()
+        delta = width - old_size
+        if not delta:
+            return
+        header = cast(QHeaderView, self.table.horizontalHeader())
+        name_current = header.sectionSize(COL_NAME)
+        name_target = max(COLUMN_BY_KEY["name"].minimum_width, name_current - delta)
+        if name_target != name_current:
+            self._resize_section_quietly(COL_NAME, name_target)
+        # When "name" is already at its minimum the remaining delta stays:
+        # the sections overflow the viewport and horizontal scrolling kicks
+        # in — the user's drag is never rolled back.
+
+    def _on_flex_column_dragged(self, old_size: int, new_size: int) -> None:
+        """User drag of "name": push the delta to visible right neighbors.
+
+        The first visible neighbor to the right (visual order) absorbs the
+        delta, cascading further right on shortage; every neighbor is clamped
+        to its min/max. Whatever nobody absorbed clamps the drag itself.
+        """
+        header = cast(QHeaderView, self.table.horizontalHeader())
+        clamped = max(COLUMN_BY_KEY["name"].minimum_width, new_size)
+        remaining = clamped - old_size
+        if remaining:
+            for col in self._visible_columns_right_of(COL_NAME):
+                if not remaining:
+                    break
+                neighbor = COLUMN_SPECS[col]
+                current = header.sectionSize(col)
+                if remaining > 0:
+                    # "name" grew: shrink the neighbor down to its minimum.
+                    absorbed = min(remaining, max(0, current - neighbor.minimum_width))
+                else:
+                    # "name" shrank: grow the neighbor up to its maximum.
+                    absorbed = max(remaining, min(0, current - neighbor.maximum_width))
+                if absorbed:
+                    self._resize_section_quietly(col, current - absorbed)
+                    self._column_widths[neighbor.key] = current - absorbed
+                    remaining -= absorbed
+        target = clamped - remaining
+        if target != new_size:
+            self._resize_section_quietly(COL_NAME, target)
 
     def _on_column_moved(
         self, _logical_index: int, _old_visual_index: int, _new_visual_index: int
@@ -750,20 +848,34 @@ class NodesPage(StackedSection):
 
     def _apply_column_visibility(self, keys: list[str]) -> None:
         visible = set(keys) | {"name"}
-        for col, key in enumerate(COLUMN_KEYS):
-            self.table.setColumnHidden(col, key not in visible)
+        previous = self._adjusting_column_width
+        self._adjusting_column_width = True
+        try:
+            # Hiding/showing sections emits sectionResized; guard it so the
+            # drag-compensation handler does not treat it as a user drag.
+            for col, key in enumerate(COLUMN_KEYS):
+                self.table.setColumnHidden(col, key not in visible)
+        finally:
+            self._adjusting_column_width = previous
+        self._relayout_flex_column()
 
     def visible_column_keys(self) -> list[str]:
         return [key for col, key in enumerate(COLUMN_KEYS) if not self.table.isColumnHidden(col)]
 
     def _set_column_visible(self, col: int, visible: bool) -> None:
-        self.table.setColumnHidden(col, not visible)
-        if visible and 0 <= col < len(COLUMN_SPECS):
-            spec = COLUMN_SPECS[col]
-            if not spec.stretch:
-                self.table.horizontalHeader().resizeSection(
-                    col, self._column_widths[spec.key]
-                )
+        previous = self._adjusting_column_width
+        self._adjusting_column_width = True
+        try:
+            self.table.setColumnHidden(col, not visible)
+            if visible and 0 <= col < len(COLUMN_SPECS):
+                spec = COLUMN_SPECS[col]
+                if not spec.stretch:
+                    self.table.horizontalHeader().resizeSection(
+                        col, self._column_widths[spec.key]
+                    )
+        finally:
+            self._adjusting_column_width = previous
+        self._relayout_flex_column()
         self._emit_view_prefs()
 
     def _on_header_context_menu(self, pos) -> None:

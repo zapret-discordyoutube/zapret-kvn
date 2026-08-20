@@ -55,24 +55,26 @@ class NodeColumnSpec:
     maximum_width: int
     sort_key: str | None = None
     centered: bool = False
+    # The single flex column: it absorbs the leftover viewport width during
+    # the NodesPage relayout instead of using QHeaderView.ResizeMode.Stretch.
     stretch: bool = False
 
 
 # Logical order is stable for the model; visual order can be moved and saved.
-# Width limits prevent compact value columns from consuming the table while
-# keeping every non-name column interactively resizable.
+# Maximums are deliberately generous sanity bounds (persisted values clamp
+# against them); live layout is governed by the flex relayout in NodesPage.
 COLUMN_SPECS = (
     NodeColumnSpec("name", "Имя", True, 420, 180, 1600, "name", stretch=True),
-    NodeColumnSpec("type", "Тип", True, 58, 44, 96, "type", centered=True),
-    NodeColumnSpec("address", "Адрес", True, 190, 112, 420),
-    NodeColumnSpec("group", "Группа", False, 140, 80, 320, "group"),
-    NodeColumnSpec("tags", "Теги", False, 160, 90, 420),
-    NodeColumnSpec("ping", "Пинг", True, 82, 64, 120, "ping", centered=True),
-    NodeColumnSpec("speed", "Скорость", True, 106, 82, 150, "speed", centered=True),
+    NodeColumnSpec("type", "Тип", True, 58, 44, 200, "type", centered=True),
+    NodeColumnSpec("address", "Адрес", True, 190, 112, 1000),
+    NodeColumnSpec("group", "Группа", False, 140, 80, 800, "group"),
+    NodeColumnSpec("tags", "Теги", False, 160, 90, 1000),
+    NodeColumnSpec("ping", "Пинг", True, 82, 64, 240, "ping", centered=True),
+    NodeColumnSpec("speed", "Скорость", True, 106, 82, 300, "speed", centered=True),
     NodeColumnSpec(
-        "last_used", "Последнее использование", False, 156, 120, 260, "last_used"
+        "last_used", "Последнее использование", False, 156, 120, 480, "last_used"
     ),
-    NodeColumnSpec("source", "Источник", False, 150, 90, 360),
+    NodeColumnSpec("source", "Источник", False, 150, 90, 1000),
 )
 
 # Compatibility exports used throughout the app and in persisted settings.

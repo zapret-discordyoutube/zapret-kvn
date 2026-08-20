@@ -24,7 +24,10 @@ from xray_fluent.ui.nodes_filter_proxy import SORT_KEYS
 from xray_fluent.ui.nodes_page import _COLUMN_WIDTHS, _FLAG_ICON_SIZE, _ROW_HEIGHT, NodesPage
 from xray_fluent.ui.nodes_table_model import (
     COL_ADDRESS,
+    COL_NAME,
     COL_TYPE,
+    COLUMN_BY_KEY,
+    COLUMN_KEYS,
     DEFAULT_VISIBLE_COLUMNS,
     NODE_ID_ROLE,
 )
@@ -77,15 +80,26 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
     def test_columns_are_movable_and_user_resizable(self) -> None:
         header = self.page.table.horizontalHeader()
         self.assertTrue(header.sectionsMovable())
-        self.assertEqual(header.sectionResizeMode(COL_ADDRESS), QHeaderView.ResizeMode.Interactive)
+        # AC1: every column, including the "name" flex column, is Interactive;
+        # ResizeMode.Stretch is not used anywhere.
+        for col in range(header.count()):
+            self.assertEqual(
+                header.sectionResizeMode(col),
+                QHeaderView.ResizeMode.Interactive,
+                f"column {COLUMN_KEYS[col]} must be Interactive",
+            )
 
     def test_type_column_has_compact_default_width(self) -> None:
         self.assertEqual(_COLUMN_WIDTHS[COL_TYPE], 58)
 
     def test_type_column_is_clamped_to_compact_interactive_range(self) -> None:
+        # AC7: the live drag is clamped only by the generous sanity bounds
+        # (type: 44..200); values inside the range are never rolled back.
         header = self.page.table.horizontalHeader()
-        header.resizeSection(COL_TYPE, 200)
-        self.assertEqual(header.sectionSize(COL_TYPE), 96)
+        header.resizeSection(COL_TYPE, 150)
+        self.assertEqual(header.sectionSize(COL_TYPE), 150)
+        header.resizeSection(COL_TYPE, 300)
+        self.assertEqual(header.sectionSize(COL_TYPE), 200)
         header.resizeSection(COL_TYPE, 20)
         self.assertEqual(header.sectionSize(COL_TYPE), 44)
 
@@ -197,6 +211,148 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
         self.assertEqual(self.prefs[1]["nodes_sort_key"], "ping")
         self.assertTrue(self.prefs[1]["nodes_sort_desc"])
         self.assertEqual(_proxy_order(self.page), ["d", "b", "a", "c"])
+
+
+class NodesPageFlexLayoutTests(NodesPageViewTestCase):
+    """Flex-column layout: "name" absorbs the leftover viewport width (AC2-AC6, AC8)."""
+
+    def _show_page(self, width: int = 1000, height: int = 500) -> None:
+        self.page.resize(width, height)
+        self.page.show()
+        _APP.processEvents()
+
+    def _header(self):
+        return self.page.table.horizontalHeader()
+
+    def _visible_total(self) -> int:
+        header = self._header()
+        return sum(
+            header.sectionSize(col)
+            for col in range(header.count())
+            if not self.page.table.isColumnHidden(col)
+        )
+
+    def test_flex_layout_fills_viewport_exactly(self) -> None:
+        # AC2: with enough room the visible columns fill the viewport exactly
+        # and "name" sits above its minimum (no horizontal scrollbar needed).
+        self._show_page(1000, 500)
+        header = self._header()
+        viewport_width = self.page.table.viewport().width()
+        self.assertGreater(viewport_width, 0)
+        self.assertEqual(self._visible_total(), viewport_width)
+        self.assertGreater(
+            header.sectionSize(COL_NAME), COLUMN_BY_KEY["name"].minimum_width
+        )
+
+        # A viewport resize re-runs the relayout and fills the new width too.
+        self.page.resize(1200, 500)
+        _APP.processEvents()
+        new_viewport_width = self.page.table.viewport().width()
+        self.assertGreater(new_viewport_width, viewport_width)
+        self.assertEqual(self._visible_total(), new_viewport_width)
+
+    def test_resizing_non_flex_column_is_absorbed_by_name(self) -> None:
+        # AC3: a user drag of a non-flex column is compensated by "name";
+        # the total width of visible columns does not change.
+        self._show_page(1000, 500)
+        header = self._header()
+        viewport_width = self.page.table.viewport().width()
+        name_before = header.sectionSize(COL_NAME)
+        address_before = header.sectionSize(COL_ADDRESS)
+
+        header.resizeSection(COL_ADDRESS, address_before + 100)
+
+        self.assertEqual(header.sectionSize(COL_ADDRESS), address_before + 100)
+        self.assertEqual(header.sectionSize(COL_NAME), name_before - 100)
+        self.assertEqual(self._visible_total(), viewport_width)
+        # AC8: the flex column width is derived and never persisted.
+        self.assertNotIn("name", self.page.column_widths())
+        self.assertEqual(self.page.column_widths()["address"], address_before + 100)
+
+    def test_resizing_name_shifts_delta_to_right_neighbor(self) -> None:
+        # AC4: growing "name" shrinks the first visible column to its right
+        # in visual order ("type"), cascading further right on shortage.
+        self._show_page(1000, 500)
+        header = self._header()
+        viewport_width = self.page.table.viewport().width()
+        name_before = header.sectionSize(COL_NAME)
+        type_before = header.sectionSize(COL_TYPE)  # 58, minimum 44
+        address_before = header.sectionSize(COL_ADDRESS)
+
+        header.resizeSection(COL_NAME, name_before + 10)
+        self.assertEqual(header.sectionSize(COL_NAME), name_before + 10)
+        self.assertEqual(header.sectionSize(COL_TYPE), type_before - 10)
+        self.assertEqual(self._visible_total(), viewport_width)
+
+        # Cascade: "type" has only 4px left above its minimum; the remaining
+        # 16px of the next 20px drag are taken from "address".
+        header.resizeSection(COL_NAME, name_before + 30)
+        self.assertEqual(header.sectionSize(COL_NAME), name_before + 30)
+        self.assertEqual(
+            header.sectionSize(COL_TYPE), COLUMN_BY_KEY["type"].minimum_width
+        )
+        self.assertEqual(header.sectionSize(COL_ADDRESS), address_before - 16)
+        self.assertEqual(self._visible_total(), viewport_width)
+        self.assertNotIn("name", self.page.column_widths())
+
+    def test_resizing_name_clamps_when_no_neighbor_can_absorb(self) -> None:
+        # AC4 (clamp case): with no visible neighbor to the right able to
+        # absorb the delta, the "name" drag itself is clamped.
+        self._show_page(1000, 500)
+        for col, key in enumerate(COLUMN_KEYS):
+            if key != "name":
+                self.page._set_column_visible(col, False)
+        _APP.processEvents()
+        header = self._header()
+        name_before = header.sectionSize(COL_NAME)
+        self.assertEqual(name_before, self.page.table.viewport().width())
+
+        header.resizeSection(COL_NAME, name_before + 50)
+        self.assertEqual(header.sectionSize(COL_NAME), name_before)
+
+    def test_min_widths_overflow_enables_horizontal_scroll(self) -> None:
+        # AC5: once "name" is at its minimum, further widening of other
+        # columns is NOT rolled back; the sections overflow the viewport,
+        # which is the horizontal-scrollbar condition.
+        self._show_page(900, 500)
+        header = self._header()
+        viewport_width = self.page.table.viewport().width()
+        name_minimum = COLUMN_BY_KEY["name"].minimum_width
+        address_before = header.sectionSize(COL_ADDRESS)
+
+        header.resizeSection(COL_ADDRESS, address_before + 800)
+
+        self.assertEqual(header.sectionSize(COL_ADDRESS), address_before + 800)
+        self.assertEqual(header.sectionSize(COL_NAME), name_minimum)
+        self.assertGreater(self._visible_total(), viewport_width)
+
+        # A further drag while "name" sits at its minimum still sticks
+        # (address maximum is 1000, so +10 stays inside the sanity bound).
+        wide = header.sectionSize(COL_ADDRESS)
+        header.resizeSection(COL_ADDRESS, wide + 10)
+        self.assertEqual(header.sectionSize(COL_ADDRESS), wide + 10)
+        self.assertEqual(header.sectionSize(COL_NAME), name_minimum)
+
+    def test_programmatic_relayout_does_not_emit_view_prefs(self) -> None:
+        # AC6: apply_view_settings, viewport resizes and the relayouts they
+        # trigger must not emit view_prefs_changed nor arm the save debounce.
+        prefs: list[dict] = []
+        self.page.view_prefs_changed.connect(prefs.append)
+
+        settings = AppSettings(
+            nodes_visible_columns=["name", "type", "address", "ping", "speed"],
+            nodes_column_widths={"address": 240},
+            nodes_column_layout_version=1,
+        )
+        self.page.apply_view_settings(settings)
+        self._show_page(1000, 500)
+        self.page.resize(1200, 500)
+        _APP.processEvents()
+
+        self.assertEqual(self._visible_total(), self.page.table.viewport().width())
+        self.assertFalse(self.page._column_layout_timer.isActive())
+        QTest.qWait(250)  # let any (wrongly) armed debounce timer fire
+        self.assertEqual(prefs, [])
 
 
 if __name__ == "__main__":
