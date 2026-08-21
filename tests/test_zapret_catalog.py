@@ -181,15 +181,25 @@ class DefaultPresetTests(unittest.TestCase):
         self.assertNotEqual(fallback, DEFAULT_PRESET_NAME)
 
     def test_preset_listing_survives_unreadable_files(self) -> None:
+        from unittest import mock
+
         from xray_fluent import zapret_manager
 
         broken = zapret_manager.PRESETS_DIR / "zz-unreadable-probe.txt"
         broken.write_text("# Preset: probe\n--new\n", encoding="utf-8")
-        broken.chmod(0o000)
+        real_read_text = Path.read_text
+
+        def refuse_probe(self, *args, **kwargs):
+            # chmod(0o000) does not make a file unreadable on Windows, so the
+            # failure is injected instead of relying on POSIX permissions.
+            if self.name == broken.name:
+                raise OSError(13, "Permission denied")
+            return real_read_text(self, *args, **kwargs)
+
         try:
-            names = {info.name for info in ZapretManager.list_preset_infos()}
+            with mock.patch.object(Path, "read_text", refuse_probe):
+                names = {info.name for info in ZapretManager.list_preset_infos()}
         finally:
-            broken.chmod(0o644)
             broken.unlink()
         self.assertNotIn("zz-unreadable-probe", names)
         self.assertIn(DEFAULT_PRESET_NAME, names)
