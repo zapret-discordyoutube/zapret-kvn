@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from types import MappingProxyType
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Mapping
 
 from .constants import BASE_DIR
 from .models import ZapretTargetSettings
+from .zapret_blobs import BUILTIN_BLOBS, blob_names_in_args
+
+log = logging.getLogger(__name__)
 
 TargetGroup = Literal["tcp_proxy", "quic_proxy", "wireguard"]
 TargetTransport = Literal["tcp", "udp"]
@@ -44,6 +49,20 @@ class ResolvedZapretEndpoint:
     ips: tuple[str, ...]
 
 
+#: Catalog labels, ordered from most to least battle-tested.
+STRATEGY_LABELS: tuple[str, ...] = (
+    "recommended", "stable", "stock", "game", "experimental", "caution",
+)
+STRATEGY_LABEL_TITLES: dict[str, str] = {
+    "recommended": "Рекомендуется",
+    "stable": "Стабильная",
+    "stock": "Штатная",
+    "game": "Для игр",
+    "experimental": "Экспериментальная",
+    "caution": "Осторожно",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ZapretStrategyEntry:
     strategy_id: str
@@ -52,6 +71,18 @@ class ZapretStrategyEntry:
     args: tuple[str, ...]
     description: str = ""
     blob_dependencies: tuple[str, ...] = ()
+    author: str = ""
+    label: str = ""
+
+    @property
+    def label_title(self) -> str:
+        return STRATEGY_LABEL_TITLES.get(self.label, self.label)
+
+    @property
+    def search_haystack(self) -> str:
+        return " ".join(
+            (self.strategy_id, self.name, self.description, self.author, self.label, *self.args)
+        ).casefold()
 
 
 def _port_token(value: Any) -> str:
@@ -194,23 +225,35 @@ def _parse_catalog(path: Path, transport: TargetTransport) -> dict[str, ZapretSt
     current_id = ""
     metadata: dict[str, str] = {}
     args: list[str] = []
+    rejected: list[str] = []
 
     def flush() -> None:
         if not current_id or not args:
             return
         try:
             safe_args = validate_custom_strategy("\n".join(args))
-        except ValueError:
+        except ValueError as exc:
+            # A dropped entry used to vanish without a trace; catalogs are now
+            # vendored wholesale, so a parse failure is worth reporting.
+            rejected.append(f"{current_id}: {exc}")
             return
+        # ``blobs =`` metadata is incomplete upstream, so declared names are only
+        # a hint — the authoritative set comes from the arguments themselves.
+        declared = (item.strip() for item in metadata.get("blobs", "").split(","))
+        dependencies = dict.fromkeys(
+            name for name in declared
+            if name and name not in BUILTIN_BLOBS and not name.lower().startswith("0x")
+        )
+        dependencies.update(dict.fromkeys(blob_names_in_args(safe_args)))
         result[current_id] = ZapretStrategyEntry(
             strategy_id=current_id,
             transport=transport,
             name=metadata.get("name", current_id),
             description=metadata.get("description", ""),
             args=safe_args,
-            blob_dependencies=tuple(
-                item.strip() for item in metadata.get("blobs", "").split(",") if item.strip()
-            ),
+            blob_dependencies=tuple(dependencies),
+            author=metadata.get("author", ""),
+            label=metadata.get("label", "").strip().lower(),
         )
 
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -228,11 +271,59 @@ def _parse_catalog(path: Path, transport: TargetTransport) -> dict[str, ZapretSt
             key, value = line.split("=", 1)
             metadata[key.strip().lower()] = value.strip()
     flush()
+    if rejected:
+        log.warning(
+            "Каталог %s: пропущено записей — %d (%s)",
+            path.name, len(rejected), "; ".join(rejected[:5]),
+        )
     return result
 
 
-def load_strategy_catalog(transport: TargetTransport) -> dict[str, ZapretStrategyEntry]:
-    return _parse_catalog(_CATALOG_ROOT / f"{transport}.txt", transport)
+def _catalog_paths(transport: TargetTransport) -> tuple[Path, ...]:
+    """Vendored upstream catalog first, local overrides second."""
+
+    return (
+        _CATALOG_ROOT / f"{transport}.txt",
+        _CATALOG_ROOT / f"{transport}.local.txt",
+    )
+
+
+def _catalog_signature(paths: Iterable[Path]) -> tuple[tuple[str, int, int], ...]:
+    signature = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((path.name, stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
+
+
+_CATALOG_CACHE: dict[
+    TargetTransport,
+    tuple[tuple[tuple[str, int, int], ...], Mapping[str, ZapretStrategyEntry]],
+] = {}
+
+
+def load_strategy_catalog(transport: TargetTransport) -> Mapping[str, ZapretStrategyEntry]:
+    """Merged strategy catalog for one transport, cached on file mtime/size.
+
+    The catalog is ~390 TCP entries, re-read on every combo repaint before —
+    caching keeps opening the page cheap.  The result is shared, so it is handed
+    out read-only.
+    """
+
+    paths = _catalog_paths(transport)
+    signature = _catalog_signature(paths)
+    cached = _CATALOG_CACHE.get(transport)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    merged: dict[str, ZapretStrategyEntry] = {}
+    for path in paths:
+        merged.update(_parse_catalog(path, transport))
+    catalog = MappingProxyType(merged)
+    _CATALOG_CACHE[transport] = (signature, catalog)
+    return catalog
 
 
 def strategy_for_target(

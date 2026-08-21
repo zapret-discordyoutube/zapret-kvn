@@ -162,47 +162,61 @@ class ZapretActivePresetAccentTest(_AccentRestoreMixin):
         QApplication.processEvents()
         super().tearDown()
 
-    def test_active_row_background_and_name_foreground(self) -> None:
-        self.page.set_running(True, "alpha")
-        soft = theme.accent_soft_bg().getRgb()
-        accent = theme.accent_color().getRgb()
-        for col in range(4):
-            item = self.page.table.item(0, col)
-            self.assertEqual(item.background().color().getRgb(), soft, f"col {col}")
-        name_item = self.page.table.item(0, 0)
-        self.assertEqual(name_item.foreground().color().getRgb(), accent)
-        self.assertNotEqual(
-            name_item.foreground().color().getRgb(), theme.success_color().getRgb()
-        )
-        # Non-name cells keep the default foreground.
-        for col in range(1, 4):
-            item = self.page.table.item(0, col)
-            self.assertEqual(item.foreground().style(), Qt.BrushStyle.NoBrush)
+    def _badge(self, row: int) -> str:
+        item = self.page.preset_list.item(row)
+        return str(item.data(Qt.ItemDataRole.UserRole + 2) or "")
 
-    def test_inactive_rows_have_no_custom_brushes(self) -> None:
+    def _row_colors(self, row: int) -> set[tuple[int, int, int]]:
+        """Colors the delegate actually paints for one row."""
+
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QImage, QPainter
+        from PyQt6.QtWidgets import QStyleOptionViewItem
+
+        view = self.page.preset_list
+        index = view.model().index(row, 0)
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 420, 44)
+        option.font = view.font()
+        option.palette = view.palette()
+        image = QImage(420, 44, QImage.Format.Format_ARGB32)
+        image.fill(0)
+        painter = QPainter(image)
+        view.itemDelegate().paint(painter, option, index)
+        painter.end()
+        colors = set()
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = image.pixelColor(x, y)
+                if pixel.alpha():
+                    colors.add((pixel.red(), pixel.green(), pixel.blue()))
+        return colors
+
+    def test_active_row_is_badged_and_painted_with_the_accent(self) -> None:
         self.page.set_running(True, "alpha")
-        for col in range(4):
-            item = self.page.table.item(1, col)
-            self.assertEqual(item.background().style(), Qt.BrushStyle.NoBrush)
-            self.assertEqual(item.foreground().style(), Qt.BrushStyle.NoBrush)
+        self.assertEqual(self._badge(0), "Активен")
+        accent = theme.accent_color()
+        success = theme.success_color()
+        colors = self._row_colors(0)
+        self.assertIn((accent.red(), accent.green(), accent.blue()), colors)
+        self.assertNotIn((success.red(), success.green(), success.blue()), colors)
+
+    def test_inactive_rows_carry_no_active_badge(self) -> None:
+        self.page.set_running(True, "alpha")
+        self.assertEqual(self._badge(1), "")
 
     def test_stopped_state_has_no_row_highlight(self) -> None:
         self.page.set_running(True, "alpha")
         self.page.set_running(False)
-        for col in range(4):
-            item = self.page.table.item(0, col)
-            self.assertEqual(item.background().style(), Qt.BrushStyle.NoBrush)
-            self.assertEqual(item.foreground().style(), Qt.BrushStyle.NoBrush)
+        self.assertEqual(self._badge(0), "")
 
     def test_accent_change_recolors_active_row(self) -> None:
         setThemeColor("#123456")
         self.page.set_running(True, "alpha")
-        before = self.page.table.item(0, 0).background().color().getRgb()
+        self.assertIn((0x12, 0x34, 0x56), self._row_colors(0))
         setThemeColor("#654321")
         QApplication.processEvents()
-        after = self.page.table.item(0, 0).background().color().getRgb()
-        self.assertNotEqual(before, after)
-        self.assertEqual(after[:3], (0x65, 0x43, 0x21))
+        self.assertIn((0x65, 0x43, 0x21), self._row_colors(0))
 
 
 class SettingsAccentPresetsTest(_AccentRestoreMixin):

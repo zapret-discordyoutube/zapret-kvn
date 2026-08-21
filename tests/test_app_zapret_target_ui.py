@@ -15,7 +15,7 @@ app = _existing or QApplication([])
 
 from xray_fluent.models import Node, ZapretTargetSettings
 from xray_fluent.ui.detail_page import DetailPage
-from xray_fluent.ui.zapret_page import ZapretPage
+from xray_fluent.ui.zapret_page import DEFAULT_UDP_STRATEGY, ZapretPage
 
 _page = ZapretPage()
 
@@ -47,15 +47,66 @@ class ZapretTargetUiTests(unittest.TestCase):
         self.assertIn("alt v9", _page.target_summary.text())
         self.assertIn("vpn.example", _page._target_page.live_details.text())
 
-    def test_udp_group_cannot_be_saved_without_udp_strategy(self) -> None:
+    def test_udp_group_falls_back_to_default_strategy(self) -> None:
+        """Enabling a UDP group must not need a manual pick to be saveable."""
+
         emitted: list[ZapretTargetSettings] = []
         _page.target_settings_changed.connect(emitted.append)
         target = _page._target_page
+        target.set_settings(ZapretTargetSettings(udp_strategy_id=""), force=True)
         target.quic_switch.setChecked(True)
-        target.udp_combo.setCurrentIndex(-1)
         target.apply_btn.click()
-        self.assertEqual(emitted, [])
-        self.assertIn("UDP-стратегию", target.validation_label.text())
+        self.assertTrue(emitted)
+        self.assertEqual(emitted[-1].udp_strategy_id, DEFAULT_UDP_STRATEGY)
+
+    def test_only_the_node_transport_section_is_shown(self) -> None:
+        target = _page._target_page
+        tcp_node = Node(
+            name="TCP", scheme="vless", server="tcp.example", port=443,
+            outbound={"protocol": "vless", "streamSettings": {"network": "tcp"}},
+        )
+        _page.set_target(tcp_node)
+        self.assertEqual(target._transport, "tcp")
+        self.assertIn("TCP-стратегия", target.picker.title_label.text())
+        udp_node = Node(
+            name="QUIC", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        )
+        _page.set_target(udp_node)
+        self.assertEqual(target._transport, "udp")
+        self.assertIn("UDP-стратегия", target.picker.title_label.text())
+
+    def test_group_switch_captions_survive_being_enabled(self) -> None:
+        target = _page._target_page
+        target.tcp_switch.setChecked(True)
+        for switch in (target.tcp_switch, target.quic_switch, target.wg_switch):
+            self.assertNotIn("On", str(switch.text or ""))
+
+    def test_search_does_not_reassign_the_selection(self) -> None:
+        target = _page._target_page
+        _page.set_target(Node(
+            name="TCP", scheme="vless", server="tcp.example", port=443,
+            outbound={"protocol": "vless", "streamSettings": {"network": "tcp"}},
+        ))
+        target.picker.set_selected("alt9")
+        target.picker.search.setText("zzz-no-such-strategy")
+        target.picker._rebuild()
+        self.assertEqual(target.picker.selected_id(), "alt9")
+        self.assertIn("скрыта", target.picker.hidden_hint.text())
+        target.picker.search.setText("")
+        target.picker._rebuild()
+
+    def test_unapplied_edits_are_dirty_and_survive_external_settings(self) -> None:
+        target = _page._target_page
+        target.set_settings(ZapretTargetSettings(), force=True)
+        self.assertFalse(target.is_dirty())
+        target.wg_switch.setChecked(not target.wg_switch.isChecked())
+        self.assertTrue(target.is_dirty())
+        keep = target._snapshot()
+        target.set_settings(ZapretTargetSettings())  # external push, not forced
+        self.assertEqual(target._snapshot(), keep)
+        target.set_settings(ZapretTargetSettings(), force=True)
+        self.assertFalse(target.is_dirty())
 
     def test_valid_tcp_settings_are_emitted_from_breadcrumb_page(self) -> None:
         emitted: list[ZapretTargetSettings] = []
@@ -67,6 +118,105 @@ class ZapretTargetUiTests(unittest.TestCase):
         self.assertTrue(emitted)
         self.assertTrue(emitted[-1].tcp_proxy_enabled)
         self.assertEqual(emitted[-1].tcp_strategy_id, "alt9")
+
+    def test_selecting_a_node_does_not_look_like_an_unsaved_edit(self) -> None:
+        """Rebuilding the form for another node is not a user edit (regression)."""
+
+        target = _page._target_page
+        _page.set_target_settings(ZapretTargetSettings())
+        _page.set_target(Node(
+            name="H2", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        ))
+        self.assertFalse(target.is_dirty())
+        _page.set_target_settings(ZapretTargetSettings(quic_proxy_enabled=True))
+        self.assertTrue(target.quic_switch.isChecked())
+
+    def test_udp_node_opens_with_a_runnable_default_strategy(self) -> None:
+        emitted: list[ZapretTargetSettings] = []
+        _page.target_settings_changed.connect(emitted.append)
+        target = _page._target_page
+        _page.set_target_settings(ZapretTargetSettings(udp_strategy_id=""))
+        _page.set_target(Node(
+            name="H2", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        ))
+        self.assertEqual(target.picker.selected_id(), DEFAULT_UDP_STRATEGY)
+        target.apply_btn.click()
+        self.assertTrue(emitted)
+        self.assertEqual(emitted[-1].udp_strategy_id, DEFAULT_UDP_STRATEGY)
+
+    def test_apply_status_survives_the_settings_round_trip(self) -> None:
+        target = _page._target_page
+        _page.set_target_settings(ZapretTargetSettings())
+        target.apply_btn.click()
+        # main_window pushes the stored settings straight back into the page.
+        _page.set_target_settings(target._settings)
+        self.assertTrue(target.validation_label.text())
+        target.set_runtime_state("Настройки сохранены")
+        self.assertEqual(target.validation_label.text(), "Сохранено")
+
+    def test_real_edits_survive_a_node_switch(self) -> None:
+        """Re-baselining on transport change must not swallow genuine edits."""
+
+        target = _page._target_page
+        _page.set_target_settings(ZapretTargetSettings())
+        _page.set_target(Node(
+            name="T", scheme="vless", server="tcp.example", port=443,
+            outbound={"protocol": "vless", "streamSettings": {"network": "tcp"}},
+        ))
+        target.wg_switch.setChecked(not target.wg_switch.isChecked())
+        edited = target.wg_switch.isChecked()
+        self.assertTrue(target.is_dirty())
+        _page.set_target(Node(
+            name="H2", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        ))
+        self.assertTrue(target.is_dirty())
+        _page.set_target_settings(ZapretTargetSettings())
+        self.assertEqual(target.wg_switch.isChecked(), edited)
+        target.set_settings(ZapretTargetSettings(), force=True)
+
+    def test_custom_body_does_not_leak_between_transports(self) -> None:
+        emitted: list[ZapretTargetSettings] = []
+        _page.target_settings_changed.connect(emitted.append)
+        target = _page._target_page
+        target.set_settings(
+            ZapretTargetSettings(tcp_strategy_id="custom", tcp_custom_args="--lua-desync=multisplit:pos=1"),
+            force=True,
+        )
+        _page.set_target(Node(
+            name="T", scheme="vless", server="tcp.example", port=443,
+            outbound={"protocol": "vless", "streamSettings": {"network": "tcp"}},
+        ))
+        self.assertIn("multisplit", target.custom_edit.toPlainText())
+        _page.set_target(Node(
+            name="H2", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        ))
+        self.assertEqual(target.custom_edit.toPlainText(), "")
+        target.apply_btn.click()
+        self.assertTrue(emitted)
+        self.assertEqual(emitted[-1].udp_custom_args, "")
+
+    def test_dirty_form_still_tracks_the_other_transport_settings(self) -> None:
+        """Protecting on-screen edits must not roll back the hidden transport."""
+
+        emitted: list[ZapretTargetSettings] = []
+        _page.target_settings_changed.connect(emitted.append)
+        target = _page._target_page
+        _page.set_target_settings(ZapretTargetSettings(tcp_strategy_id="multisplit_pos1"))
+        _page.set_target(Node(
+            name="H2", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        ))
+        target.wg_switch.setChecked(not target.wg_switch.isChecked())
+        self.assertTrue(target.is_dirty())
+        _page.set_target_settings(ZapretTargetSettings(tcp_strategy_id="tls_fake_badseq"))
+        target.apply_btn.click()
+        self.assertTrue(emitted)
+        self.assertEqual(emitted[-1].tcp_strategy_id, "tls_fake_badseq")
+        target.set_settings(ZapretTargetSettings(), force=True)
 
     def test_page_does_not_force_translucent_or_opaque_styles(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "xray_fluent" / "ui" / "zapret_page.py").read_text(

@@ -16,6 +16,7 @@ from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 from .constants import BASE_DIR
 from .models import ZapretTargetSettings
 from .subprocess_utils import decode_output, kill_processes_by_path, sleep_with_events
+from .zapret_blobs import blob_arguments, lua_init_arguments, unresolved_blob_names
 from .zapret_target import (
     ResolvedZapretEndpoint,
     ZapretEndpointSpec,
@@ -32,13 +33,11 @@ WINWS2_EXE = ZAPRET_DIR / "exe" / "winws2.exe"
 WINWS_EXE = ZAPRET_DIR / "exe" / "winws.exe"
 PRESETS_DIR = ZAPRET_DIR / "presets"
 
+#: Preset applied when the user never picked one; falls back to any preset on disk.
+DEFAULT_PRESET_NAME = "Default"
+
 _IPSET_IP_PREFIX = "--ipset-ip="
 _UDP_PROXY_TYPES = frozenset({"hysteria", "hysteria2", "tuic"})
-_BLOB_ARGUMENTS = {
-    "quic_google": "--blob=quic_google:@bin/quic_initial_www_google_com.bin",
-    "tls_google": "--blob=tls_google:@bin/tls_clienthello_www_google_com.bin",
-    "hex_00": "--blob=hex_00:0x00",
-}
 _PROFILE_ARGUMENT_PREFIXES = (
     "--filter-",
     "--hostlist",
@@ -200,6 +199,19 @@ class ZapretManager(QObject):
         )
 
     @staticmethod
+    def default_preset() -> str:
+        """Preset to fall back on so a fresh install can still connect.
+
+        A blank ``zapret_preset`` used to refuse the connection outright, which
+        made a clean install unusable until the user discovered the Zapret page.
+        """
+
+        if ZapretManager.preset_path(DEFAULT_PRESET_NAME).is_file():
+            return DEFAULT_PRESET_NAME
+        available = ZapretManager.list_presets()
+        return available[0] if available else ""
+
+    @staticmethod
     def preset_path(name: str) -> Path:
         return PRESETS_DIR / f"{name}.txt"
 
@@ -248,10 +260,26 @@ class ZapretManager(QObject):
             filename = required.rsplit("/", 1)[-1]
             if not any(arg.startswith("--lua-init=") and filename in arg for arg in global_args):
                 global_args.insert(0, required)
-        for blob_name in strategy.blob_dependencies:
-            required = _BLOB_ARGUMENTS.get(blob_name)
-            if required and not any(arg.startswith(f"--blob={blob_name}:") for arg in global_args):
-                global_args.append(required)
+        # Extension lua files must load after the core ones they build upon.
+        lua_tail = max(
+            (index for index, arg in enumerate(global_args) if arg.startswith("--lua-init=")),
+            default=-1,
+        )
+        for extension in reversed(lua_init_arguments(strategy.args)):
+            filename = extension.rsplit("/", 1)[-1]
+            if any(arg.startswith("--lua-init=") and filename in arg for arg in global_args):
+                continue
+            global_args.insert(lua_tail + 1, extension)
+        for definition in blob_arguments(strategy.blob_dependencies):
+            blob_name = definition.removeprefix("--blob=").split(":", 1)[0]
+            if not any(arg.startswith(f"--blob={blob_name}:") for arg in global_args):
+                global_args.append(definition)
+        unresolved = unresolved_blob_names(strategy.blob_dependencies)
+        if unresolved:
+            log.warning(
+                "Стратегия %s ссылается на неизвестные блобы: %s",
+                strategy.strategy_id, ", ".join(unresolved),
+            )
 
         transport = target.spec.transport
         capture_prefix = f"--wf-{transport}-out="
@@ -552,7 +580,13 @@ class ZapretManager(QObject):
         for p in sorted(PRESETS_DIR.iterdir()):
             if p.suffix != ".txt" or p.name.startswith("_"):
                 continue
-            text = p.read_text(encoding="utf-8", errors="replace")
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                # This runs on the window-initialization path; one unreadable
+                # file must not take the whole page down with it.
+                log.warning("Не удалось прочитать пресет %s: %s", p.name, exc)
+                continue
             meta = ZapretManager._parse_metadata(text)
             arg_count = sum(1 for line in text.splitlines()
                            if line.strip() and not line.strip().startswith("#"))

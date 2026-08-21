@@ -1391,10 +1391,18 @@ class AppController(QObject):
                 return True
             self._desired_connected = True
         if requires_zapret and not self.state.settings.zapret_preset:
-            self._cancel_target_transition(
-                "Для обхода выбранного сервера сначала выберите пресет Zapret"
+            fallback = self.zapret.default_preset()
+            if not fallback:
+                self._cancel_target_transition(
+                    "Для обхода выбранного сервера сначала выберите пресет Zapret"
+                )
+                return True
+            self._logger.info("Zapret preset not chosen, falling back to %r", fallback)
+            self.state.settings.zapret_preset = fallback
+            self.schedule_save()
+            self.transition_state_changed.emit(
+                True, f"Zapret: пресет по умолчанию «{fallback}»"
             )
-            return True
 
         worker = TargetProfileResolver(
             generation,

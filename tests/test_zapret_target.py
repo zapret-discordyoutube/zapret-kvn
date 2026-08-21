@@ -8,6 +8,7 @@ from xray_fluent.app_controller import AppController
 from xray_fluent.link_parser import parse_single
 from xray_fluent.models import AppSettings, Node, ZapretTargetSettings
 from xray_fluent.zapret_manager import ZapretManager
+from xray_fluent.zapret_blobs import lua_init_arguments
 from xray_fluent.zapret_target import (
     ResolvedZapretEndpoint,
     ZapretEndpointSpec,
@@ -145,6 +146,52 @@ class ZapretTargetArgumentTests(unittest.TestCase):
         captures = [arg for arg in updated if arg.startswith("--wf-tcp-out=")]
         self.assertEqual(captures, ["--wf-tcp-out=80,443,8080,8443"])
 
+    def test_extension_lua_is_injected_after_the_core_libraries(self) -> None:
+        """Extension lua defines functions on top of the core API, so order matters."""
+
+        spec = ZapretEndpointSpec("tcp_proxy", "tcp", ("one.example",), ("443",))
+        target = ResolvedZapretEndpoint(spec, ("203.0.113.8",))
+        entry = load_strategy_catalog("tcp")["fakemultisplit_google_ultra"]
+        updated = ZapretManager._with_target_profile([], target, entry)
+        lua = [arg for arg in updated if arg.startswith("--lua-init=")]
+        self.assertEqual(
+            lua,
+            [
+                "--lua-init=@lua/zapret-lib.lua",
+                "--lua-init=@lua/zapret-antidpi.lua",
+                "--lua-init=@lua/fakemultisplit.lua",
+            ],
+        )
+
+    def test_core_only_strategy_gets_no_extension_lua(self) -> None:
+        spec = ZapretEndpointSpec("tcp_proxy", "tcp", ("one.example",), ("443",))
+        target = ResolvedZapretEndpoint(spec, ("203.0.113.8",))
+        updated = ZapretManager._with_target_profile(
+            [], target, load_strategy_catalog("tcp")["multisplit_pos1"]
+        )
+        lua = [arg for arg in updated if arg.startswith("--lua-init=")]
+        self.assertEqual(len(lua), 2)
+
+    def test_every_catalog_strategy_gets_the_lua_it_needs(self) -> None:
+        """Whole-catalog sweep: any extension function implies its lua-init."""
+
+        for transport in ("tcp", "udp"):
+            spec = ZapretEndpointSpec(
+                "tcp_proxy" if transport == "tcp" else "quic_proxy",
+                transport, ("one.example",), ("443",),
+            )
+            target = ResolvedZapretEndpoint(spec, ("203.0.113.8",))
+            for entry in load_strategy_catalog(transport).values():
+                required = lua_init_arguments(entry.args)
+                if not required:
+                    continue
+                with self.subTest(transport=transport, strategy=entry.strategy_id):
+                    updated = ZapretManager._with_target_profile([], target, entry)
+                    core = updated.index("--lua-init=@lua/zapret-antidpi.lua")
+                    for extension in required:
+                        self.assertIn(extension, updated)
+                        self.assertGreater(updated.index(extension), core)
+
     def test_every_catalog_blob_dependency_is_injected(self) -> None:
         for transport in ("tcp", "udp"):
             for entry in load_strategy_catalog(transport).values():
@@ -250,6 +297,64 @@ class ZapretTargetBarrierTests(unittest.TestCase):
         )
         self.assertTrue(controller._desired_connected)
         worker.start.assert_called_once()
+
+    def test_empty_preset_falls_back_instead_of_cancelling(self) -> None:
+        """A fresh install must connect on the default preset, not be refused."""
+
+        controller = Mock()
+        controller.selected_node = Node(
+            name="new",
+            scheme="vless",
+            server="new.example",
+            port=443,
+            outbound={"protocol": "vless", "streamSettings": {"network": "tcp"}},
+        )
+        spec = endpoint_spec_for_node(controller.selected_node)
+        controller.state.settings.zapret_target = ZapretTargetSettings()
+        controller.state.settings.zapret_preset = ""
+        controller._active_config_uses_selected_node.return_value = True
+        controller.zapret.target_spec.return_value = spec
+        controller.zapret.target_requires_zapret.return_value = True
+        controller.zapret.target_profile_is_ready.return_value = True
+        controller.zapret.default_preset.return_value = "Default"
+        controller.connected = False
+        controller._proxy_protection_workers = {}
+        controller._proxy_protection_wait_generation = 0
+        controller._proxy_protection_wait_token = 0
+        worker = Mock()
+
+        with patch("xray_fluent.app_controller.TargetProfileResolver", return_value=worker):
+            waiting = AppController._prepare_proxy_protection(controller, 21)
+
+        self.assertTrue(waiting)
+        controller._cancel_target_transition.assert_not_called()
+        self.assertEqual(controller.state.settings.zapret_preset, "Default")
+        controller.schedule_save.assert_called_once()
+        worker.start.assert_called_once()
+
+    def test_missing_presets_still_cancel_with_a_message(self) -> None:
+        controller = Mock()
+        controller.selected_node = Node(
+            name="new",
+            scheme="vless",
+            server="new.example",
+            port=443,
+            outbound={"protocol": "vless", "streamSettings": {"network": "tcp"}},
+        )
+        spec = endpoint_spec_for_node(controller.selected_node)
+        controller.state.settings.zapret_target = ZapretTargetSettings()
+        controller.state.settings.zapret_preset = ""
+        controller._active_config_uses_selected_node.return_value = True
+        controller.zapret.target_spec.return_value = spec
+        controller.zapret.target_requires_zapret.return_value = True
+        controller.zapret.target_profile_is_ready.return_value = True
+        controller.zapret.default_preset.return_value = ""
+        controller.connected = False
+
+        handled = AppController._prepare_proxy_protection(controller, 22)
+
+        self.assertTrue(handled)
+        controller._cancel_target_transition.assert_called_once()
 
     def test_manual_stop_fails_pending_profile_instead_of_marking_ready(self) -> None:
         manager = ZapretManager()
