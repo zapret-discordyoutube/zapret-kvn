@@ -759,6 +759,27 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         else:
             commit = prepare_source(version)
         mark_phase(state, "source_prepared", commit=commit)
+    elif not phase_done(state, "tag_pushed"):
+        # A gate can fail because of the release source itself, and the only
+        # way to fix that is a new commit.  Nothing immutable exists before the
+        # tag, so re-pin to the pushed HEAD and replay the gates against it;
+        # otherwise the release would be stuck rebuilding the broken commit,
+        # with a fresh start blocked by the already-bumped APP_VERSION.
+        require_clean_main()
+        head = output(["git", "rev-parse", "HEAD"])
+        if head != state["commit"]:
+            if current_app_version() != version:
+                raise ReleaseError(
+                    "APP_VERSION no longer matches the active release version"
+                )
+            if output(["git", "rev-parse", "origin/main"]) != head:
+                raise ReleaseError("push the source fix to origin/main before resuming")
+            if output(["git", "ls-remote", "--tags", "origin", f"refs/tags/v{version}"]):
+                raise ReleaseError(f"remote tag v{version} already exists")
+            if forgejo.release_by_tag(version) is not None:
+                raise ReleaseError(f"Forgejo release v{version} already exists")
+            log(f"re-pinning release source to {head} after a source fix")
+            mark_phase(state, "source_prepared", commit=head)
     commit = state["commit"]
 
     release_dir = RELEASE_ROOT / f"v{version}"
