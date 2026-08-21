@@ -34,6 +34,7 @@ from .theme import (
 CUSTOM_STRATEGY_ID = "custom"
 
 _ROW_HEIGHT = 30
+_VISIBLE_ROWS = 12
 _BADGE_HEIGHT = 18
 _BADGE_PADDING = 8
 _SEARCH_DEBOUNCE_MS = 180
@@ -167,7 +168,12 @@ class StrategyPicker(QWidget):
         self.list = ListWidget(self)
         self.list.setItemDelegate(StrategyItemDelegate(self.list))
         self.list.setUniformItemSizes(True)
-        self.list.setFixedHeight(288)
+        # Pixel scrolling parks the view mid-row; per-item scrolling keeps every
+        # visible row whole.
+        self.list.setVerticalScrollMode(ListWidget.ScrollMode.ScrollPerItem)
+        # A height that is not a whole number of rows leaves a sliced row at the
+        # bottom edge, which reads as a rendering glitch.
+        self.list.setFixedHeight(_VISIBLE_ROWS * _ROW_HEIGHT)
         layout.addWidget(self.list)
 
         self.hidden_hint = CaptionLabel("", self)
@@ -194,6 +200,18 @@ class StrategyPicker(QWidget):
         self.search.textChanged.connect(lambda _text: self._debounce.start())
         self.label_filter.currentIndexChanged.connect(lambda _index: self._rebuild())
         self.list.currentRowChanged.connect(self._on_row_changed)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._fit_list_height()
+
+    def _fit_list_height(self) -> None:
+        """Keep the viewport an exact number of rows, whatever the frame costs."""
+
+        overhead = self.list.height() - self.list.viewport().height()
+        wanted = _VISIBLE_ROWS * _ROW_HEIGHT + max(0, overhead)
+        if self.list.height() != wanted:
+            self.list.setFixedHeight(wanted)
 
     # ── public API ──
 
@@ -295,7 +313,7 @@ class StrategyPicker(QWidget):
 
     def _show_details(self) -> None:
         if self._selected_id == CUSTOM_STRATEGY_ID:
-            self.description_label.setText("Своя стратегия: только комментарии и строки --lua-desync=…")
+            self.description_label.setText("")
             self.args_label.setText("")
             return
         entry = self._entries.get(self._selected_id)

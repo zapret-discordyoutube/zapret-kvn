@@ -218,6 +218,58 @@ class ZapretTargetUiTests(unittest.TestCase):
         self.assertEqual(emitted[-1].tcp_strategy_id, "tls_fake_badseq")
         target.set_settings(ZapretTargetSettings(), force=True)
 
+    def test_strategy_list_never_shows_a_sliced_row(self) -> None:
+        """A partially drawn row at the edge reads as a rendering glitch."""
+
+        from xray_fluent.ui.strategy_picker import _ROW_HEIGHT, _VISIBLE_ROWS
+
+        target = _page._target_page
+        _page.set_target_settings(ZapretTargetSettings(quic_proxy_enabled=True))
+        _page.set_target(Node(
+            name="H2", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        ))
+        picker = target.picker
+        picker._fit_list_height()
+        viewport = picker.list.viewport().height()
+        self.assertEqual(viewport % _ROW_HEIGHT, 0)
+        self.assertEqual(viewport // _ROW_HEIGHT, _VISIBLE_ROWS)
+
+    def test_lists_scroll_by_whole_rows(self) -> None:
+        from PyQt6.QtWidgets import QAbstractItemView
+
+        per_item = QAbstractItemView.ScrollMode.ScrollPerItem
+        self.assertEqual(_page.preset_list.verticalScrollMode(), per_item)
+        self.assertEqual(_page._target_page.picker.list.verticalScrollMode(), per_item)
+
+    def test_catalog_is_hidden_while_the_bypass_is_off(self) -> None:
+        """66 irrelevant strategies must not crowd a server with bypass disabled."""
+
+        target = _page._target_page
+        node = Node(
+            name="H2", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        )
+        _page.set_target_settings(ZapretTargetSettings(quic_proxy_enabled=False))
+        _page.set_target(node)
+        self.assertTrue(target.picker.isHidden())
+        self.assertFalse(target.disabled_hint.isHidden())
+        self.assertIn("QUIC", target.disabled_hint.text())
+        _page.set_target_settings(ZapretTargetSettings(quic_proxy_enabled=True))
+        _page.set_target(node)
+        self.assertFalse(target.picker.isHidden())
+        self.assertTrue(target.disabled_hint.isHidden())
+
+    def test_summary_never_shows_the_internal_pass_id(self) -> None:
+        _page.set_target_settings(ZapretTargetSettings(quic_proxy_enabled=False))
+        _page.set_target(Node(
+            name="H2", scheme="hysteria2", server="udp.example", port=443,
+            outbound={"protocol": "hysteria2"},
+        ))
+        summary = _page.target_summary.text()
+        self.assertNotIn("pass", summary)
+        self.assertIn("обход выключен", summary)
+
     def test_page_does_not_force_translucent_or_opaque_styles(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "xray_fluent" / "ui" / "zapret_page.py").read_text(
             encoding="utf-8"

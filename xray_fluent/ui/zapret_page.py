@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from PyQt6.QtCore import QModelIndex, QRect, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QModelIndex, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter
 from PyQt6.QtWidgets import (
     QFileDialog, QHBoxLayout, QListWidgetItem, QStyleOptionViewItem,
@@ -137,11 +137,16 @@ class SelectedServerZapretPage(DetailPage):
         strategy_layout = QVBoxLayout(strategy_card)
         strategy_layout.setContentsMargins(16, 12, 16, 12)
         strategy_layout.setSpacing(8)
+        self.strategy_card = strategy_card
+        self.disabled_hint = BodyLabel("", strategy_card)
+        self.disabled_hint.setWordWrap(True)
+        self.disabled_hint.hide()
+        strategy_layout.addWidget(self.disabled_hint)
         self.picker = StrategyPicker(strategy_card)
         strategy_layout.addWidget(self.picker)
         self.custom_edit = PlainTextEdit(strategy_card)
         self.custom_edit.setPlaceholderText("# комментарий\n--lua-desync=...")
-        self.custom_edit.setMaximumHeight(110)
+        self.custom_edit.setMaximumHeight(84)
         self.custom_edit.hide()
         strategy_layout.addWidget(self.custom_edit)
         self.content_layout.addWidget(strategy_card)
@@ -234,6 +239,33 @@ class SelectedServerZapretPage(DetailPage):
 
         self.validation_label.setText("")
         self._refresh_summary()
+        self._sync_strategy_section()
+
+    def _group_switch(self, group: str) -> SwitchButton:
+        if group == "tcp_proxy":
+            return self.tcp_switch
+        if group == "quic_proxy":
+            return self.quic_switch
+        return self.wg_switch
+
+    def _sync_strategy_section(self) -> None:
+        """Hide the catalog while the bypass is off — the choice changes nothing."""
+
+        if not self._group:
+            enabled = True
+        else:
+            enabled = self._group_switch(self._group).isChecked()
+        self.picker.setVisible(enabled)
+        self.custom_edit.setVisible(
+            enabled and self.picker.selected_id() == CUSTOM_STRATEGY_ID
+        )
+        self.disabled_hint.setVisible(not enabled)
+        if not enabled:
+            title = _GROUP_TITLES.get(self._group, self._group)
+            self.disabled_hint.setText(
+                f"Обход для этого сервера выключен. Включите «{title}» выше, "
+                "чтобы выбрать стратегию."
+            )
 
     # ── dirty tracking ──
 
@@ -276,6 +308,7 @@ class SelectedServerZapretPage(DetailPage):
         )
         self.picker.set_selected(self._settings_strategy_id())
         self._sync_custom_editor()
+        self._sync_strategy_section()
         self.mark_clean()
 
     def set_target(
@@ -294,6 +327,7 @@ class SelectedServerZapretPage(DetailPage):
         self._refresh_summary()
         self.live_state.setText(state or ("Готов" if resolved else "Профиль не подготовлен"))
         self._mark_active_group()
+        self._sync_strategy_section()
 
     def _mark_active_group(self) -> None:
         for group, mark in (
@@ -508,6 +542,7 @@ class ZapretPage(StackedSection):
         self.preset_list = ListWidget(list_page)
         self.preset_list.setItemDelegate(PresetItemDelegate(self.preset_list))
         self.preset_list.setUniformItemSizes(True)
+        self.preset_list.setVerticalScrollMode(ListWidget.ScrollMode.ScrollPerItem)
         self.preset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         root.addWidget(self.preset_list, 1)
 
@@ -538,6 +573,24 @@ class ZapretPage(StackedSection):
         self.target_open_btn.clicked.connect(lambda: self.show_sub_page(self._target_page))
         self._target_page.apply_requested.connect(self.target_settings_changed)
         on_theme_or_accent_changed(self._on_theme_changed)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # The layout has not settled while the resize is still being delivered,
+        # so the row fit is deferred to the end of the event loop turn.
+        QTimer.singleShot(0, self._fit_preset_list)
+
+    def _fit_preset_list(self) -> None:
+        """Show whole preset rows only — a sliced last row reads as a glitch."""
+
+        if not self.preset_list.isVisible():
+            return
+        overhead = self.preset_list.height() - self.preset_list.viewport().height()
+        available = self.preset_list.height() - overhead
+        rows = max(3, available // _PRESET_ROW_HEIGHT)
+        wanted = rows * _PRESET_ROW_HEIGHT + overhead
+        if self.preset_list.maximumHeight() != wanted:
+            self.preset_list.setMaximumHeight(wanted)
 
     def _on_theme_changed(self, *args) -> None:
         self._reload_list(self.current_preset())
@@ -591,7 +644,9 @@ class ZapretPage(StackedSection):
             ips = ", ".join(resolved.ips) if resolved and resolved.spec == spec else "DNS ожидается"
             try:
                 strategy = strategy_for_target(self._target_settings, spec)
-                strategy_name = strategy.name if strategy else "отключена"
+                strategy_name = strategy.name if strategy else "обход выключен"
+                if strategy is not None and strategy.strategy_id == "pass":
+                    strategy_name = "обход выключен"
             except ValueError:
                 strategy_name = "не выбрана"
             summary = (
