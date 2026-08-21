@@ -14,7 +14,16 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from .constants import BASE_DIR
+from .models import ZapretTargetSettings
 from .subprocess_utils import decode_output, kill_processes_by_path, sleep_with_events
+from .zapret_target import (
+    ResolvedZapretEndpoint,
+    ZapretEndpointSpec,
+    ZapretStrategyEntry,
+    endpoint_spec_for_node,
+    strategy_for_target,
+    target_requires_zapret,
+)
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +34,11 @@ PRESETS_DIR = ZAPRET_DIR / "presets"
 
 _IPSET_IP_PREFIX = "--ipset-ip="
 _UDP_PROXY_TYPES = frozenset({"hysteria", "hysteria2", "tuic"})
+_BLOB_ARGUMENTS = {
+    "quic_google": "--blob=quic_google:@bin/quic_initial_www_google_com.bin",
+    "tls_google": "--blob=tls_google:@bin/tls_clienthello_www_google_com.bin",
+    "hex_00": "--blob=hex_00:0x00",
+}
 _PROFILE_ARGUMENT_PREFIXES = (
     "--filter-",
     "--hostlist",
@@ -71,6 +85,9 @@ class ZapretManager(QObject):
     # from an older restart from unblocking a newer transition.
     proxy_protection_ready = pyqtSignal(int)
     proxy_protection_failed = pyqtSignal(int, str)
+    target_profile_ready = pyqtSignal(int)
+    target_profile_failed = pyqtSignal(int, str)
+    target_profile_changed = pyqtSignal(object)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -79,6 +96,9 @@ class ZapretManager(QObject):
         self._start_args: list[str] = []
         self._protected_proxy_ips: set[str] = set()
         self._proxy_resolution_cache: dict[str, set[str]] = {}
+        self._target_settings = ZapretTargetSettings()
+        self._resolved_target: ResolvedZapretEndpoint | None = None
+        self._target_strategy: ZapretStrategyEntry | None = None
         self._pending_restart_preset = ""
         self._stop_expected = False
         self._proxy_protection_generation = 0
@@ -117,6 +137,58 @@ class ZapretManager(QObject):
             return True
         return self._proxy_protection_ready_generation == self._proxy_protection_generation
 
+    @property
+    def target_profile_generation(self) -> int:
+        return self._proxy_protection_generation
+
+    @property
+    def resolved_target(self) -> ResolvedZapretEndpoint | None:
+        return self._resolved_target
+
+    @property
+    def target_strategy(self) -> ZapretStrategyEntry | None:
+        return self._target_strategy
+
+    def set_target_settings(self, settings: ZapretTargetSettings) -> None:
+        self._target_settings = settings
+
+    def target_spec(self, node: object | None) -> ZapretEndpointSpec | None:
+        return endpoint_spec_for_node(node)
+
+    def target_requires_zapret(self, node: object | None) -> bool:
+        return target_requires_zapret(self._target_settings, node)
+
+    def target_profile_is_ready(self, node: object | None = None) -> bool:
+        if self._proxy_protection_pending_generation:
+            return False
+        spec = self.target_spec(node)
+        if spec is None:
+            return True
+        try:
+            strategy = strategy_for_target(self._target_settings, spec)
+        except ValueError:
+            return False
+        if strategy is None:
+            return True
+        if self._resolved_target is None or self._resolved_target.spec != spec:
+            return False
+        if self._target_strategy != strategy:
+            return False
+        if self.target_requires_zapret(node) and not self.running:
+            return False
+        if not self.running:
+            return True
+        return self._proxy_protection_ready_generation == self._proxy_protection_generation
+
+    def start_with_target(self, preset_name: str) -> None:
+        """Start winws2 and make QProcess.started the readiness proof."""
+        if self._resolved_target is not None and self._target_strategy is not None:
+            generation = self._proxy_protection_generation
+            self._proxy_protection_ready_generation = generation - 1
+            self._proxy_protection_pending_generation = generation
+            self._arm_proxy_protection_timeout(generation)
+        self.start(preset_name)
+
     @staticmethod
     def list_presets() -> list[str]:
         """Return sorted list of available preset names (without .txt)."""
@@ -143,11 +215,85 @@ class ZapretManager(QObject):
         return args
 
     @staticmethod
-    def _with_proxy_pass_profile(args: list[str], protected_ips: set[str]) -> list[str]:
-        """Prepend a pass-through profile for protected UDP proxy endpoints."""
-        if not protected_ips:
+    def _with_target_profile(
+        args: list[str],
+        target: ResolvedZapretEndpoint | None,
+        strategy: ZapretStrategyEntry | None,
+    ) -> list[str]:
+        """Prepend one exact IP/transport/port profile without editing a preset."""
+        if target is None or strategy is None or not target.ips:
             return list(args)
 
+        normalized_ips = sorted(
+            {str(ipaddress.ip_address(value)) for value in target.ips},
+            key=lambda value: (ipaddress.ip_address(value).version, value),
+        )
+        first_profile_index = next(
+            (
+                index
+                for index, argument in enumerate(args)
+                if argument == "--new"
+                or argument.startswith("--new=")
+                or argument.startswith(_PROFILE_ARGUMENT_PREFIXES)
+            ),
+            len(args),
+        )
+        global_args = args[:first_profile_index]
+        original_profiles = args[first_profile_index:]
+        required_lua = (
+            "--lua-init=@lua/zapret-lib.lua",
+            "--lua-init=@lua/zapret-antidpi.lua",
+        )
+        for required in reversed(required_lua):
+            filename = required.rsplit("/", 1)[-1]
+            if not any(arg.startswith("--lua-init=") and filename in arg for arg in global_args):
+                global_args.insert(0, required)
+        for blob_name in strategy.blob_dependencies:
+            required = _BLOB_ARGUMENTS.get(blob_name)
+            if required and not any(arg.startswith(f"--blob={blob_name}:") for arg in global_args):
+                global_args.append(required)
+
+        transport = target.spec.transport
+        capture_prefix = f"--wf-{transport}-out="
+        capture_indexes = [
+            index for index, argument in enumerate(global_args)
+            if argument.startswith(capture_prefix)
+        ]
+        if capture_indexes:
+            first = capture_indexes[0]
+            existing_values = [
+                global_args[index].removeprefix(capture_prefix)
+                for index in capture_indexes
+            ]
+            if "*" in existing_values:
+                global_args[first] = capture_prefix + "*"
+            else:
+                merged = list(dict.fromkeys(
+                    [
+                        token.strip()
+                        for token in f"{','.join(existing_values)},{target.spec.port_filter}".split(",")
+                        if token.strip()
+                    ]
+                ))
+                global_args[first] = capture_prefix + ",".join(merged)
+            for index in reversed(capture_indexes[1:]):
+                global_args.pop(index)
+        else:
+            global_args.append(capture_prefix + target.spec.port_filter)
+        target_profile = [
+            "--name=ZapretKVN: выбранный сервер",
+            f"--filter-{transport}={target.spec.port_filter}",
+            _IPSET_IP_PREFIX + ",".join(normalized_ips),
+            *strategy.args,
+        ]
+        separator = ["--new"] if original_profiles else []
+        return [*global_args, *target_profile, *separator, *original_profiles]
+
+    @staticmethod
+    def _with_proxy_pass_profile(args: list[str], protected_ips: set[str]) -> list[str]:
+        """Compatibility implementation for the former UDP-only protection API."""
+        if not protected_ips:
+            return list(args)
         normalized_ips = sorted(
             protected_ips,
             key=lambda value: (ipaddress.ip_address(value).version, value),
@@ -164,11 +310,12 @@ class ZapretManager(QObject):
         )
         global_args = args[:first_profile_index]
         original_profiles = args[first_profile_index:]
+        required_lua = "--lua-init=@lua/zapret-lib.lua"
         if not any(
-            argument.startswith("--lua-init=") and "zapret-lib.lua" in argument
-            for argument in global_args
+            arg.startswith("--lua-init=") and "zapret-lib.lua" in arg
+            for arg in global_args
         ):
-            global_args = ["--lua-init=@lua/zapret-lib.lua", *global_args]
+            global_args.insert(0, required_lua)
         pass_profile = [
             "--filter-udp=*",
             _IPSET_IP_PREFIX + ",".join(normalized_ips),
@@ -196,6 +343,19 @@ class ZapretManager(QObject):
                 continue
         return resolved
 
+    @classmethod
+    def resolve_target(cls, spec: ZapretEndpointSpec) -> ResolvedZapretEndpoint:
+        resolved: set[str] = set()
+        for host in spec.hosts:
+            resolved.update(cls._resolve_server_ips(host))
+        if not resolved:
+            raise OSError(f"не удалось определить IP: {', '.join(spec.hosts)}")
+        normalized = tuple(sorted(
+            resolved,
+            key=lambda value: (ipaddress.ip_address(value).version, value),
+        ))
+        return ResolvedZapretEndpoint(spec, normalized)
+
     @staticmethod
     def proxy_protection_server(node: object | None) -> str:
         if node is None:
@@ -209,6 +369,32 @@ class ZapretManager(QObject):
     def cache_proxy_resolution(self, server: str, protected_ips: set[str]) -> None:
         if server:
             self._proxy_resolution_cache[server] = set(protected_ips)
+
+    def apply_resolved_target(
+        self,
+        node: object | None,
+        resolved: ResolvedZapretEndpoint | None,
+    ) -> bool:
+        """Install a freshly resolved selected-node profile in manager state."""
+        spec = self.target_spec(node)
+        if spec is None:
+            self._set_target_profile(None, None)
+            return True
+        try:
+            strategy = strategy_for_target(self._target_settings, spec)
+        except ValueError as exc:
+            self.log_line.emit(f"[zapret] {exc}")
+            return False
+        if strategy is None:
+            self._set_target_profile(None, None)
+            return True
+        if resolved is None or resolved.spec != spec or not resolved.ips:
+            return False
+        self._set_target_profile(resolved, strategy)
+        return True
+
+    def clear_target_profile(self) -> None:
+        self._set_target_profile(None, None)
 
     def apply_cached_proxy_node(self, node: object | None) -> bool:
         """Apply a prepared endpoint without DNS or other blocking work."""
@@ -239,18 +425,43 @@ class ZapretManager(QObject):
         return resolved
 
     def _set_protected_proxy_ips(self, protected_ips: set[str]) -> None:
-        if protected_ips == self._protected_proxy_ips:
+        if not protected_ips and self._resolved_target is None:
+            self._protected_proxy_ips.clear()
+            return
+        if protected_ips:
+            target = ResolvedZapretEndpoint(
+                ZapretEndpointSpec("quic_proxy", "udp", ("compat",), ("1-65535",)),
+                tuple(sorted(protected_ips)),
+            )
+            strategy = ZapretStrategyEntry("pass", "udp", "pass", ("--lua-desync=pass",))
+        else:
+            target = None
+            strategy = None
+        self._set_target_profile(target, strategy)
+
+    def _set_target_profile(
+        self,
+        target: ResolvedZapretEndpoint | None,
+        strategy: ZapretStrategyEntry | None,
+    ) -> None:
+        if target == self._resolved_target and strategy == self._target_strategy:
             return
 
-        self._protected_proxy_ips = set(protected_ips)
+        self._resolved_target = target
+        self._target_strategy = strategy
+        self._protected_proxy_ips = set(target.ips if target else ())
         self._proxy_protection_generation += 1
         generation = self._proxy_protection_generation
         self._proxy_protection_ready_generation = generation - 1
-        if protected_ips:
-            joined = ", ".join(sorted(protected_ips))
-            self.log_line.emit(f"[zapret] Для сервера UDP-прокси включён профиль pass: {joined}")
+        if target and strategy:
+            joined = ", ".join(target.ips)
+            self.log_line.emit(
+                f"[zapret] Профиль выбранного сервера: {target.spec.transport.upper()} "
+                f"{target.spec.port_filter}; {strategy.name}; {joined}"
+            )
         else:
-            self.log_line.emit("[zapret] Профиль pass для UDP-прокси отключён")
+            self.log_line.emit("[zapret] Профиль выбранного сервера отключён")
+        self.target_profile_changed.emit(target)
 
         # If a previous restart has already killed the process, retain the
         # pending generation and let that restart's eventual start event prove
@@ -272,6 +483,7 @@ class ZapretManager(QObject):
             self._proxy_protection_pending_generation = 0
             self._proxy_protection_ready_generation = generation
             self.proxy_protection_ready.emit(generation)
+            self.target_profile_ready.emit(generation)
 
         if self.running and self._current_preset and not restart_in_flight:
             preset = self._current_preset
@@ -293,6 +505,7 @@ class ZapretManager(QObject):
             f"за {PROXY_PROTECTION_READY_TIMEOUT_MS} мс"
         )
         self.proxy_protection_failed.emit(generation, "timeout")
+        self.target_profile_failed.emit(generation, "timeout")
 
     def _fail_pending_proxy_protection(self, reason: str) -> None:
         generation = self._proxy_protection_pending_generation
@@ -300,6 +513,7 @@ class ZapretManager(QObject):
             return
         self._proxy_protection_pending_generation = 0
         self.proxy_protection_failed.emit(generation, reason)
+        self.target_profile_failed.emit(generation, reason)
 
     def _restart_for_proxy_protection(self, preset: str) -> None:
         """Restart winws2 through QProcess signals instead of waitForFinished()."""
@@ -458,7 +672,7 @@ class ZapretManager(QObject):
         # replacement process cannot recursively schedule an unbounded restart.
         self._pending_restart_preset = ""
         if self._process is not None and self._process.state() != QProcess.ProcessState.NotRunning:
-            self.stop()
+            self.stop(preserve_pending=True)
 
         killed = self._kill_orphaned()
         for name in killed:
@@ -477,9 +691,10 @@ class ZapretManager(QObject):
             return
 
         # Parse preset and pass args directly (winws2 @file can't handle spaces in path)
-        args = self._with_proxy_pass_profile(
+        args = self._with_target_profile(
             self._parse_preset_args(preset),
-            self._protected_proxy_ips,
+            self._resolved_target,
+            self._target_strategy,
         )
         if not args:
             self.error.emit(f"Пресет пустой: {preset_name}")
@@ -510,6 +725,7 @@ class ZapretManager(QObject):
             self._proxy_protection_pending_generation = 0
             self._proxy_protection_ready_generation = generation
             self.proxy_protection_ready.emit(generation)
+            self.target_profile_ready.emit(generation)
         self.started.emit()
 
     def _on_process_error(self, process_error: QProcess.ProcessError) -> None:
@@ -525,16 +741,19 @@ class ZapretManager(QObject):
             self._fail_pending_proxy_protection("start_failed")
             self.stopped.emit()
 
-    def stop(self) -> None:
+    def stop(self, *, preserve_pending: bool = False) -> None:
+        """Stop winws2; a manual stop fails any readiness waiter.
+
+        ``preserve_pending`` is used only by :meth:`start` while replacing an
+        already running process.  In that narrow case the next ``started``
+        signal remains the readiness proof for the same generation.
+        """
         self._pending_restart_preset = ""
         self._health_timer.stop()
         process = self._process
         if process is None:
-            generation = self._proxy_protection_pending_generation
-            if generation:
-                self._proxy_protection_pending_generation = 0
-                self._proxy_protection_ready_generation = generation
-                self.proxy_protection_ready.emit(generation)
+            if not preserve_pending:
+                self._fail_pending_proxy_protection("stopped")
             return
 
         if process.state() != QProcess.ProcessState.NotRunning:
@@ -548,12 +767,9 @@ class ZapretManager(QObject):
             self._current_preset = ""
             self._start_args = []
             self._stop_expected = False
-            generation = self._proxy_protection_pending_generation
-            if generation:
-                self._proxy_protection_pending_generation = 0
-                self._proxy_protection_ready_generation = generation
-                self.proxy_protection_ready.emit(generation)
             self.stopped.emit()
+        if not preserve_pending:
+            self._fail_pending_proxy_protection("stopped")
 
     # ── internals ───────────────────────────────────────────────
 

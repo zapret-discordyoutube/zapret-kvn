@@ -244,6 +244,9 @@ def shutdown(controller: AppController) -> None:
     for worker in list(controller._proxy_protection_workers.values()):
         if worker.isRunning():
             worker.wait(5000)
+    manual_zapret_worker = controller._manual_zapret_worker
+    if manual_zapret_worker is not None and manual_zapret_worker.isRunning():
+        manual_zapret_worker.wait(5000)
     if controller._country_resolver and controller._country_resolver.isRunning():
         controller._country_resolver.quit()
         controller._country_resolver.wait(2000)

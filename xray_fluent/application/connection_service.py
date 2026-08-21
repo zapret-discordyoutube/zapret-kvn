@@ -65,6 +65,13 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
                 message = "В конфиге есть outbound tag `proxy`. Сначала выберите сервер."
             controller._set_connection_status("error", message, level="warning")
             return False
+        if (
+            node is not None
+            and not singbox_editor_mode
+            and not xray_raw_mode
+            and not controller.target_profile_allows_core_start(node)
+        ):
+            return False
 
         controller._reset_auto_switch_state(
             reset_cooldown=not controller._auto_switch_transitioning,
@@ -95,7 +102,6 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             session_label = node.name if node else "unknown"
 
         if node is not None:
-            controller.zapret.apply_cached_proxy_node(node)
             if not singbox_editor_mode and not xray_raw_mode:
                 problem = controller._prepare_node_for_runtime(node)
                 if problem:

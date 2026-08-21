@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -15,19 +16,33 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    ComboBox,
     FluentIcon as FIF,
     IndeterminateProgressBar,
+    PlainTextEdit,
+    PrimaryPushButton,
     PrimaryToolButton,
+    SearchLineEdit,
     SubtitleLabel,
+    SwitchButton,
     TableWidget,
+    TransparentPushButton,
     TransparentToolButton,
     VerticalSeparator,
     setCustomStyleSheet,
 )
 from qfluentwidgets import RoundMenu, Action
 
+from ..models import Node, ZapretTargetSettings
 from ..zapret_manager import PresetInfo, ZapretManager
-from .detail_page import StackedSection
+from ..zapret_target import (
+    ResolvedZapretEndpoint,
+    endpoint_spec_for_node,
+    load_strategy_catalog,
+    strategy_for_target,
+    validate_custom_strategy,
+)
+from .detail_page import DetailPage, StackedSection
 from .preset_edit_widget import PresetEditWidget
 from .theme import accent_color, accent_soft_bg, on_theme_or_accent_changed, token_pair
 
@@ -40,9 +55,219 @@ def _status_qss(token: str) -> tuple[str, str]:
     )
 
 
+class SelectedServerZapretPage(DetailPage):
+    """TCP/UDP strategy policy for the currently selected VPN endpoint."""
+
+    apply_requested = pyqtSignal(object)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(
+            "Zapret",
+            "Выбранный сервер",
+            parent,
+            root_key="zapret",
+            page_key="selected-server",
+        )
+        self._settings = ZapretTargetSettings()
+        self._node: Node | None = None
+        self._resolved: ResolvedZapretEndpoint | None = None
+        self._catalogs = {
+            "tcp": load_strategy_catalog("tcp"),
+            "udp": load_strategy_catalog("udp"),
+        }
+
+        self.apply_btn = PrimaryPushButton(FIF.ACCEPT, "Применить", self)
+        self.apply_btn.clicked.connect(self._apply)
+        self.add_header_action(self.apply_btn)
+
+        live = CardWidget(self)
+        live_layout = QVBoxLayout(live)
+        live_layout.setContentsMargins(16, 12, 16, 12)
+        self.live_title = BodyLabel("Сервер не выбран", live)
+        self.live_details = CaptionLabel("—", live)
+        self.live_details.setWordWrap(True)
+        self.live_state = CaptionLabel("Профиль не подготовлен", live)
+        live_layout.addWidget(self.live_title)
+        live_layout.addWidget(self.live_details)
+        live_layout.addWidget(self.live_state)
+        self.content_layout.addWidget(live)
+
+        groups = CardWidget(self)
+        groups_layout = QVBoxLayout(groups)
+        groups_layout.setContentsMargins(16, 12, 16, 12)
+        groups_layout.addWidget(BodyLabel("Группы протоколов", groups))
+        self.tcp_switch = SwitchButton("TCP-прокси: VLESS, VMess, Trojan, SS, SOCKS, HTTP", groups)
+        self.quic_switch = SwitchButton("QUIC-прокси: Hysteria, Hysteria2, TUIC, QUIC/KCP", groups)
+        self.wg_switch = SwitchButton("WireGuard / AmneziaWG", groups)
+        groups_layout.addWidget(self.tcp_switch)
+        groups_layout.addWidget(self.quic_switch)
+        groups_layout.addWidget(self.wg_switch)
+        self.content_layout.addWidget(groups)
+
+        self.tcp_search, self.tcp_combo, self.tcp_desc, self.tcp_preview, self.tcp_custom = \
+            self._strategy_card("TCP", "tcp")
+        self.udp_search, self.udp_combo, self.udp_desc, self.udp_preview, self.udp_custom = \
+            self._strategy_card("UDP", "udp")
+        self.validation_label = CaptionLabel("", self)
+        self.validation_label.setWordWrap(True)
+        self.content_layout.addWidget(self.validation_label)
+        self.content_layout.addStretch(1)
+
+        self.tcp_search.textChanged.connect(lambda text: self._fill_combo("tcp", text))
+        self.udp_search.textChanged.connect(lambda text: self._fill_combo("udp", text))
+        self.tcp_combo.currentIndexChanged.connect(lambda _i: self._show_strategy("tcp"))
+        self.udp_combo.currentIndexChanged.connect(lambda _i: self._show_strategy("udp"))
+        self._fill_combo("tcp")
+        self._fill_combo("udp")
+
+    def _strategy_card(self, title: str, transport: str):
+        card = CardWidget(self)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+        layout.addWidget(BodyLabel(f"{title}-стратегия", card))
+        search = SearchLineEdit(card)
+        search.setPlaceholderText("Поиск по каталогу")
+        combo = ComboBox(card)
+        description = CaptionLabel("", card)
+        description.setWordWrap(True)
+        preview = PlainTextEdit(card)
+        preview.setReadOnly(True)
+        preview.setMaximumHeight(94)
+        custom = PlainTextEdit(card)
+        custom.setPlaceholderText("# комментарий\n--lua-desync=...")
+        custom.setMaximumHeight(120)
+        custom.hide()
+        layout.addWidget(search)
+        layout.addWidget(combo)
+        layout.addWidget(description)
+        layout.addWidget(preview)
+        layout.addWidget(custom)
+        self.content_layout.addWidget(card)
+        return search, combo, description, preview, custom
+
+    def _controls(self, transport: str):
+        if transport == "tcp":
+            return self.tcp_combo, self.tcp_desc, self.tcp_preview, self.tcp_custom
+        return self.udp_combo, self.udp_desc, self.udp_preview, self.udp_custom
+
+    def _fill_combo(self, transport: str, query: str = "") -> None:
+        combo, _desc, _preview, _custom = self._controls(transport)
+        selected = combo.currentData() if combo.count() else ""
+        query = str(query or "").casefold()
+        combo.blockSignals(True)
+        combo.clear()
+        for strategy_id, entry in self._catalogs[transport].items():
+            haystack = f"{entry.name} {entry.description} {' '.join(entry.args)}".casefold()
+            if not query or query in haystack:
+                combo.addItem(entry.name, userData=strategy_id)
+        combo.addItem("Своя стратегия", userData="custom")
+        for index in range(combo.count()):
+            if combo.itemData(index) == selected:
+                combo.setCurrentIndex(index)
+                break
+        combo.blockSignals(False)
+        self._show_strategy(transport)
+
+    def _show_strategy(self, transport: str) -> None:
+        combo, desc, preview, custom = self._controls(transport)
+        strategy_id = str(combo.currentData() or "")
+        is_custom = strategy_id == "custom"
+        custom.setVisible(is_custom)
+        if is_custom:
+            desc.setText("Разрешены только комментарии и строки --lua-desync=...")
+            preview.setPlainText(custom.toPlainText())
+            return
+        entry = self._catalogs[transport].get(strategy_id)
+        desc.setText(entry.description if entry else "Стратегия не выбрана")
+        preview.setPlainText("\n".join(entry.args) if entry else "")
+
+    @staticmethod
+    def _select(combo: ComboBox, value: str) -> None:
+        for index in range(combo.count()):
+            if combo.itemData(index) == value:
+                combo.setCurrentIndex(index)
+                return
+
+    def set_settings(self, settings: ZapretTargetSettings) -> None:
+        self._settings = replace(settings)
+        self.tcp_switch.setChecked(settings.tcp_proxy_enabled)
+        self.quic_switch.setChecked(settings.quic_proxy_enabled)
+        self.wg_switch.setChecked(settings.wireguard_enabled)
+        self.tcp_custom.setPlainText(settings.tcp_custom_args)
+        self.udp_custom.setPlainText(settings.udp_custom_args)
+        self._select(self.tcp_combo, settings.tcp_strategy_id)
+        if settings.udp_strategy_id:
+            self._select(self.udp_combo, settings.udp_strategy_id)
+        else:
+            self.udp_combo.setCurrentIndex(-1)
+            self._show_strategy("udp")
+        self.validation_label.setText("")
+
+    def set_target(
+        self,
+        node: Node | None,
+        resolved: ResolvedZapretEndpoint | None = None,
+        state: str = "",
+    ) -> None:
+        self._node = node
+        self._resolved = resolved
+        spec = endpoint_spec_for_node(node)
+        self.live_title.setText(node.name if node else "Сервер не выбран")
+        if spec is None:
+            self.live_details.setText("Для выбранной ноды точечный профиль не применяется")
+        else:
+            ips = ", ".join(resolved.ips) if resolved and resolved.spec == spec else "DNS ещё не выполнен"
+            try:
+                strategy = strategy_for_target(self._settings, spec)
+                strategy_name = strategy.name if strategy else "отключена"
+            except ValueError:
+                strategy_name = "не выбрана"
+            self.live_details.setText(
+                f"Группа: {spec.group} · {spec.transport.upper()} · "
+                f"{', '.join(spec.hosts)}:{spec.port_filter}\n"
+                f"IP: {ips} · Стратегия: {strategy_name}"
+            )
+        self.live_state.setText(state or ("Готов" if resolved else "Профиль не подготовлен"))
+
+    def _apply(self) -> None:
+        tcp_id = str(self.tcp_combo.currentData() or "")
+        udp_id = str(self.udp_combo.currentData() or "")
+        if (self.quic_switch.isChecked() or self.wg_switch.isChecked()) and not udp_id:
+            self.validation_label.setText("Для включённой UDP-группы выберите UDP-стратегию")
+            return
+        try:
+            if tcp_id == "custom":
+                validate_custom_strategy(self.tcp_custom.toPlainText())
+            if udp_id == "custom":
+                validate_custom_strategy(self.udp_custom.toPlainText())
+        except ValueError as exc:
+            self.validation_label.setText(str(exc))
+            return
+        updated = ZapretTargetSettings(
+            tcp_proxy_enabled=self.tcp_switch.isChecked(),
+            quic_proxy_enabled=self.quic_switch.isChecked(),
+            wireguard_enabled=self.wg_switch.isChecked(),
+            tcp_strategy_id=tcp_id or "alt9",
+            udp_strategy_id=udp_id,
+            tcp_custom_args=self.tcp_custom.toPlainText(),
+            udp_custom_args=self.udp_custom.toPlainText(),
+        )
+        self._settings = replace(updated)
+        self.validation_label.setText("Настройки применяются…")
+        self.apply_requested.emit(updated)
+
+    def set_runtime_state(self, text: str) -> None:
+        self.live_state.setText(text or "Профиль не подготовлен")
+
+    def is_dirty(self) -> bool:
+        return False
+
+
 class ZapretPage(StackedSection):
     start_requested = pyqtSignal(str)   # preset name
     stop_requested = pyqtSignal()
+    target_settings_changed = pyqtSignal(object)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -51,6 +276,7 @@ class ZapretPage(StackedSection):
         self._presets: list[PresetInfo] = []
         self._running = False
         self._active_preset = ""
+        self._target_settings = ZapretTargetSettings()
 
         # ══════════════ Root view: preset list ══════════════
         list_page = QWidget()
@@ -59,6 +285,20 @@ class ZapretPage(StackedSection):
         root.setSpacing(12)
 
         root.addWidget(SubtitleLabel("Обход блокировок (zapret)", list_page))
+
+        self.target_card = CardWidget(list_page)
+        target_layout = QHBoxLayout(self.target_card)
+        target_layout.setContentsMargins(16, 12, 16, 12)
+        target_text = QVBoxLayout()
+        target_text.setSpacing(3)
+        target_text.addWidget(BodyLabel("Обход выбранного сервера", self.target_card))
+        self.target_summary = CaptionLabel("Сервер не выбран", self.target_card)
+        self.target_summary.setWordWrap(True)
+        target_text.addWidget(self.target_summary)
+        target_layout.addLayout(target_text, 1)
+        self.target_open_btn = TransparentPushButton("Настроить", self.target_card)
+        target_layout.addWidget(self.target_open_btn)
+        root.addWidget(self.target_card)
 
         # Info card
         info_card = CardWidget(list_page)
@@ -147,6 +387,8 @@ class ZapretPage(StackedSection):
         # ══════════════ Sub-page: preset editor ══════════════
         self._editor = PresetEditWidget(self)
         self.add_sub_page(self._editor)
+        self._target_page = SelectedServerZapretPage(self)
+        self.add_sub_page(self._target_page)
 
         # ── Signals ──
         self.add_btn.clicked.connect(self._on_create)
@@ -158,6 +400,8 @@ class ZapretPage(StackedSection):
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self._editor.save_requested.connect(self._on_save_preset)
+        self.target_open_btn.clicked.connect(lambda: self.show_sub_page(self._target_page))
+        self._target_page.apply_requested.connect(self.target_settings_changed)
         # Re-resolve the theme/accent-dependent row brushes on any change (AC6).
         on_theme_or_accent_changed(self._on_theme_changed)
 
@@ -194,6 +438,38 @@ class ZapretPage(StackedSection):
         self.set_running(False)
         self.status_label.setText(f"Ошибка: {message}")
         setCustomStyleSheet(self.status_label, *_status_qss("error"))
+
+    def set_target_settings(self, settings: ZapretTargetSettings) -> None:
+        self._target_settings = replace(settings)
+        self._target_page.set_settings(settings)
+
+    def set_target(
+        self,
+        node: Node | None,
+        resolved: ResolvedZapretEndpoint | None = None,
+        state: str = "",
+    ) -> None:
+        self._target_page.set_target(node, resolved, state)
+        spec = endpoint_spec_for_node(node)
+        if spec is None:
+            summary = f"{node.name}: профиль не применяется" if node else "Сервер не выбран"
+        else:
+            ips = ", ".join(resolved.ips) if resolved and resolved.spec == spec else "DNS ожидается"
+            try:
+                strategy = strategy_for_target(self._target_settings, spec)
+                strategy_name = strategy.name if strategy else "отключена"
+            except ValueError:
+                strategy_name = "не выбрана"
+            summary = (
+                f"{node.name} · {spec.transport.upper()} {spec.port_filter} · "
+                f"{', '.join(spec.hosts)} · {ips} · {strategy_name}"
+            )
+        if state:
+            summary += f" · {state}"
+        self.target_summary.setText(summary)
+
+    def set_target_runtime_state(self, text: str) -> None:
+        self._target_page.set_runtime_state(text)
 
     def current_preset(self) -> str:
         row = self.table.currentRow()

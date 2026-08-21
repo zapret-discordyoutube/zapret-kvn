@@ -385,6 +385,48 @@ def normalize_startup_connect_order(value: Any) -> str:
 
 
 @dataclass(slots=True)
+class ZapretTargetSettings:
+    """Policy for the synthetic first winws2 profile.
+
+    The policy follows the currently selected node.  It deliberately stores
+    strategy choices, not resolved addresses: endpoint DNS is refreshed for
+    every protected connection attempt.
+    """
+
+    tcp_proxy_enabled: bool = True
+    quic_proxy_enabled: bool = False
+    wireguard_enabled: bool = False
+    tcp_strategy_id: str = "alt9"
+    udp_strategy_id: str = ""
+    tcp_custom_args: str = ""
+    udp_custom_args: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tcp_proxy_enabled": self.tcp_proxy_enabled,
+            "quic_proxy_enabled": self.quic_proxy_enabled,
+            "wireguard_enabled": self.wireguard_enabled,
+            "tcp_strategy_id": self.tcp_strategy_id,
+            "udp_strategy_id": self.udp_strategy_id,
+            "tcp_custom_args": self.tcp_custom_args,
+            "udp_custom_args": self.udp_custom_args,
+        }
+
+    @staticmethod
+    def from_dict(data: Any) -> "ZapretTargetSettings":
+        payload = data if isinstance(data, dict) else {}
+        return ZapretTargetSettings(
+            tcp_proxy_enabled=bool(payload.get("tcp_proxy_enabled", True)),
+            quic_proxy_enabled=bool(payload.get("quic_proxy_enabled", False)),
+            wireguard_enabled=bool(payload.get("wireguard_enabled", False)),
+            tcp_strategy_id=str(payload.get("tcp_strategy_id") or "alt9"),
+            udp_strategy_id=str(payload.get("udp_strategy_id") or ""),
+            tcp_custom_args=str(payload.get("tcp_custom_args") or ""),
+            udp_custom_args=str(payload.get("udp_custom_args") or ""),
+        )
+
+
+@dataclass(slots=True)
 class AppSettings:
     theme: str = "system"  # system | light | dark
     accent_color: str = DEFAULT_ACCENT_COLOR
@@ -417,6 +459,7 @@ class AppSettings:
     window_y: int = -1
     zapret_preset: str = ""
     zapret_autostart: bool = False
+    zapret_target: ZapretTargetSettings = field(default_factory=ZapretTargetSettings)
     auto_switch_enabled: bool = True
     auto_switch_threshold_kbps: int = 50
     auto_switch_delay_sec: int = 30
@@ -479,6 +522,7 @@ class AppSettings:
             "window_y": self.window_y,
             "zapret_preset": self.zapret_preset,
             "zapret_autostart": self.zapret_autostart,
+            "zapret_target": self.zapret_target.to_dict(),
             "auto_switch_enabled": self.auto_switch_enabled,
             "auto_switch_threshold_kbps": self.auto_switch_threshold_kbps,
             "auto_switch_delay_sec": self.auto_switch_delay_sec,
@@ -540,6 +584,7 @@ class AppSettings:
             window_y=int(data.get("window_y", -1)),
             zapret_preset=str(data.get("zapret_preset") or ""),
             zapret_autostart=bool(data.get("zapret_autostart", False)),
+            zapret_target=ZapretTargetSettings.from_dict(data.get("zapret_target")),
             auto_switch_enabled=bool(data.get("auto_switch_enabled", True)),
             auto_switch_threshold_kbps=int(data.get("auto_switch_threshold_kbps") or 50),
             auto_switch_delay_sec=int(data.get("auto_switch_delay_sec") or 30),

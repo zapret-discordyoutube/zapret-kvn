@@ -171,8 +171,8 @@ class Ac1ModelTests(unittest.TestCase):
             1440,
         )
 
-    def test_schema_version_not_bumped(self) -> None:
-        self.assertEqual(STATE_SCHEMA_VERSION, 2)
+    def test_schema_version_includes_zapret_target_settings(self) -> None:
+        self.assertEqual(STATE_SCHEMA_VERSION, 3)
 
     def test_helpers(self) -> None:
         self.assertEqual(clamp_subscriptions_check_interval(None), 15)

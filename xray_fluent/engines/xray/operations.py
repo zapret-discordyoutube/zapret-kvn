@@ -61,6 +61,13 @@ def start_tun(
         )
 
     controller._xray_api_port = runtime.api_port
+    gate = getattr(controller, "target_profile_allows_core_start", None)
+    if gate is not None and not gate(
+        node,
+        used_selected_node=bool(runtime.used_selected_node),
+    ):
+        controller._active_core = prev_active_core
+        return None
     if not controller.xray.start(controller.state.settings.xray_path, runtime.config):
         controller._active_core = prev_active_core
         return None
@@ -107,6 +114,13 @@ def start_proxy(
         controller._log(f"[xray] outbound tag 'proxy' replaced from selected node: {node.name}")
 
     controller._xray_api_port = runtime.api_port
+    gate = getattr(controller, "target_profile_allows_core_start", None)
+    if gate is not None and not gate(
+        node,
+        used_selected_node=bool(runtime.used_selected_node),
+    ):
+        controller._active_core = prev_active_core
+        return None
     if not controller.xray.start(controller.state.settings.xray_path, runtime.config):
         controller._active_core = prev_active_core
         return None
@@ -171,6 +185,13 @@ def restart_proxy_core_steps(controller: AppController, reason: str) -> Transiti
             return False
 
         controller._xray_api_port = runtime.api_port
+        gate = getattr(controller, "target_profile_allows_core_start", None)
+        if gate is not None and not gate(
+            node,
+            used_selected_node=bool(runtime.used_selected_node),
+        ):
+            controller._handle_unexpected_disconnect()
+            return False
         ok = yield from controller.xray.start_steps(controller.state.settings.xray_path, runtime.config)
         if not ok:
             controller._handle_unexpected_disconnect()

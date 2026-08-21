@@ -156,8 +156,6 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         except ValueError as exc:
             controller._set_connection_status("error", str(exc), level="error")
             return False
-        controller.zapret.apply_cached_proxy_node(node if plan.used_selected_node else None)
-
         session_label = plan.source_path.name
         if plan.used_selected_node and node is not None:
             session_label = f"{plan.source_path.name} / {node.name}"
@@ -240,8 +238,6 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         except ValueError as exc:
             controller._set_connection_status("error", str(exc), level="error")
             return False
-        controller.zapret.apply_cached_proxy_node(node if plan.used_selected_node else None)
-
         session_label = _proxy_session_label(plan, node)
         controller._set_connection_status("starting", f"Переключение на {session_label}...", level="info")
         _notify_proxy_port_change(controller, plan)

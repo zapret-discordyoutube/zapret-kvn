@@ -271,10 +271,13 @@ class MainWindow(FluentWindow):
 
         self.zapret_page.start_requested.connect(self._on_zapret_start)
         self.zapret_page.stop_requested.connect(self._on_zapret_stop)
+        self.zapret_page.target_settings_changed.connect(self._on_zapret_target_settings_changed)
         self.controller.zapret.started.connect(self._on_zapret_started)
         self.controller.zapret.stopped.connect(self._on_zapret_stopped)
         self.controller.zapret.error.connect(self._on_zapret_error)
         self.controller.zapret.log_line.connect(self.logs_page.append_line)
+        self.controller.zapret.target_profile_changed.connect(self._on_zapret_target_changed)
+        self.controller.transition_state_changed.connect(self._on_zapret_transition_state)
 
         self.logs_page.clear_requested.connect(self._clear_logs_view)
         self.logs_page.export_diag_requested.connect(self._export_diagnostics)
@@ -476,6 +479,7 @@ class MainWindow(FluentWindow):
             self.dashboard_page.set_selected_latency(node.ping_ms)
         else:
             self.dashboard_page.set_selected_latency(None)
+        self.zapret_page.set_target(node, self.controller.zapret.resolved_target)
         self._refresh_tray_tooltip()
 
     def _on_connection_changed(self, connected: bool) -> None:
@@ -506,6 +510,7 @@ class MainWindow(FluentWindow):
 
     def _on_settings_changed(self, settings: AppSettings) -> None:
         self.settings_page.set_values(settings, self.controller.state.security)
+        self.zapret_page.set_target_settings(settings.zapret_target)
         self.settings_page.set_encryption_active(self.controller.is_data_encrypted())
         # Сверяем дашборд с реальным состоянием прокси Windows (быстрое
         # чтение реестра; на не-Windows вернётся supported=False).
@@ -1065,14 +1070,17 @@ class MainWindow(FluentWindow):
         infos = ZapretManager.list_preset_infos()
         saved = self.controller.state.settings.zapret_preset
         self.zapret_page.set_presets(infos, saved)
+        self.zapret_page.set_target_settings(self.controller.state.settings.zapret_target)
+        self.zapret_page.set_target(
+            self.controller.selected_node,
+            self.controller.zapret.resolved_target,
+        )
         if self.controller.state.settings.zapret_autostart and saved:
             if any(p.name == saved for p in infos):
                 QTimer.singleShot(1000, lambda: self._on_zapret_start(saved))
 
     def _on_zapret_start(self, preset_name: str) -> None:
-        self.controller.state.settings.zapret_preset = preset_name
-        self.controller.save()
-        self.controller.zapret.start(preset_name)
+        self.controller.start_zapret(preset_name)
 
     def _on_zapret_stop(self) -> None:
         self.controller.zapret.stop()
@@ -1087,6 +1095,37 @@ class MainWindow(FluentWindow):
     def _on_zapret_error(self, message: str) -> None:
         self.zapret_page.set_error(message)
         self._show_status("error", f"Zapret: {message}")
+
+    def _on_zapret_target_changed(self, resolved) -> None:
+        self.zapret_page.set_target(
+            self.controller.selected_node,
+            resolved,
+            "Профиль подготовлен" if resolved else "Профиль отключён",
+        )
+
+    def _on_zapret_transition_state(self, busy: bool, text: str) -> None:
+        if busy:
+            self.zapret_page.set_target_runtime_state(text)
+            return
+        ready = self.controller.zapret.target_profile_is_ready(self.controller.selected_node)
+        self.zapret_page.set_target_runtime_state("Готов" if ready else "Не готов")
+
+    def _on_zapret_target_settings_changed(self, settings) -> None:
+        self.controller.state.settings.zapret_target = settings
+        self.controller.zapret.set_target_settings(settings)
+        self.controller.schedule_save()
+        self.zapret_page.set_target_settings(settings)
+        self.zapret_page.set_target(
+            self.controller.selected_node,
+            self.controller.zapret.resolved_target,
+        )
+        if self.controller.connected or self.controller._desired_connected:
+            self.controller._desired_connected = True
+            self.controller._request_transition("Zapret target strategy changed")
+        elif self.controller.zapret.running and self.controller.state.settings.zapret_preset:
+            self.controller.start_zapret(self.controller.state.settings.zapret_preset)
+        else:
+            self.zapret_page.set_target_runtime_state("Настройки сохранены")
 
     def _check_updates(self, silent: bool = False) -> None:
         if getattr(self, "_update_in_progress", False):

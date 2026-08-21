@@ -92,6 +92,10 @@ def start_tun(
         controller._tun2socks_proxy_username = ""
         controller._tun2socks_proxy_password = ""
         return None
+    gate = getattr(controller, "target_profile_allows_core_start", None)
+    if gate is not None and not gate(node):
+        controller._active_core = prev_active_core
+        return None
     if not controller.xray.start(controller.state.settings.xray_path, config):
         controller._log("[tun] xray start failed")
         controller._active_core = prev_active_core
@@ -110,6 +114,10 @@ def start_tun(
     # При ротации активным по очереди становится любой сервер пула — обходной маршрут
     # нужен сразу для всех, а не только для текущего.
     server_ips = [pooled.server for pooled in outbound_pool.nodes]
+    if gate is not None and not gate(node):
+        controller.xray.stop()
+        controller._active_core = prev_active_core
+        return None
     tun_ok = controller.tun2socks.start(
         socks_port,
         username=proxy_username,
@@ -195,6 +203,9 @@ def hot_swap_steps(controller: AppController, reason: str, node: Node) -> Transi
             return False
         perf["build"] = time.monotonic() - stage_began
         stage_began = time.monotonic()
+        gate = getattr(controller, "target_profile_allows_core_start", None)
+        if gate is not None and not gate(node):
+            return False
         ok = yield from controller.xray.start_steps(controller.state.settings.xray_path, config)
         perf["start"] = time.monotonic() - stage_began
         if ok:

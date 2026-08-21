@@ -40,6 +40,27 @@ class ProxyProtectionResolver(QThread):
         self.resolved.emit(self._generation, self._server, addresses, error)
 
 
+class TargetProfileResolver(QThread):
+    """Resolve every host in one immutable selected-server endpoint spec."""
+
+    resolved = pyqtSignal(int, object, object, object)
+
+    def __init__(self, generation: int, spec, resolver: Callable, parent=None) -> None:
+        super().__init__(parent)
+        self._generation = generation
+        self._spec = spec
+        self._resolver = resolver
+
+    def run(self) -> None:
+        try:
+            endpoint = self._resolver(self._spec)
+            error: Exception | None = None
+        except Exception as exc:
+            endpoint = None
+            error = exc
+        self.resolved.emit(self._generation, self._spec, endpoint, error)
+
+
 class StateSaveWorker(QThread):
     """Serialize, encrypt and write a large state away from the GUI thread."""
 
