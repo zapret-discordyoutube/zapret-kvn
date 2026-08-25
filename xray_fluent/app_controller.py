@@ -161,6 +161,7 @@ from .engines.xray import (
     restart_proxy_core as restart_xray_proxy_core,
     restart_proxy_core_steps as restart_xray_proxy_core_steps,
 )
+from .engines.hysteria import HysteriaManager
 from .engines.singbox import (
     SingBoxManager,
     classify_node_for_singbox,
@@ -307,6 +308,7 @@ class AppController(QObject):
         self.storage = StateStorage()
         self.xray = XrayManager(self)
         self.singbox = SingBoxManager(self)
+        self.hysteria = HysteriaManager(self)
         self.tun2socks = Tun2SocksManager(self)
         self._xray_tun_routes = XrayTunRouteManager(self)
         self.zapret = ZapretManager(self)
@@ -413,6 +415,11 @@ class AppController(QObject):
         self.singbox.error.connect(self._on_singbox_error)
         self.singbox.state_changed.connect(self._on_core_state_changed)
         self.singbox.stopped.connect(lambda code: self._on_core_stopped("singbox", code))
+
+        self.hysteria.log_received.connect(self._on_xray_log)
+        self.hysteria.error.connect(self._on_singbox_error)
+        self.hysteria.state_changed.connect(self._on_core_state_changed)
+        self.hysteria.stopped.connect(lambda code: self._on_core_stopped("hysteria", code))
 
         self.tun2socks.log_received.connect(self._on_xray_log)
         self.tun2socks.error.connect(self._on_singbox_error)
@@ -951,10 +958,13 @@ class AppController(QObject):
         preferred_protect_port = 0
         preferred_protect_password = ""
         session = self._active_session
-        if session is not None and session.active_core == "singbox" and session.hybrid:
-            preferred_relay_port = session.sidecar_relay_port
-            preferred_protect_port = session.protect_ss_port
-            preferred_protect_password = session.protect_ss_password
+        if session is not None and session.active_core == "singbox":
+            if session.hybrid:
+                preferred_relay_port = session.sidecar_relay_port
+                preferred_protect_port = session.protect_ss_port
+                preferred_protect_password = session.protect_ss_password
+            elif session.sidecar_kind == "hysteria":
+                preferred_relay_port = session.sidecar_relay_port
         return plan_singbox_runtime(
             document,
             node,
@@ -981,6 +991,8 @@ class AppController(QObject):
                 preferred_relay_port = session.sidecar_relay_port
                 preferred_protect_port = session.protect_ss_port
                 preferred_protect_password = session.protect_ss_password
+            elif session.sidecar_kind == "hysteria":
+                preferred_relay_port = session.sidecar_relay_port
         return plan_singbox_proxy_runtime(
             document,
             node,
@@ -1006,7 +1018,19 @@ class AppController(QObject):
                 encoding="utf-8",
             )
             temporary.replace(SINGBOX_PROVIDER_FILE)
-        if plan.xray_sidecar is not None:
+        if plan.hysteria_sidecar is not None:
+            self._protect_ss_port = 0
+            self._protect_ss_password = ""
+            self._log(
+                "[sing-box] starting official Hysteria Gecko sidecar "
+                f"relay=127.0.0.1:{plan.hysteria_sidecar.relay_port}"
+            )
+            if not self.hysteria.start(
+                plan.hysteria_sidecar.config,
+                plan.hysteria_sidecar.relay_port,
+            ):
+                return False
+        elif plan.xray_sidecar is not None:
             self._protect_ss_port = plan.xray_sidecar.protect_port
             self._protect_ss_password = plan.xray_sidecar.protect_password
             self._log(
@@ -1047,6 +1071,8 @@ class AppController(QObject):
         ):
             if plan.xray_sidecar is not None and self.xray.is_running:
                 self.xray.stop()
+            if plan.hysteria_sidecar is not None and self.hysteria.is_running:
+                self.hysteria.stop()
             return False
         sb_ok = self.singbox.start(self.state.settings.singbox_path, plan.singbox_config)
         self._log(f"[sing-box] start result: {sb_ok}")
@@ -1059,6 +1085,8 @@ class AppController(QObject):
                 self.singbox.stop()
                 if plan.xray_sidecar is not None and self.xray.is_running:
                     self.xray.stop()
+                if plan.hysteria_sidecar is not None and self.hysteria.is_running:
+                    self.hysteria.stop()
                 self._singbox_clash_api_port = 0
                 self._xray_api_port = 0
                 self._protect_ss_port = 0
@@ -1068,6 +1096,8 @@ class AppController(QObject):
 
         if plan.xray_sidecar is not None and self.xray.is_running:
             self.xray.stop()
+        if plan.hysteria_sidecar is not None and self.hysteria.is_running:
+            self.hysteria.stop()
         self._protect_ss_port = 0
         self._protect_ss_password = ""
         self._singbox_clash_api_port = 0
@@ -1120,6 +1150,7 @@ class AppController(QObject):
         outbound_pool_tags: dict[str, str] | None = None,
         hybrid_relay_selector_tags: tuple[str, ...] = (),
         hybrid_relay_selected_tag: str = "",
+        sidecar_kind: str = "",
     ) -> None:
         settings = self.state.settings
         routing = self.state.routing
@@ -1166,6 +1197,7 @@ class AppController(QObject):
             outbound_pool_tags=outbound_pool_tags,
             hybrid_relay_selector_tags=hybrid_relay_selector_tags,
             hybrid_relay_selected_tag=hybrid_relay_selected_tag,
+            sidecar_kind=sidecar_kind,
         )
         self._blocked_transition_signature = ""
         begin_auto_switch_warmup(self, node)
@@ -1225,6 +1257,7 @@ class AppController(QObject):
                 core=session.active_core if session is not None else self._active_core,
                 api_port=session.api_port if session is not None else self._xray_api_port,
                 hybrid=session.hybrid if session is not None else False,
+                sidecar_kind=session.sidecar_kind if session is not None else "",
                 socks_port=socks_port,
                 http_port=http_port,
                 xray_inbound_tags=session.xray_inbound_tags if session is not None else (),
@@ -1766,7 +1799,12 @@ class AppController(QObject):
         """
         if self.connected:
             return
-        any_running = self.xray.is_running or self.singbox.is_running or self.tun2socks.is_running
+        any_running = (
+            self.xray.is_running
+            or self.singbox.is_running
+            or self.hysteria.is_running
+            or self.tun2socks.is_running
+        )
         if any_running:
             self._log("[transition] cancelled mid-swap — stopping partial connection processes")
             self._stop_active_connection_processes(disable_proxy=not self._desired_connected)
@@ -2292,6 +2330,8 @@ class AppController(QObject):
         if self._active_core == "singbox":
             if self._active_session is not None and self._active_session.hybrid:
                 return self.singbox.is_running and self.xray.is_running
+            if self._active_session is not None and self._active_session.sidecar_kind == "hysteria":
+                return self.singbox.is_running and self.hysteria.is_running
             return self.singbox.is_running
         if self._active_core == "tun2socks":
             return self.tun2socks.is_running and self.xray.is_running
@@ -2571,6 +2611,7 @@ class AppController(QObject):
             core=session.active_core,
             api_port=session.api_port,
             hybrid=session.hybrid,
+            sidecar_kind=session.sidecar_kind,
             socks_port=session.socks_port,
             http_port=session.http_port,
             xray_inbound_tags=session.xray_inbound_tags,

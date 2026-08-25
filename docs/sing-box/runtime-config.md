@@ -412,10 +412,11 @@ with a top-level `type` field is passed through as-is, with only its runtime
 `tag` replaced by the app. These native nodes intentionally require the
 `TUN -> sing-box` engine and are not sent to Xray.
 
-Hysteria2 links containing `pinSHA256` are rejected with an explicit error:
-the URI field pins the complete certificate, while sing-box exposes
-`certificate_public_key_sha256` (an SPKI/public-key pin). Silently copying or
-dropping that value would weaken or break certificate verification.
+For native sing-box Hysteria2 links, `pinSHA256` is rejected unless the link
+already disables certificate verification: the URI pins the complete
+certificate, while sing-box exposes an SPKI/public-key pin. Gecko links are the
+exception: the official Hysteria sidecar receives the original URI unchanged,
+so its full-certificate pin is preserved rather than converted or dropped.
 
 ### TLS support mapped today
 

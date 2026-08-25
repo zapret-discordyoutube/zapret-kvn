@@ -127,7 +127,17 @@ try {
     foreach ($source in $lock.sources) {
         $archivePath = Get-VerifiedArchive $source $DownloadCache
         $extractDirectory = Join-Path $temporaryRoot ([string]$source.id)
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDirectory -Force
+        $sourceKind = if ($source.PSObject.Properties.Name -contains "kind") { [string]$source.kind } else { "archive" }
+        if ($sourceKind -eq "file") {
+            New-Item -ItemType Directory -Force -Path $extractDirectory | Out-Null
+            Copy-Item -LiteralPath $archivePath -Destination (Join-Path $extractDirectory ([string]$source.archive)) -Force
+        }
+        elseif ($sourceKind -eq "archive") {
+            Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDirectory -Force
+        }
+        else {
+            throw "Unsupported source kind '$sourceKind' for $($source.id)"
+        }
 
         foreach ($mapping in $source.files) {
             $pattern = [string]$mapping.match

@@ -322,7 +322,7 @@ def _validate_lock(lock: dict[str, Any]) -> None:
     ids = [source.get("id") for source in sources if isinstance(source, dict)]
     if len(ids) != len(sources) or len(set(ids)) != len(ids):
         raise ResolverError("core lock sources must contain unique object ids")
-    for required in ("sing-box-extended", "xray-core"):
+    for required in ("sing-box-extended", "xray-core", "hysteria"):
         if required not in ids:
             raise ResolverError(f"core lock is missing {required}")
 

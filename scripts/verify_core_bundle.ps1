@@ -54,6 +54,18 @@ $expectedXrayVersion = ([string]$xraySource.version).TrimStart("v")
 if ($xrayVersionOutput -notmatch [regex]::Escape($expectedXrayVersion)) {
     throw "Bundled Xray version output does not match $($xraySource.version)"
 }
+$hysteriaSource = $manifest.sources | Where-Object { [string]$_.id -eq "hysteria" } | Select-Object -First 1
+if (-not $hysteriaSource) { throw "Core manifest does not identify official Hysteria" }
+$hysteriaPath = Join-Path $CoreDirectory "hysteria.exe"
+$hysteriaVersionOutput = (& $hysteriaPath version 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    throw "Bundled Hysteria failed its version command with exit code $LASTEXITCODE"
+}
+$expectedHysteriaVersion = ([string]$hysteriaSource.version).Replace("app/", "")
+if ($hysteriaVersionOutput -notmatch [regex]::Escape($expectedHysteriaVersion)) {
+    throw "Bundled Hysteria version output does not match $($hysteriaSource.version)"
+}
 
 Write-Host "[core] verified $($manifest.files.Count) files"
 Write-Host "[core] sing-box: $($singBoxSource.version)"
+Write-Host "[core] Hysteria: $($hysteriaSource.version)"

@@ -16,6 +16,8 @@ from ...runtime_security import generate_local_proxy_credentials, strip_singbox_
 from ...constants import (
     DEFAULT_HTTP_PORT,
     DEFAULT_SOCKS_PORT,
+    HYSTERIA_PATH_DEFAULT,
+    HYSTERIA_SIDECAR_RELAY_PORT,
     PROXY_HOST,
     SINGBOX_CLASH_API_PORT,
     SINGBOX_XRAY_RELAY_PORT,
@@ -91,14 +93,23 @@ class SingboxXraySidecarPlan:
 
 
 @dataclass(slots=True)
+class SingboxHysteriaSidecarPlan:
+    relay_port: int
+    relay_username: str
+    relay_password: str
+    config: dict[str, Any]
+
+
+@dataclass(slots=True)
 class SingboxRuntimePlan:
-    outcome: str  # native_singbox | hybrid_xray_sidecar
+    outcome: str  # native_singbox | hybrid_xray_sidecar | hysteria_sidecar
     source_path: Path
     text_hash: str
     singbox_config: dict[str, Any]
     has_proxy_outbound: bool
     used_selected_node: bool
     xray_sidecar: SingboxXraySidecarPlan | None
+    hysteria_sidecar: SingboxHysteriaSidecarPlan | None = None
     requested_socks_port: int = 0
     requested_http_port: int = 0
     socks_port: int = 0
@@ -113,6 +124,18 @@ class SingboxRuntimePlan:
     @property
     def is_hybrid(self) -> bool:
         return self.outcome == "hybrid_xray_sidecar"
+
+    @property
+    def is_hysteria_sidecar(self) -> bool:
+        return self.outcome == "hysteria_sidecar"
+
+    @property
+    def sidecar_kind(self) -> str:
+        if self.is_hybrid:
+            return "xray"
+        if self.is_hysteria_sidecar:
+            return "hysteria"
+        return ""
 
     @property
     def proxy_ports_changed(self) -> bool:
@@ -193,6 +216,8 @@ def classify_node_for_singbox(node: Node | None) -> str:
         return "native_singbox"
     if is_singbox_endpoint_node(node):
         return "native_singbox_endpoint"
+    if _is_hysteria_gecko_node(node):
+        return "hysteria_sidecar"
     try:
         build_singbox_outbound(node, tag="proxy")
     except ValueError:
@@ -336,6 +361,20 @@ def _plan_runtime_outbound(
             clash_api_port=clash_api_port,
         )
 
+    if _is_hysteria_gecko_node(node):
+        return _plan_hysteria_sidecar_runtime(
+            document,
+            runtime_config=runtime_config,
+            proxy_index=proxy_index,
+            node=node,
+            preferred_relay_port=preferred_relay_port,
+            requested_socks_port=requested_socks_port,
+            requested_http_port=requested_http_port,
+            socks_port=socks_port,
+            http_port=http_port,
+            clash_api_port=clash_api_port,
+        )
+
     try:
         native_proxy = build_singbox_outbound(node, tag="proxy")
     except ValueError:
@@ -430,6 +469,110 @@ def _plan_runtime_outbound(
         http_port=http_port,
         clash_api_port=clash_api_port,
     )
+
+
+def _is_hysteria_gecko_node(node: Node) -> bool:
+    outbound = node.outbound if isinstance(node.outbound, dict) else {}
+    if str(outbound.get("type") or "").strip().lower() != "hysteria2":
+        return False
+    obfs = outbound.get("obfs")
+    return isinstance(obfs, dict) and str(obfs.get("type") or "").strip().lower() == "gecko"
+
+
+def _plan_hysteria_sidecar_runtime(
+    document: ParsedSingboxDocument,
+    *,
+    runtime_config: dict[str, Any],
+    proxy_index: int,
+    node: Node,
+    preferred_relay_port: int,
+    requested_socks_port: int = 0,
+    requested_http_port: int = 0,
+    socks_port: int = 0,
+    http_port: int = 0,
+    clash_api_port: int = 0,
+) -> SingboxRuntimePlan:
+    raw_link = str(node.link or "").strip()
+    if raw_link.partition(":")[0].lower() not in {"hy2", "hysteria2"}:
+        raise ValueError(
+            "Hysteria2 Gecko можно запустить через временную прослойку только из "
+            "исходной ссылки hy2:// или hysteria2://. Импортируйте сервер ссылкой."
+        )
+    try:
+        relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(
+            preferred=HYSTERIA_SIDECAR_RELAY_PORT,
+            allow_ephemeral_fallback=True,
+        )
+    except RuntimeError as exc:
+        raise ValueError(
+            "Не удалось подобрать свободный локальный TCP-порт для Hysteria Gecko."
+        ) from exc
+
+    relay_username, relay_password = generate_local_proxy_credentials(prefix="hysteria")
+    outbounds = runtime_config.setdefault("outbounds", [])
+    assert isinstance(outbounds, list)
+    outbounds[proxy_index] = {
+        "type": "socks",
+        "tag": "proxy",
+        "server": PROXY_HOST,
+        "server_port": relay_port,
+        "username": relay_username,
+        "password": relay_password,
+        "inet4_bind_address": PROXY_HOST,
+    }
+    _ensure_hysteria_process_direct_route(runtime_config)
+    _validate_runtime_dns_contract(runtime_config)
+
+    sidecar = SingboxHysteriaSidecarPlan(
+        relay_port=relay_port,
+        relay_username=relay_username,
+        relay_password=relay_password,
+        config={
+            # The official client remains the single implementation of the
+            # Gecko protocol. Passing the original URI avoids a second, subtly
+            # different converter for auth, TLS pins and port hopping.
+            "server": raw_link,
+            "lazy": True,
+            "socks5": {
+                "listen": f"{PROXY_HOST}:{relay_port}",
+                "username": relay_username,
+                "password": relay_password,
+                "disableUDP": False,
+            },
+        },
+    )
+    return SingboxRuntimePlan(
+        outcome="hysteria_sidecar",
+        source_path=document.source_path,
+        text_hash=document.text_hash,
+        singbox_config=runtime_config,
+        has_proxy_outbound=True,
+        used_selected_node=True,
+        xray_sidecar=None,
+        hysteria_sidecar=sidecar,
+        requested_socks_port=requested_socks_port,
+        requested_http_port=requested_http_port,
+        socks_port=socks_port,
+        http_port=http_port,
+        clash_api_port=clash_api_port,
+    )
+
+
+def _ensure_hysteria_process_direct_route(payload: dict[str, Any]) -> None:
+    route = _ensure_dict(payload, "route")
+    rules = _ensure_list(route, "rules")
+    executable = str(HYSTERIA_PATH_DEFAULT.resolve())
+    protect_rule = {"process_path": [executable], "outbound": "direct"}
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        paths = rule.get("process_path")
+        if isinstance(paths, list) and executable in [str(item) for item in paths]:
+            rules[index] = protect_rule
+            return
+    # This app-owned safety rule must precede user routing so the sidecar's
+    # own UDP transport cannot re-enter the sing-box TUN.
+    rules.insert(0, protect_rule)
 
 
 def _plan_hybrid_runtime(

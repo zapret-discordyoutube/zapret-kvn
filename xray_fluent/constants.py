@@ -57,6 +57,9 @@ SINGBOX_DEFAULT_CONFIG_NAME = "default.json"
 SINGBOX_PATH_DEFAULT = BASE_DIR / "core" / "sing-box.exe"
 SINGBOX_CLASH_API_PORT = 19090
 SINGBOX_XRAY_RELAY_PORT = 11808
+HYSTERIA_SIDECAR_RELAY_PORT = 11809
+HYSTERIA_PATH_DEFAULT = BASE_DIR / "core" / "hysteria.exe"
+HYSTERIA_CONFIG_FILE = RUNTIME_DIR / "hysteria_config.json"
 
 SPEED_TEST_URLS_BY_COUNTRY: dict[str, str] = {
     "nl": "https://ams.download.datapacket.com/100mb.bin",

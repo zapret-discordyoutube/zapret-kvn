@@ -38,6 +38,7 @@ function Assert-StableCoreLock([string]$LockFile) {
     $required = @{
         "xray-core" = "XTLS/Xray-core"
         "sing-box-extended" = "shtorm-7/sing-box-extended"
+        "hysteria" = "HyNetworks/hysteria"
     }
     foreach ($entry in $required.GetEnumerator()) {
         $matches = @($lock.sources | Where-Object { [string]$_.id -eq $entry.Key })
@@ -69,7 +70,7 @@ function Stop-ReleaseProcesses([string]$Root) {
         [IO.Path]::GetFullPath((Join-Path $Root "dist\ZapretKVN")),
         [IO.Path]::GetFullPath((Join-Path $Root "core"))
     )
-    $names = @("ZapretKVN", "sing-box", "xray", "tun2socks")
+    $names = @("ZapretKVN", "sing-box", "xray", "hysteria", "tun2socks")
     foreach ($process in Get-Process -Name $names -ErrorAction SilentlyContinue) {
         $path = $null
         try { $path = $process.Path } catch { $path = $null }
@@ -138,7 +139,7 @@ function Get-CoreProof([string]$Root) {
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $sources = @($lock.sources | Where-Object {
-        [string]$_.id -in @("xray-core", "sing-box-extended")
+        [string]$_.id -in @("xray-core", "sing-box-extended", "hysteria")
     } | ForEach-Object {
         [ordered]@{
             id = [string]$_.id

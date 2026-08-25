@@ -158,6 +158,25 @@ class SingboxProtocolParserTests(unittest.TestCase):
         with self.assertRaisesRegex(LinkParseError, "obfs-password"):
             parse_single("hy2://secret@example.com:443/?obfs=salamander")
 
+    def test_hysteria2_gecko_is_preserved_for_the_official_sidecar(self) -> None:
+        link = (
+            "hy2://secret@example.com:443/?obfs=gecko&obfs-password=cover"
+            "&pinSHA256=deadbeef#Gecko"
+        )
+
+        node = parse_single(link)
+
+        self.assertEqual(node.link, link)
+        self.assertEqual(node.outbound["obfs"], {"type": "gecko", "password": "cover"})
+        self.assertEqual(link_import_warnings(link), [])
+        nodes, errors = parse_links_text(link)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(errors, [])
+
+    def test_hysteria2_gecko_requires_password(self) -> None:
+        with self.assertRaisesRegex(LinkParseError, "gecko obfs requires obfs-password"):
+            parse_single("hy2://secret@example.com:443/?obfs=gecko")
+
 
 if __name__ == "__main__":
     unittest.main()

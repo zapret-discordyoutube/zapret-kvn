@@ -368,7 +368,11 @@ def verify_gate_manifest(
         if not re.fullmatch(r"[0-9a-f]{64}", str(core.get(digest_key) or "")):
             raise ReleaseError(f"{mode} manifest contains an invalid core {digest_key}")
     core_sources = core.get("sources") or []
-    if {str(item.get("id")) for item in core_sources} != {"xray-core", "sing-box-extended"}:
+    if {str(item.get("id")) for item in core_sources} != {
+        "xray-core",
+        "sing-box-extended",
+        "hysteria",
+    }:
         raise ReleaseError(f"{mode} manifest core source set mismatch")
     for source in core_sources:
         if source.get("channel") != "stable" or source.get("release_prerelease") is not False:

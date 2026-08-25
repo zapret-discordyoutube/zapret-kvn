@@ -6,6 +6,7 @@ from .operations import restart_proxy_runtime, restart_runtime, start_proxy, sta
 from .runtime_planner import (
     ParsedSingboxDocument,
     SingboxDocumentState,
+    SingboxHysteriaSidecarPlan,
     SingboxRuntimePlan,
     SingboxXraySidecarPlan,
     classify_node_for_singbox,
@@ -26,6 +27,7 @@ __all__ = [
     "start_tun",
     "ParsedSingboxDocument",
     "SingboxDocumentState",
+    "SingboxHysteriaSidecarPlan",
     "SingboxRuntimePlan",
     "SingboxXraySidecarPlan",
     "classify_node_for_singbox",

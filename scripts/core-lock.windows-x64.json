@@ -40,6 +40,33 @@
       "asset_size": 20913304
     },
     {
+      "id": "hysteria",
+      "version": "app/v2.12.2",
+      "kind": "file",
+      "archive": "hysteria-windows-amd64.exe",
+      "url": "https://github.com/HyNetworks/hysteria/releases/download/app/v2.12.2/hysteria-windows-amd64.exe",
+      "sha256": "807ae5332a8fefeeff804923e057b6942acceaa11706ac7fa3db42f192c2fde1",
+      "files": [
+        { "match": "^hysteria-windows-amd64\\.exe$", "target": "hysteria.exe" }
+      ],
+      "repository": "HyNetworks/hysteria",
+      "channel": "stable",
+      "release_tag": "app/v2.12.2",
+      "release_prerelease": false,
+      "asset_name": "hysteria-windows-amd64.exe",
+      "asset_size": 23795712
+    },
+    {
+      "id": "hysteria-license",
+      "version": "app/v2.12.2",
+      "archive": "hysteria-app-v2.12.2.zip",
+      "url": "https://github.com/HyNetworks/hysteria/archive/refs/tags/app/v2.12.2.zip",
+      "sha256": "6772c8250039b08df69c64c65b0cc4ff4f789090cb9ea206f6a0efcb64782a3b",
+      "files": [
+        { "match": "(^|/)app/LICENSE\\.md$", "target": "LICENSE-Hysteria.md" }
+      ]
+    },
+    {
       "id": "runetfreedom-routing-data",
       "version": "97fafe95f258ee9e41a18e112c1fbf06db51c2c3",
       "archive": "russia-v2ray-rules-dat-97fafe95f258ee9e41a18e112c1fbf06db51c2c3.zip",

@@ -33,6 +33,7 @@ class ActiveSessionSnapshot:
     outbound_pool_tags: dict[str, str] | None = None
     hybrid_relay_selector_tags: tuple[str, ...] = ()
     hybrid_relay_selected_tag: str = ""
+    sidecar_kind: str = ""
 
 
 @dataclass(slots=True)
@@ -94,6 +95,7 @@ def build_active_session_snapshot(
     outbound_pool_tags: dict[str, str] | None = None,
     hybrid_relay_selector_tags: tuple[str, ...] = (),
     hybrid_relay_selected_tag: str = "",
+    sidecar_kind: str = "",
 ) -> ActiveSessionSnapshot:
     return ActiveSessionSnapshot(
         node_id=node_id,
@@ -122,4 +124,5 @@ def build_active_session_snapshot(
         outbound_pool_tags=dict(outbound_pool_tags or {}),
         hybrid_relay_selector_tags=tuple(hybrid_relay_selector_tags),
         hybrid_relay_selected_tag=str(hybrid_relay_selected_tag),
+        sidecar_kind=str(sidecar_kind),
     )

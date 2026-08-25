@@ -409,6 +409,7 @@ class HybridRuntimeStartupTests(unittest.TestCase):
         plan = SimpleNamespace(
             provider_payload=None,
             xray_sidecar=sidecar,
+            hysteria_sidecar=None,
             selected_outbound_tag="node-tag",
             clash_api_port=19090,
             singbox_config={"main": True},

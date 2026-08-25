@@ -119,6 +119,9 @@ def cleanup_connection_runtime_state(
 def stop_active_connection_processes(controller: AppController, *, disable_proxy: bool) -> bool:
     stopped = True
 
+    if controller.hysteria.is_running:
+        stopped = controller.hysteria.stop() and stopped
+
     if controller._active_core == "singbox":
         if controller.singbox.is_running:
             stopped = controller.singbox.stop() and stopped
@@ -266,6 +269,8 @@ def shutdown(controller: AppController) -> None:
         controller._xray_update_worker.wait(1000)
 
     controller.disconnect_current()
+    if controller.hysteria.is_running:
+        controller.hysteria.stop()
     if controller.tun2socks.is_running:
         controller.tun2socks.stop()
     if controller.singbox.is_running:

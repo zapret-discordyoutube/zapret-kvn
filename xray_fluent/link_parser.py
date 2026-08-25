@@ -14,6 +14,9 @@ class LinkParseError(ValueError):
     pass
 
 
+_HYSTERIA2_SUPPORTED_OBFS_TYPES = frozenset({"none", "plain", "salamander", "gecko"})
+
+
 def parse_links_text(text: str) -> tuple[list[Node], list[str]]:
     stripped = text.strip()
     if _looks_like_wireguard_conf(stripped):
@@ -57,6 +60,11 @@ def link_import_warnings(raw: str) -> list[str]:
         return []
     params = {key: _first(parse_qs(parsed.query, keep_blank_values=True), key)
               for key in parse_qs(parsed.query, keep_blank_values=True)}
+    if _get_param(params, "obfs").lower() == "gecko":
+        # Gecko is preserved by the official Hysteria sidecar; unlike the
+        # native sing-box conversion, the original URI (including its pin) is
+        # passed to Hysteria unchanged.
+        return []
     if not _get_param(params, "pinSHA256", "pin_sha256"):
         return []
     return [
@@ -758,10 +766,11 @@ def _parse_hysteria2(link: str) -> Node:
             allow_hopping=True,
         )
 
+    obfs_type = _get_param(params, "obfs").lower()
     certificate_pin = _get_param(params, "pinSHA256", "pin_sha256")
     if certificate_pin and not _to_bool(
         _get_param(params, "insecure", "skip-cert-verify", "allow_insecure", "allowInsecure")
-    ):
+    ) and obfs_type != "gecko":
         # Пин закрепляет весь сертификат, а sing-box — только публичный ключ, так что
         # перенести его нельзя. Рядом с insecure проверка отключена самой ссылкой и пин
         # уже ничего не добавляет: отказ отнял бы рабочий сервер, ничего не защитив.
@@ -785,15 +794,19 @@ def _parse_hysteria2(link: str) -> Node:
     if down:
         outbound["down_mbps"] = _parse_mbps(down, "down_mbps")
 
-    obfs_type = _get_param(params, "obfs").lower()
-    if obfs_type and obfs_type not in {"none", "plain", "salamander"}:
-        raise LinkParseError(f"unsupported Hysteria2 obfs type for sing-box: {obfs_type}")
-    if obfs_type == "salamander":
+    if obfs_type and obfs_type not in _HYSTERIA2_SUPPORTED_OBFS_TYPES:
+        raise LinkParseError(
+            "unsupported Hysteria2 obfs type "
+            f"'{obfs_type}'; supported types: salamander, gecko"
+        )
+    if obfs_type in {"salamander", "gecko"}:
         obfs_password = _get_param(params, "obfs-password", "obfs_password")
         if not obfs_password:
-            raise LinkParseError("invalid hysteria2 link: salamander obfs requires obfs-password")
+            raise LinkParseError(
+                f"invalid hysteria2 link: {obfs_type} obfs requires obfs-password"
+            )
         outbound["obfs"] = {
-            "type": "salamander",
+            "type": obfs_type,
             "password": obfs_password,
         }
 

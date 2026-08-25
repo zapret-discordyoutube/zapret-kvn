@@ -117,6 +117,13 @@ class ReleaseStateTests(unittest.TestCase):
                         "archive_sha256": "f" * 64,
                         "asset_size": 1,
                     },
+                    {
+                        "id": "hysteria",
+                        "channel": "stable",
+                        "release_prerelease": False,
+                        "archive_sha256": "1" * 64,
+                        "asset_size": 1,
+                    },
                 ],
             },
         }

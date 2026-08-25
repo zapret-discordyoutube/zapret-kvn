@@ -208,8 +208,12 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             + (
                 " (TUN, xray sidecar)"
                 if tun and singbox_plan is not None and singbox_plan.is_hybrid
+                else " (TUN, Hysteria Gecko)"
+                if tun and singbox_plan is not None and singbox_plan.is_hysteria_sidecar
                 else " (sing-box + Xray sidecar)"
                 if not tun and singbox_plan is not None and singbox_plan.is_hybrid
+                else " (sing-box + Hysteria Gecko)"
+                if not tun and singbox_plan is not None and singbox_plan.is_hysteria_sidecar
                 else " (sing-box extended)"
                 if not tun and singbox_plan is not None
                 else " (TUN)" if tun else ""
@@ -222,6 +226,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             core=controller._active_core,
             api_port=controller._xray_api_port,
             hybrid=bool(singbox_plan is not None and singbox_plan.is_hybrid),
+            sidecar_kind=singbox_plan.sidecar_kind if singbox_plan is not None else "",
             socks_port=(
                 runtime_xray.socks_port
                 if runtime_xray is not None
@@ -235,7 +240,13 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
                 else tun2socks_http_port if tun2socks_http_port > 0 else None
             ),
             xray_inbound_tags=runtime_xray.inbound_tags if runtime_xray is not None else (),
-            sidecar_relay_port=singbox_plan.xray_sidecar.relay_port if singbox_plan and singbox_plan.xray_sidecar else 0,
+            sidecar_relay_port=(
+                singbox_plan.xray_sidecar.relay_port
+                if singbox_plan and singbox_plan.xray_sidecar
+                else singbox_plan.hysteria_sidecar.relay_port
+                if singbox_plan and singbox_plan.hysteria_sidecar
+                else 0
+            ),
             protect_ss_port=controller._protect_ss_port,
             protect_ss_password=controller._protect_ss_password,
             ping_host=(

@@ -15,6 +15,8 @@ from xray_fluent.engines.singbox.runtime_planner import (
     plan_singbox_proxy_runtime,
     plan_singbox_runtime,
 )
+from xray_fluent.constants import HYSTERIA_PATH_DEFAULT
+from xray_fluent.engines.hysteria.manager import HysteriaManager
 from xray_fluent.link_parser import parse_single
 from xray_fluent.models import Node
 
@@ -47,6 +49,9 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             http_port=1391,
             singbox_config={},
             xray_sidecar=None,
+            hysteria_sidecar=None,
+            is_hysteria_sidecar=False,
+            sidecar_kind="",
             proxy_ports_changed=False,
             hybrid_relay_selector_tags=(),
             hybrid_relay_selected_tag="",
@@ -57,6 +62,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         controller.state.settings.enable_system_proxy = False
         controller.singbox.is_running = False
         controller.xray.is_running = False
+        controller.hysteria.is_running = False
         controller._start_singbox_runtime_plan.return_value = True
         controller._infer_singbox_ping_target.return_value = (node.server, node.port)
         controller._refresh_connected_state.return_value = (True, True)
@@ -114,6 +120,85 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             plan.singbox_config["experimental"]["clash_api"]["external_controller"],
             f"127.0.0.1:{plan.clash_api_port}",
         )
+
+    def test_gecko_uses_official_hysteria_sidecar_without_duplicating_uri_conversion(self) -> None:
+        link = (
+            "hy2://secret@example.com:443/?obfs=gecko&obfs-password=cover"
+            "&pinSHA256=deadbeef&sni=cdn.example.com#Gecko"
+        )
+        document = parse_singbox_document(
+            TEMPLATE_PATH,
+            TEMPLATE_PATH.read_text(encoding="utf-8"),
+        )
+        node = parse_single(link)
+
+        self.assertEqual(classify_node_for_singbox(node), "hysteria_sidecar")
+        for plan in (
+            plan_singbox_runtime(document, node),
+            plan_singbox_proxy_runtime(document, node, allowed_proxy_ports={1390, 1391}),
+        ):
+            with self.subTest(mode="proxy" if plan.socks_port else "tun"):
+                self.assertTrue(plan.is_hysteria_sidecar)
+                self.assertIsNone(plan.xray_sidecar)
+                self.assertIsNotNone(plan.hysteria_sidecar)
+                sidecar = plan.hysteria_sidecar
+                assert sidecar is not None
+                self.assertEqual(sidecar.config["server"], link)
+                self.assertEqual(
+                    sidecar.config["socks5"],
+                    {
+                        "listen": f"127.0.0.1:{sidecar.relay_port}",
+                        "username": sidecar.relay_username,
+                        "password": sidecar.relay_password,
+                        "disableUDP": False,
+                    },
+                )
+                proxy = next(
+                    item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy"
+                )
+                self.assertEqual(proxy["type"], "socks")
+                self.assertEqual(proxy["server"], "127.0.0.1")
+                self.assertEqual(proxy["server_port"], sidecar.relay_port)
+                self.assertEqual(proxy["username"], sidecar.relay_username)
+                self.assertEqual(proxy["password"], sidecar.relay_password)
+                self.assertFalse(
+                    any(item.get("type") == "hysteria2" for item in plan.singbox_config["outbounds"])
+                )
+                rules = plan.singbox_config["route"]["rules"]
+                self.assertEqual(
+                    rules[0],
+                    {
+                        "process_path": [str(HYSTERIA_PATH_DEFAULT.resolve())],
+                        "outbound": "direct",
+                    },
+                )
+
+    def test_gecko_json_outbound_is_refused_without_original_uri(self) -> None:
+        document = parse_singbox_document(
+            TEMPLATE_PATH,
+            TEMPLATE_PATH.read_text(encoding="utf-8"),
+        )
+        node = Node(
+            scheme="hysteria2",
+            server="example.com",
+            port=443,
+            outbound={
+                "type": "hysteria2",
+                "server": "example.com",
+                "server_port": 443,
+                "password": "secret",
+                "obfs": {"type": "gecko", "password": "cover"},
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "исходной ссылки"):
+            plan_singbox_runtime(document, node)
+
+    def test_hysteria_log_redaction_never_exposes_share_uri(self) -> None:
+        secret = "hy2://secret@example.com:443/?obfs=gecko&obfs-password=cover"
+        redacted = HysteriaManager.redact_log_line(f"failed to use {secret}")
+        self.assertNotIn("secret", redacted)
+        self.assertNotIn("obfs-password", redacted)
 
     def test_clash_api_port_self_heals_when_default_is_taken(self) -> None:
         import socket

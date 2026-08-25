@@ -23,6 +23,14 @@ def _proxy_session_label(plan: SingboxRuntimePlan, node: Node | None) -> str:
     return plan.source_path.name
 
 
+def _runtime_suffix(plan: SingboxRuntimePlan) -> str:
+    if plan.is_hybrid:
+        return " (sing-box + Xray sidecar)"
+    if plan.is_hysteria_sidecar:
+        return " (sing-box + Hysteria Gecko)"
+    return " (sing-box extended)"
+
+
 def _notify_proxy_port_change(controller: AppController, plan: SingboxRuntimePlan) -> None:
     if not plan.proxy_ports_changed:
         return
@@ -71,7 +79,7 @@ def start_proxy(
         return None
 
     session_label = _proxy_session_label(plan, node)
-    suffix = " (sing-box + Xray sidecar)" if plan.is_hybrid else " (sing-box extended)"
+    suffix = _runtime_suffix(plan)
     controller._set_connection_status("starting", f"Запуск прокси: {session_label}{suffix}...", level="info")
     _notify_proxy_port_change(controller, plan)
     controller._log(f"[proxy] sing-box planner outcome: {plan.outcome} from {plan.source_path}")
@@ -90,6 +98,8 @@ def start_proxy(
         controller.singbox.stop()
         if controller.xray.is_running:
             controller.xray.stop()
+        if controller.hysteria.is_running:
+            controller.hysteria.stop()
         controller._protect_ss_port = 0
         controller._protect_ss_password = ""
         controller._active_core = prev_active_core
@@ -115,17 +125,17 @@ def start_tun(
     session_label = plan.source_path.name
     if plan.used_selected_node and node is not None:
         session_label = f"{plan.source_path.name} / {node.name}"
-    start_message = (
-        f"Запуск VPN: {session_label} (sing-box + xray sidecar)..."
-        if plan.is_hybrid
-        else f"Запуск VPN: {session_label}..."
-    )
+    start_message = f"Запуск VPN: {session_label}{_runtime_suffix(plan)}..."
     controller._set_connection_status("starting", start_message, level="info")
     controller._log(f"[tun] sing-box planner outcome: {plan.outcome} from {plan.source_path}")
     if plan.used_selected_node and node is not None:
         if plan.is_hybrid:
             controller._log(
                 f"[tun] outbound tag 'proxy' replaced with local xray relay for unsupported node: {node.name}"
+            )
+        elif plan.is_hysteria_sidecar:
+            controller._log(
+                f"[tun] outbound tag 'proxy' replaced with local official Hysteria relay: {node.name}"
             )
         else:
             controller._log(f"[tun] outbound tag 'proxy' replaced from selected node: {node.name}")
@@ -134,8 +144,8 @@ def start_tun(
         controller._set_connection_status(
             "error",
             (
-                "Не удалось запустить sing-box hybrid runtime. Смотрите причину в последних строках лога sing-box."
-                if plan.is_hybrid
+                "Не удалось запустить sing-box sidecar runtime. Смотрите причину в последних строках лога."
+                if plan.sidecar_kind
                 else "Не удалось запустить sing-box TUN runtime. Смотрите причину в последних строках лога sing-box."
             ),
             level="error",
@@ -173,6 +183,9 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         if controller.xray.is_running and not controller.xray.stop():
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray sidecar", level="error")
             return False
+        if controller.hysteria.is_running and not controller.hysteria.stop():
+            controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Hysteria sidecar", level="error")
+            return False
 
         controller._xray_api_port = 0
         controller._protect_ss_port = 0
@@ -201,8 +214,15 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
             core="singbox",
             api_port=0,
             hybrid=plan.is_hybrid,
+            sidecar_kind=plan.sidecar_kind,
             xray_inbound_tags=(),
-            sidecar_relay_port=plan.xray_sidecar.relay_port if plan.xray_sidecar else 0,
+            sidecar_relay_port=(
+                plan.xray_sidecar.relay_port
+                if plan.xray_sidecar
+                else plan.hysteria_sidecar.relay_port
+                if plan.hysteria_sidecar
+                else 0
+            ),
             protect_ss_port=controller._protect_ss_port,
             protect_ss_password=controller._protect_ss_password,
             ping_host=ping_host,
@@ -213,7 +233,9 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         )
         controller._set_connection_status(
             "running",
-            f"Переключено: {session_label}" + (" (TUN, xray sidecar)" if plan.is_hybrid else " (TUN)"),
+            f"Переключено: {session_label}" + (
+                f" (TUN, {plan.sidecar_kind} sidecar)" if plan.sidecar_kind else " (TUN)"
+            ),
             level="success",
         )
         controller.schedule_save()
@@ -249,6 +271,9 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         if controller.xray.is_running and not controller.xray.stop():
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray sidecar", level="error")
             return False
+        if controller.hysteria.is_running and not controller.hysteria.stop():
+            controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Hysteria sidecar", level="error")
+            return False
 
         controller._xray_api_port = 0
         controller._protect_ss_port = 0
@@ -275,10 +300,17 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
             core="singbox",
             api_port=0,
             hybrid=plan.is_hybrid,
+            sidecar_kind=plan.sidecar_kind,
             socks_port=plan.socks_port,
             http_port=plan.http_port,
             xray_inbound_tags=(),
-            sidecar_relay_port=plan.xray_sidecar.relay_port if plan.xray_sidecar else 0,
+            sidecar_relay_port=(
+                plan.xray_sidecar.relay_port
+                if plan.xray_sidecar
+                else plan.hysteria_sidecar.relay_port
+                if plan.hysteria_sidecar
+                else 0
+            ),
             protect_ss_port=controller._protect_ss_port,
             protect_ss_password=controller._protect_ss_password,
             ping_host=ping_host,
@@ -287,7 +319,7 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
             hybrid_relay_selector_tags=plan.hybrid_relay_selector_tags,
             hybrid_relay_selected_tag=plan.hybrid_relay_selected_tag,
         )
-        suffix = " (sing-box + Xray sidecar)" if plan.is_hybrid else " (sing-box extended)"
+        suffix = _runtime_suffix(plan)
         controller._set_connection_status("running", f"Переключено: {session_label}{suffix}", level="success")
         controller.schedule_save()
         return True

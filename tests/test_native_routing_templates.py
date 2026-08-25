@@ -143,6 +143,8 @@ class RoutingAssetOwnershipTests(unittest.TestCase):
         self.assertNotIn("$manifestFiles +=", script)
         self.assertIn("$partialOutputArchive", script)
         self.assertIn("7z verification failed", script)
+        self.assertIn('$sourceKind -eq "file"', script)
+        self.assertIn("Unsupported source kind", script)
 
     def test_core_lock_overlays_pinned_runetfreedom_data_after_xray(self) -> None:
         lock = json.loads(
@@ -160,12 +162,16 @@ class RoutingAssetOwnershipTests(unittest.TestCase):
         protected = {
             item["id"]: item
             for item in sources
-            if item["id"] in {"xray-core", "sing-box-extended"}
+            if item["id"] in {"xray-core", "sing-box-extended", "hysteria"}
         }
         self.assertEqual(protected["xray-core"]["channel"], "stable")
         self.assertFalse(protected["xray-core"]["release_prerelease"])
         self.assertEqual(protected["sing-box-extended"]["channel"], "stable")
         self.assertFalse(protected["sing-box-extended"]["release_prerelease"])
+        self.assertEqual(protected["hysteria"]["repository"], "HyNetworks/hysteria")
+        self.assertEqual(protected["hysteria"]["channel"], "stable")
+        self.assertFalse(protected["hysteria"]["release_prerelease"])
+        self.assertEqual(protected["hysteria"]["kind"], "file")
 
     def test_core_only_update_preserves_application_owned_geo_data(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

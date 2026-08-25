@@ -52,11 +52,13 @@ Important version note:
 - The same raw sing-box profile is compiled into one of two capture modes:
   - proxy: app-owned SOCKS and HTTP inbounds replace source TUN/proxy inbounds;
   - TUN: source TUN remains active with a fresh app-owned interface name.
-- Both capture modes support two outbound planner outcomes:
+- Both capture modes support three outbound planner outcomes:
   - `native`: `sing-box` owns the selected outbound;
   - `hybrid`: `sing-box` remains the front runtime, while actual proxy traffic
     is relayed to a local Xray sidecar for transports our conversion layer does
     not map directly.
+  - `hysteria_sidecar`: Hysteria2 Gecko is relayed through the unmodified
+    official Hysteria client on an authenticated loopback SOCKS listener.
 - The current conversion layer supports these outbound families:
   - `vless`
   - `vmess`
