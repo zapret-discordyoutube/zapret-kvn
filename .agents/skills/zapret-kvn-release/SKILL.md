@@ -21,7 +21,8 @@ python3 scripts/release_windows.py \
 ```
 
 The version defaults to the next patch after the latest stable tag. Pass
-`--version MAJOR.MINOR.PATCH` only to make that same next patch explicit.
+`--version MAJOR.MINOR.PATCH` to make that same next patch explicit or, when the
+user explicitly requests a minor release, the immediate next minor `.0`.
 Telegram delivery is included by default; use `--no-telegram` only when the user
 explicitly excludes channel delivery.
 

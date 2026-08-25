@@ -14,6 +14,21 @@ class ReleaseVersionTests(unittest.TestCase):
         self.assertEqual(release_windows.next_patch("v0.4.83"), "0.4.84")
         self.assertEqual(release_windows.next_patch("v1.9.99"), "1.9.100")
 
+    def test_explicit_immediate_minor_zero_is_allowed(self) -> None:
+        self.assertEqual(
+            release_windows.validate_next_stable_version("v0.4.101", "0.5.0"),
+            "0.5.0",
+        )
+        self.assertEqual(
+            release_windows.validate_next_stable_version("v0.4.101", None),
+            "0.4.102",
+        )
+
+    def test_skipped_or_major_versions_are_rejected(self) -> None:
+        for value in ("0.4.103", "0.5.1", "0.6.0", "1.0.0"):
+            with self.subTest(value=value), self.assertRaises(release_windows.ReleaseError):
+                release_windows.validate_next_stable_version("v0.4.101", value)
+
     def test_prerelease_or_malformed_version_is_rejected(self) -> None:
         for value in ("0.4", "0.4.84-rc1", "latest", ""):
             with self.subTest(value=value), self.assertRaises(release_windows.ReleaseError):

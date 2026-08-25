@@ -161,6 +161,23 @@ def next_patch(tag: str) -> str:
     return version_text((major, minor, patch + 1))
 
 
+def next_minor(tag: str) -> str:
+    major, minor, _patch = parse_version(tag)
+    return version_text((major, minor + 1, 0))
+
+
+def validate_next_stable_version(latest_tag: str, requested: str | None) -> str:
+    patch_version = next_patch(latest_tag)
+    version = requested or patch_version
+    allowed = {patch_version, next_minor(latest_tag)}
+    if version not in allowed:
+        raise ReleaseError(
+            "next stable must be the next patch "
+            f"({patch_version}) or explicit next minor ({next_minor(latest_tag)}), not {version}"
+        )
+    return version
+
+
 def current_app_version() -> str:
     source = CONSTANTS_PATH.read_text(encoding="utf-8")
     match = re.search(r'^APP_VERSION\s*=\s*"(\d+\.\d+\.\d+)"\s*$', source, re.M)
@@ -665,10 +682,7 @@ def publish_telegram(version: str, changes: list[str]) -> None:
 
 def preflight(version: str | None, changes: list[str], telegram: bool) -> str:
     latest = latest_stable_tag()
-    expected = next_patch(latest)
-    version = version or expected
-    if version != expected:
-        raise ReleaseError(f"next stable must be {expected}, not {version}")
+    version = validate_next_stable_version(latest, version)
     if current_app_version() != latest.removeprefix("v"):
         raise ReleaseError("APP_VERSION must match the latest stable before a fresh release")
     refresh_stable_core_lock(write=False)
@@ -705,9 +719,7 @@ def load_or_create_state(args: argparse.Namespace, changes: list[str]) -> dict[s
             log(f"resuming v{state['version']} from {state.get('phase', 'start')}")
             return state
     tag = latest_stable_tag()
-    version = args.version or next_patch(tag)
-    if version != next_patch(tag):
-        raise ReleaseError(f"next stable must be {next_patch(tag)}, not {version}")
+    version = validate_next_stable_version(tag, args.version)
     if current_app_version() != tag.removeprefix("v"):
         raise ReleaseError(
             "APP_VERSION must match the latest stable before a fresh release"
@@ -871,7 +883,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build, verify and publish one Zapret KVN Windows stable release"
     )
-    parser.add_argument("--version", help="exact next patch version; defaults to the next tag")
+    parser.add_argument(
+        "--version",
+        help="exact next patch or immediate next minor .0; defaults to the next patch",
+    )
     parser.add_argument(
         "--change",
         action="append",
