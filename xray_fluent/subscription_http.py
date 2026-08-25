@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .constants import APP_VERSION, PROXY_HOST
+from .constants import APP_VERSION, PROXY_HOST, SUBSCRIPTION_PARSER_REVISION
 from .happ_crypt import HappCryptError, decrypt_happ_link, is_happ_crypt_link
 from .http_utils import build_opener
 from .models import Subscription
@@ -311,6 +311,7 @@ def fetch_subscription(
     proxy_port: int | None = None,
     timeout: float = 15,
     max_bytes: int = MAX_SUBSCRIPTION_BYTES,
+    force_refresh: bool = False,
 ) -> SubscriptionFetchResult:
     url = validate_subscription_url(subscription.url)
     if mode not in {"auto", "direct", "proxy"}:
@@ -324,6 +325,9 @@ def fetch_subscription(
         raise SubscriptionFetchError("Активный HTTP-прокси недоступен")
 
     errors: list[str] = []
+    unconditional = bool(force_refresh) or (
+        int(subscription.parser_revision) != SUBSCRIPTION_PARSER_REVISION
+    )
     for via_proxy, port in attempts:
         try:
             return _fetch_once(
@@ -333,6 +337,7 @@ def fetch_subscription(
                 proxy_port=port,
                 timeout=timeout,
                 max_bytes=max_bytes,
+                force_refresh=unconditional,
             )
         except Exception as exc:
             errors.append(sanitize_fetch_error(exc))
@@ -348,6 +353,7 @@ def _fetch_once(
     proxy_port: int | None,
     timeout: float,
     max_bytes: int,
+    force_refresh: bool = False,
 ) -> SubscriptionFetchResult:
     proxy_handler = (
         urllib.request.ProxyHandler(
@@ -361,15 +367,21 @@ def _fetch_once(
     )
     opener = build_opener(proxy_handler, _SafeRedirectHandler())
     headers = subscription_request_headers(subscription)
-    if subscription.etag:
+    if not force_refresh and subscription.etag:
         headers["If-None-Match"] = subscription.etag
-    if subscription.last_modified:
+    if not force_refresh and subscription.last_modified:
         headers["If-Modified-Since"] = subscription.last_modified
     request = urllib.request.Request(url, headers=headers)
     try:
         response = opener.open(request, timeout=timeout)
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
+            if force_refresh or not (
+                headers.get("If-None-Match") or headers.get("If-Modified-Since")
+            ):
+                raise SubscriptionFetchError(
+                    "Сервер вернул 304 без условного запроса; полное тело подписки не получено"
+                ) from exc
             return SubscriptionFetchResult(
                 headers=_response_headers(exc.headers),
                 status=304,

@@ -12,12 +12,42 @@ from .constants import DEFAULT_ACCENT_COLOR, ROUTING_RULE, STATE_SCHEMA_VERSION
 # only ever produces "#RRGGBB" strings; anything else falls back to the
 # default.  Full QColor-based normalization lives in ui/theme.py.
 _ACCENT_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_SUBSCRIPTION_URI_RE = re.compile(
+    r"(?i)\b(?:https?|happ|vless|vmess|trojan|ss|hysteria|hysteria2|hy2|tuic|"
+    r"socks5?|wireguard|awg)://\S+"
+)
+_SUBSCRIPTION_SECRET_RE = re.compile(
+    r"(?i)\b(auth|password|obfs-password|privatekey|presharedkey|token|uuid)"
+    r"\s*[:=]\s*[^\s;,]+"
+)
+_SUBSCRIPTION_WARNING_LIMIT = 20
+_SUBSCRIPTION_WARNING_LENGTH = 500
 
 
 def normalize_accent_color(value: Any) -> str:
     """Return *value* if it looks like "#RRGGBB", else the default accent."""
     text = str(value or "")
     return text if _ACCENT_COLOR_RE.fullmatch(text) else DEFAULT_ACCENT_COLOR
+
+
+def normalize_subscription_warnings(value: Any) -> list[str]:
+    """Bound and redact parser diagnostics before they reach persistent state."""
+
+    if not isinstance(value, (list, tuple)):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = " ".join(item.split())
+        text = _SUBSCRIPTION_URI_RE.sub("<ссылка скрыта>", text)
+        text = _SUBSCRIPTION_SECRET_RE.sub(lambda match: f"{match.group(1)}=<скрыто>", text)
+        text = text[:_SUBSCRIPTION_WARNING_LENGTH].strip()
+        if text:
+            normalized.append(text)
+        if len(normalized) >= _SUBSCRIPTION_WARNING_LIMIT:
+            break
+    return normalized
 
 
 def utc_now_iso() -> str:
@@ -168,6 +198,11 @@ class Subscription:
     exclude_pattern: str = ""
     etag: str = ""
     last_modified: str = ""
+    # Revision describes the parser that produced the stored node snapshot.
+    # A new/legacy subscription has no applied snapshot until first reconcile.
+    parser_revision: int = 0
+    skipped_count: int = 0
+    warnings: list[str] = field(default_factory=list)
     last_checked_at: str | None = None
     last_success_at: str | None = None
     last_error: str = ""
@@ -200,6 +235,9 @@ class Subscription:
             "exclude_pattern": self.exclude_pattern,
             "etag": self.etag,
             "last_modified": self.last_modified,
+            "parser_revision": self.parser_revision,
+            "skipped_count": self.skipped_count,
+            "warnings": normalize_subscription_warnings(self.warnings),
             "last_checked_at": self.last_checked_at,
             "last_success_at": self.last_success_at,
             "last_error": self.last_error,
@@ -242,6 +280,9 @@ class Subscription:
             exclude_pattern=str(data.get("exclude_pattern") or ""),
             etag=str(data.get("etag") or ""),
             last_modified=str(data.get("last_modified") or ""),
+            parser_revision=_non_negative_int("parser_revision"),
+            skipped_count=_non_negative_int("skipped_count"),
+            warnings=normalize_subscription_warnings(data.get("warnings")),
             last_checked_at=data.get("last_checked_at"),
             last_success_at=data.get("last_success_at"),
             last_error=str(data.get("last_error") or ""),

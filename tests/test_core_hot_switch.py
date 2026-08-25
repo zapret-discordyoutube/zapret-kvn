@@ -15,6 +15,7 @@ from xray_fluent.application.outbound_pool_service import (
 from xray_fluent.engines.singbox.runtime_planner import (
     parse_singbox_document,
     plan_singbox_proxy_runtime,
+    plan_singbox_runtime,
 )
 from xray_fluent.engines.singbox.selector_api import build_selector_url, select_outbound
 from xray_fluent.engines.xray.config_builder import build_xray_config
@@ -67,6 +68,50 @@ class XrayPoolTests(unittest.TestCase):
 
 
 class SingboxPoolTests(unittest.TestCase):
+    def test_native_provider_excludes_gecko_sidecar_nodes(self) -> None:
+        salamander = parse_single(
+            "hy2://secret@one.example:443/?obfs=salamander&obfs-password=cover#one"
+        )
+        gecko = parse_single(
+            "hy2://secret@gecko.example:443/?obfs=gecko&obfs-password=cover#gecko"
+        )
+        vless = parse_single(
+            "vless://11111111-1111-1111-1111-111111111111@two.example:443"
+            "?type=tcp&security=tls&sni=two.example#two"
+        )
+        nodes = [salamander, gecko, vless]
+        document = parse_singbox_document(
+            SINGBOX_TEMPLATE,
+            SINGBOX_TEMPLATE.read_text(encoding="utf-8"),
+        )
+
+        plans = (
+            plan_singbox_proxy_runtime(document, salamander, pool_nodes=nodes),
+            plan_singbox_runtime(document, salamander, pool_nodes=nodes),
+        )
+
+        for plan in plans:
+            with self.subTest(mode="proxy" if plan.socks_port else "tun"):
+                self.assertEqual(plan.outcome, "native_singbox")
+                self.assertIn(salamander.id, plan.selector_tags)
+                self.assertIn(vless.id, plan.selector_tags)
+                self.assertNotIn(gecko.id, plan.selector_tags)
+                provider = (plan.provider_payload or {})["outbounds"]
+                self.assertFalse(
+                    any(
+                        isinstance(item.get("obfs"), dict)
+                        and item["obfs"].get("type") == "gecko"
+                        for item in provider
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        isinstance(item.get("obfs"), dict)
+                        and item["obfs"].get("type") == "salamander"
+                        for item in provider
+                    )
+                )
+
     def test_native_nodes_are_exposed_through_provider_selector(self) -> None:
         nodes = [
             parse_single("hy2://secret@one.example:443/?insecure=1#one"),

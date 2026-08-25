@@ -85,11 +85,20 @@ class SubscriptionUpdateWorker(QThread):
     failed = pyqtSignal(object, str)                # Subscription, sanitized message
     progress = pyqtSignal(str, str)                 # subscription id, phase
 
-    def __init__(self, subscription, *, mode: str, proxy_port: int | None, parent=None) -> None:
+    def __init__(
+        self,
+        subscription,
+        *,
+        mode: str,
+        proxy_port: int | None,
+        force_refresh: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._subscription = subscription
         self._mode = mode
         self._proxy_port = proxy_port
+        self._force_refresh = bool(force_refresh)
 
     def run(self) -> None:
         try:
@@ -98,6 +107,7 @@ class SubscriptionUpdateWorker(QThread):
                 self._subscription,
                 mode=self._mode,
                 proxy_port=self._proxy_port,
+                force_refresh=self._force_refresh,
             )
             if fetched.not_modified:
                 self.completed.emit(self._subscription, fetched, None)

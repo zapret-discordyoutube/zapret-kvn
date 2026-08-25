@@ -171,8 +171,8 @@ class Ac1ModelTests(unittest.TestCase):
             1440,
         )
 
-    def test_schema_version_includes_zapret_target_settings(self) -> None:
-        self.assertEqual(STATE_SCHEMA_VERSION, 3)
+    def test_schema_version_includes_subscription_parser_revision(self) -> None:
+        self.assertEqual(STATE_SCHEMA_VERSION, 4)
 
     def test_helpers(self) -> None:
         self.assertEqual(clamp_subscriptions_check_interval(None), 15)
@@ -270,6 +270,29 @@ class Ac3GlobalSubscriptionToggleTests(unittest.TestCase):
         self.assertEqual(
             [item[0].id for item in self.controller._subscription_update_queue],
             [subscription.id],
+        )
+
+    def test_force_refresh_is_request_scoped_and_preserves_live_validators(self) -> None:
+        subscription = _due_subscription()
+        subscription.etag = '"old"'
+        subscription.last_modified = "Mon, 01 Jan 2024 00:00:00 GMT"
+        self.controller.state.subscriptions = [subscription]
+
+        self.assertTrue(
+            self.controller.update_subscription(
+                subscription.id,
+                mode="auto",
+                force_refresh=True,
+            )
+        )
+
+        queued = self.controller._subscription_update_queue[0]
+        self.assertEqual(queued[0].id, subscription.id)
+        self.assertTrue(queued[4])
+        self.assertEqual(subscription.etag, '"old"')
+        self.assertEqual(
+            subscription.last_modified,
+            "Mon, 01 Jan 2024 00:00:00 GMT",
         )
 
 

@@ -447,6 +447,41 @@ class SubscriptionEditPage(DetailPage):
         self.match_label.setText(f"Совпадений: {count} из {len(self._provider_names)}")
 
 
+def _subscription_status(
+    subscription: Subscription,
+    *,
+    updating: bool,
+) -> tuple[str, str]:
+    if updating:
+        return "Обновление…", "Подписка загружается и проверяется"
+
+    diagnostics: list[str] = []
+    if subscription.skipped_count:
+        diagnostics.append(f"Пропущено записей: {subscription.skipped_count}")
+    diagnostics.extend(subscription.warnings)
+    if subscription.skipped_count and not subscription.warnings:
+        diagnostics.append(
+            "Часть записей не импортирована из-за фильтров, скрытых серверов, "
+            "точных дублей или служебных outbound."
+        )
+
+    if subscription.last_error:
+        tooltip = subscription.last_error
+        if diagnostics:
+            tooltip += "\n\nПоследний успешно применённый снимок:\n" + "\n".join(diagnostics)
+        return subscription.last_error, tooltip
+    if subscription.warnings:
+        text = (
+            f"⚠ Предупреждений: {len(subscription.warnings)} · "
+            f"пропущено: {subscription.skipped_count}"
+        )
+        return text, "\n".join(diagnostics)
+    if subscription.skipped_count:
+        text = f"Пропущено: {subscription.skipped_count}"
+        return text, "\n".join(diagnostics)
+    return "OK", "Последний применённый снимок разобран без пропусков"
+
+
 class SubscriptionDeleteDialog(FluentDialog):
     def __init__(self, name: str, parent=None):
         super().__init__(parent)
@@ -474,6 +509,7 @@ class SubscriptionsPage(StackedSection):
     add_requested = pyqtSignal()
     edit_requested = pyqtSignal(str)
     update_requested = pyqtSignal(str, str)
+    force_update_requested = pyqtSignal(str, str)
     check_requested = pyqtSignal(str, str)
     update_all_requested = pyqtSignal(str)
     delete_requested = pyqtSignal(str)
@@ -511,12 +547,17 @@ class SubscriptionsPage(StackedSection):
         # оставались только в отчёте — со стороны это выглядело потерей серверов.
         self.check_btn = PushButton("Проверить и обновить", self)
         self.check_btn.setToolTip("Загрузить подписку и применить изменения")
+        self.force_update_btn = PushButton("Полностью обновить без кэша", self)
+        self.force_update_btn.setToolTip(
+            "Один раз загрузить полное тело без ETag и Last-Modified"
+        )
         self.delete_btn = TransparentToolButton(FIF.DELETE, self)
         self.delete_btn.setToolTip("Удалить")
         for button in (
             self.add_btn,
             self.update_all_btn,
             self.check_btn,
+            self.force_update_btn,
             self.edit_btn,
             self.update_btn,
             self.delete_btn,
@@ -550,6 +591,7 @@ class SubscriptionsPage(StackedSection):
         self.add_btn.clicked.connect(self.add_requested)
         self.update_all_btn.clicked.connect(lambda: self.update_all_requested.emit("auto"))
         self.check_btn.clicked.connect(self._emit_check)
+        self.force_update_btn.clicked.connect(self._emit_force_update)
         self.edit_btn.clicked.connect(self._emit_edit)
         self.update_btn.clicked.connect(self._emit_update)
         self.delete_btn.clicked.connect(self._emit_delete)
@@ -582,9 +624,12 @@ class SubscriptionsPage(StackedSection):
             self.table.setItem(row, 3, QTableWidgetItem(_format_traffic(subscription)))
             self.table.setItem(row, 4, QTableWidgetItem(_format_expire(subscription)))
             self.table.setItem(row, 5, QTableWidgetItem(_format_time(subscription.last_checked_at)))
-            status = "Обновление…" if subscription.id in self._updating else subscription.last_error or "OK"
+            status, status_tooltip = _subscription_status(
+                subscription,
+                updating=subscription.id in self._updating,
+            )
             status_item = QTableWidgetItem(status if len(status) <= 80 else f"{status[:77]}…")
-            status_item.setToolTip(status)
+            status_item.setToolTip(status_tooltip)
             self.table.setItem(row, 6, status_item)
             switch = SwitchButton(self.table)
             switch.setChecked(subscription.auto_update)
@@ -631,6 +676,7 @@ class SubscriptionsPage(StackedSection):
         busy = subscription_id in self._updating if subscription_id else False
         self.edit_btn.setEnabled(enabled and not busy)
         self.check_btn.setEnabled(enabled and not busy)
+        self.force_update_btn.setEnabled(enabled and not busy)
         self.update_btn.setEnabled(enabled and not busy)
         self.delete_btn.setEnabled(enabled and not busy)
 
@@ -649,6 +695,11 @@ class SubscriptionsPage(StackedSection):
         if subscription_id:
             # Проверка без применения осталась отдельным пунктом контекстного меню.
             self.update_requested.emit(subscription_id, "auto")
+
+    def _emit_force_update(self) -> None:
+        subscription_id = self.selected_id()
+        if subscription_id:
+            self.force_update_requested.emit(subscription_id, "auto")
 
     def _emit_delete(self) -> None:
         subscription_id = self.selected_id()
@@ -674,6 +725,11 @@ class SubscriptionsPage(StackedSection):
                 lambda _checked=False, sid=subscription_id, fetch_mode=mode: self.update_requested.emit(sid, fetch_mode)
             )
             menu.addAction(action)
+        force = Action("Полностью обновить без кэша", self)
+        force.triggered.connect(
+            lambda: self.force_update_requested.emit(subscription_id, "auto")
+        )
+        menu.addAction(force)
         menu.addSeparator()
         edit = Action("Редактировать", self)
         edit.triggered.connect(lambda: self.edit_requested.emit(subscription_id))

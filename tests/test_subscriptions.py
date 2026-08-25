@@ -16,15 +16,24 @@ import zipfile
 from PyQt6.QtGui import QImage
 
 from xray_fluent.application.subscription_service import (
+    apply_not_modified,
     hide_subscription_node,
     mark_subscription_failure,
     reconcile_subscription,
     remove_subscription,
     subscription_due,
 )
-from xray_fluent.constants import STATE_SCHEMA_VERSION
+from xray_fluent.constants import (
+    STATE_SCHEMA_VERSION,
+    SUBSCRIPTION_PARSER_REVISION,
+)
 from xray_fluent.diagnostics import export_diagnostics
-from xray_fluent.models import AppState, Node, Subscription
+from xray_fluent.models import (
+    AppState,
+    Node,
+    Subscription,
+    normalize_subscription_warnings,
+)
 from xray_fluent.qr_utils import QrDecodeError, decode_subscription_qr
 from xray_fluent.storage import StateStorage
 from xray_fluent.link_parser import LinkParseError, parse_single
@@ -56,6 +65,28 @@ VLESS_B = "vless://22222222-2222-2222-2222-222222222222@b.example:443?security=t
 
 
 class SubscriptionParserTests(unittest.TestCase):
+    def test_mixed_hysteria_subscription_keeps_all_gecko_nodes(self) -> None:
+        salamander = [
+            f"hy2://auth-{index}@s{index}.example:443/?obfs=salamander&"
+            f"obfs-password=cover-{index}#Salamander-{index}"
+            for index in range(38)
+        ]
+        gecko = [
+            f"hy2://auth-g{index}@g{index}.example:443/?obfs=gecko&"
+            f"obfs-password=cover-g{index}#Gecko-{index}"
+            for index in range(4)
+        ]
+
+        parsed = parse_subscription_payload("\n".join(salamander + gecko))
+
+        self.assertEqual(len(parsed.nodes), 42)
+        self.assertEqual(parsed.skipped, 0)
+        self.assertEqual(parsed.warnings, [])
+        self.assertEqual(
+            sum((node.outbound.get("obfs") or {}).get("type") == "gecko" for node in parsed.nodes),
+            4,
+        )
+
     def test_all_supported_link_protocols_and_wireguard_config(self) -> None:
         vmess_json = json.dumps(
             {
@@ -315,6 +346,63 @@ class SubscriptionReconcileTests(unittest.TestCase):
         self.assertEqual(subscription.pending_url, "https://other.example/new")
         self.assertEqual(subscription.etag, "current")
 
+    def test_legacy_snapshot_recovers_gecko_and_stamps_parser_revision(self) -> None:
+        old_links = [
+            f"hy2://auth-{index}@s{index}.example:443/?obfs=salamander&"
+            f"obfs-password=cover-{index}#Server-{index}"
+            for index in range(38)
+        ]
+        gecko_links = [
+            f"hy2://auth-g{index}@g{index}.example:443/?obfs=gecko&"
+            f"obfs-password=cover-g{index}#Gecko-{index}"
+            for index in range(4)
+        ]
+        subscription = Subscription(id="sub", parser_revision=0, etag='"old"')
+        state = AppState(subscriptions=[subscription])
+        first = parse_subscription_payload("\n".join(old_links))
+        reconcile_subscription(state, subscription, first, self._fetch(etag='"old"'))
+        stable_ids = {node.provider_name: node.id for node in state.nodes}
+        subscription.parser_revision = 0
+
+        outcome = reconcile_subscription(
+            state,
+            subscription,
+            parse_subscription_payload("\n".join(old_links + gecko_links)),
+            self._fetch(etag='"new"'),
+        )
+
+        self.assertEqual(len(state.nodes), 42)
+        self.assertEqual(outcome.result.added, 4)
+        self.assertEqual(outcome.result.removed, 0)
+        self.assertEqual(subscription.parser_revision, SUBSCRIPTION_PARSER_REVISION)
+        self.assertEqual(subscription.etag, '"new"')
+        self.assertEqual(
+            {node.provider_name: node.id for node in state.nodes if node.provider_name in stable_ids},
+            stable_ids,
+        )
+
+    def test_persistent_parse_diagnostics_follow_applied_snapshot(self) -> None:
+        subscription = Subscription(id="sub")
+        state = AppState(subscriptions=[subscription])
+        partial = parse_subscription_payload(f"{VLESS_A}\nnot-a-link")
+
+        reconcile_subscription(state, subscription, partial, self._fetch(etag='"partial"'))
+
+        self.assertEqual(subscription.skipped_count, 1)
+        self.assertTrue(subscription.warnings)
+        unchanged = apply_not_modified(subscription, self._fetch(etag='"partial"'))
+        self.assertEqual(unchanged.skipped, 1)
+        self.assertEqual(unchanged.warnings, subscription.warnings)
+
+        reconcile_subscription(
+            state,
+            subscription,
+            parse_subscription_payload(VLESS_A),
+            self._fetch(etag='"clean"'),
+        )
+        self.assertEqual(subscription.skipped_count, 0)
+        self.assertEqual(subscription.warnings, [])
+
 
 class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
     def test_open_client_deep_links_are_unwrapped_and_encrypted_happ_is_rejected(self) -> None:
@@ -427,6 +515,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
     def test_interval_override_and_backoff(self) -> None:
         now = datetime.now(timezone.utc)
         subscription = Subscription(
+            parser_revision=SUBSCRIPTION_PARSER_REVISION,
             update_interval_hours=2,
             provider_interval_hours=8,
             last_success_at=(now - timedelta(hours=3)).isoformat(),
@@ -438,6 +527,14 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         self.assertFalse(subscription_due(subscription, now))
         mark_subscription_failure(subscription, "again")
         self.assertEqual(subscription.failure_count, 2)
+
+        stale = Subscription(
+            parser_revision=0,
+            last_success_at=now.isoformat(),
+        )
+        self.assertTrue(subscription_due(stale, now))
+        stale.auto_update = False
+        self.assertFalse(subscription_due(stale, now))
 
     def test_auto_fetch_retries_once_through_active_proxy(self) -> None:
         subscription = Subscription(url="https://sub.example/path?token=secret")
@@ -453,6 +550,31 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
             result = fetch_subscription(subscription, mode="auto", proxy_port=1391)
         self.assertTrue(result.via_proxy)
         self.assertEqual(calls, [(False, None), (True, 1391)])
+
+    def test_force_refresh_preserves_fallback_and_omits_validators(self) -> None:
+        subscription = Subscription(
+            url="https://sub.example/list",
+            etag='"old"',
+            last_modified="Mon, 01 Jan 2024 00:00:00 GMT",
+            parser_revision=SUBSCRIPTION_PARSER_REVISION,
+        )
+        attempts: list[bool] = []
+
+        def fake_once(_subscription, **kwargs):
+            attempts.append(bool(kwargs["force_refresh"]))
+            if not kwargs["via_proxy"]:
+                raise OSError("direct failed")
+            return SubscriptionFetchResult(data=b"ok", via_proxy=True)
+
+        with patch("xray_fluent.subscription_http._fetch_once", side_effect=fake_once):
+            result = fetch_subscription(
+                subscription,
+                mode="auto",
+                proxy_port=1391,
+                force_refresh=True,
+            )
+        self.assertTrue(result.via_proxy)
+        self.assertEqual(attempts, [True, True])
 
     def test_proxy_mode_requires_port_and_secrets_are_masked(self) -> None:
         subscription = Subscription(url="https://user:pass@sub.example/very-long-token-value?token=secret")
@@ -470,6 +592,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
             url="https://sub.example/list",
             etag='"abc"',
             last_modified="Mon, 01 Jan 2024 00:00:00 GMT",
+            parser_revision=SUBSCRIPTION_PARSER_REVISION,
         )
 
         class Response:
@@ -530,6 +653,24 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
             not_modified = fetch_subscription(subscription, mode="direct")
         self.assertTrue(not_modified.not_modified)
 
+        stale = Subscription(
+            url=subscription.url,
+            etag='"abc"',
+            last_modified=subscription.last_modified,
+            parser_revision=0,
+        )
+        captured.clear()
+        opener.open = open_and_capture
+        with patch("xray_fluent.subscription_http.build_opener", return_value=opener):
+            fetch_subscription(stale, mode="direct")
+        stale_request = captured[0][0]
+        self.assertIsNone(stale_request.get_header("If-none-match"))
+        self.assertIsNone(stale_request.get_header("If-modified-since"))
+        opener.open = lambda _request, timeout: (_ for _ in ()).throw(http_error)
+        with patch("xray_fluent.subscription_http.build_opener", return_value=opener):
+            with self.assertRaisesRegex(SubscriptionFetchError, "304 без условного"):
+                fetch_subscription(stale, mode="direct")
+
         handler = _SafeRedirectHandler()
         with self.assertRaises(SubscriptionFetchError):
             handler.redirect_request(
@@ -560,6 +701,12 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
             client_profile="happ",
             send_hwid=True,
             hwid="OWN-DEVICE-ID",
+            parser_revision=SUBSCRIPTION_PARSER_REVISION,
+            skipped_count=4,
+            warnings=[
+                "hysteria2://auth@example/?obfs-password=secret",
+                "PrivateKey=private-value",
+            ],
         )
         state = AppState(schema_version=STATE_SCHEMA_VERSION, subscriptions=[subscription])
         state_data = state.to_dict()
@@ -568,6 +715,18 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
         self.assertEqual(restored.subscriptions[0].client_profile, "happ")
         self.assertTrue(restored.subscriptions[0].send_hwid)
         self.assertEqual(restored.subscriptions[0].hwid, "OWN-DEVICE-ID")
+        self.assertEqual(restored.subscriptions[0].parser_revision, SUBSCRIPTION_PARSER_REVISION)
+        self.assertEqual(restored.subscriptions[0].skipped_count, 4)
+        self.assertNotIn("secret", " ".join(restored.subscriptions[0].warnings))
+        self.assertNotIn("private-value", " ".join(restored.subscriptions[0].warnings))
+        legacy_subscription = Subscription.from_dict({"url": "https://example.com"})
+        self.assertEqual(legacy_subscription.parser_revision, 0)
+        self.assertEqual(legacy_subscription.skipped_count, 0)
+        self.assertEqual(legacy_subscription.warnings, [])
+        self.assertEqual(
+            normalize_subscription_warnings("not-a-list"),
+            [],
+        )
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.enc"
             plain_path = Path(temp_dir) / "state-plain.enc"
@@ -593,6 +752,10 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
                     url="https://sub.example/?token=top-secret",
                     send_hwid=True,
                     hwid="SUBSCRIPTION-HWID-SECRET",
+                    warnings=[
+                        "hy2://auth-secret@example/?obfs-password=cover-secret",
+                        "PrivateKey=warning-private-key",
+                    ],
                 )
             ],
             nodes=[
@@ -616,6 +779,9 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
         self.assertNotIn("private-key", state_text)
         self.assertNotIn("INSTALL-DEVICE-SECRET", state_text)
         self.assertNotIn("SUBSCRIPTION-HWID-SECRET", state_text)
+        self.assertNotIn("auth-secret", state_text)
+        self.assertNotIn("cover-secret", state_text)
+        self.assertNotIn("warning-private-key", state_text)
         self.assertNotIn("log-secret", logs_text)
 
     def test_qimage_is_passed_directly_and_only_http_is_accepted(self) -> None:

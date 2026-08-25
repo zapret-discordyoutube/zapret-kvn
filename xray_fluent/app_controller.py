@@ -203,6 +203,7 @@ from .models import (
     Subscription,
     SubscriptionUpdateResult,
     clamp_subscriptions_check_interval,
+    normalize_subscription_warnings,
     utc_now_iso,
 )
 from .subscription_http import (
@@ -345,7 +346,9 @@ class AppController(QObject):
         self._xray_update_worker: XrayCoreUpdateWorker | None = None
         self._state_save_worker: StateSaveWorker | None = None
         self._subscription_workers: dict[str, SubscriptionUpdateWorker] = {}
-        self._subscription_update_queue: list[tuple[Subscription, str, bool, bool]] = []
+        self._subscription_update_queue: list[
+            tuple[Subscription, str, bool, bool, bool]
+        ] = []
         self._subscription_queued_ids: set[str] = set()
         self._pending_subscription_additions: dict[str, Subscription] = {}
         self._subscription_check_ids: set[str] = set()
@@ -2038,11 +2041,23 @@ class AppController(QObject):
             subscription.hwid or self.state.subscription_device_id
         )
 
-    def update_subscription(self, subscription_id: str, *, mode: str = "auto") -> bool:
+    def update_subscription(
+        self,
+        subscription_id: str,
+        *,
+        mode: str = "auto",
+        force_refresh: bool = False,
+    ) -> bool:
         subscription = self.get_subscription(subscription_id)
         if subscription is None:
             return False
-        return self._enqueue_subscription_update(subscription, mode, pending_add=False, apply_result=True)
+        return self._enqueue_subscription_update(
+            subscription,
+            mode,
+            pending_add=False,
+            apply_result=True,
+            force_refresh=force_refresh,
+        )
 
     def check_subscription(self, subscription_id: str, *, mode: str = "auto") -> bool:
         subscription = self.get_subscription(subscription_id)
@@ -2135,11 +2150,12 @@ class AppController(QObject):
         mode: str,
         pending_add: bool,
         apply_result: bool,
+        force_refresh: bool = False,
     ) -> bool:
         if subscription.id in self._subscription_workers or subscription.id in self._subscription_queued_ids:
             return False
         self._subscription_update_queue.append(
-            (deepcopy(subscription), mode, pending_add, apply_result)
+            (deepcopy(subscription), mode, pending_add, apply_result, bool(force_refresh))
         )
         self._subscription_queued_ids.add(subscription.id)
         self._drain_subscription_update_queue()
@@ -2147,7 +2163,9 @@ class AppController(QObject):
 
     def _drain_subscription_update_queue(self) -> None:
         while self._subscription_update_queue and len(self._subscription_workers) < 3:
-            subscription, mode, pending_add, apply_result = self._subscription_update_queue.pop(0)
+            subscription, mode, pending_add, apply_result, force_refresh = (
+                self._subscription_update_queue.pop(0)
+            )
             self._subscription_queued_ids.discard(subscription.id)
             if not pending_add and self.get_subscription(subscription.id) is None:
                 continue
@@ -2156,6 +2174,7 @@ class AppController(QObject):
                 subscription,
                 mode=mode,
                 proxy_port=proxy_port,
+                force_refresh=force_refresh,
                 parent=self,
             )
             self._subscription_workers[subscription.id] = worker
@@ -2210,8 +2229,12 @@ class AppController(QObject):
                 subscription_id=subscription.id,
                 success=True,
                 message=f"Проверка успешна: в подписке серверов {node_count}",
-                skipped=0 if parsed is None else parsed.skipped,
-                warnings=[] if parsed is None else list(parsed.warnings),
+                skipped=(subscription.skipped_count if parsed is None else parsed.skipped),
+                warnings=(
+                    list(subscription.warnings)
+                    if parsed is None
+                    else normalize_subscription_warnings(parsed.warnings)
+                ),
                 not_modified=fetched.not_modified,
                 check_only=True,
                 source_count=node_count,

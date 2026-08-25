@@ -399,6 +399,8 @@ def _plan_runtime_outbound(
     for pooled in pool_nodes or []:
         if is_singbox_endpoint_node(pooled):
             continue
+        if _is_hysteria_gecko_node(pooled):
+            continue
         tag = singbox_outbound_tag(pooled.id)
         try:
             pooled_outbound = build_singbox_outbound(pooled, tag=tag)

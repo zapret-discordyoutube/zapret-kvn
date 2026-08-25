@@ -246,6 +246,13 @@ class MainWindow(FluentWindow):
         self.subscriptions_page.update_requested.connect(
             lambda sid, mode: self.controller.update_subscription(sid, mode=mode)
         )
+        self.subscriptions_page.force_update_requested.connect(
+            lambda sid, mode: self.controller.update_subscription(
+                sid,
+                mode=mode,
+                force_refresh=True,
+            )
+        )
         self.subscriptions_page.check_requested.connect(
             lambda sid, mode: self.controller.check_subscription(sid, mode=mode)
         )

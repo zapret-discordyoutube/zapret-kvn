@@ -35,7 +35,7 @@ app = _existing or QApplication([])
 from xray_fluent.models import Node, Subscription
 from xray_fluent.ui.detail_page import DetailPage, StackedSection
 from xray_fluent.ui.nodes_page import NodesPage
-from xray_fluent.ui.subscriptions_page import SubscriptionsPage
+from xray_fluent.ui.subscriptions_page import SubscriptionsPage, _subscription_status
 
 UI_DIR = Path(__file__).resolve().parent.parent / "xray_fluent" / "ui"
 
@@ -180,6 +180,32 @@ class NodesPageSubPagesTest(unittest.TestCase):
 
 
 class SubscriptionsPageSubPageTest(unittest.TestCase):
+    def test_persistent_subscription_status_and_force_refresh_signal(self) -> None:
+        subscription = Subscription(
+            id="s-warning",
+            skipped_count=4,
+            warnings=["Строка 39: Gecko не поддержан"],
+        )
+        text, tooltip = _subscription_status(subscription, updating=False)
+        self.assertIn("Предупреждений: 1", text)
+        self.assertIn("пропущено: 4", text)
+        self.assertIn("Gecko", tooltip)
+
+        subscription.last_error = "Сетевая ошибка"
+        text, tooltip = _subscription_status(subscription, updating=False)
+        self.assertEqual(text, "Сетевая ошибка")
+        self.assertIn("Последний успешно применённый снимок", tooltip)
+
+        page = _subscriptions_page()
+        page.set_data([subscription], [])
+        page.table.selectRow(0)
+        emitted: list[tuple[str, str]] = []
+        page.force_update_requested.connect(
+            lambda sid, mode: emitted.append((sid, mode))
+        )
+        page.force_update_btn.click()
+        self.assertEqual(emitted, [(subscription.id, "auto")])
+
     def test_new_subscription_form_opens_as_sub_page(self) -> None:
         page = _subscriptions_page()
         page.open_editor(None)

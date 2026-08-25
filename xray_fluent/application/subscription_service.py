@@ -6,7 +6,15 @@ from copy import deepcopy
 import json
 from urllib.parse import urlsplit
 
-from ..models import AppState, Node, Subscription, SubscriptionUpdateResult, utc_now_iso
+from ..constants import SUBSCRIPTION_PARSER_REVISION
+from ..models import (
+    AppState,
+    Node,
+    Subscription,
+    SubscriptionUpdateResult,
+    normalize_subscription_warnings,
+    utc_now_iso,
+)
 from ..subscription_http import SubscriptionFetchResult, sanitize_fetch_error
 from ..subscription_parser import ParsedSubscription
 
@@ -25,6 +33,8 @@ def subscription_due(subscription: Subscription, now: datetime | None = None) ->
     backoff = _parse_time(subscription.backoff_until)
     if backoff is not None and backoff > now:
         return False
+    if subscription.parser_revision != SUBSCRIPTION_PARSER_REVISION:
+        return True
     last_success = _parse_time(subscription.last_success_at)
     if last_success is None:
         return True
@@ -60,6 +70,8 @@ def apply_not_modified(
         subscription_id=subscription.id,
         success=True,
         message="Подписка не изменилась",
+        skipped=subscription.skipped_count,
+        warnings=list(subscription.warnings),
         not_modified=True,
     )
 
@@ -156,6 +168,9 @@ def reconcile_subscription(
 
     _apply_success_metadata(subscription, parsed, fetch)
     state.nodes = other_nodes + reconciled
+    subscription.parser_revision = SUBSCRIPTION_PARSER_REVISION
+    subscription.skipped_count = max(0, int(parsed.skipped))
+    subscription.warnings = normalize_subscription_warnings(parsed.warnings)
     result = SubscriptionUpdateResult(
         subscription_id=subscription.id,
         success=True,
@@ -164,7 +179,7 @@ def reconcile_subscription(
         updated=updated,
         removed=len(removed_nodes),
         skipped=parsed.skipped,
-        warnings=list(parsed.warnings),
+        warnings=list(subscription.warnings),
         reconnect_required=selected_changed or selected_removed,
     )
     return ReconcileOutcome(result, selected_changed, selected_removed)
