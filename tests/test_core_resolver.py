@@ -243,12 +243,24 @@ class AssetVerificationTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_branch_commit_must_be_an_immutable_sha(self) -> None:
+        with patch.object(resolver, "fetch_json", return_value={"sha": "AB" * 20}):
+            self.assertEqual(
+                resolver.github_branch_commit("owner/repo", "release"),
+                "ab" * 20,
+            )
+        with patch.object(resolver, "fetch_json", return_value={"sha": "release"}):
+            with self.assertRaisesRegex(resolver.ResolverError, "invalid commit"):
+                resolver.github_branch_commit("owner/repo", "release")
+
 
 class LockUpdateTests(unittest.TestCase):
-    def test_resolve_lock_updates_only_two_online_sources(self) -> None:
+    def test_resolve_lock_updates_cores_and_one_routing_snapshot(self) -> None:
         current = resolver.read_lock(ROOT / "scripts" / "core-lock.windows-x64.json")
         xray_payload = b"xray"
         singbox_payload = b"singbox"
+        routing_payload = b"routing"
+        routing_commit = "b" * 40
         xray_release = _release(
             "XTLS/Xray-core",
             "v26.3.27",
@@ -272,10 +284,16 @@ class LockUpdateTests(unittest.TestCase):
                 xray_release,
                 singbox_release,
             ]),
+            patch.object(resolver, "github_branch_commit", return_value=routing_commit),
             patch.object(
                 resolver,
                 "download_and_verify",
                 side_effect=[len(xray_payload), len(singbox_payload)],
+            ),
+            patch.object(
+                resolver,
+                "download_and_hash",
+                return_value=(len(routing_payload), hashlib.sha256(routing_payload).hexdigest()),
             ),
         ):
             candidate = resolver.resolve_lock(current)
@@ -287,12 +305,22 @@ class LockUpdateTests(unittest.TestCase):
             candidate_by_id["sing-box-extended"]["version"],
             "v1.13.18-extended-2.6.5",
         )
+        self.assertEqual(candidate_by_id["runetfreedom-routing-data"]["version"], routing_commit)
+        self.assertEqual(
+            candidate_by_id["runetfreedom-routing-data"]["sha256"],
+            hashlib.sha256(routing_payload).hexdigest(),
+        )
+        self.assertEqual(candidate_by_id["runetfreedom-routing-data"]["asset_size"], len(routing_payload))
         self.assertEqual(candidate_by_id["xray-core"]["files"], current_by_id["xray-core"]["files"])
         self.assertEqual(
             candidate_by_id["sing-box-extended"]["files"],
             current_by_id["sing-box-extended"]["files"],
         )
-        for source_id in ("runetfreedom-routing-data", "tun2socks", "wintun"):
+        self.assertEqual(
+            candidate_by_id["runetfreedom-routing-data"]["files"],
+            current_by_id["runetfreedom-routing-data"]["files"],
+        )
+        for source_id in ("tun2socks", "wintun"):
             self.assertEqual(candidate_by_id[source_id], current_by_id[source_id])
 
     def test_atomic_write_preserves_original_on_replace_failure(self) -> None:

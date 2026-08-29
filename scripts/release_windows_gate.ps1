@@ -210,6 +210,20 @@ function Assert-CleanPayload([string]$Root) {
     if (-not (Test-Path -LiteralPath (Join-Path $data "templates") -PathType Container)) {
         throw "Release payload is missing data/templates"
     }
+
+    $ruleSetRoot = Join-Path $portable "core\rule-set"
+    $requiredRuleSets = @(
+        "geosite-ru-blocked.srs",
+        "geoip-ru-blocked.srs",
+        "geosite-category-ru.srs",
+        "geoip-ru.srs"
+    )
+    foreach ($name in $requiredRuleSets) {
+        $path = Join-Path $ruleSetRoot $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -le 0) {
+            throw "Release payload is missing bundled sing-box rule-set: $path"
+        }
+    }
 }
 
 function Test-ShippedTemplates([string]$Root) {
@@ -229,6 +243,14 @@ function Test-ShippedTemplates([string]$Root) {
                 throw "Shipped template mismatch: $destination"
             }
         }
+    }
+
+    $portable = Join-Path $Root "dist\ZapretKVN"
+    $singbox = Join-Path $portable "core\sing-box.exe"
+    $workingDirectory = Join-Path $portable "core"
+    $singboxTemplates = @(Get-ChildItem -LiteralPath (Join-Path $portable "data\templates\sing-box") -Filter "*.json" -File)
+    foreach ($template in $singboxTemplates) {
+        Invoke-Native $singbox @("check", "-D", $workingDirectory, "-c", $template.FullName)
     }
     return $templates.Count
 }

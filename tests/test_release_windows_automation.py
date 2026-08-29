@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import zipfile
 
 import build
 from scripts import release_windows
@@ -177,6 +181,10 @@ class BuildPayloadTests(unittest.TestCase):
         (app_dir / "data" / "templates" / "xray" / "default.json").write_text(
             "{}\n", encoding="utf-8"
         )
+        for relative in build.SINGBOX_RULE_SET_RELATIVE_PATHS:
+            path = app_dir / "core" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"srs")
         return app_dir
 
     def test_clean_payload_allows_only_source_owned_templates_under_data(self) -> None:
@@ -202,6 +210,76 @@ class BuildPayloadTests(unittest.TestCase):
             (app_dir / "old-orphan.bin").write_bytes(b"stale")
             with self.assertRaisesRegex(RuntimeError, "unexpected top-level"):
                 build.assert_clean_payload(app_dir)
+
+    def test_clean_payload_requires_all_local_singbox_rule_sets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app_dir = self._make_clean_payload(Path(directory))
+            (app_dir / "core" / build.SINGBOX_RULE_SET_RELATIVE_PATHS[0]).unlink()
+            with self.assertRaisesRegex(RuntimeError, "missing bundled sing-box rule-set"):
+                build.assert_clean_payload(app_dir)
+
+    @staticmethod
+    def _routing_archive() -> bytes:
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr(
+                "snapshot/sing-box/rule-set-geosite/geosite-ru-blocked.srs",
+                b"blocked-domain",
+            )
+            archive.writestr(
+                "snapshot/sing-box/rule-set-geoip/geoip-ru-blocked.srs",
+                b"blocked-ip",
+            )
+            archive.writestr(
+                "snapshot/sing-box/rule-set-geosite/geosite-category-ru.srs",
+                b"direct-domain",
+            )
+            archive.writestr(
+                "snapshot/sing-box/rule-set-geoip/geoip-ru.srs",
+                b"direct-ip",
+            )
+        return output.getvalue()
+
+    def test_build_downloads_locked_rule_sets_into_core_and_replaces_stale_data(self) -> None:
+        archive_bytes = self._routing_archive()
+        archive_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, size=-1):
+                nonlocal archive_bytes
+                if not archive_bytes:
+                    return b""
+                chunk, archive_bytes = archive_bytes[:size], archive_bytes[size:]
+                return chunk
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = json.loads(build.CORE_LOCK_PATH.read_text(encoding="utf-8"))
+            source = next(item for item in lock["sources"] if item["id"] == build.ROUTING_SOURCE_ID)
+            source["sha256"] = archive_sha256
+            lock_path = root / "core-lock.json"
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            core_dir = root / "core"
+            stale = core_dir / "rule-set" / "stale.srs"
+            stale.parent.mkdir(parents=True)
+            stale.write_bytes(b"stale")
+
+            with patch.object(build, "urlopen", return_value=Response()):
+                destination = build.stage_singbox_rule_sets(lock_path, core_dir)
+
+            self.assertEqual(destination, core_dir / "rule-set")
+            self.assertFalse(stale.exists())
+            self.assertEqual(
+                {path.name for path in destination.iterdir()},
+                {relative.name for relative in build.SINGBOX_RULE_SET_RELATIVE_PATHS},
+            )
+            self.assertTrue(all(path.stat().st_size > 0 for path in destination.iterdir()))
 
     def test_clean_removes_the_entire_previous_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -249,6 +327,8 @@ class BuildPayloadTests(unittest.TestCase):
         )
         self.assertIn("function Assert-CleanPayload", source)
         self.assertIn("only data/templates is allowed", source)
+        self.assertIn("Release payload is missing bundled sing-box rule-set", source)
+        self.assertIn('Invoke-Native $singbox @(\"check\", \"-D\"', source)
         self.assertIn("Assert-CleanPayload $RepoRoot", source)
         self.assertIn("function Assert-StableCoreLock", source)
         self.assertIn("release_prerelease", source)

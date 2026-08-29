@@ -190,5 +190,54 @@ class SingBoxStopTests(unittest.TestCase):
         released_mock.assert_called_once_with()
 
 
+class SingBoxProxyReadinessTests(unittest.TestCase):
+    def test_clash_api_port_is_the_proxy_readiness_contract(self) -> None:
+        config = {
+            "experimental": {
+                "clash_api": {"external_controller": "127.0.0.1:19090"}
+            }
+        }
+        self.assertEqual(SingBoxManager._extract_clash_api_port(config), 19090)
+
+    def test_proxy_waits_for_clash_api_instead_of_process_age(self) -> None:
+        manager = SingBoxManager()
+        fake = Mock()
+        fake.state.return_value = _RUNNING
+        manager._process = fake
+
+        with patch.object(manager, "_is_port_ready", side_effect=[False, False, True]), patch(
+            "xray_fluent.engines.singbox.manager.sleep_with_events"
+        ) as sleep_mock:
+            self.assertTrue(
+                manager._wait_until_proxy_ready(
+                    {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}},
+                    max_wait=1.0,
+                )
+            )
+
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_proxy_readiness_timeout_stops_the_process(self) -> None:
+        manager = SingBoxManager()
+        fake = Mock()
+        fake.state.return_value = _RUNNING
+        manager._process = fake
+        manager.stop = Mock(return_value=True)
+        errors: list[str] = []
+        manager.error.connect(errors.append)
+
+        with patch.object(manager, "_is_port_ready", return_value=False):
+            self.assertFalse(
+                manager._wait_until_proxy_ready(
+                    {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}},
+                    max_wait=0.0,
+                )
+            )
+
+        manager.stop.assert_called_once_with(expected=True)
+        self.assertTrue(manager.last_start_failure_retryable)
+        self.assertTrue(any("19090" in message for message in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

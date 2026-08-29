@@ -11,11 +11,18 @@ Requires .venv created by setup.bat (or manually).
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+import zipfile
 
 ROOT = Path(__file__).resolve().parent
 VENV_DIR = ROOT / ".venv"
@@ -36,6 +43,15 @@ DATA_TEMPLATES_DIR = ROOT / "data" / "templates"
 ASSETS_DIR = ROOT / "assets"
 APP_ICON = ASSETS_DIR / "app_icon.ico"
 TEMPLATE_UPDATE_BUNDLE_NAME = "template-update"
+CORE_LOCK_PATH = ROOT / "scripts" / "core-lock.windows-x64.json"
+ROUTING_SOURCE_ID = "runetfreedom-routing-data"
+ROUTING_ARCHIVE_LIMIT_BYTES = 128 * 1024 * 1024
+SINGBOX_RULE_SET_RELATIVE_PATHS = (
+    Path("rule-set/geosite-ru-blocked.srs"),
+    Path("rule-set/geoip-ru-blocked.srs"),
+    Path("rule-set/geosite-category-ru.srs"),
+    Path("rule-set/geoip-ru.srs"),
+)
 
 # A release build is a payload, not an installed application.  Only these
 # directories are allowed to be copied from the source tree into the portable
@@ -128,6 +144,19 @@ def assert_clean_payload(app_dir: Path = APP_DIR) -> None:
     if not (data_dir / "templates").is_dir():
         raise RuntimeError(f"Build payload is missing data/templates: {data_dir}")
 
+    core_dir = app_dir / "core"
+    missing_rule_sets = [
+        relative.as_posix()
+        for relative in SINGBOX_RULE_SET_RELATIVE_PATHS
+        if not (core_dir / relative).is_file()
+        or (core_dir / relative).stat().st_size <= 0
+    ]
+    if missing_rule_sets:
+        raise RuntimeError(
+            "Build payload is missing bundled sing-box rule-set files: "
+            + ", ".join(missing_rule_sets)
+        )
+
 
 def stage_template_update_bundle(
     source_dir: Path = DATA_TEMPLATES_DIR,
@@ -140,6 +169,104 @@ def stage_template_update_bundle(
         _print(f"Staging template update bundle -> {destination}")
         _copy_tree_strict(source_dir, destination)
     return destination
+
+
+def _routing_source(lock_path: Path) -> dict:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot read routing lock {lock_path}: {exc}") from exc
+    sources = payload.get("sources") if isinstance(payload, dict) else None
+    matches = [
+        source
+        for source in sources or []
+        if isinstance(source, dict) and source.get("id") == ROUTING_SOURCE_ID
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"Core lock must contain exactly one {ROUTING_SOURCE_ID} source")
+    return matches[0]
+
+
+def _download_locked_archive(source: dict, destination: Path) -> None:
+    url = str(source.get("url") or "")
+    expected_sha256 = str(source.get("sha256") or "").lower()
+    if not url.startswith("https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/"):
+        raise RuntimeError("Routing source URL is outside the approved repository")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise RuntimeError("Routing source has no valid SHA-256")
+
+    request = Request(url, headers={"User-Agent": "ZapretKVN-build/1"})
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with urlopen(request, timeout=120) as response, destination.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > ROUTING_ARCHIVE_LIMIT_BYTES:
+                    raise RuntimeError("Routing archive exceeds the build safety limit")
+                digest.update(chunk)
+                output.write(chunk)
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Cannot download locked routing data: {exc}") from exc
+    if total <= 0:
+        raise RuntimeError("Locked routing archive is empty")
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            "Routing archive SHA-256 mismatch: "
+            f"expected {expected_sha256}, got {actual_sha256}"
+        )
+
+
+def stage_singbox_rule_sets(
+    lock_path: Path = CORE_LOCK_PATH,
+    core_dir: Path | None = None,
+) -> Path:
+    """Download the locked routing snapshot, stage four SRS files, and clean temp data."""
+
+    source = _routing_source(lock_path)
+    destination_root = (core_dir or (APP_DIR / "core")) / "rule-set"
+    expected_targets = {relative.as_posix() for relative in SINGBOX_RULE_SET_RELATIVE_PATHS}
+    mappings = [
+        mapping
+        for mapping in source.get("files") or []
+        if isinstance(mapping, dict) and str(mapping.get("target") or "") in expected_targets
+    ]
+    if {str(mapping["target"]) for mapping in mappings} != expected_targets:
+        raise RuntimeError("Routing lock does not map every required sing-box rule-set")
+
+    with tempfile.TemporaryDirectory(prefix="zapret-kvn-routing-build-") as temp_name:
+        temp_root = Path(temp_name)
+        archive_path = temp_root / "routing.zip"
+        staged_root = temp_root / "rule-set"
+        staged_root.mkdir()
+        _print(f"Downloading locked routing data {source.get('version', '')}")
+        _download_locked_archive(source, archive_path)
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                names = [name.replace("\\", "/") for name in archive.namelist()]
+                for mapping in mappings:
+                    pattern = re.compile(str(mapping["match"]))
+                    matches = [name for name in names if pattern.search(name)]
+                    if len(matches) != 1:
+                        raise RuntimeError(
+                            f"Expected one {mapping['match']} in routing archive, found {len(matches)}"
+                        )
+                    relative = Path(str(mapping["target"])).relative_to("rule-set")
+                    payload = archive.read(matches[0])
+                    if not payload:
+                        raise RuntimeError(f"Routing archive contains an empty {relative.as_posix()}")
+                    (staged_root / relative).write_bytes(payload)
+        except (OSError, re.error, zipfile.BadZipFile) as exc:
+            raise RuntimeError(f"Cannot stage sing-box rule-set files: {exc}") from exc
+
+        _remove_path_strict(destination_root)
+        _copy_tree_strict(staged_root, destination_root)
+
+    return destination_root
 
 
 # ------------------------------------------------------------------
@@ -206,6 +333,7 @@ def build_exe() -> None:
     dst_core = APP_DIR / "core"
     _print(f"Staging core -> {dst_core}")
     _copy_tree_strict(CORE_DIR, dst_core)
+    stage_singbox_rule_sets(core_dir=dst_core)
 
     dst_zapret = APP_DIR / "zapret"
     _print(f"Staging zapret -> {dst_zapret}")

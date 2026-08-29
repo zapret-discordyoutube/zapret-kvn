@@ -17,7 +17,11 @@ from xray_fluent.engines.singbox.runtime_planner import (
     plan_singbox_proxy_runtime,
     plan_singbox_runtime,
 )
-from xray_fluent.engines.singbox.selector_api import build_selector_url, select_outbound
+from xray_fluent.engines.singbox.selector_api import (
+    build_selector_url,
+    select_outbound,
+    select_outbound_when_ready,
+)
 from xray_fluent.engines.xray.config_builder import build_xray_config
 from xray_fluent.link_parser import parse_single
 from xray_fluent.models import AppSettings, RoutingSettings
@@ -226,6 +230,33 @@ class SelectorApiTests(unittest.TestCase):
         request = opener.open.call_args.args[0]
         self.assertEqual(request.method, "PUT")
         self.assertEqual(request.data, b'{"name": "provider/node"}')
+
+    @patch("xray_fluent.engines.singbox.selector_api.build_opener")
+    def test_cold_start_waits_for_control_plane_listener(self, build_opener_mock: Mock) -> None:
+        from urllib.error import URLError
+
+        response = Mock(status=204)
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        opener = build_opener_mock.return_value
+        opener.open.side_effect = [
+            URLError("connection refused"),
+            URLError("connection refused"),
+            response,
+        ]
+        waits: list[float] = []
+
+        ok, message = select_outbound_when_ready(
+            19090,
+            "proxy",
+            "provider/node",
+            timeout_sec=1.0,
+            wait=waits.append,
+        )
+
+        self.assertTrue(ok, message)
+        self.assertEqual(opener.open.call_count, 3)
+        self.assertEqual(len(waits), 2)
 
 
 class ManualSelectionTests(unittest.TestCase):
@@ -475,11 +506,65 @@ class HybridRuntimeStartupTests(unittest.TestCase):
             controller._apply_core_outbound_tag.call_args_list,
             [
                 unittest.mock.call("xray", "node-tag"),
-                unittest.mock.call("singbox", "relay-a"),
+                unittest.mock.call("singbox", "relay-a", startup=True),
             ],
         )
         self.assertEqual(controller._xray_api_port, 19085)
         self.assertEqual(controller._singbox_clash_api_port, 19090)
+
+    def test_start_restarts_singbox_once_when_cold_selector_pin_fails(self) -> None:
+        plan = SimpleNamespace(
+            provider_payload=None,
+            xray_sidecar=None,
+            hysteria_sidecar=None,
+            selected_outbound_tag="__app_nodes/node-one",
+            clash_api_port=19090,
+            singbox_config={"main": True},
+            is_hybrid=False,
+            hybrid_relay_selected_tag="",
+        )
+        controller = Mock()
+        controller.state.settings.singbox_path = "sing-box.exe"
+        controller.singbox.start.return_value = True
+        controller._apply_core_outbound_tag.side_effect = [False, True]
+
+        with patch("xray_fluent.app_controller.sleep_with_events") as sleep_mock:
+            self.assertTrue(AppController._start_singbox_runtime_plan(controller, plan))
+
+        self.assertEqual(controller.singbox.start.call_count, 2)
+        controller.singbox.stop.assert_called_once()
+        sleep_mock.assert_called_once_with(0.5)
+        self.assertEqual(
+            controller._apply_core_outbound_tag.call_args_list,
+            [
+                unittest.mock.call("singbox", "__app_nodes/node-one", startup=True),
+                unittest.mock.call("singbox", "__app_nodes/node-one", startup=True),
+            ],
+        )
+
+    def test_start_retries_manager_readiness_timeout_once(self) -> None:
+        plan = SimpleNamespace(
+            provider_payload=None,
+            xray_sidecar=None,
+            hysteria_sidecar=None,
+            selected_outbound_tag="__app_nodes/node-one",
+            clash_api_port=19090,
+            singbox_config={"main": True},
+            is_hybrid=False,
+            hybrid_relay_selected_tag="",
+        )
+        controller = Mock()
+        controller.state.settings.singbox_path = "sing-box.exe"
+        controller.singbox.start.side_effect = [False, True]
+        controller.singbox.last_start_failure_retryable = True
+        controller._apply_core_outbound_tag.return_value = True
+
+        with patch("xray_fluent.app_controller.sleep_with_events") as sleep_mock:
+            self.assertTrue(AppController._start_singbox_runtime_plan(controller, plan))
+
+        self.assertEqual(controller.singbox.start.call_count, 2)
+        controller.singbox.stop.assert_not_called()
+        sleep_mock.assert_called_once_with(0.5)
 
 
 if __name__ == "__main__":

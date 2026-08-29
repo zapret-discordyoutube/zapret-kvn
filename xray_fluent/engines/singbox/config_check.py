@@ -67,7 +67,7 @@ def check_config(exe: Path, config_path: Path, *, timeout: float = 15.0) -> tupl
 
     try:
         result = run_text_pumped(
-            [str(exe), "check", "-c", str(config_path)],
+            [str(exe), "check", "-D", str(exe.parent), "-c", str(config_path)],
             timeout=timeout,
         )
     except Exception as exc:  # ядро может отсутствовать или не запуститься

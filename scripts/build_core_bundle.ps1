@@ -122,10 +122,14 @@ $stagingDirectory = Join-Path $temporaryRoot "core"
 $partialOutputArchive = "$OutputArchive.partial"
 New-Item -ItemType Directory -Force -Path $stagingDirectory | Out-Null
 $manifestFilesByName = [ordered]@{}
+$ephemeralArchives = @()
 
 try {
     foreach ($source in $lock.sources) {
         $archivePath = Get-VerifiedArchive $source $DownloadCache
+        if ([string]$source.id -eq "runetfreedom-routing-data") {
+            $ephemeralArchives += $archivePath
+        }
         $extractDirectory = Join-Path $temporaryRoot ([string]$source.id)
         $sourceKind = if ($source.PSObject.Properties.Name -contains "kind") { [string]$source.kind } else { "archive" }
         if ($sourceKind -eq "file") {
@@ -154,6 +158,8 @@ try {
 
             $targetName = [string]$mapping.target
             $targetPath = Join-Path $stagingDirectory $targetName
+            $targetParent = Split-Path -Parent $targetPath
+            New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
             Copy-Item -LiteralPath $matches[0].FullName -Destination $targetPath -Force
             # Later sources intentionally overlay files from earlier sources
             # (for example runetfreedom geoip/geosite over Xray defaults).
@@ -220,4 +226,7 @@ try {
 finally {
     Remove-Item -LiteralPath $partialOutputArchive -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($archivePath in $ephemeralArchives) {
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+    }
 }

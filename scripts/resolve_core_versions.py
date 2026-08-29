@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Resolve and pin the latest stable Windows core assets.
+"""Resolve and pin the latest stable Windows core and routing assets.
 
 The normal Windows build is deliberately lock-driven.  This command is the
-explicit online boundary that may inspect GitHub and refresh only the Xray and
-extended sing-box entries in ``scripts/core-lock.windows-x64.json``.  Both
-``--check`` and ``--write`` download the selected archives and verify their
-actual bytes against the digest published by GitHub before a result is
-reported.  ``--write`` replaces the lock atomically; a network or digest error
-therefore leaves the previous lock untouched.
+explicit online boundary that may inspect GitHub and refresh Xray, extended
+sing-box, and the runetfreedom release-branch snapshot in
+``scripts/core-lock.windows-x64.json``.  Both ``--check`` and ``--write``
+download the selected archives into private temporary files, verify or record
+their exact digests, and delete those files before returning.  ``--write``
+replaces the lock atomically; a network or digest error therefore leaves the
+previous lock untouched.
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ ARCHIVE_LIMIT = 512 * 1024 * 1024
 XRAY_REPOSITORY = "XTLS/Xray-core"
 XRAY_ASSET_NAME = "Xray-windows-64.zip"
 SINGBOX_REPOSITORY = "shtorm-7/sing-box-extended"
+ROUTING_REPOSITORY = "runetfreedom/russia-v2ray-rules-dat"
+ROUTING_BRANCH = "release"
 
 _XRAY_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _SINGBOX_TAG_RE = re.compile(
@@ -113,6 +116,24 @@ def github_latest_release(repository: str, *, timeout: float = 30.0) -> dict[str
     if not isinstance(payload, dict):
         raise ResolverError(f"GitHub latest release response is not an object: {repository}")
     return payload
+
+
+def github_branch_commit(
+    repository: str,
+    branch: str,
+    *,
+    timeout: float = 30.0,
+) -> str:
+    """Resolve one moving branch to an immutable Git commit."""
+
+    url = f"{GITHUB_API_ROOT}/repos/{repository}/commits/{quote(branch, safe='')}"
+    payload = fetch_json(url, timeout=timeout)
+    if not isinstance(payload, dict):
+        raise ResolverError(f"GitHub branch response is not an object: {repository}/{branch}")
+    commit = str(payload.get("sha") or "").lower()
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ResolverError(f"GitHub returned an invalid commit for {repository}/{branch}")
+    return commit
 
 
 def _release_is_stable(release: dict[str, Any]) -> bool:
@@ -262,17 +283,12 @@ def asset_digest(
     return parsed
 
 
-def download_and_verify(
+def download_and_hash(
     url: str,
-    expected_sha256: str,
     *,
     timeout: float = 120.0,
-) -> int:
-    """Download an archive to a private temporary file and verify every byte."""
-
-    expected = expected_sha256.lower()
-    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
-        raise ResolverError(f"invalid expected SHA-256: {expected_sha256}")
+) -> tuple[int, str]:
+    """Download an archive privately, return its size and digest, then delete it."""
 
     fd, temporary_name = tempfile.mkstemp(prefix="zapret-kvn-core-", suffix=".part")
     temporary = Path(temporary_name)
@@ -298,12 +314,7 @@ def download_and_verify(
             raise ResolverError(f"archive download failed for {url}: {exc}") from exc
         if total <= 0:
             raise ResolverError(f"archive download was empty: {url}")
-        actual = digest.hexdigest()
-        if actual != expected:
-            raise ResolverError(
-                f"SHA-256 mismatch for {url}: expected {expected}, got {actual}"
-            )
-        return total
+        return total, digest.hexdigest()
     finally:
         if fd >= 0:
             os.close(fd)
@@ -311,6 +322,25 @@ def download_and_verify(
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def download_and_verify(
+    url: str,
+    expected_sha256: str,
+    *,
+    timeout: float = 120.0,
+) -> int:
+    """Download an archive to a private temporary file and verify every byte."""
+
+    expected = expected_sha256.lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise ResolverError(f"invalid expected SHA-256: {expected_sha256}")
+    total, actual = download_and_hash(url, timeout=timeout)
+    if actual != expected:
+        raise ResolverError(
+            f"SHA-256 mismatch for {url}: expected {expected}, got {actual}"
+        )
+    return total
 
 
 def _validate_lock(lock: dict[str, Any]) -> None:
@@ -322,7 +352,12 @@ def _validate_lock(lock: dict[str, Any]) -> None:
     ids = [source.get("id") for source in sources if isinstance(source, dict)]
     if len(ids) != len(sources) or len(set(ids)) != len(ids):
         raise ResolverError("core lock sources must contain unique object ids")
-    for required in ("sing-box-extended", "xray-core", "hysteria"):
+    for required in (
+        "sing-box-extended",
+        "xray-core",
+        "hysteria",
+        "runetfreedom-routing-data",
+    ):
         if required not in ids:
             raise ResolverError(f"core lock is missing {required}")
 
@@ -383,8 +418,33 @@ def _replace_source(
     return updated
 
 
+def _replace_routing_source(
+    source: dict[str, Any],
+    *,
+    commit: str,
+    timeout: float,
+) -> dict[str, Any]:
+    archive = f"russia-v2ray-rules-dat-{commit}.zip"
+    url = f"https://github.com/{ROUTING_REPOSITORY}/archive/{commit}.zip"
+    size, digest = download_and_hash(url, timeout=max(timeout, 120.0))
+    updated = copy.deepcopy(source)
+    updated.update(
+        {
+            "version": commit,
+            "archive": archive,
+            "url": url,
+            "sha256": digest,
+            "repository": ROUTING_REPOSITORY,
+            "channel": ROUTING_BRANCH,
+            "branch": ROUTING_BRANCH,
+            "asset_size": size,
+        }
+    )
+    return updated
+
+
 def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
-    """Resolve both stable sources while preserving all other lock entries."""
+    """Resolve stable cores and one immutable routing-data snapshot."""
 
     _validate_lock(lock)
     candidate = copy.deepcopy(lock)
@@ -394,9 +454,15 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
     singbox_release = select_stable_singbox(
         [github_latest_release(SINGBOX_REPOSITORY, timeout=timeout)]
     )
+    routing_commit = github_branch_commit(
+        ROUTING_REPOSITORY,
+        ROUTING_BRANCH,
+        timeout=timeout,
+    )
 
     xray_source = _source_by_id(candidate, "xray-core")
     singbox_source = _source_by_id(candidate, "sing-box-extended")
+    routing_source = _source_by_id(candidate, "runetfreedom-routing-data")
     replacement_xray = _replace_source(
         xray_source,
         release=xray_release,
@@ -413,12 +479,19 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
         asset_name=singbox_asset_name,
         timeout=timeout,
     )
+    replacement_routing = _replace_routing_source(
+        routing_source,
+        commit=routing_commit,
+        timeout=timeout,
+    )
 
     for index, source in enumerate(candidate["sources"]):
         if source.get("id") == "xray-core":
             candidate["sources"][index] = replacement_xray
         elif source.get("id") == "sing-box-extended":
             candidate["sources"][index] = replacement_singbox
+        elif source.get("id") == "runetfreedom-routing-data":
+            candidate["sources"][index] = replacement_routing
     return candidate
 
 
@@ -479,7 +552,11 @@ def atomic_write_lock(path: Path, lock: dict[str, Any]) -> None:
 
 def _source_summary(lock: dict[str, Any]) -> list[str]:
     summaries: list[str] = []
-    for source_id in ("xray-core", "sing-box-extended"):
+    for source_id in (
+        "xray-core",
+        "sing-box-extended",
+        "runetfreedom-routing-data",
+    ):
         source = _source_by_id(lock, source_id)
         summaries.append(f"{source_id}: {source['version']} sha256={source['sha256']}")
     return summaries
@@ -488,8 +565,9 @@ def _source_summary(lock: dict[str, Any]) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Resolve the latest stable Xray and extended sing-box Windows assets "
-            "and optionally atomically update the pinned core lock."
+            "Resolve the latest stable Xray and extended sing-box Windows assets, "
+            "plus the latest runetfreedom release-branch snapshot, and optionally "
+            "atomically update the pinned core lock."
         )
     )
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -514,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         current = read_lock(args.lock_file)
         candidate = resolve_lock(current, timeout=args.timeout)
-        print("Resolved stable core sources:")
+        print("Resolved stable core and routing sources:")
         for summary in _source_summary(candidate):
             print(f"  {summary}")
         if args.check:

@@ -159,6 +159,8 @@ def _parse_awg_node() -> Node:
 
 
 def _run_singbox_check(config: dict) -> subprocess.CompletedProcess:
+    if os.name != "nt" and not shutil.which("wslpath"):
+        raise unittest.SkipTest("Windows sing-box.exe cannot run on this host")
     with tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
@@ -170,13 +172,25 @@ def _run_singbox_check(config: dict) -> subprocess.CompletedProcess:
         config_path = Path(handle.name)
     try:
         runtime_path = str(config_path)
+        working_directory = str(SINGBOX_CORE.parent)
         if os.name != "nt" and shutil.which("wslpath"):
             runtime_path = subprocess.check_output(
                 ["wslpath", "-w", runtime_path],
                 text=True,
             ).strip()
+            working_directory = subprocess.check_output(
+                ["wslpath", "-w", working_directory],
+                text=True,
+            ).strip()
         return subprocess.run(
-            [str(SINGBOX_CORE), "check", "-c", runtime_path],
+            [
+                str(SINGBOX_CORE),
+                "check",
+                "-D",
+                working_directory,
+                "-c",
+                runtime_path,
+            ],
             capture_output=True,
             text=True,
             timeout=15,

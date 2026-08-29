@@ -221,6 +221,8 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         core = ROOT / "core" / "sing-box.exe"
         if not core.is_file():
             self.skipTest("bundled sing-box.exe is not present")
+        if os.name != "nt" and not shutil.which("wslpath"):
+            self.skipTest("Windows sing-box.exe cannot run on this host")
 
         links = (
             "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1",
@@ -244,13 +246,25 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     config_path = Path(handle.name)
                 try:
                     runtime_path = str(config_path)
+                    working_directory = str(core.parent)
                     if os.name != "nt" and shutil.which("wslpath"):
                         runtime_path = subprocess.check_output(
                             ["wslpath", "-w", runtime_path],
                             text=True,
                         ).strip()
+                        working_directory = subprocess.check_output(
+                            ["wslpath", "-w", working_directory],
+                            text=True,
+                        ).strip()
                     result = subprocess.run(
-                        [str(core), "check", "-c", runtime_path],
+                        [
+                            str(core),
+                            "check",
+                            "-D",
+                            working_directory,
+                            "-c",
+                            runtime_path,
+                        ],
                         capture_output=True,
                         text=True,
                         timeout=15,

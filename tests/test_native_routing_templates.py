@@ -30,6 +30,12 @@ BLOCKED_CHECK_DOMAINS = [
     "vk-analytics.ru",
     "apptracer.ru",
 ]
+SINGBOX_RULE_SET_PATHS = {
+    "geosite-ru-blocked": "rule-set/geosite-ru-blocked.srs",
+    "geoip-ru-blocked": "rule-set/geoip-ru-blocked.srs",
+    "geosite-category-ru": "rule-set/geosite-category-ru.srs",
+    "geoip-ru": "rule-set/geoip-ru.srs",
+}
 
 
 class NativeSingboxRoutingTemplateTests(unittest.TestCase):
@@ -42,15 +48,15 @@ class NativeSingboxRoutingTemplateTests(unittest.TestCase):
                 rule_sets = {item["tag"]: item for item in route["rule_set"]}
                 self.assertEqual(
                     set(rule_sets),
-                    {
-                        "geosite-ru-blocked",
-                        "geoip-ru-blocked",
-                        "geosite-category-ru",
-                        "geoip-ru",
-                    },
+                    set(SINGBOX_RULE_SET_PATHS),
                 )
-                self.assertTrue(all(item["update_interval"] == "6h" for item in rule_sets.values()))
-                self.assertTrue(all(item["download_detour"] == "direct" for item in rule_sets.values()))
+                for tag, item in rule_sets.items():
+                    self.assertEqual(item["type"], "local")
+                    self.assertEqual(item["format"], "binary")
+                    self.assertEqual(item["path"], SINGBOX_RULE_SET_PATHS[tag])
+                    self.assertNotIn("url", item)
+                    self.assertNotIn("download_detour", item)
+                    self.assertNotIn("update_interval", item)
 
                 rules = route["rules"]
                 self.assertEqual(rules[0], {"action": "sniff"})
@@ -154,11 +160,23 @@ class RoutingAssetOwnershipTests(unittest.TestCase):
         ids = [source["id"] for source in sources]
         self.assertLess(ids.index("xray-core"), ids.index("runetfreedom-routing-data"))
         source = sources[ids.index("runetfreedom-routing-data")]
-        self.assertEqual(source["version"], "97fafe95f258ee9e41a18e112c1fbf06db51c2c3")
+        self.assertRegex(source["version"], r"^[0-9a-f]{40}$")
+        self.assertEqual(source["repository"], "runetfreedom/russia-v2ray-rules-dat")
+        self.assertEqual(source["channel"], "release")
+        self.assertEqual(source["branch"], "release")
         self.assertEqual(
             {mapping["target"] for mapping in source["files"]},
-            {"geoip.dat", "geosite.dat"},
+            {
+                "geoip.dat",
+                "geosite.dat",
+                *SINGBOX_RULE_SET_PATHS.values(),
+            },
         )
+        script = (ROOT / "scripts" / "build_core_bundle.ps1").read_text(encoding="utf-8")
+        self.assertIn("$targetParent = Split-Path -Parent $targetPath", script)
+        self.assertIn("Remove-Item -LiteralPath $temporaryRoot -Recurse -Force", script)
+        self.assertIn('$source.id -eq "runetfreedom-routing-data"', script)
+        self.assertIn("foreach ($archivePath in $ephemeralArchives)", script)
         protected = {
             item["id"]: item
             for item in sources

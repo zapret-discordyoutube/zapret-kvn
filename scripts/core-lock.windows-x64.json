@@ -74,8 +74,15 @@
       "sha256": "910507643a17e7d7e78e7cea4823d0d1f8bc81d0cf8b96dccec171d9985b16d9",
       "files": [
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
-        { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" }
-      ]
+        { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
+        { "match": "(^|/)sing-box/rule-set-geosite/geosite-ru-blocked\\.srs$", "target": "rule-set/geosite-ru-blocked.srs" },
+        { "match": "(^|/)sing-box/rule-set-geoip/geoip-ru-blocked\\.srs$", "target": "rule-set/geoip-ru-blocked.srs" },
+        { "match": "(^|/)sing-box/rule-set-geosite/geosite-category-ru\\.srs$", "target": "rule-set/geosite-category-ru.srs" },
+        { "match": "(^|/)sing-box/rule-set-geoip/geoip-ru\\.srs$", "target": "rule-set/geoip-ru.srs" }
+      ],
+      "repository": "runetfreedom/russia-v2ray-rules-dat",
+      "channel": "release",
+      "branch": "release"
     },
     {
       "id": "tun2socks",

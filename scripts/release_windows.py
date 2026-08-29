@@ -245,11 +245,12 @@ def require_clean_main() -> None:
 
 
 def refresh_stable_core_lock(*, write: bool) -> None:
-    """Resolve exact stable Windows cores before the release source is pinned.
+    """Resolve exact Windows cores and routing data before source is pinned.
 
     The online resolver is the only moving boundary.  Once it has verified the
-    upstream bytes and atomically updated the lock, every Windows build remains
-    fully lock-driven and reproducible from the release commit.
+    core bytes, captured one immutable runetfreedom snapshot, and atomically
+    updated the lock, every Windows build remains fully lock-driven and
+    reproducible from the release commit.
     """
 
     if not CORE_RESOLVER_PATH.is_file():

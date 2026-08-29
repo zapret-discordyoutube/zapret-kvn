@@ -4,6 +4,8 @@ from collections import deque
 import json
 import os
 from pathlib import Path
+import socket
+import time
 from typing import Any
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -49,12 +51,18 @@ class SingBoxManager(QObject):
         self._last_exit_code: int | None = None
         self._last_exit_status = QProcess.ExitStatus.NormalExit
         self._uses_tun = False
+        self._last_start_failure_retryable = False
 
     @property
     def is_running(self) -> bool:
         return self._running
 
+    @property
+    def last_start_failure_retryable(self) -> bool:
+        return self._last_start_failure_retryable
+
     def start(self, singbox_path: str, config: dict[str, Any]) -> bool:
+        self._last_start_failure_retryable = False
         exe = resolve_configured_path(
             singbox_path,
             default_path=SINGBOX_PATH_DEFAULT,
@@ -105,8 +113,9 @@ class SingBoxManager(QObject):
         self._runtime_error_reported = False
         self._last_output_lines.clear()
 
-        # Proxy mode has no adapter to wait for. Keep a short settling window so
-        # an invalid config can exit and report its last log line before success.
+        # Proxy mode has no adapter to wait for. Its Clash API is the runtime
+        # control plane, so process existence alone is not readiness: local
+        # rule-set loading may still be in progress after QProcess.started.
         if not tun_interface_name:
             self._last_output_lines.clear()
             self._process.setWorkingDirectory(str(core_dir))
@@ -117,12 +126,8 @@ class SingBoxManager(QObject):
                 self._starting = False
                 self._report_startup_failure(f"failed to start sing-box process: {self._process.errorString()}")
                 return False
-            sleep_with_events(0.75)
-            if self._process.state() == QProcess.ProcessState.NotRunning:
+            if not self._wait_until_proxy_ready(config):
                 self._starting = False
-                self._report_startup_failure(
-                    self._unexpected_exit_message(self._last_exit_code, self._last_exit_status, startup=True)
-                )
                 return False
             self._starting = False
             self._mark_running()
@@ -308,6 +313,72 @@ class SingBoxManager(QObject):
                 continue
             return str(inbound.get("interface_name") or "").strip()
         return ""
+
+    @staticmethod
+    def _extract_clash_api_port(config: dict[str, Any]) -> int:
+        experimental = config.get("experimental")
+        if not isinstance(experimental, dict):
+            return 0
+        clash_api = experimental.get("clash_api")
+        if not isinstance(clash_api, dict):
+            return 0
+        endpoint = str(clash_api.get("external_controller") or "").strip()
+        if ":" not in endpoint:
+            return 0
+        try:
+            port = int(endpoint.rsplit(":", 1)[1])
+        except (TypeError, ValueError):
+            return 0
+        return port if 0 < port <= 65535 else 0
+
+    def _wait_until_proxy_ready(
+        self,
+        config: dict[str, Any],
+        max_wait: float = 15.0,
+    ) -> bool:
+        port = self._extract_clash_api_port(config)
+        if port <= 0:
+            sleep_with_events(0.75)
+            if self._process.state() != QProcess.ProcessState.NotRunning:
+                return True
+            self._report_startup_failure(
+                self._unexpected_exit_message(
+                    self._last_exit_code,
+                    self._last_exit_status,
+                    startup=True,
+                )
+            )
+            return False
+
+        deadline = time.monotonic() + max(0.0, max_wait)
+        while time.monotonic() < deadline:
+            if self._process.state() == QProcess.ProcessState.NotRunning:
+                self._report_startup_failure(
+                    self._unexpected_exit_message(
+                        self._last_exit_code,
+                        self._last_exit_status,
+                        startup=True,
+                    )
+                )
+                return False
+            if self._is_port_ready(port):
+                return True
+            sleep_with_events(0.1)
+
+        self._last_start_failure_retryable = True
+        self.stop(expected=True)
+        self._report_startup_failure(
+            f"sing-box запустился, но Clash API не открыл локальный порт {port}."
+        )
+        return False
+
+    @staticmethod
+    def _is_port_ready(port: int) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return True
+        except OSError:
+            return False
 
     def _wait_until_tun_ready(self, tun_interface_name: str, max_wait: float = 18.0) -> bool:
         if os.name != "nt" or not tun_interface_name:

@@ -174,6 +174,7 @@ from .engines.singbox import (
     SingboxDocumentState,
     SingboxRuntimePlan,
     select_outbound as select_singbox_outbound,
+    select_outbound_when_ready as select_singbox_outbound_when_ready,
 )
 from .constants import (
     APP_NAME,
@@ -221,7 +222,7 @@ from .engines.tun2socks import (
 )
 from .storage import PassphraseRequired, StateStorage
 from .startup import build_startup_command, set_startup_enabled
-from .subprocess_utils import result_output_text, run_text
+from .subprocess_utils import result_output_text, run_text, sleep_with_events
 from .traffic_history import TrafficHistoryStorage
 from .application.zapret_prewarm_service import start_proxy_dns_prewarm
 from .zapret_manager import ZapretManager
@@ -1077,25 +1078,40 @@ class AppController(QObject):
             if plan.hysteria_sidecar is not None and self.hysteria.is_running:
                 self.hysteria.stop()
             return False
-        sb_ok = self.singbox.start(self.state.settings.singbox_path, plan.singbox_config)
-        self._log(f"[sing-box] start result: {sb_ok}")
-        if sb_ok:
+        singbox_start_tag = (
+            plan.hybrid_relay_selected_tag if plan.is_hybrid else plan.selected_outbound_tag
+        )
+        for start_attempt in range(2):
+            sb_ok = self.singbox.start(self.state.settings.singbox_path, plan.singbox_config)
+            self._log(f"[sing-box] start result: {sb_ok}")
+            if not sb_ok:
+                retryable = getattr(
+                    self.singbox,
+                    "last_start_failure_retryable",
+                    False,
+                ) is True
+                if start_attempt == 0 and retryable:
+                    self._log(
+                        "[sing-box] self-heal: control plane did not become ready; "
+                        "restarting sing-box once"
+                    )
+                    sleep_with_events(0.5)
+                    continue
+                break
             self._singbox_clash_api_port = plan.clash_api_port
-            singbox_start_tag = (
-                plan.hybrid_relay_selected_tag if plan.is_hybrid else plan.selected_outbound_tag
-            )
-            if singbox_start_tag and not self._apply_core_outbound_tag("singbox", singbox_start_tag):
-                self.singbox.stop()
-                if plan.xray_sidecar is not None and self.xray.is_running:
-                    self.xray.stop()
-                if plan.hysteria_sidecar is not None and self.hysteria.is_running:
-                    self.hysteria.stop()
-                self._singbox_clash_api_port = 0
-                self._xray_api_port = 0
-                self._protect_ss_port = 0
-                self._protect_ss_password = ""
-                return False
-            return True
+            if not singbox_start_tag or self._apply_core_outbound_tag(
+                "singbox", singbox_start_tag, startup=True
+            ):
+                return True
+
+            self.singbox.stop()
+            self._singbox_clash_api_port = 0
+            if start_attempt == 0:
+                self._log(
+                    "[sing-box] self-heal: control plane did not become ready; "
+                    "restarting sing-box once"
+                )
+                sleep_with_events(0.5)
 
         if plan.xray_sidecar is not None and self.xray.is_running:
             self.xray.stop()
@@ -2390,12 +2406,23 @@ class AppController(QObject):
         self._xray_outbound_pool_cache = None
         self._xray_outbound_pool_cache_key = None
 
-    def _apply_core_outbound_tag(self, core: str, outbound_tag: str) -> bool:
+    def _apply_core_outbound_tag(
+        self,
+        core: str,
+        outbound_tag: str,
+        *,
+        startup: bool = False,
+    ) -> bool:
         if core == "singbox":
-            ok, output = select_singbox_outbound(
+            selector = (
+                select_singbox_outbound_when_ready if startup else select_singbox_outbound
+            )
+            kwargs = {"wait": sleep_with_events} if startup else {}
+            ok, output = selector(
                 self._singbox_clash_api_port,
                 SINGBOX_SELECTOR_TAG,
                 outbound_tag,
+                **kwargs,
             )
         else:
             xray_path = getattr(self.xray, "_exe_path", None) or self.state.settings.xray_path
