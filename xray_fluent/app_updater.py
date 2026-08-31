@@ -395,13 +395,14 @@ def _build_update_script(
         "$runtimeDir = Join-Path (Join-Path $appDir 'data') 'runtime'",
         "$errorLog = Join-Path $logDir 'update_error.log'",
         "$preserveNames = @('data')",
-        "$backupDir = Join-Path $runtimeDir 'update_backup'",
+        # Каждая попытка получает собственный backup. Старый фиксированный
+        # update_backup мог остаться после прерывания/антивирусной блокировки;
+        # тогда Move-Item десять секунд повторял перенос в уже существующий
+        # каталог и оставлял приложение без штатного перезапуска.
+        "$backupRootDir = Join-Path $runtimeDir 'update_backups'",
+        "$backupDir = Join-Path $backupRootDir (Split-Path -Leaf $tempDir)",
         "$backupReplaceDir = Join-Path $backupDir 'replace'",
         "$backupStaleDir = Join-Path $backupDir 'stale'",
-        "Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
-        "New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null",
-        "New-Item -ItemType Directory -Path $backupReplaceDir -Force | Out-Null",
-        "New-Item -ItemType Directory -Path $backupStaleDir -Force | Out-Null",
         # Ядра живут отдельными процессами внутри каталога приложения и
         # держат core\ открытым, поэтому ожидания одного лишь основного
         # процесса не хватало: перемещение падало на занятом каталоге.
@@ -422,38 +423,72 @@ def _build_update_script(
         "    }",
         "}",
         # Даже после завершения процесса Windows освобождает файл не мгновенно.
+        # Directory.Move выполняет переименование каталога целиком на том же
+        # томе. В отличие от Move-Item в каталог-контейнер, не остаётся частично
+        # созданного destination, который делает все повторы бесполезными.
         "function Move-WithRetry {",
         "    param([string] $path, [string] $destination, [int] $attempts = 20)",
-        # -ErrorAction Stop обязателен: без него Move-Item сообщает об
-        # ошибке не-терминирующим способом, catch не срабатывает, и функция
-        # отчитывается об успехе, оставив файл на месте.
-        "    for ($try = 1; $try -lt $attempts; $try++) {",
+        "    if (Test-Path -LiteralPath $destination) {",
+        "        throw ('Move destination already exists: ' + $destination)",
+        "    }",
+        "    for ($try = 1; $try -le $attempts; $try++) {",
         "        try {",
-        "            Move-Item -LiteralPath $path -Destination $destination -Force -ErrorAction Stop",
+        "            if (Test-Path -LiteralPath $path -PathType Container) {",
+        "                [System.IO.Directory]::Move($path, $destination)",
+        "            } else {",
+        "                [System.IO.File]::Move($path, $destination)",
+        "            }",
         "            return",
         "        } catch {",
+        "            if ($try -eq $attempts) { throw }",
         "            Start-Sleep -Milliseconds 500",
         "        }",
         "    }",
-        "    Move-Item -LiteralPath $path -Destination $destination -Force -ErrorAction Stop",
         "}",
+        "function Remove-WithRetry {",
+        "    param([string] $path, [int] $attempts = 20)",
+        "    for ($try = 1; $try -le $attempts; $try++) {",
+        "        if (-not (Test-Path -LiteralPath $path)) { return }",
+        "        try {",
+        "            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop",
+        "            return",
+        "        } catch {",
+        "            if ($try -eq $attempts) { throw }",
+        "            Start-Sleep -Milliseconds 500",
+        "        }",
+        "    }",
+        "}",
+        "$appRoot = [System.IO.Path]::GetFullPath($appDir).TrimEnd('\\') + '\\'",
+        "$sourceNames = @()",
+        "$originalNames = @()",
+        "try {",
+        # С этого места приложение уже может успеть завершиться по команде UI.
+        # Поэтому даже ошибка подготовки backup обязана попасть в общий rollback,
+        # который снова запустит ещё не изменённую установленную версию.
+        "    New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null",
+        "    New-Item -ItemType Directory -Path $backupRootDir -Force | Out-Null",
+        "    if (Test-Path -LiteralPath $backupDir) { throw ('Update backup already exists: ' + $backupDir) }",
+        "    New-Item -ItemType Directory -Path $backupReplaceDir -Force | Out-Null",
+        "    New-Item -ItemType Directory -Path $backupStaleDir -Force | Out-Null",
         "for ($i = 0; $i -lt 120; $i++) {",
         "    if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { break }",
         "    Start-Sleep -Milliseconds 500",
         "}",
         "$proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue",
         "if ($proc) { Stop-Process -Id $pidToWait -Force }",
-        "$appRoot = [System.IO.Path]::GetFullPath($appDir).TrimEnd('\\') + '\\'",
         "Stop-AppProcesses -root $appRoot -timeoutMs 30000",
         "$sourceItems = @(Get-ChildItem -LiteralPath $sourceDir -Force | Where-Object { $preserveNames -notcontains $_.Name })",
         "$sourceNames = @($sourceItems | ForEach-Object { $_.Name })",
-        "try {",
-        "    Get-ChildItem -LiteralPath $appDir -Force | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
+        "$installedItems = @(Get-ChildItem -LiteralPath $appDir -Force | Where-Object { $preserveNames -notcontains $_.Name })",
+        "$originalNames = @($installedItems | ForEach-Object { $_.Name })",
+        "    $installedItems | ForEach-Object {",
         "        $backupTarget = if ($sourceNames -contains $_.Name) { $backupReplaceDir } else { $backupStaleDir }",
-        "        Move-WithRetry -path $_.FullName -destination $backupTarget",
+        "        $backupPath = Join-Path $backupTarget $_.Name",
+        "        Move-WithRetry -path $_.FullName -destination $backupPath",
         "    }",
         "    foreach ($item in $sourceItems) {",
-        "        Copy-Item -LiteralPath $item.FullName -Destination $appDir -Recurse -Force",
+        "        $installPath = Join-Path $appDir $item.Name",
+        "        Copy-Item -LiteralPath $item.FullName -Destination $installPath -Recurse -Force -ErrorAction Stop",
         "    }",
         (
             "    $started = Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
@@ -468,14 +503,29 @@ def _build_update_script(
         "}",
         "catch {",
         "    $restoreError = $_",
-        "    Get-ChildItem -LiteralPath $appDir -Force -ErrorAction SilentlyContinue | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
-        "        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue",
+        "    $rollbackErrors = New-Object 'System.Collections.Generic.List[string]'",
+        # Неудачно стартовавшая новая версия могла успеть породить ядро. Пока
+        # оно держит каталог, очистка и возврат старой версии тоже будут падать.
+        "    Stop-AppProcesses -root $appRoot -timeoutMs 30000",
+        # Удаляем только элементы, которых до обновления не было. Старый элемент,
+        # перенос которого не состоялся, уже является корректной частью rollback
+        # и не должен уничтожаться общей очисткой каталога приложения.
+        "    Get-ChildItem -LiteralPath $appDir -Force -ErrorAction SilentlyContinue | Where-Object {",
+        "        ($sourceNames -contains $_.Name) -and ($originalNames -notcontains $_.Name)",
+        "    } | ForEach-Object {",
+        "        try { Remove-WithRetry -path $_.FullName } catch { [void] $rollbackErrors.Add(($_ | Out-String)) }",
         "    }",
         # Один невосстановимый файл не должен обрывать возврат остальных: иначе
         # каталог приложения остаётся без exe, и запускать становится нечего.
         "    foreach ($backupSource in @($backupReplaceDir, $backupStaleDir)) {",
         "        Get-ChildItem -LiteralPath $backupSource -Force -ErrorAction SilentlyContinue | ForEach-Object {",
-        "            try { Move-WithRetry -path $_.FullName -destination $appDir } catch { }",
+        "            $restorePath = Join-Path $appDir $_.Name",
+        "            try {",
+        "                Remove-WithRetry -path $restorePath",
+        "                Move-WithRetry -path $_.FullName -destination $restorePath",
+        "            } catch {",
+        "                [void] $rollbackErrors.Add(($_ | Out-String))",
+        "            }",
         "        }",
         "    }",
         # Последняя линия обороны: работоспособный exe важнее того, чьей он версии.
@@ -485,14 +535,26 @@ def _build_update_script(
         "            Copy-Item -LiteralPath $rescue -Destination $appDir -Force -ErrorAction SilentlyContinue",
         "        }",
         "    }",
-        (
-            "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
-            if restart_in_tray
-            else "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
-        ),
+        # Лог должен существовать до запуска восстановленной версии: иначе она
+        # успевала проверить его раньше Set-Content, и сбой снова был «тихим».
         "    New-Item -ItemType Directory -Path $logDir -Force | Out-Null",
-        "    ($restoreError | Out-String) | Set-Content -LiteralPath $errorLog -Encoding UTF8",
-        "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
+        "    $errorText = ($restoreError | Out-String)",
+        "    if ($rollbackErrors.Count -gt 0) {",
+        "        $errorText += \"`r`nRollback errors:`r`n\" + ($rollbackErrors -join \"`r`n\")",
+        "    }",
+        "    $errorText | Set-Content -LiteralPath $errorLog -Encoding UTF8",
+        (
+            "    if (Test-Path -LiteralPath $exePath) { $rollbackStarted = Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -PassThru -ErrorAction SilentlyContinue }"
+            if restart_in_tray
+            else "    if (Test-Path -LiteralPath $exePath) { $rollbackStarted = Start-Process -FilePath $exePath -WorkingDirectory $appDir -PassThru -ErrorAction SilentlyContinue }"
+        ),
+        "    if ($rollbackStarted) { Start-Sleep -Seconds 5 }",
+        "    if (-not $rollbackStarted -or $rollbackStarted.HasExited) {",
+        "        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue",
+        "        [System.Windows.Forms.MessageBox]::Show(('Не удалось завершить обновление или восстановить запуск. Подробности: ' + $logDir), 'Zapret KVN', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null",
+        "    } elseif ($rollbackErrors.Count -eq 0) {",
+        "        Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
+        "    }",
         "    throw",
         "}",
         "Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue",

@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 import unittest
 
 from xray_fluent.app_updater import _build_update_script
@@ -29,28 +28,64 @@ class UpdateScriptTests(unittest.TestCase):
         first_move_call = script.index("Move-WithRetry -path")
         self.assertLess(stop_call, first_move_call)
 
-    def test_every_move_retries_and_fails_loudly(self) -> None:
-        # Windows освобождает файл не мгновенно даже после выхода процесса.
+    def test_directory_moves_are_atomic_and_have_unique_destinations(self) -> None:
+        # Move-Item каталога в существующий контейнер способен оставить там
+        # частичную копию. Повтор после блокировки тогда падает уже из-за того,
+        # что destination существует. Directory.Move на одном томе переименует
+        # весь top-level каталог либо не изменит его.
         script = self.script()
         self.assertIn("function Move-WithRetry", script)
-        for line in script.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("Move-Item") or "    Move-Item" in line:
-                # Без -ErrorAction Stop ошибка не терминирующая: catch не сработает,
-                # функция отчитается об успехе, а файл останется на месте.
-                self.assertIn("-ErrorAction Stop", stripped, stripped)
+        self.assertNotIn("Move-Item", script)
+        self.assertIn("[System.IO.Directory]::Move($path, $destination)", script)
+        self.assertIn("[System.IO.File]::Move($path, $destination)", script)
+        self.assertIn("$backupPath = Join-Path $backupTarget $_.Name", script)
+        self.assertIn("$restorePath = Join-Path $appDir $_.Name", script)
+
+    def test_each_attempt_uses_a_unique_backup_directory(self) -> None:
+        script = self.script()
+        self.assertIn("$backupRootDir = Join-Path $runtimeDir 'update_backups'", script)
+        self.assertIn(
+            "$backupDir = Join-Path $backupRootDir (Split-Path -Leaf $tempDir)",
+            script,
+        )
+        self.assertNotIn("Join-Path $runtimeDir 'update_backup'", script)
 
     def test_moves_go_through_the_retry_helper(self) -> None:
         script = self.script()
-        lines = script.splitlines()
-        start = next(i for i, line in enumerate(lines) if line.startswith("function Move-WithRetry"))
-        end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
-        outside_helper = [
-            line.strip()
-            for index, line in enumerate(lines)
-            if re.match(r"^\s*Move-Item\b", line) and not start <= index <= end
-        ]
-        self.assertEqual([], outside_helper)
+        self.assertEqual(2, script.count("Move-WithRetry -path"))
+
+    def test_rollback_stops_children_and_publishes_error_before_restart(self) -> None:
+        script = self.script()
+        catch = script.index("catch {", script.index("Updated application exited immediately"))
+        rollback = script[catch:]
+        self.assertIn("Stop-AppProcesses -root $appRoot", rollback)
+        write_error = rollback.index("Set-Content -LiteralPath $errorLog")
+        restart = rollback.index("$rollbackStarted = Start-Process")
+        self.assertLess(write_error, restart)
+        self.assertIn("$rollbackStarted.HasExited", rollback)
+        self.assertIn("[System.Windows.Forms.MessageBox]::Show", rollback)
+
+    def test_rollback_does_not_delete_original_items_that_never_moved(self) -> None:
+        script = self.script()
+        self.assertIn("$originalNames = @($installedItems | ForEach-Object { $_.Name })", script)
+        self.assertIn(
+            "($sourceNames -contains $_.Name) -and ($originalNames -notcontains $_.Name)",
+            script,
+        )
+        self.assertIn("Remove-WithRetry -path $restorePath", script)
+        self.assertIn("$rollbackErrors.Count -eq 0", script)
+
+    def test_backup_preparation_is_inside_the_rollback_boundary(self) -> None:
+        script = self.script()
+        transaction = script.index("try {", script.index("$sourceNames = @()"))
+        prepare_backup = script.index(
+            "New-Item -ItemType Directory -Path $backupReplaceDir", transaction
+        )
+        wait_for_exit = script.index("Get-Process -Id $pidToWait", transaction)
+        outer_catch = script.index("catch {", wait_for_exit)
+        self.assertLess(transaction, prepare_backup)
+        self.assertLess(prepare_backup, wait_for_exit)
+        self.assertLess(wait_for_exit, outer_catch)
 
     def test_paths_are_quoted_for_powershell(self) -> None:
         script = self.script()
