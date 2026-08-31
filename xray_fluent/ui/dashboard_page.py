@@ -607,7 +607,7 @@ class DashboardPage(StackedSection):
             )
             self.routing_bypass_label.setText(
                 "GUI routing не влияет на sing-box. Unsupported node transports вроде xhttp будут автоматически "
-                "обслужены через local Xray sidecar; Hysteria2 Gecko — через официальный Hysteria sidecar."
+                "обслужены через local Xray sidecar; ссылки Hysteria2 — через официальный Hysteria sidecar."
             )
             return
         self.routing_mode_label.setText(_mode_title(self._routing.mode))

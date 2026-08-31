@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
+from xray_fluent.constants import HYSTERIA_PATH_DEFAULT
 from xray_fluent.engines.singbox.runtime_planner import (
     parse_singbox_document,
     plan_singbox_proxy_runtime,
@@ -80,7 +81,16 @@ class SingboxTemplateDnsContractTests(unittest.TestCase):
                     for outbound in plan.singbox_config["outbounds"]
                     if outbound.get("tag") == "proxy"
                 )
-                self.assertEqual(proxy["domain_resolver"], "bootstrap-dns")
+                self.assertEqual(proxy["type"], "socks")
+                self.assertEqual(proxy["server"], "127.0.0.1")
+                self.assertNotIn("domain_resolver", proxy)
+                self.assertEqual(
+                    plan.singbox_config["route"]["rules"][0],
+                    {
+                        "process_path": [str(HYSTERIA_PATH_DEFAULT.resolve())],
+                        "outbound": "direct",
+                    },
+                )
 
 
 if __name__ == "__main__":

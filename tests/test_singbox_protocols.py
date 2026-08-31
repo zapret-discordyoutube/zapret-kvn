@@ -6,6 +6,7 @@ import unittest
 
 from xray_fluent.link_parser import (
     LinkParseError,
+    hysteria2_uri_fingerprint,
     link_import_warnings,
     is_native_singbox_outbound,
     parse_links_text,
@@ -143,16 +144,22 @@ class SingboxProtocolParserTests(unittest.TestCase):
         self.assertEqual(outbound["tag"], "proxy")
         self.assertEqual(node.outbound["tag"], "saved")
 
-    def test_hysteria2_certificate_pin_is_not_silently_dropped(self) -> None:
-        # Рядом с insecure проверка отключена самой ссылкой, поэтому сервер
-        # импортируется, но потеря пина обязана быть названа.
+    def test_hysteria2_certificate_pin_is_preserved_by_official_sidecar(self) -> None:
         link = "hy2://secret@example.com:443/?insecure=1&pinSHA256=deadbeef"
         self.assertTrue(parse_single(link).outbound["tls"]["insecure"])
-        self.assertTrue(any("pinSHA256" in item for item in link_import_warnings(link)))
+        self.assertEqual(link_import_warnings(link), [])
 
-        # Без insecure пин — единственная аутентификация сервера.
-        with self.assertRaisesRegex(LinkParseError, "pinSHA256"):
-            parse_single("hy2://secret@example.com:443/?pinSHA256=deadbeef")
+        pinned = parse_single("hy2://secret@example.com:443/?pinSHA256=deadbeef")
+        self.assertEqual(pinned.link, "hy2://secret@example.com:443/?pinSHA256=deadbeef")
+        self.assertEqual(link_import_warnings(pinned.link), [])
+
+    def test_hysteria2_uri_fingerprint_ignores_only_fragment_and_scheme_alias(self) -> None:
+        first = "hy2://secret@example.com:443/?pinSHA256=deadbeef#One"
+        alias = "hysteria2://secret@example.com:443/?pinSHA256=deadbeef#Two"
+        changed = "hy2://secret@example.com:443/?pinSHA256=cafebabe#One"
+
+        self.assertEqual(hysteria2_uri_fingerprint(first), hysteria2_uri_fingerprint(alias))
+        self.assertNotEqual(hysteria2_uri_fingerprint(first), hysteria2_uri_fingerprint(changed))
 
     def test_hysteria2_salamander_requires_password(self) -> None:
         with self.assertRaisesRegex(LinkParseError, "obfs-password"):

@@ -163,6 +163,22 @@ class WinNetInfoHelperTests(unittest.TestCase):
             self.assertFalse(win_netinfo.any_adapter_name_contains("tap-windows"))
             self.assertFalse(win_netinfo.any_adapter_name_contains(""))
 
+    def test_list_adapters_requests_all_ndis_interfaces(self) -> None:
+        captured_flags: list[int] = []
+
+        def fake_get_adapters_addresses(_family, flags, _reserved, _buffer, _size) -> int:
+            captured_flags.append(int(flags))
+            return win_netinfo._ERROR_NO_DATA
+
+        with patch.object(win_netinfo.os, "name", "nt"), patch(
+            "xray_fluent.win_netinfo._resolve_get_adapters_addresses",
+            return_value=fake_get_adapters_addresses,
+        ):
+            self.assertEqual(win_netinfo.list_adapters(), [])
+
+        self.assertEqual(len(captured_flags), 1)
+        self.assertTrue(captured_flags[0] & win_netinfo._GAA_FLAG_INCLUDE_ALL_INTERFACES)
+
 
 class SingBoxTunProbeTests(unittest.TestCase):
     def test_fast_path_skips_powershell(self) -> None:
@@ -175,6 +191,27 @@ class SingBoxTunProbeTests(unittest.TestCase):
 
         fast_mock.assert_called_once_with("xftun0")
         powershell_mock.assert_not_called()
+
+    def test_fast_negative_is_verified_by_powershell(self) -> None:
+        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.win_netinfo.adapter_has_ipv4", return_value=False
+        ) as fast_mock, patch.object(
+            SingBoxManager, "_tun_interface_has_ipv4", return_value=True
+        ) as powershell_mock:
+            self.assertEqual(SingBoxManager._probe_tun_interface_has_ipv4("xftun0"), (True, False))
+
+        fast_mock.assert_called_once_with("xftun0")
+        powershell_mock.assert_called_once_with("xftun0")
+
+    def test_both_providers_must_report_negative_before_waiting_again(self) -> None:
+        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.win_netinfo.adapter_has_ipv4", return_value=False
+        ), patch.object(
+            SingBoxManager, "_tun_interface_has_ipv4", return_value=False
+        ) as powershell_mock:
+            self.assertEqual(SingBoxManager._probe_tun_interface_has_ipv4("xftun0"), (False, False))
+
+        powershell_mock.assert_called_once_with("xftun0")
 
     def test_ctypes_failure_falls_back_to_powershell(self) -> None:
         with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(

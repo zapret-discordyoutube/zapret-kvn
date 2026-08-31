@@ -32,6 +32,7 @@ from ...application.outbound_pool_service import (
     singbox_outbound_tag,
 )
 from ...models import Node
+from ...runtime_logging import RuntimeNodeIdentity
 from .config_builder import build_singbox_outbound, is_singbox_endpoint_node
 
 
@@ -98,6 +99,7 @@ class SingboxHysteriaSidecarPlan:
     relay_username: str
     relay_password: str
     config: dict[str, Any]
+    context: RuntimeNodeIdentity
 
 
 @dataclass(slots=True)
@@ -216,7 +218,7 @@ def classify_node_for_singbox(node: Node | None) -> str:
         return "native_singbox"
     if is_singbox_endpoint_node(node):
         return "native_singbox_endpoint"
-    if _is_hysteria_gecko_node(node):
+    if _is_hysteria2_uri_node(node):
         return "hysteria_sidecar"
     try:
         build_singbox_outbound(node, tag="proxy")
@@ -361,7 +363,7 @@ def _plan_runtime_outbound(
             clash_api_port=clash_api_port,
         )
 
-    if _is_hysteria_gecko_node(node):
+    if _is_hysteria2_uri_node(node):
         return _plan_hysteria_sidecar_runtime(
             document,
             runtime_config=runtime_config,
@@ -399,7 +401,7 @@ def _plan_runtime_outbound(
     for pooled in pool_nodes or []:
         if is_singbox_endpoint_node(pooled):
             continue
-        if _is_hysteria_gecko_node(pooled):
+        if _is_hysteria2_uri_node(pooled):
             continue
         tag = singbox_outbound_tag(pooled.id)
         try:
@@ -473,12 +475,11 @@ def _plan_runtime_outbound(
     )
 
 
-def _is_hysteria_gecko_node(node: Node) -> bool:
+def _is_hysteria2_uri_node(node: Node) -> bool:
     outbound = node.outbound if isinstance(node.outbound, dict) else {}
     if str(outbound.get("type") or "").strip().lower() != "hysteria2":
         return False
-    obfs = outbound.get("obfs")
-    return isinstance(obfs, dict) and str(obfs.get("type") or "").strip().lower() == "gecko"
+    return str(node.link or "").partition(":")[0].strip().lower() in {"hy2", "hysteria2"}
 
 
 def _plan_hysteria_sidecar_runtime(
@@ -497,7 +498,7 @@ def _plan_hysteria_sidecar_runtime(
     raw_link = str(node.link or "").strip()
     if raw_link.partition(":")[0].lower() not in {"hy2", "hysteria2"}:
         raise ValueError(
-            "Hysteria2 Gecko можно запустить через временную прослойку только из "
+            "Hysteria2 можно запустить через официальное ядро только из "
             "исходной ссылки hy2:// или hysteria2://. Импортируйте сервер ссылкой."
         )
     try:
@@ -507,7 +508,7 @@ def _plan_hysteria_sidecar_runtime(
         )
     except RuntimeError as exc:
         raise ValueError(
-            "Не удалось подобрать свободный локальный TCP-порт для Hysteria Gecko."
+            "Не удалось подобрать свободный локальный TCP-порт для Hysteria2."
         ) from exc
 
     relay_username, relay_password = generate_local_proxy_credentials(prefix="hysteria")
@@ -529,10 +530,10 @@ def _plan_hysteria_sidecar_runtime(
         relay_port=relay_port,
         relay_username=relay_username,
         relay_password=relay_password,
+        context=RuntimeNodeIdentity.from_node(node),
         config={
-            # The official client remains the single implementation of the
-            # Gecko protocol. Passing the original URI avoids a second, subtly
-            # different converter for auth, TLS pins and port hopping.
+            # Passing the original URI avoids a second, subtly different
+            # converter for auth, TLS pins, ECH and port hopping.
             "server": raw_link,
             "lazy": True,
             "socks5": {

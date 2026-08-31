@@ -27,7 +27,7 @@ def _runtime_suffix(plan: SingboxRuntimePlan) -> str:
     if plan.is_hybrid:
         return " (sing-box + Xray sidecar)"
     if plan.is_hysteria_sidecar:
-        return " (sing-box + Hysteria Gecko)"
+        return " (sing-box + Hysteria2)"
     return " (sing-box extended)"
 
 
@@ -135,7 +135,7 @@ def start_tun(
             )
         elif plan.is_hysteria_sidecar:
             controller._log(
-                f"[tun] outbound tag 'proxy' replaced with local official Hysteria relay: {node.name}"
+                f"[tun] outbound tag 'proxy' replaced with local official Hysteria2 relay: {node.name}"
             )
         else:
             controller._log(f"[tun] outbound tag 'proxy' replaced from selected node: {node.name}")
@@ -242,6 +242,7 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         return True
     finally:
         controller._switching = False
+        controller._auto_switch_transitioning = False
         _, controller.connected = controller._refresh_connected_state()
         controller.connection_changed.emit(controller.connected)
         if controller.connected:
@@ -325,6 +326,7 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         return True
     finally:
         controller._switching = False
+        controller._auto_switch_transitioning = False
         _, controller.connected = controller._refresh_connected_state()
         controller.connection_changed.emit(controller.connected)
         if controller.connected:

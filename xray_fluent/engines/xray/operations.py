@@ -68,6 +68,14 @@ def start_tun(
     ):
         controller._active_core = prev_active_core
         return None
+    configure_logs = getattr(controller, "_configure_core_log_context", None)
+    if configure_logs is not None:
+        configure_logs(
+            "xray",
+            node=node,
+            outbound_tags=runtime.outbound_pool_tags,
+            used_selected_node=bool(runtime.used_selected_node),
+        )
     if not controller.xray.start(controller.state.settings.xray_path, runtime.config):
         controller._active_core = prev_active_core
         return None
@@ -121,6 +129,14 @@ def start_proxy(
     ):
         controller._active_core = prev_active_core
         return None
+    configure_logs = getattr(controller, "_configure_core_log_context", None)
+    if configure_logs is not None:
+        configure_logs(
+            "xray",
+            node=node,
+            outbound_tags=runtime.outbound_pool_tags,
+            used_selected_node=bool(runtime.used_selected_node),
+        )
     if not controller.xray.start(controller.state.settings.xray_path, runtime.config):
         controller._active_core = prev_active_core
         return None
@@ -192,6 +208,14 @@ def restart_proxy_core_steps(controller: AppController, reason: str) -> Transiti
         ):
             controller._handle_unexpected_disconnect()
             return False
+        configure_logs = getattr(controller, "_configure_core_log_context", None)
+        if configure_logs is not None:
+            configure_logs(
+                "xray",
+                node=node,
+                outbound_tags=runtime.outbound_pool_tags,
+                used_selected_node=bool(runtime.used_selected_node),
+            )
         ok = yield from controller.xray.start_steps(controller.state.settings.xray_path, runtime.config)
         if not ok:
             controller._handle_unexpected_disconnect()

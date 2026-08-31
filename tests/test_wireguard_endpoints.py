@@ -363,7 +363,7 @@ class WireguardRuntimePlannerTests(unittest.TestCase):
         )
         self.assertEqual(classify_node_for_singbox(vless), "native_singbox")
         hy2 = parse_single("hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1")
-        self.assertEqual(classify_node_for_singbox(hy2), "native_singbox")
+        self.assertEqual(classify_node_for_singbox(hy2), "hysteria_sidecar")
 
     def _assert_endpoint_plan(self, plan, *, expect_amnezia: bool) -> None:
         endpoints = plan.singbox_config.get("endpoints")

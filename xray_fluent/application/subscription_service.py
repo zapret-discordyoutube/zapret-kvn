@@ -16,7 +16,11 @@ from ..models import (
     utc_now_iso,
 )
 from ..subscription_http import SubscriptionFetchResult, sanitize_fetch_error
-from ..subscription_parser import ParsedSubscription
+from ..subscription_parser import (
+    ParsedSubscription,
+    hidden_source_key_for_node,
+    source_fingerprint_for_node,
+)
 
 
 @dataclass(slots=True)
@@ -114,9 +118,20 @@ def reconcile_subscription(
                 for node in source_candidates
                 if (node.provider_name or node.name).casefold()
                 == (incoming.provider_name or incoming.name).casefold()
+                and _source_fingerprint(node) == _source_fingerprint(incoming)
             ),
             None,
         )
+        if match is None:
+            match = next(
+                (
+                    node
+                    for node in source_candidates
+                    if (node.provider_name or node.name).casefold()
+                    == (incoming.provider_name or incoming.name).casefold()
+                ),
+                None,
+            )
         if match is None:
             match = _take_unused(source_candidates, used_ids)
         if match is None:
@@ -136,6 +151,7 @@ def reconcile_subscription(
 
         used_ids.add(match.id)
         old_outbound = _canonical_outbound(match)
+        old_source_fingerprint = _source_fingerprint(match)
         provider_name_before = match.provider_name or match.name
         local_name = match.name
         incoming.id = match.id
@@ -151,7 +167,10 @@ def reconcile_subscription(
         incoming.ping_history = list(match.ping_history)
         incoming.speed_history = list(match.speed_history)
         incoming.sort_order = match.sort_order
-        if match.id == selected_id and old_outbound != _canonical_outbound(incoming):
+        if match.id == selected_id and (
+            old_outbound != _canonical_outbound(incoming)
+            or old_source_fingerprint != _source_fingerprint(incoming)
+        ):
             selected_changed = True
         reconciled.append(incoming)
         updated += 1
@@ -195,6 +214,7 @@ def remove_subscription(state: AppState, subscription_id: str, *, keep_nodes: bo
         for node in owned:
             node.subscription_id = None
             node.source_key = ""
+            node.source_fingerprint = ""
             node.provider_name = node.name
     else:
         state.nodes = [node for node in state.nodes if node.subscription_id != subscription_id]
@@ -211,12 +231,14 @@ def hide_subscription_node(state: AppState, node_id: str) -> str | None:
     subscription = next((item for item in state.subscriptions if item.id == node.subscription_id), None)
     if subscription is None:
         return None
-    if node.source_key not in subscription.hidden_source_keys:
-        subscription.hidden_source_keys.append(node.source_key)
+    hidden_key = hidden_source_key_for_node(node)
+    if hidden_key not in subscription.hidden_source_keys:
+        subscription.hidden_source_keys.append(hidden_key)
     removed_ids = {
         item.id
         for item in state.nodes
-        if item.subscription_id == subscription.id and item.source_key == node.source_key
+        if item.subscription_id == subscription.id
+        and hidden_source_key_for_node(item) == hidden_key
     }
     state.nodes = [item for item in state.nodes if item.id not in removed_ids]
     if state.selected_node_id in removed_ids:
@@ -282,6 +304,10 @@ def _fallback_key(node: Node) -> tuple[str, str, int, str]:
 
 def _canonical_outbound(node: Node) -> str:
     return json.dumps(node.outbound, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _source_fingerprint(node: Node) -> str:
+    return source_fingerprint_for_node(node) or str(node.source_fingerprint or "")
 
 
 def _parse_time(value: str | None) -> datetime | None:

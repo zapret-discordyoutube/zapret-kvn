@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from ..constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT
+from ..constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT, HYSTERIA_PATH_DEFAULT
 from ..engines.singbox import classify_node_for_singbox
+from ..link_parser import hysteria2_uri_fingerprint
 
 if TYPE_CHECKING:
     from ..app_controller import AppController
@@ -102,6 +103,9 @@ def _singbox_runtime_signature_payload(
         "node_outbound": node.outbound if has_proxy_outbound and node and selector_pool is None else None,
         "selector_pool": selector_pool,
     }
+    if planner_outcome == "hysteria_sidecar" and node is not None:
+        payload["hysteria_path"] = str(HYSTERIA_PATH_DEFAULT)
+        payload["sidecar_uri_fingerprint"] = hysteria2_uri_fingerprint(node.link)
     if planner_outcome == "hybrid_xray_sidecar":
         payload["xray_path"] = str(settings.xray_path)
     if controller.is_singbox_proxy_mode(settings):

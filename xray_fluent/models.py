@@ -87,6 +87,7 @@ class Node:
     sort_order: int = 0
     subscription_id: str | None = None
     source_key: str = ""
+    source_fingerprint: str = ""
     provider_name: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -111,6 +112,7 @@ class Node:
             "sort_order": self.sort_order,
             "subscription_id": self.subscription_id,
             "source_key": self.source_key,
+            "source_fingerprint": self.source_fingerprint,
             "provider_name": self.provider_name,
         }
 
@@ -137,6 +139,7 @@ class Node:
             sort_order=int(data.get("sort_order", 0)),
             subscription_id=(str(data.get("subscription_id")) if data.get("subscription_id") else None),
             source_key=str(data.get("source_key") or ""),
+            source_fingerprint=str(data.get("source_fingerprint") or ""),
             provider_name=str(data.get("provider_name") or data.get("name") or ""),
         )
 

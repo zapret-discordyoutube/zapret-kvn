@@ -216,6 +216,13 @@ from .subscription_parser import validate_filter_patterns
 from .network_monitor import NetworkMonitor
 from .proxy_manager import ProxyManager, SystemProxyState
 from .security import create_password_hash, get_idle_seconds, verify_password
+from .runtime_logging import (
+    RuntimeLogContext,
+    RuntimeNodeIdentity,
+    contextualize_runtime_log,
+    identities_for_tags,
+    runtime_mapping_lines,
+)
 from .engines.tun2socks import (
     Tun2SocksManager,
     hot_swap_steps as hot_swap_tun2socks_steps,
@@ -409,24 +416,25 @@ class AppController(QObject):
         # П3 (AC9/AC10): кэш пула outbound'ов по идентичности списка нод.
         self._xray_outbound_pool_cache: XrayOutboundPool | None = None
         self._xray_outbound_pool_cache_key: tuple | None = None
+        self._core_log_contexts: dict[str, RuntimeLogContext] = {}
 
         self.xray.log_received.connect(self._on_xray_log)
         self.xray.error.connect(self._on_xray_error)
         self.xray.state_changed.connect(self._on_core_state_changed)
         self.xray.stopped.connect(lambda code: self._on_core_stopped("xray", code))
 
-        self.singbox.log_received.connect(self._on_xray_log)
-        self.singbox.error.connect(self._on_singbox_error)
+        self.singbox.log_received.connect(lambda line: self._on_core_log("sing-box", line))
+        self.singbox.error.connect(lambda message: self._on_core_error("sing-box", message))
         self.singbox.state_changed.connect(self._on_core_state_changed)
         self.singbox.stopped.connect(lambda code: self._on_core_stopped("singbox", code))
 
-        self.hysteria.log_received.connect(self._on_xray_log)
-        self.hysteria.error.connect(self._on_singbox_error)
+        self.hysteria.log_received.connect(lambda line: self._on_core_log("hysteria", line))
+        self.hysteria.error.connect(lambda message: self._on_core_error("hysteria", message))
         self.hysteria.state_changed.connect(self._on_core_state_changed)
         self.hysteria.stopped.connect(lambda code: self._on_core_stopped("hysteria", code))
 
-        self.tun2socks.log_received.connect(self._on_xray_log)
-        self.tun2socks.error.connect(self._on_singbox_error)
+        self.tun2socks.log_received.connect(lambda line: self._on_core_log("tun2socks", line))
+        self.tun2socks.error.connect(lambda message: self._on_core_error("tun2socks", message))
         self.tun2socks.state_changed.connect(self._on_core_state_changed)
         self.tun2socks.stopped.connect(lambda code: self._on_core_stopped("tun2socks", code))
         self._xray_tun_routes.log_received.connect(self._on_xray_log)
@@ -1007,6 +1015,94 @@ class AppController(QObject):
             pool_nodes=self.state.nodes,
         )
 
+    def _configure_singbox_log_contexts(self, plan: SingboxRuntimePlan) -> None:
+        """Freeze tag-to-node mappings before any runtime process starts."""
+
+        mode = "tun" if self.state.settings.tun_mode else "proxy"
+        generation = int(self._transition_generation)
+        nodes_by_id = {node.id: node for node in self.state.nodes}
+        selected_node = self.selected_node if plan.used_selected_node else None
+        selected = RuntimeNodeIdentity.from_node(selected_node) if selected_node is not None else None
+
+        singbox_nodes = identities_for_tags(plan.selector_tags, nodes_by_id)
+        if selected is not None:
+            singbox_nodes.setdefault("proxy", selected)
+        singbox_context = RuntimeLogContext(
+            engine="sing-box",
+            role="front",
+            mode=mode,
+            generation=generation,
+            selected=selected,
+            outbound_nodes=singbox_nodes,
+        )
+        self._core_log_contexts["sing-box"] = singbox_context
+
+        if plan.hysteria_sidecar is not None:
+            self._core_log_contexts["hysteria"] = RuntimeLogContext(
+                engine="hysteria",
+                role="sidecar",
+                mode=mode,
+                generation=generation,
+                selected=plan.hysteria_sidecar.context,
+                outbound_nodes={"proxy": plan.hysteria_sidecar.context},
+            )
+        else:
+            self._core_log_contexts.pop("hysteria", None)
+
+        if plan.xray_sidecar is not None:
+            xray_nodes = identities_for_tags(plan.xray_sidecar.outbound_pool_tags, nodes_by_id)
+            if selected is not None:
+                xray_nodes.setdefault("proxy", selected)
+            self._core_log_contexts["xray"] = RuntimeLogContext(
+                engine="xray",
+                role="sidecar",
+                mode=mode,
+                generation=generation,
+                selected=selected,
+                outbound_nodes=xray_nodes,
+            )
+        else:
+            self._core_log_contexts.pop("xray", None)
+
+        for context in (
+            singbox_context,
+            self._core_log_contexts.get("hysteria"),
+            self._core_log_contexts.get("xray") if plan.xray_sidecar is not None else None,
+        ):
+            if context is None:
+                continue
+            for line in runtime_mapping_lines(context):
+                self._log(line)
+
+    def _configure_core_log_context(
+        self,
+        engine: str,
+        *,
+        node: Node | None,
+        outbound_tags: dict[str, str] | None = None,
+        role: str = "core",
+        used_selected_node: bool = True,
+    ) -> None:
+        """Freeze a secret-safe node mapping before starting a standalone core."""
+
+        selected_node = node if used_selected_node else None
+        selected = RuntimeNodeIdentity.from_node(selected_node) if selected_node is not None else None
+        nodes_by_id = {item.id: item for item in self.state.nodes}
+        mapped = identities_for_tags(outbound_tags or {}, nodes_by_id)
+        if selected is not None:
+            mapped.setdefault("proxy", selected)
+        context = RuntimeLogContext(
+            engine=engine,
+            role=role,
+            mode="tun" if self.state.settings.tun_mode else "proxy",
+            generation=int(self._transition_generation),
+            selected=selected,
+            outbound_nodes=mapped,
+        )
+        self._core_log_contexts[engine] = context
+        for line in runtime_mapping_lines(context):
+            self._log(line)
+
     def _start_singbox_runtime_plan(self, plan: SingboxRuntimePlan) -> bool:
         gate = getattr(self, "target_profile_allows_core_start", None)
         if gate is not None and not gate(
@@ -1014,6 +1110,7 @@ class AppController(QObject):
             used_selected_node=bool(getattr(plan, "used_selected_node", True)),
         ):
             return False
+        self._configure_singbox_log_contexts(plan)
         if plan.provider_payload is not None:
             SINGBOX_PROVIDER_FILE.parent.mkdir(parents=True, exist_ok=True)
             temporary = SINGBOX_PROVIDER_FILE.with_suffix(".json.tmp")
@@ -1026,12 +1123,13 @@ class AppController(QObject):
             self._protect_ss_port = 0
             self._protect_ss_password = ""
             self._log(
-                "[sing-box] starting official Hysteria Gecko sidecar "
+                "[sing-box] starting official Hysteria2 sidecar "
                 f"relay=127.0.0.1:{plan.hysteria_sidecar.relay_port}"
             )
             if not self.hysteria.start(
                 plan.hysteria_sidecar.config,
                 plan.hysteria_sidecar.relay_port,
+                context=plan.hysteria_sidecar.context,
             ):
                 return False
         elif plan.xray_sidecar is not None:
@@ -1241,6 +1339,7 @@ class AppController(QObject):
 
     def _clear_active_session(self) -> None:
         self._active_session = None
+        self._core_log_contexts.clear()
 
     def _apply_proxy_runtime_change(self) -> bool:
         settings = self.state.settings
@@ -3071,6 +3170,18 @@ class AppController(QObject):
         self.log_line.emit(line)
 
     def _on_xray_log(self, line: str) -> None:
+        self._on_core_log("xray", line)
+
+    def _on_core_log(self, engine: str, line: str) -> None:
+        context = self._core_log_contexts.get(engine)
+        if context is None:
+            context = RuntimeLogContext(
+                engine=engine,
+                role="core",
+                mode="tun" if self.state.settings.tun_mode else "proxy",
+                generation=int(self._transition_generation),
+            )
+        line = contextualize_runtime_log(line, context=context)
         # In TUN mode, throttle noisy per-connection logs to prevent UI freeze
         if self.state.settings.tun_mode and "accepted" in line:
             self._tun_log_count = getattr(self, "_tun_log_count", 0) + 1
@@ -3085,12 +3196,23 @@ class AppController(QObject):
         self._log(line)
 
     def _on_xray_error(self, message: str) -> None:
-        self._log(f"[xray-error] {message}")
-        self._set_connection_status("error", message, level="error")
+        self._on_core_error("xray", message)
+
+    def _on_core_error(self, engine: str, message: str) -> None:
+        context = self._core_log_contexts.get(engine)
+        if context is None:
+            context = RuntimeLogContext(
+                engine=engine,
+                role="core",
+                mode="tun" if self.state.settings.tun_mode else "proxy",
+                generation=int(self._transition_generation),
+            )
+        detailed = contextualize_runtime_log(message, context=context, error=True)
+        self._log(detailed)
+        self._set_connection_status("error", detailed, level="error")
 
     def _on_singbox_error(self, message: str) -> None:
-        self._log(f"[singbox-error] {message}")
-        self._set_connection_status("error", message, level="error")
+        self._on_core_error("sing-box", message)
 
     def _on_core_stopped(self, core: str, exit_code: int) -> None:
         self._log(f"[{core}] process stopped with code {exit_code}")

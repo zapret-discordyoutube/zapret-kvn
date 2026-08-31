@@ -42,6 +42,7 @@ _AF_INET6 = 23
 _GAA_FLAG_SKIP_ANYCAST = 0x0002
 _GAA_FLAG_SKIP_MULTICAST = 0x0004
 _GAA_FLAG_SKIP_DNS_SERVER = 0x0008
+_GAA_FLAG_INCLUDE_ALL_INTERFACES = 0x0100
 
 _ERROR_SUCCESS = 0
 _ERROR_BUFFER_OVERFLOW = 111
@@ -177,7 +178,15 @@ def list_adapters() -> list[AdapterInfo]:
         func = _resolve_get_adapters_addresses()
     except Exception as exc:  # missing DLL/symbol (Wine, stripped systems)
         raise WinNetInfoError(f"iphlpapi is unavailable: {exc}") from exc
-    flags = _GAA_FLAG_SKIP_ANYCAST | _GAA_FLAG_SKIP_MULTICAST | _GAA_FLAG_SKIP_DNS_SERVER
+    # Wintun can briefly exist without being bound to either address family
+    # while sing-box configures it.  Ask for every NDIS interface so a poll
+    # started during that window does not keep overlooking the same adapter.
+    flags = (
+        _GAA_FLAG_SKIP_ANYCAST
+        | _GAA_FLAG_SKIP_MULTICAST
+        | _GAA_FLAG_SKIP_DNS_SERVER
+        | _GAA_FLAG_INCLUDE_ALL_INTERFACES
+    )
     size = c_ulong(16 * 1024)
     for _ in range(4):
         buffer = ctypes.create_string_buffer(size.value)

@@ -96,6 +96,14 @@ def start_tun(
     if gate is not None and not gate(node):
         controller._active_core = prev_active_core
         return None
+    configure_logs = getattr(controller, "_configure_core_log_context", None)
+    if configure_logs is not None:
+        configure_logs(
+            "xray",
+            node=node,
+            outbound_tags=outbound_pool.tags,
+            role="relay",
+        )
     if not controller.xray.start(controller.state.settings.xray_path, config):
         controller._log("[tun] xray start failed")
         controller._active_core = prev_active_core
@@ -118,6 +126,12 @@ def start_tun(
         controller.xray.stop()
         controller._active_core = prev_active_core
         return None
+    if configure_logs is not None:
+        configure_logs(
+            "tun2socks",
+            node=node,
+            role="front",
+        )
     tun_ok = controller.tun2socks.start(
         socks_port,
         username=proxy_username,
@@ -206,6 +220,14 @@ def hot_swap_steps(controller: AppController, reason: str, node: Node) -> Transi
         gate = getattr(controller, "target_profile_allows_core_start", None)
         if gate is not None and not gate(node):
             return False
+        configure_logs = getattr(controller, "_configure_core_log_context", None)
+        if configure_logs is not None:
+            configure_logs(
+                "xray",
+                node=node,
+                outbound_tags=outbound_pool.tags,
+                role="relay",
+            )
         ok = yield from controller.xray.start_steps(controller.state.settings.xray_path, config)
         perf["start"] = time.monotonic() - stage_began
         if ok:

@@ -383,8 +383,8 @@ class SingBoxManager(QObject):
     def _wait_until_tun_ready(self, tun_interface_name: str, max_wait: float = 18.0) -> bool:
         if os.name != "nt" or not tun_interface_name:
             return True
-        waited = 0.0
-        while waited < max_wait:
+        deadline = time.monotonic() + max(0.0, max_wait)
+        while time.monotonic() < deadline:
             if self._process.state() == QProcess.ProcessState.NotRunning:
                 return False
             has_ipv4, fast_probe = self._probe_tun_interface_has_ipv4(tun_interface_name)
@@ -392,7 +392,6 @@ class SingBoxManager(QObject):
                 return True
             step = 0.1 if fast_probe else 0.25
             sleep_with_events(step)
-            waited += step
         return False
 
     @classmethod
@@ -400,9 +399,17 @@ class SingBoxManager(QObject):
         """Return (interface has an IPv4 address, fast ctypes path was used)."""
         if win_netinfo.is_available():
             try:
-                return bool(win_netinfo.adapter_has_ipv4(tun_interface_name)), True
+                if win_netinfo.adapter_has_ipv4(tun_interface_name):
+                    return True, True
             except Exception:
-                pass  # fall back to the PowerShell probe below
+                pass
+
+            # A negative GetAdaptersAddresses result is not authoritative for
+            # a newly-created Wintun adapter: Windows may expose it to the
+            # NetTCPIP provider before it is visible in the ordinary adapter
+            # list.  Verify the negative result through the independent legacy
+            # provider instead of timing out and killing a healthy sing-box.
+            return cls._tun_interface_has_ipv4(tun_interface_name), False
         return cls._tun_interface_has_ipv4(tun_interface_name), False
 
     @staticmethod

@@ -72,7 +72,7 @@ class XrayPoolTests(unittest.TestCase):
 
 
 class SingboxPoolTests(unittest.TestCase):
-    def test_native_provider_excludes_gecko_sidecar_nodes(self) -> None:
+    def test_native_provider_excludes_all_uri_hysteria2_sidecar_nodes(self) -> None:
         salamander = parse_single(
             "hy2://secret@one.example:443/?obfs=salamander&obfs-password=cover#one"
         )
@@ -90,39 +90,26 @@ class SingboxPoolTests(unittest.TestCase):
         )
 
         plans = (
-            plan_singbox_proxy_runtime(document, salamander, pool_nodes=nodes),
-            plan_singbox_runtime(document, salamander, pool_nodes=nodes),
+            plan_singbox_proxy_runtime(document, vless, pool_nodes=nodes),
+            plan_singbox_runtime(document, vless, pool_nodes=nodes),
         )
 
         for plan in plans:
             with self.subTest(mode="proxy" if plan.socks_port else "tun"):
                 self.assertEqual(plan.outcome, "native_singbox")
-                self.assertIn(salamander.id, plan.selector_tags)
                 self.assertIn(vless.id, plan.selector_tags)
+                self.assertNotIn(salamander.id, plan.selector_tags)
                 self.assertNotIn(gecko.id, plan.selector_tags)
                 provider = (plan.provider_payload or {})["outbounds"]
-                self.assertFalse(
-                    any(
-                        isinstance(item.get("obfs"), dict)
-                        and item["obfs"].get("type") == "gecko"
-                        for item in provider
-                    )
-                )
-                self.assertTrue(
-                    any(
-                        isinstance(item.get("obfs"), dict)
-                        and item["obfs"].get("type") == "salamander"
-                        for item in provider
-                    )
-                )
+                self.assertFalse(any(item.get("type") == "hysteria2" for item in provider))
 
     def test_native_nodes_are_exposed_through_provider_selector(self) -> None:
         nodes = [
-            parse_single("hy2://secret@one.example:443/?insecure=1#one"),
             parse_single(
                 "vless://11111111-1111-1111-1111-111111111111@two.example:443"
                 "?type=tcp&security=tls&sni=two.example#two"
             ),
+            parse_single("trojan://secret@three.example:443?security=tls&sni=three.example#three"),
         ]
         document = parse_singbox_document(SINGBOX_TEMPLATE, SINGBOX_TEMPLATE.read_text(encoding="utf-8"))
         plan = plan_singbox_proxy_runtime(document, nodes[0], pool_nodes=nodes)

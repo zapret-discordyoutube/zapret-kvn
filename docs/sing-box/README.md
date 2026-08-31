@@ -57,8 +57,9 @@ Important version note:
   - `hybrid`: `sing-box` remains the front runtime, while actual proxy traffic
     is relayed to a local Xray sidecar for transports our conversion layer does
     not map directly.
-  - `hysteria_sidecar`: Hysteria2 Gecko is relayed through the unmodified
-    official Hysteria client on an authenticated loopback SOCKS listener.
+  - `hysteria_sidecar`: URI-backed Hysteria2 is relayed through the unmodified
+    official Hysteria client on an authenticated loopback SOCKS listener; the
+    original URI is passed byte-for-byte.
 - The current conversion layer supports these outbound families:
   - `vless`
   - `vmess`
@@ -66,7 +67,8 @@ Important version note:
   - `shadowsocks`
   - `socks`
   - `http`
-  - native sing-box `hysteria`, `hysteria2`, and `tuic` share links
+  - native sing-box `hysteria` and `tuic` share links; Hysteria2 share links use
+    the official sidecar, while native Hysteria2 outbound JSON stays native
   - native sing-box outbound JSON (`{"type": ...}`), passed through without
     conversion so extended-only outbound types are not rejected by the app
 - The current conversion layer supports these transport/TLS features:

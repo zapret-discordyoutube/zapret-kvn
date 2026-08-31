@@ -9,7 +9,12 @@ import re
 from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
 
-from .link_parser import link_import_warnings, parse_single, validate_node_outbound
+from .link_parser import (
+    hysteria2_uri_fingerprint,
+    link_import_warnings,
+    parse_single,
+    validate_node_outbound,
+)
 from .models import Node, SubscriptionInfo
 
 
@@ -100,6 +105,20 @@ def source_key_for_node(node: Node) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def source_fingerprint_for_node(node: Node) -> str:
+    """Return a secret-safe hash of transport data omitted from outbound JSON."""
+
+    return hysteria2_uri_fingerprint(node.link)
+
+
+def hidden_source_key_for_node(node: Node) -> str:
+    """Identify one subscription record without storing its original URI."""
+
+    base_key = node.source_key or source_key_for_node(node)
+    fingerprint = source_fingerprint_for_node(node) or str(node.source_fingerprint or "")
+    return f"{base_key}:{fingerprint}" if fingerprint else base_key
+
+
 def parse_subscription_payload(
     payload: bytes | str,
     *,
@@ -137,8 +156,9 @@ def parse_subscription_payload(
         provider_name = node.name or node.server or node.scheme
         node.provider_name = provider_name
         base_key = source_key_for_node(node)
+        source_fingerprint = source_fingerprint_for_node(node)
         record_key = hashlib.sha256(
-            f"{base_key}\0{provider_name}".encode("utf-8")
+            f"{base_key}\0{source_fingerprint}\0{provider_name}".encode("utf-8")
         ).hexdigest()
         if record_key in duplicate_records:
             skipped += 1
@@ -146,7 +166,12 @@ def parse_subscription_payload(
         duplicate_records.add(record_key)
 
         node.source_key = base_key
-        if node.source_key in hidden or base_key in hidden:
+        node.source_fingerprint = source_fingerprint
+        hidden_key = hidden_source_key_for_node(node)
+        # A bare source key is the legacy representation. Continue honoring it
+        # so existing state keeps the old "hide every equivalent outbound"
+        # behavior, while new entries can distinguish URI-only parameters.
+        if hidden_key in hidden or base_key in hidden:
             skipped += 1
             continue
         if include_re and include_re.search(provider_name) is None:

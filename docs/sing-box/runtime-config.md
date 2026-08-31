@@ -406,17 +406,22 @@ this subset:
 - `socks`
 - `http`
 
-The parser also stores `hysteria://`, `hy2://` / `hysteria2://`, and
-`tuic://` nodes as native sing-box outbounds. A native outbound JSON object
-with a top-level `type` field is passed through as-is, with only its runtime
-`tag` replaced by the app. These native nodes intentionally require the
-`TUN -> sing-box` engine and are not sent to Xray.
+The parser stores `hysteria://`, `hy2://` / `hysteria2://`, and `tuic://`
+nodes. URI-backed Hysteria2 is relayed through the pinned official Hysteria
+client; the exact source URI is its transport source of truth and is never
+rebuilt from sing-box JSON. A native outbound JSON object with a top-level
+`type` field is still passed through as-is, with only its runtime `tag`
+replaced by the app. Consequently `hysteria://` (v1), TUIC, and native
+Hysteria2 JSON remain native sing-box outbounds.
 
-For native sing-box Hysteria2 links, `pinSHA256` is rejected unless the link
-already disables certificate verification: the URI pins the complete
-certificate, while sing-box exposes an SPKI/public-key pin. Gecko links are the
-exception: the official Hysteria sidecar receives the original URI unchanged,
-so its full-certificate pin is preserved rather than converted or dropped.
+The official Hysteria v2 URI parser recognizes `obfs`, `obfs-password`, `sni`,
+`insecure`, `pinSHA256`, and `ech`. Unknown/vendor query parameters are retained
+verbatim in the saved source and passed on unchanged; whether the pinned core
+uses them is determined by that core. `pinSHA256` pins the complete leaf
+certificate, so it is deliberately not converted into sing-box's SPKI pin.
+Because the sidecar uses `lazy: true`, local SOCKS readiness does not claim that
+the first remote QUIC/TLS handshake has succeeded; the runtime log reports those
+stages separately.
 
 ### TLS support mapped today
 

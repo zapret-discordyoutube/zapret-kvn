@@ -190,6 +190,27 @@ class SingBoxStopTests(unittest.TestCase):
         released_mock.assert_called_once_with()
 
 
+class SingBoxTunReadinessTests(unittest.TestCase):
+    def test_slow_fallback_probe_cannot_extend_the_startup_deadline(self) -> None:
+        manager = SingBoxManager()
+        fake = Mock()
+        fake.state.return_value = _RUNNING
+        manager._process = fake
+
+        with patch("xray_fluent.engines.singbox.manager.os.name", "nt"), patch.object(
+            manager, "_probe_tun_interface_has_ipv4", return_value=(False, False)
+        ) as probe_mock, patch(
+            "xray_fluent.engines.singbox.manager.time.monotonic",
+            side_effect=[10.0, 10.0, 11.0],
+        ), patch(
+            "xray_fluent.engines.singbox.manager.sleep_with_events"
+        ) as sleep_mock:
+            self.assertFalse(manager._wait_until_tun_ready("xftun0", max_wait=1.0))
+
+        probe_mock.assert_called_once_with("xftun0")
+        sleep_mock.assert_called_once_with(0.25)
+
+
 class SingBoxProxyReadinessTests(unittest.TestCase):
     def test_clash_api_port_is_the_proxy_readiness_contract(self) -> None:
         config = {

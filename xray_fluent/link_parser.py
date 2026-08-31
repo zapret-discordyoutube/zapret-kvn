@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import re
 from typing import Any
@@ -14,7 +15,21 @@ class LinkParseError(ValueError):
     pass
 
 
-_HYSTERIA2_SUPPORTED_OBFS_TYPES = frozenset({"none", "plain", "salamander", "gecko"})
+_HYSTERIA2_SUPPORTED_OBFS_TYPES = frozenset({"plain", "salamander", "gecko"})
+
+
+def hysteria2_uri_fingerprint(raw: str) -> str:
+    """Hash a Hysteria2 URI without its display-only fragment."""
+
+    text = str(raw or "").strip()
+    scheme, separator, remainder = text.partition(":")
+    if not separator or scheme.lower() not in {"hy2", "hysteria2"}:
+        return ""
+    # Keep query order, escaping and unknown keys exact.  The official client,
+    # rather than this parser, owns their semantics.  The two schemes are
+    # aliases and intentionally share one fingerprint.
+    authoritative = f"hysteria2:{remainder.split('#', 1)[0]}"
+    return hashlib.sha256(authoritative.encode("utf-8")).hexdigest()
 
 
 def parse_links_text(text: str) -> tuple[list[Node], list[str]]:
@@ -58,19 +73,9 @@ def link_import_warnings(raw: str) -> list[str]:
     parsed = urlsplit(text)
     if parsed.scheme.lower() not in {"hy2", "hysteria2"}:
         return []
-    params = {key: _first(parse_qs(parsed.query, keep_blank_values=True), key)
-              for key in parse_qs(parsed.query, keep_blank_values=True)}
-    if _get_param(params, "obfs").lower() == "gecko":
-        # Gecko is preserved by the official Hysteria sidecar; unlike the
-        # native sing-box conversion, the original URI (including its pin) is
-        # passed to Hysteria unchanged.
-        return []
-    if not _get_param(params, "pinSHA256", "pin_sha256"):
-        return []
-    return [
-        "закрепление сертификата (pinSHA256) не перенесено, "
-        "проверка сертификата отключена самой ссылкой"
-    ]
+    # All URI-backed Hysteria2 nodes are passed to the official client as the
+    # original URI.  No pin/ECH/query parameter is converted or dropped here.
+    return []
 
 
 def parse_single(raw: str) -> Node:
@@ -767,19 +772,6 @@ def _parse_hysteria2(link: str) -> Node:
         )
 
     obfs_type = _get_param(params, "obfs").lower()
-    certificate_pin = _get_param(params, "pinSHA256", "pin_sha256")
-    if certificate_pin and not _to_bool(
-        _get_param(params, "insecure", "skip-cert-verify", "allow_insecure", "allowInsecure")
-    ) and obfs_type != "gecko":
-        # Пин закрепляет весь сертификат, а sing-box — только публичный ключ, так что
-        # перенести его нельзя. Рядом с insecure проверка отключена самой ссылкой и пин
-        # уже ничего не добавляет: отказ отнял бы рабочий сервер, ничего не защитив.
-        # Без insecure пин — единственная аутентификация сервера, и терять его нельзя.
-        raise LinkParseError(
-            "Hysteria2 pinSHA256 pins the whole certificate and cannot be safely converted "
-            "to sing-box certificate_public_key_sha256"
-        )
-
     outbound: dict[str, Any] = {
         "type": "hysteria2",
         "server": server,

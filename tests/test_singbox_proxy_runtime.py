@@ -97,7 +97,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1"
         )
 
-        self.assertEqual(plan.outcome, "native_singbox")
+        self.assertEqual(plan.outcome, "hysteria_sidecar")
         self.assertEqual((plan.socks_port, plan.http_port), (1390, 1391))
         self.assertFalse(any(item.get("type") == "tun" for item in plan.singbox_config["inbounds"]))
         self.assertEqual(
@@ -111,7 +111,8 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             ],
         )
         proxy = next(item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy")
-        self.assertEqual(proxy["type"], "hysteria2")
+        self.assertEqual(proxy["type"], "socks")
+        self.assertIsNotNone(plan.hysteria_sidecar)
         # Порт clash_api подбирается пробным bind'ом (19090 может быть в
         # excluded port range Windows), поэтому проверяем согласованность,
         # а не конкретное значение.
@@ -121,7 +122,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             f"127.0.0.1:{plan.clash_api_port}",
         )
 
-    def test_gecko_uses_official_hysteria_sidecar_without_duplicating_uri_conversion(self) -> None:
+    def test_hysteria2_uses_official_sidecar_without_duplicating_uri_conversion(self) -> None:
         link = (
             "hy2://secret@example.com:443/?obfs=gecko&obfs-password=cover"
             "&pinSHA256=deadbeef&sni=cdn.example.com#Gecko"
@@ -173,7 +174,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     },
                 )
 
-    def test_gecko_json_outbound_is_refused_without_original_uri(self) -> None:
+    def test_hysteria2_json_outbound_without_original_uri_stays_native(self) -> None:
         document = parse_singbox_document(
             TEMPLATE_PATH,
             TEMPLATE_PATH.read_text(encoding="utf-8"),
@@ -191,8 +192,11 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             },
         )
 
-        with self.assertRaisesRegex(ValueError, "исходной ссылки"):
-            plan_singbox_runtime(document, node)
+        plan = plan_singbox_runtime(document, node)
+        self.assertEqual(plan.outcome, "native_singbox")
+        self.assertIsNone(plan.hysteria_sidecar)
+        proxy = next(item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy")
+        self.assertEqual(proxy["type"], "hysteria2")
 
     def test_hysteria_log_redaction_never_exposes_share_uri(self) -> None:
         secret = "hy2://secret@example.com:443/?obfs=gecko&obfs-password=cover"

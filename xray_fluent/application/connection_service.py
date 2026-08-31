@@ -208,11 +208,11 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             + (
                 " (TUN, xray sidecar)"
                 if tun and singbox_plan is not None and singbox_plan.is_hybrid
-                else " (TUN, Hysteria Gecko)"
+                else " (TUN, Hysteria2)"
                 if tun and singbox_plan is not None and singbox_plan.is_hysteria_sidecar
                 else " (sing-box + Xray sidecar)"
                 if not tun and singbox_plan is not None and singbox_plan.is_hybrid
-                else " (sing-box + Hysteria Gecko)"
+                else " (sing-box + Hysteria2)"
                 if not tun and singbox_plan is not None and singbox_plan.is_hysteria_sidecar
                 else " (sing-box extended)"
                 if not tun and singbox_plan is not None
