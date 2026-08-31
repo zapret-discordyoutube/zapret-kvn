@@ -469,7 +469,7 @@ def _without_display_fields(value: Any) -> Any:
         return {
             str(key): _without_display_fields(item)
             for key, item in value.items()
-            if str(key) not in {"tag", "remarks", "name"}
+            if str(key) not in {"tag", "remarks", "name", "certificate_sha256"}
         }
     if isinstance(value, list):
         return [_without_display_fields(item) for item in value]

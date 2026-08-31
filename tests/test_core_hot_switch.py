@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from xray_fluent.app_controller import AppController
+from xray_fluent.application.hysteria_runtime_contract import HysteriaFailureCode
 from xray_fluent.application.node_service import set_selected_node
 from xray_fluent.application.signature_service import transition_signature
 from xray_fluent.application.outbound_pool_service import (
@@ -22,6 +23,7 @@ from xray_fluent.engines.singbox.selector_api import (
     select_outbound,
     select_outbound_when_ready,
 )
+from xray_fluent.engines.hysteria.manager import HysteriaManager
 from xray_fluent.engines.xray.config_builder import build_xray_config
 from xray_fluent.link_parser import parse_single
 from xray_fluent.models import AppSettings, RoutingSettings
@@ -380,7 +382,7 @@ class LiveConnectionCutoverTests(unittest.TestCase):
 
 class ProxyProtectionTransitionTests(unittest.TestCase):
     def test_transition_waits_for_cached_pass_restart_readiness(self) -> None:
-        node = parse_single("hy2://secret@one.example:443/?insecure=1#one")
+        node = parse_single("hy2://secret@one.example:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#one")
         controller = Mock()
         controller.selected_node = node
         controller.zapret.apply_cached_proxy_node.return_value = True
@@ -415,6 +417,7 @@ class ProxyProtectionTransitionTests(unittest.TestCase):
         controller._transition_generation = 11
         controller._transition_pending = True
         controller.connected = True
+        controller._hysteria_recovery_active = False
         controller._transition_signature.return_value = "blocked-signature"
 
         AppController._on_proxy_protection_failed(controller, 7, "timeout")
@@ -429,7 +432,7 @@ class ProxyProtectionTransitionTests(unittest.TestCase):
         controller.transition_state_changed.emit.assert_called_once_with(False, "")
 
     def test_dns_failure_with_running_zapret_keeps_existing_connection(self) -> None:
-        node = parse_single("hy2://secret@one.example:443/?insecure=1#one")
+        node = parse_single("hy2://secret@one.example:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#one")
         controller = Mock()
         controller.selected_node = node
         controller.zapret.running = True
@@ -439,6 +442,7 @@ class ProxyProtectionTransitionTests(unittest.TestCase):
         controller._proxy_protection_wait_token = 0
         controller._desired_connected = True
         controller.connected = True
+        controller._hysteria_recovery_active = False
         controller._transition_pending = True
         controller._transition_signature.return_value = "blocked-dns"
 
@@ -461,6 +465,113 @@ class ProxyProtectionTransitionTests(unittest.TestCase):
 
 
 class HybridRuntimeStartupTests(unittest.TestCase):
+    def test_stale_hysteria_state_callback_cannot_clear_new_generation(self) -> None:
+        controller = Mock()
+        current = Mock()
+        current.process_generation = 8
+        controller.hysteria = current
+        controller._hysteria_active_generation = 9
+
+        AppController._on_hysteria_state_changed(controller, current, False)
+
+        controller._on_core_state_changed.assert_not_called()
+        self.assertIn("ignored stale state callback", controller._log.call_args.args[0])
+
+    def test_security_failure_stops_admission_without_tls_downgrade_or_switch(self) -> None:
+        controller = Mock()
+        manager = Mock()
+        manager.process_generation = 4
+        controller.hysteria = manager
+        controller._hysteria_active_generation = 4
+        controller._hysteria_contract.session.session_generation = 12
+        controller.connected = True
+        controller._disconnecting = False
+        controller._desired_connected = True
+        controller.singbox.is_running = True
+
+        AppController._on_hysteria_failure(
+            controller,
+            manager,
+            HysteriaFailureCode.TARGET_PIN_MISMATCH.value,
+            "certificate pin mismatch",
+            4,
+        )
+
+        controller.singbox.stop.assert_called_once_with(expected=True)
+        controller._request_transition.assert_not_called()
+        controller._try_hot_switch_selected_node.assert_not_called()
+        self.assertFalse(controller._desired_connected)
+
+    def test_running_manager_security_log_reaches_controller_and_closes_admission(self) -> None:
+        controller = Mock()
+        manager = HysteriaManager()
+        manager._running = True
+        manager._failure_reported = False
+        manager._process_generation = 4
+        controller.hysteria = manager
+        controller._hysteria_active_generation = 4
+        controller._hysteria_contract.session.session_generation = 12
+        controller.connected = True
+        controller._disconnecting = False
+        controller._desired_connected = True
+        controller.singbox.is_running = True
+        manager.failure.connect(
+            lambda code, message, generation: AppController._on_hysteria_failure(
+                controller,
+                manager,
+                code,
+                message,
+                generation,
+            )
+        )
+
+        manager._emit_process_line(
+            "outbound connection failed: x509: certificate signed by unknown authority"
+        )
+
+        controller.singbox.stop.assert_called_once_with(expected=True)
+        controller._request_transition.assert_not_called()
+        self.assertFalse(controller._desired_connected)
+
+    def test_network_failure_selects_one_other_target_once(self) -> None:
+        current = parse_single("hy2://current@one.example:443/#current")
+        first = parse_single("hy2://first@two.example:443/#first")
+        second = parse_single("hy2://second@three.example:443/#second")
+        controller = Mock()
+        manager = Mock()
+        manager.process_generation = 6
+        controller.hysteria = manager
+        controller._hysteria_active_generation = 6
+        controller._hysteria_contract.session.session_generation = 20
+        controller.connected = True
+        controller._disconnecting = False
+        controller._hysteria_recovery_active = False
+        controller._hysteria_cooldown_until = {}
+        controller._hysteria_failure_episode_id = 0
+        controller.selected_node = current
+        controller.state = SimpleNamespace(
+            nodes=[current, first, second],
+            selected_node_id=current.id,
+        )
+        controller._pending_hysteria_replacement_node_id = None
+        controller.singbox.is_running = True
+
+        for _ in range(2):
+            AppController._on_hysteria_failure(
+                controller,
+                manager,
+                HysteriaFailureCode.TARGET_NETWORK_TIMEOUT.value,
+                "no recent network activity",
+                6,
+            )
+
+        self.assertEqual(controller.state.selected_node_id, current.id)
+        self.assertEqual(controller._pending_hysteria_replacement_node_id, first.id)
+        controller._request_transition.assert_called_once_with("node switched")
+        controller._try_hot_switch_selected_node.assert_not_called()
+        controller.auto_switch_triggered.emit.assert_called_once_with(first.name)
+        self.assertEqual(controller._hysteria_failure_episode_id, 1)
+
     def test_start_pins_xray_target_and_known_relay_generation(self) -> None:
         sidecar = SimpleNamespace(
             protect_port=19084,

@@ -104,6 +104,8 @@ def cleanup_connection_runtime_state(
     controller._tun2socks_proxy_username = ""
     controller._tun2socks_proxy_password = ""
     controller._traffic_save_counter = 0
+    controller._active_singbox_plan = None
+    controller._hysteria_failure_started_at = 0.0
     controller._reset_auto_switch_state(
         reset_cooldown=reset_auto_switch_cooldown,
         reset_cycle=reset_auto_switch_cycle,
@@ -177,6 +179,17 @@ def handle_unexpected_disconnect(controller: AppController) -> None:
 
 
 def on_core_state_changed(controller: AppController, _running: bool) -> None:
+    if (
+        not _running
+        and getattr(controller, "_hysteria_recovery_active", False)
+        and getattr(controller, "_switching", False)
+    ):
+        # The Hysteria transition coordinator owns this failure episode.  Keep
+        # the logical old session long enough for the normal hot-swap planner
+        # to prepare a generation-specific replacement.  Generic cleanup here
+        # would cancel that transition and could tear down generation N+1.
+        stop_metrics_worker(controller)
+        return
     was_connected, is_connected = controller._refresh_connected_state()
     if not controller._switching and was_connected != is_connected:
         controller.connection_changed.emit(is_connected)
@@ -201,6 +214,7 @@ def on_core_state_changed(controller: AppController, _running: bool) -> None:
         not is_connected
         and controller.state.settings.enable_system_proxy
         and not controller._reconnecting
+        and not controller._switching
     ):
         controller.proxy.disable(restore_previous=True)
 

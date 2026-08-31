@@ -74,6 +74,15 @@ from .application.auto_switch_service import (
     begin_auto_switch_warmup,
     transport_kind_for_node,
 )
+from .application.hysteria_runtime_contract import (
+    AUTOMATIC_SWITCH_FAILURES,
+    SECURITY_FAILURES,
+    HysteriaFailureCode,
+    HysteriaRuntimeState,
+    HysteriaTransitionContract,
+    classify_hysteria_uri,
+    node_is_maintenance,
+)
 from .application.singbox_config_recovery import (
     SingboxConfigRepair,
     repair_singbox_config_file,
@@ -242,6 +251,12 @@ if TYPE_CHECKING:
     from .live_metrics_worker import LiveMetricsWorker
     from .ping_worker import PingWorker
     from .speed_test_worker import SpeedTestWorker
+
+
+def _increment_int(value: object) -> int:
+    """Advance a generation counter, including lightweight Mock controllers in tests."""
+
+    return value + 1 if isinstance(value, int) else 1
 
 
 def _find_free_api_port(preferred: int | None = None, excluded: set[int] | None = None) -> int:
@@ -417,6 +432,21 @@ class AppController(QObject):
         self._xray_outbound_pool_cache: XrayOutboundPool | None = None
         self._xray_outbound_pool_cache_key: tuple | None = None
         self._core_log_contexts: dict[str, RuntimeLogContext] = {}
+        self._active_singbox_plan: SingboxRuntimePlan | None = None
+        self._session_generation = 0
+        self._front_process_generation = 0
+        self._front_target_generation = 0
+        self._relay_credentials_generation = 0
+        self._hysteria_process_generation = 0
+        self._hysteria_active_generation = 0
+        self._hysteria_failure_episode_id = 0
+        self._hysteria_last_failure_code: HysteriaFailureCode | None = None
+        self._hysteria_automatic_switch_attempted = False
+        self._hysteria_recovery_active = False
+        self._pending_hysteria_replacement_node_id: str | None = None
+        self._hysteria_cooldown_until: dict[str, float] = {}
+        self._hysteria_failure_started_at = 0.0
+        self._hysteria_contract = HysteriaTransitionContract()
 
         self.xray.log_received.connect(self._on_xray_log)
         self.xray.error.connect(self._on_xray_error)
@@ -428,10 +458,7 @@ class AppController(QObject):
         self.singbox.state_changed.connect(self._on_core_state_changed)
         self.singbox.stopped.connect(lambda code: self._on_core_stopped("singbox", code))
 
-        self.hysteria.log_received.connect(lambda line: self._on_core_log("hysteria", line))
-        self.hysteria.error.connect(lambda message: self._on_core_error("hysteria", message))
-        self.hysteria.state_changed.connect(self._on_core_state_changed)
-        self.hysteria.stopped.connect(lambda code: self._on_core_stopped("hysteria", code))
+        self._bind_hysteria_manager(self.hysteria)
 
         self.tun2socks.log_received.connect(lambda line: self._on_core_log("tun2socks", line))
         self.tun2socks.error.connect(lambda message: self._on_core_error("tun2socks", message))
@@ -963,14 +990,19 @@ class AppController(QObject):
     def _inspect_active_xray_config(self) -> tuple[Path, str, bool, int, int, int]:
         return inspect_active_xray_config_operation(self)
 
-    def _plan_runtime_singbox(self, node: Node | None = None) -> SingboxRuntimePlan:
+    def _plan_runtime_singbox(
+        self,
+        node: Node | None = None,
+        *,
+        replacement: bool = False,
+    ) -> SingboxRuntimePlan:
         state = self._get_singbox_document_state()
         document = parse_singbox_document(state.source_path, state.text)
         preferred_relay_port = 0
         preferred_protect_port = 0
         preferred_protect_password = ""
         session = self._active_session
-        if session is not None and session.active_core == "singbox":
+        if session is not None and session.active_core == "singbox" and not replacement:
             if session.hybrid:
                 preferred_relay_port = session.sidecar_relay_port
                 preferred_protect_port = session.protect_ss_port
@@ -986,7 +1018,12 @@ class AppController(QObject):
             pool_nodes=self.state.nodes,
         )
 
-    def _plan_proxy_runtime_singbox(self, node: Node | None = None) -> SingboxRuntimePlan:
+    def _plan_proxy_runtime_singbox(
+        self,
+        node: Node | None = None,
+        *,
+        replacement: bool = False,
+    ) -> SingboxRuntimePlan:
         state = self._get_singbox_document_state()
         document = parse_singbox_document(state.source_path, state.text)
         preferred_relay_port = 0
@@ -999,11 +1036,11 @@ class AppController(QObject):
                 allowed_proxy_ports.add(int(session.socks_port))
             if session.http_port > 0:
                 allowed_proxy_ports.add(int(session.http_port))
-            if session.hybrid:
+            if session.hybrid and not replacement:
                 preferred_relay_port = session.sidecar_relay_port
                 preferred_protect_port = session.protect_ss_port
                 preferred_protect_password = session.protect_ss_password
-            elif session.sidecar_kind == "hysteria":
+            elif session.sidecar_kind == "hysteria" and not replacement:
                 preferred_relay_port = session.sidecar_relay_port
         return plan_singbox_proxy_runtime(
             document,
@@ -1103,10 +1140,16 @@ class AppController(QObject):
         for line in runtime_mapping_lines(context):
             self._log(line)
 
-    def _start_singbox_runtime_plan(self, plan: SingboxRuntimePlan) -> bool:
+    def _start_singbox_runtime_plan(
+        self,
+        plan: SingboxRuntimePlan,
+        *,
+        prepared_hysteria: HysteriaManager | None = None,
+    ) -> bool:
+        runtime_node = self._runtime_selected_node()
         gate = getattr(self, "target_profile_allows_core_start", None)
         if gate is not None and not gate(
-            self.selected_node,
+            runtime_node,
             used_selected_node=bool(getattr(plan, "used_selected_node", True)),
         ):
             return False
@@ -1126,12 +1169,40 @@ class AppController(QObject):
                 "[sing-box] starting official Hysteria2 sidecar "
                 f"relay=127.0.0.1:{plan.hysteria_sidecar.relay_port}"
             )
-            if not self.hysteria.start(
-                plan.hysteria_sidecar.config,
-                plan.hysteria_sidecar.relay_port,
-                context=plan.hysteria_sidecar.context,
-            ):
-                return False
+            target_manager = prepared_hysteria or self.hysteria
+            if prepared_hysteria is not None:
+                if not prepared_hysteria.is_running:
+                    return False
+            else:
+                contract = getattr(self, "_hysteria_contract", None)
+                if isinstance(contract, HysteriaTransitionContract):
+                    planned_generation = _increment_int(
+                        getattr(self, "_session_generation", 0)
+                    )
+                    contract.begin(
+                        planned_generation,
+                        runtime_node.id if runtime_node else None,
+                        "official_hysteria_sidecar",
+                    )
+                    contract.advance(
+                        HysteriaRuntimeState.STARTING_SIDECAR,
+                        generation=planned_generation,
+                    )
+                    contract.advance(
+                        HysteriaRuntimeState.WAITING_RELAY,
+                        generation=planned_generation,
+                    )
+                self._hysteria_process_generation = _increment_int(
+                    getattr(self, "_hysteria_process_generation", 0)
+                )
+                self._hysteria_active_generation = self._hysteria_process_generation
+                if not target_manager.start(
+                    plan.hysteria_sidecar.config,
+                    plan.hysteria_sidecar.relay_port,
+                    context=plan.hysteria_sidecar.context,
+                    process_generation=self._hysteria_process_generation,
+                ):
+                    return False
         elif plan.xray_sidecar is not None:
             self._protect_ss_port = plan.xray_sidecar.protect_port
             self._protect_ss_password = plan.xray_sidecar.protect_password
@@ -1173,12 +1244,21 @@ class AppController(QObject):
         ):
             if plan.xray_sidecar is not None and self.xray.is_running:
                 self.xray.stop()
-            if plan.hysteria_sidecar is not None and self.hysteria.is_running:
-                self.hysteria.stop()
+            if plan.hysteria_sidecar is not None:
+                target_manager = prepared_hysteria or self.hysteria
+                if target_manager.is_running:
+                    target_manager.stop()
             return False
         singbox_start_tag = (
             plan.hybrid_relay_selected_tag if plan.is_hybrid else plan.selected_outbound_tag
         )
+        if plan.hysteria_sidecar is not None:
+            contract = getattr(self, "_hysteria_contract", None)
+            if isinstance(contract, HysteriaTransitionContract):
+                contract.advance(
+                    HysteriaRuntimeState.STARTING_FRONT,
+                    generation=contract.session.session_generation,
+                )
         for start_attempt in range(2):
             sb_ok = self.singbox.start(self.state.settings.singbox_path, plan.singbox_config)
             self._log(f"[sing-box] start result: {sb_ok}")
@@ -1200,6 +1280,13 @@ class AppController(QObject):
             if not singbox_start_tag or self._apply_core_outbound_tag(
                 "singbox", singbox_start_tag, startup=True
             ):
+                self._front_process_generation = _increment_int(
+                    getattr(self, "_front_process_generation", 0)
+                )
+                self._front_target_generation = _increment_int(
+                    getattr(self, "_front_target_generation", 0)
+                )
+                self._active_singbox_plan = plan
                 return True
 
             self.singbox.stop()
@@ -1213,13 +1300,242 @@ class AppController(QObject):
 
         if plan.xray_sidecar is not None and self.xray.is_running:
             self.xray.stop()
-        if plan.hysteria_sidecar is not None and self.hysteria.is_running:
-            self.hysteria.stop()
+        if plan.hysteria_sidecar is not None:
+            target_manager = prepared_hysteria or self.hysteria
+            if target_manager.is_running:
+                target_manager.stop()
         self._protect_ss_port = 0
         self._protect_ss_password = ""
         self._singbox_clash_api_port = 0
         self._xray_api_port = 0
         return False
+
+    def _prepare_hysteria_replacement(self, plan: SingboxRuntimePlan) -> HysteriaManager | None:
+        sidecar = plan.hysteria_sidecar
+        if sidecar is None:
+            return None
+        self._hysteria_process_generation = _increment_int(
+            getattr(self, "_hysteria_process_generation", 0)
+        )
+        generation = self._hysteria_process_generation
+        replacement = HysteriaManager(self)
+        self._bind_hysteria_manager(replacement)
+        self._hysteria_contract.advance(
+            HysteriaRuntimeState.STARTING_SIDECAR,
+            generation=self._hysteria_contract.session.session_generation,
+        )
+        self._hysteria_contract.advance(
+            HysteriaRuntimeState.WAITING_RELAY,
+            generation=self._hysteria_contract.session.session_generation,
+        )
+        if not replacement.start(
+            sidecar.config,
+            sidecar.relay_port,
+            context=sidecar.context,
+            process_generation=generation,
+            allow_parallel=True,
+        ):
+            failure = replacement.last_failure_code or HysteriaFailureCode.LOCAL_RELAY_NOT_READY
+            self._hysteria_last_failure_code = failure
+            self._hysteria_contract.terminal(
+                failure,
+                generation=self._hysteria_contract.session.session_generation,
+            )
+            replacement.deleteLater()
+            return None
+        self._relay_credentials_generation = _increment_int(
+            getattr(self, "_relay_credentials_generation", 0)
+        )
+        self._hysteria_contract.session.sidecar_process_generation = generation
+        self._hysteria_contract.session.relay_port = sidecar.relay_port
+        self._hysteria_contract.session.relay_credentials_generation = self._relay_credentials_generation
+        self._hysteria_contract.advance(
+            HysteriaRuntimeState.REPLACEMENT_READY,
+            generation=self._hysteria_contract.session.session_generation,
+        )
+        return replacement
+
+    def _commit_hysteria_replacement(self, replacement: HysteriaManager | None) -> bool:
+        old = self.hysteria
+        if replacement is not None:
+            self.hysteria = replacement
+            self._hysteria_active_generation = replacement.process_generation
+        stopped = True
+        if old is not replacement and old.is_running:
+            stopped = old.stop(expected=True)
+        if old is not replacement and stopped:
+            old.deleteLater()
+        elif old is not replacement:
+            old.stopped.connect(old.deleteLater)
+        return stopped
+
+    def _rollback_singbox_front(self, plan: SingboxRuntimePlan | None) -> bool:
+        if plan is None or not self.hysteria.is_running:
+            return False
+        self._log("[hysteria-transition] replacement front failed; restoring previous generation")
+        if not self.singbox.start(self.state.settings.singbox_path, plan.singbox_config):
+            return False
+        self._singbox_clash_api_port = plan.clash_api_port
+        self._active_singbox_plan = plan
+        return True
+
+    def _bind_hysteria_manager(self, manager: HysteriaManager) -> None:
+        manager.log_received.connect(lambda line: self._on_core_log("hysteria", line))
+        manager.error.connect(lambda message: self._on_core_error("hysteria", message))
+        manager.failure.connect(
+            lambda code, message, generation, current=manager: self._on_hysteria_failure(
+                current,
+                code,
+                message,
+                generation,
+            )
+        )
+        manager.state_changed.connect(
+            lambda running, current=manager: self._on_hysteria_state_changed(current, running)
+        )
+        manager.stopped.connect(
+            lambda code, current=manager: self._on_hysteria_stopped(current, code)
+        )
+
+    def _on_hysteria_state_changed(self, manager: HysteriaManager, running: bool) -> None:
+        if manager is not self.hysteria or manager.process_generation != self._hysteria_active_generation:
+            self._log(
+                "[hysteria-transition] ignored stale state callback "
+                f"generation={manager.process_generation} running={running}"
+            )
+            return
+        self._on_core_state_changed(running)
+
+    def _on_hysteria_stopped(self, manager: HysteriaManager, exit_code: int) -> None:
+        suffix = ""
+        if manager.last_failure_code is not None:
+            suffix = f" original_failure={manager.last_failure_code.value}"
+        self._log(
+            f"[hysteria] process stopped with code {exit_code} "
+            f"generation={manager.process_generation}{suffix}"
+        )
+
+    def _on_hysteria_failure(
+        self,
+        manager: HysteriaManager,
+        code_text: str,
+        message: str,
+        process_generation: int,
+    ) -> None:
+        try:
+            code = HysteriaFailureCode(code_text)
+        except ValueError:
+            code = HysteriaFailureCode.LOCAL_PROCESS_EXITED
+        self._log(
+            f"[hysteria-failure] code={code.value} process_generation={process_generation}"
+        )
+        if manager is not self.hysteria or process_generation != self._hysteria_active_generation:
+            self._log("[hysteria-failure] stale generation ignored")
+            return
+        self._hysteria_last_failure_code = code
+        if code in SECURITY_FAILURES and self.connected and not self._disconnecting:
+            self._hysteria_contract.fail(
+                code,
+                generation=self._hysteria_contract.session.session_generation,
+                automatic_switch=False,
+            )
+            self._set_connection_status(
+                "error",
+                f"Hysteria2 остановлена без ослабления TLS: {code.value}.",
+                level="error",
+            )
+            self._desired_connected = False
+            # Fail closed: do not leave the front admitting connections into a
+            # transport whose pin/CA/auth/obfs contract was rejected.
+            if self.singbox.is_running:
+                self.singbox.stop(expected=True)
+            return
+        if (
+            code not in AUTOMATIC_SWITCH_FAILURES
+            or not self.connected
+            or self._hysteria_recovery_active
+            or self._disconnecting
+        ):
+            return
+
+        failed = self.selected_node
+        failed_id = failed.id if failed is not None else ""
+        now = time.monotonic()
+        self._hysteria_failure_started_at = now
+        if failed_id:
+            self._hysteria_cooldown_until[failed_id] = now + 300.0
+
+        replacement: Node | None = None
+        for candidate in sorted(self.state.nodes, key=lambda item: item.sort_order):
+            if candidate.id == failed_id or node_is_maintenance(candidate):
+                continue
+            if self._hysteria_cooldown_until.get(candidate.id, 0.0) > now:
+                continue
+            raw_uri = str(candidate.link or "")
+            if raw_uri.partition(":")[0].lower() in {"hy2", "hysteria2"}:
+                if not classify_hysteria_uri(raw_uri, platform="windows").valid:
+                    continue
+            elif classify_node_for_singbox(candidate) not in {
+                "native_singbox",
+                "native_singbox_endpoint",
+                "hybrid_xray_sidecar",
+            }:
+                continue
+            replacement = candidate
+            break
+
+        self._hysteria_failure_episode_id += 1
+        self._hysteria_automatic_switch_attempted = replacement is not None
+        self._hysteria_contract.fail(
+            code,
+            generation=self._hysteria_contract.session.session_generation,
+            automatic_switch=replacement is not None,
+        )
+        if replacement is None:
+            self._hysteria_last_failure_code = HysteriaFailureCode.NO_COMPATIBLE_FALLBACK
+            self._hysteria_contract.terminal(
+                HysteriaFailureCode.NO_COMPATIBLE_FALLBACK,
+                generation=self._hysteria_contract.session.session_generation,
+            )
+            self._set_connection_status(
+                "error",
+                "Hysteria2: совместимый резервный сервер не найден.",
+                level="error",
+            )
+            # Stop admission immediately; otherwise front keeps opening new
+            # connections against an already dead loopback relay.
+            if self.singbox.is_running:
+                self.singbox.stop(expected=True)
+            self._desired_connected = False
+            return
+
+        self._hysteria_recovery_active = True
+        self._pending_hysteria_replacement_node_id = replacement.id
+        self._auto_switch_transitioning = True
+        self._switching = True
+        self._desired_connected = True
+        self._log(
+            f"[hysteria-recovery] episode={self._hysteria_failure_episode_id} "
+            f"failed={failed_id} replacement={replacement.id} code={code.value}"
+        )
+        self.auto_switch_triggered.emit(replacement.name)
+        # The committed selection remains authoritative until replacement
+        # sidecar readiness, front readiness and active-session capture all
+        # succeed.  Transition planners read the pending node explicitly.
+        self._request_transition("node switched")
+        # Close admission to the failed loopback relay once.  The recovery
+        # state fence above keeps the logical old session available to the
+        # full-transition planner while no connection-refused storm is created.
+        if self.singbox.is_running and not self.singbox.stop(expected=True):
+            self._log("[hysteria-recovery] failed to close front admission")
+
+    def _record_hysteria_switch_commit(self) -> None:
+        started = float(getattr(self, "_hysteria_failure_started_at", 0.0))
+        if started <= 0:
+            return
+        elapsed_ms = int(max(0.0, time.monotonic() - started) * 1000)
+        self._log(f"[hysteria-recovery] switch committed in {elapsed_ms} ms")
+        self._hysteria_failure_started_at = 0.0
 
     def _build_runtime_xray_config(self, node: Node | None = None, *, tun_mode: bool = False) -> XrayRuntimeConfig:
         return build_runtime_xray_config_operation(self, node, tun_mode=tun_mode)
@@ -1287,6 +1603,19 @@ class AppController(QObject):
             # источника (пула контроллера), а не из памяти вызывающего.
             # Явно переданный параметр (в т.ч. пустой dict) всегда сильнее.
             outbound_pool_tags = self._derive_outbound_pool_tags(node, core=core)
+        self._session_generation = _increment_int(getattr(self, "_session_generation", 0))
+        contract = getattr(self, "_hysteria_contract", None)
+        contract_session = getattr(contract, "session", None)
+        started_at = (
+            float(getattr(contract_session, "started_at_monotonic", 0.0))
+            or time.monotonic()
+        )
+        ready_at = time.monotonic()
+        runtime_kind = (
+            "official_hysteria_sidecar"
+            if sidecar_kind == "hysteria"
+            else "native"
+        )
         self._active_session = build_active_session_snapshot(
             node_id=node.id if node else None,
             node_server=node.server if node else "",
@@ -1315,7 +1644,41 @@ class AppController(QObject):
             hybrid_relay_selector_tags=hybrid_relay_selector_tags,
             hybrid_relay_selected_tag=hybrid_relay_selected_tag,
             sidecar_kind=sidecar_kind,
+            session_generation=self._session_generation,
+            runtime_kind=runtime_kind,
+            sidecar_process_generation=(
+                int(getattr(self, "_hysteria_active_generation", 0))
+                if sidecar_kind == "hysteria"
+                else 0
+            ),
+            relay_host=PROXY_HOST,
+            relay_credentials_generation=int(getattr(self, "_relay_credentials_generation", 0)),
+            front_process_generation=int(getattr(self, "_front_process_generation", 0)),
+            front_target_generation=int(getattr(self, "_front_target_generation", 0)),
+            started_at_monotonic=started_at,
+            ready_at_monotonic=ready_at,
+            failure_episode_id=int(getattr(self, "_hysteria_failure_episode_id", 0)),
+            last_failure_code=getattr(self, "_hysteria_last_failure_code", None),
+            automatic_switch_attempted=bool(
+                getattr(self, "_hysteria_automatic_switch_attempted", False)
+            ),
         )
+        if isinstance(contract, HysteriaTransitionContract):
+            if contract.session.session_generation != self._session_generation:
+                contract.begin(
+                    self._session_generation,
+                    node.id if node else None,
+                    runtime_kind,
+                    preserve_failure_episode=bool(
+                        getattr(self, "_hysteria_recovery_active", False)
+                    ),
+                )
+            contract.session.ready_at_monotonic = ready_at
+            contract.session.state = HysteriaRuntimeState.READY
+        if hasattr(self, "_hysteria_recovery_active"):
+            self._hysteria_recovery_active = False
+        if hasattr(self, "_hysteria_automatic_switch_attempted"):
+            self._hysteria_automatic_switch_attempted = False
         self._blocked_transition_signature = ""
         begin_auto_switch_warmup(self, node)
 
@@ -1397,7 +1760,7 @@ class AppController(QObject):
         return True
 
     def _needs_transition(self) -> bool:
-        node = self.selected_node
+        node = self._runtime_selected_node()
         context = TransitionContext(
             desired_connected=self._desired_connected,
             locked=self.locked,
@@ -1445,7 +1808,7 @@ class AppController(QObject):
 
     def _can_tun_hot_swap(self, session: ActiveSessionSnapshot) -> bool:
         settings = self.state.settings
-        node = self.selected_node
+        node = self._runtime_selected_node()
         return can_tun_hot_swap_rule(
             session=session,
             settings_tun_mode=bool(settings.tun_mode),
@@ -1455,7 +1818,7 @@ class AppController(QObject):
         )
 
     def _compute_transition_action(self) -> str | None:
-        node = self.selected_node
+        node = self._runtime_selected_node()
         session = self._active_session
         context = TransitionContext(
             desired_connected=self._desired_connected,
@@ -1498,7 +1861,7 @@ class AppController(QObject):
         This method is deliberately entered for every connection transition;
         a previous DNS answer is never accepted as readiness proof.
         """
-        node = self.selected_node
+        node = self._runtime_selected_node()
         self.zapret.set_target_settings(self.state.settings.zapret_target)
         if not self._active_config_uses_selected_node(node):
             self.zapret.clear_target_profile()
@@ -1600,7 +1963,13 @@ class AppController(QObject):
         self._proxy_protection_wait_generation = 0
         self._proxy_protection_wait_token = 0
         self._transition_pending = False
-        self._desired_connected = self.connected
+        if self._hysteria_recovery_active:
+            self._clear_pending_hysteria_selection()
+            self._hysteria_recovery_active = False
+            self._desired_connected = False
+            self._handle_unexpected_disconnect()
+        else:
+            self._desired_connected = self.connected
         self._blocked_transition_signature = self._transition_signature()
         self._set_connection_status("error", message, level="warning")
         self.transition_state_changed.emit(False, "")
@@ -1617,6 +1986,7 @@ class AppController(QObject):
         resolved: object,
         error: Exception | None,
     ) -> None:
+        runtime_node = self._runtime_selected_node()
         if isinstance(spec, str):
             if error is None:
                 self.zapret.cache_proxy_resolution(spec, resolved)
@@ -1624,7 +1994,17 @@ class AppController(QObject):
                 return
             self._proxy_protection_wait_generation = 0
             self._proxy_protection_wait_token = 0
+            if error is not None:
+                self._log(
+                    f"[zapret] DNS выбранного сервера host={spec} "
+                    f"завершился ошибкой: {error}"
+                )
             if error is not None and self.zapret.running:
+                if self._hysteria_recovery_active:
+                    self._cancel_target_transition(
+                        "Не удалось подготовить UDP-защиту replacement target"
+                    )
+                    return
                 self._transition_pending = False
                 self._blocked_transition_signature = self._transition_signature()
                 self._desired_connected = self.connected
@@ -1634,8 +2014,8 @@ class AppController(QObject):
                 )
                 self.transition_state_changed.emit(False, "")
                 return
-            if error is None and self.zapret.apply_cached_proxy_node(self.selected_node):
-                if not self.zapret.proxy_protection_is_ready(self.selected_node):
+            if error is None and self.zapret.apply_cached_proxy_node(runtime_node):
+                if not self.zapret.proxy_protection_is_ready(runtime_node):
                     self._wait_for_proxy_protection(generation)
                     return
             if not self._transition_active:
@@ -1648,11 +2028,15 @@ class AppController(QObject):
         if not self._desired_connected:
             self.transition_state_changed.emit(False, "")
             return
-        if spec != self.zapret.target_spec(self.selected_node):
+        if spec != self.zapret.target_spec(runtime_node):
             return
-        requires_zapret = self.zapret.target_requires_zapret(self.selected_node)
+        requires_zapret = self.zapret.target_requires_zapret(runtime_node)
         if error is not None:
-            self._log(f"[zapret] DNS выбранного сервера завершился ошибкой: {error}")
+            hosts = ", ".join(spec.hosts)
+            self._log(
+                f"[zapret] DNS выбранного сервера host={hosts} "
+                f"завершился ошибкой: {error}"
+            )
             if requires_zapret or self.zapret.running:
                 self._cancel_target_transition(
                     "Подключение отменено: не удалось определить IP выбранного сервера"
@@ -1663,13 +2047,23 @@ class AppController(QObject):
             return
 
         previous_target = self.zapret.resolved_target
-        profile_was_ready = self.zapret.target_profile_is_ready(self.selected_node)
+        profile_was_ready = self.zapret.target_profile_is_ready(runtime_node)
         if self.connected and (previous_target != resolved or not profile_was_ready):
-            # Stop data-plane retries before winws2 loses the old profile.
-            self.transition_state_changed.emit(True, "Остановка VPN перед Zapret...")
-            self.disconnect_current(disable_proxy=False, emit_status=False)
-            self._desired_connected = True
-        if not self.zapret.apply_resolved_target(self.selected_node, resolved):
+            if self._hysteria_recovery_active:
+                # Admission was already closed by the Hysteria failure
+                # coordinator.  Preserve the old sidecar process/generation
+                # while winws2 prepares protection for the replacement; the
+                # normal sidecar transition will retire it only after readiness.
+                self._log(
+                    "[hysteria-recovery] preparing Zapret target without "
+                    "stopping the old Hysteria generation"
+                )
+            else:
+                # Stop data-plane retries before winws2 loses the old profile.
+                self.transition_state_changed.emit(True, "Остановка VPN перед Zapret...")
+                self.disconnect_current(disable_proxy=False, emit_status=False)
+                self._desired_connected = True
+        if not self.zapret.apply_resolved_target(runtime_node, resolved):
             self._cancel_target_transition("Не удалось подготовить стратегию выбранного сервера")
             return
 
@@ -1678,7 +2072,7 @@ class AppController(QObject):
             self._wait_for_proxy_protection(generation)
             self.zapret.start_with_target(preset)
             return
-        if not self.zapret.target_profile_is_ready(self.selected_node):
+        if not self.zapret.target_profile_is_ready(runtime_node):
             self._wait_for_proxy_protection(generation)
             return
         if not self._transition_active:
@@ -1697,7 +2091,7 @@ class AppController(QObject):
             self._proxy_protection_wait_token = 0
             self.transition_state_changed.emit(False, "")
             return
-        if not self.zapret.target_profile_is_ready(self.selected_node):
+        if not self.zapret.target_profile_is_ready(self._runtime_selected_node()):
             return
 
         self._proxy_protection_wait_generation = 0
@@ -1717,7 +2111,12 @@ class AppController(QObject):
         self._proxy_protection_wait_generation = 0
         self._proxy_protection_wait_token = 0
         self._transition_pending = False
-        self._blocked_transition_signature = self._transition_signature()
+        self._blocked_transition_signature = self._transition_signature(
+            self._runtime_selected_node()
+        )
+        if self._hysteria_recovery_active:
+            self._clear_pending_hysteria_selection()
+            self._hysteria_recovery_active = False
         legacy_contract = not isinstance(self.zapret, ZapretManager)
         self._desired_connected = self.connected if legacy_contract else False
         if legacy_contract:
@@ -1891,7 +2290,9 @@ class AppController(QObject):
                 if ok:
                     self._blocked_transition_signature = ""
                 else:
-                    self._blocked_transition_signature = self._transition_signature()
+                    self._blocked_transition_signature = self._transition_signature(
+                        self._runtime_selected_node()
+                    )
                     self._desired_connected = self.connected
             else:
                 # Отменённый переход не трогает blocked-сигнатуру и desired_connected
@@ -1900,6 +2301,9 @@ class AppController(QObject):
                 self._reconcile_cancelled_transition()
         finally:
             self._transition_active = False
+            if self._pending_hysteria_replacement_node_id:
+                self._clear_pending_hysteria_selection()
+                self._hysteria_recovery_active = False
             if self._transition_pending or self._needs_transition():
                 self._schedule_transition_drain(0)
             else:
@@ -2000,6 +2404,32 @@ class AppController(QObject):
     @property
     def selected_node(self) -> Node | None:
         return self._get_node_by_id(self.state.selected_node_id)
+
+    def _runtime_selected_node(self) -> Node | None:
+        pending_id = getattr(self, "_pending_hysteria_replacement_node_id", None)
+        if getattr(self, "_hysteria_recovery_active", False) and pending_id:
+            pending = self._get_node_by_id(pending_id)
+            if pending is not None:
+                return pending
+        return self.selected_node
+
+    def _commit_pending_hysteria_selection(self, node: Node | None) -> bool:
+        pending_id = getattr(self, "_pending_hysteria_replacement_node_id", None)
+        if not pending_id:
+            return True
+        if node is None or node.id != pending_id:
+            self._log(
+                "[hysteria-transition] refused selection commit: active session "
+                f"node={node.id if node else ''} pending={pending_id}"
+            )
+            return False
+        self.state.selected_node_id = pending_id
+        self._pending_hysteria_replacement_node_id = None
+        self.selection_changed.emit(node)
+        return True
+
+    def _clear_pending_hysteria_selection(self) -> None:
+        self._pending_hysteria_replacement_node_id = None
 
     def _get_node_by_id(self, node_id: str | None) -> Node | None:
         return get_node_by_id_operation(self, node_id)
@@ -3289,7 +3719,7 @@ class AppController(QObject):
 
     def _hot_swap_node_steps(self, reason: str) -> TransitionSteps:
         """Handle node switch while TUN is active."""
-        node = self.selected_node
+        node = self._runtime_selected_node()
         session = self._active_session
         if session is None:
             self._auto_switch_transitioning = False

@@ -38,7 +38,7 @@ class ZapretTargetClassificationTests(unittest.TestCase):
                 self.assertEqual((spec.group, spec.transport), ("quic_proxy", "udp"))
 
     def test_hysteria_port_hopping_becomes_winws_range(self) -> None:
-        node = parse_single("hy2://secret@one.example:443,5000-5010/?insecure=1#one")
+        node = parse_single("hy2://secret@one.example:443,5000-5010/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#one")
         spec = endpoint_spec_for_node(node)
         self.assertEqual(spec.ports, ("443", "5000-5010"))
 
@@ -237,6 +237,51 @@ class ZapretTargetBarrierTests(unittest.TestCase):
         AppController._on_proxy_protection_resolved(controller, 7, spec, endpoint, None)
 
         controller.zapret.apply_resolved_target.assert_not_called()
+
+    def test_dns_failure_log_names_every_resolved_host(self) -> None:
+        controller = Mock()
+        controller._transition_generation = 7
+        controller._desired_connected = True
+        spec = ZapretEndpointSpec(
+            "wireguard",
+            "udp",
+            ("one.example", "two.example"),
+            ("51820",),
+        )
+        controller.zapret.target_spec.return_value = spec
+        controller.zapret.target_requires_zapret.return_value = True
+        controller.zapret.running = False
+
+        AppController._on_proxy_protection_resolved(
+            controller,
+            7,
+            spec,
+            None,
+            OSError(11001, "getaddrinfo failed"),
+        )
+
+        controller._log.assert_called_once_with(
+            "[zapret] DNS выбранного сервера host=one.example, two.example "
+            "завершился ошибкой: [Errno 11001] getaddrinfo failed"
+        )
+
+    def test_legacy_dns_failure_log_names_host_without_running_zapret(self) -> None:
+        controller = Mock()
+        controller._transition_generation = 9
+        controller.zapret.running = False
+
+        AppController._on_proxy_protection_resolved(
+            controller,
+            9,
+            "legacy.example",
+            set(),
+            OSError(11001, "getaddrinfo failed"),
+        )
+
+        controller._log.assert_called_once_with(
+            "[zapret] DNS выбранного сервера host=legacy.example "
+            "завершился ошибкой: [Errno 11001] getaddrinfo failed"
+        )
 
     def test_core_start_fence_rejects_unready_profile(self) -> None:
         controller = Mock()

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .runtime_planner import SingboxRuntimePlan
+from ...application.hysteria_runtime_contract import HysteriaFailureCode, HysteriaRuntimeState
 
 if TYPE_CHECKING:
     from ...app_controller import AppController
@@ -157,12 +158,13 @@ def start_tun(
 
 
 def restart_runtime(controller: AppController, reason: str) -> bool:
-    node = controller.selected_node
+    node = controller._runtime_selected_node()
+    hysteria_recovery = bool(controller._hysteria_recovery_active)
     controller._switching = True
     try:
         controller._log(f"[tun-hot-swap] {reason}")
         try:
-            plan = controller._plan_runtime_singbox(node)
+            plan = controller._plan_runtime_singbox(node, replacement=True)
         except ValueError as exc:
             controller._set_connection_status("error", str(exc), level="error")
             return False
@@ -177,31 +179,80 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         controller._set_connection_status("starting", start_message, level="info")
         controller._stop_metrics_worker()
 
+        old_plan = getattr(controller, "_active_singbox_plan", None)
+        old_hysteria = controller.hysteria
+        replacement_hysteria = None
+        if plan.hysteria_sidecar is not None:
+            controller._hysteria_contract.advance(
+                HysteriaRuntimeState.PREPARING_REPLACEMENT,
+                generation=controller._hysteria_contract.session.session_generation,
+            )
+            replacement_hysteria = controller._prepare_hysteria_replacement(plan)
+            if replacement_hysteria is None:
+                controller._set_connection_status(
+                    "error",
+                    "Новый Hysteria sidecar не доказал readiness; прежний runtime сохранён.",
+                    level="error",
+                )
+                if controller._hysteria_recovery_active:
+                    controller._handle_unexpected_disconnect()
+                return False
+
         if controller.singbox.is_running and not controller.singbox.stop():
+            if replacement_hysteria is not None:
+                replacement_hysteria.stop(expected=True)
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс sing-box", level="error")
             return False
         if controller.xray.is_running and not controller.xray.stop():
+            if replacement_hysteria is not None:
+                replacement_hysteria.stop(expected=True)
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray sidecar", level="error")
             return False
-        if controller.hysteria.is_running and not controller.hysteria.stop():
-            controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Hysteria sidecar", level="error")
-            return False
-
         controller._xray_api_port = 0
         controller._protect_ss_port = 0
         controller._protect_ss_password = ""
-        if not controller._start_singbox_runtime_plan(plan):
+        controller._hysteria_contract.advance(
+            HysteriaRuntimeState.COMMITTING_SWITCH,
+            generation=controller._hysteria_contract.session.session_generation,
+        )
+        if not controller._start_singbox_runtime_plan(
+            plan,
+            prepared_hysteria=replacement_hysteria,
+        ):
+            rolled_back = controller._rollback_singbox_front(old_plan)
+            controller._hysteria_contract.terminal(
+                HysteriaFailureCode.LOCAL_FRONT_NOT_READY,
+                generation=controller._hysteria_contract.session.session_generation,
+                degraded=rolled_back,
+            )
             controller._set_connection_status(
                 "error",
                 (
-                    "Не удалось перезапустить sing-box hybrid runtime. Смотрите причину в последних строках лога sing-box."
-                    if plan.is_hybrid
-                    else "Не удалось перезапустить sing-box runtime. Смотрите причину в последних строках лога sing-box."
+                    "Новый front не запустился; прежняя generation восстановлена."
+                    if rolled_back
+                    else "Новый front не запустился и rollback прежней generation не удался."
                 ),
                 level="error",
             )
-            controller._handle_unexpected_disconnect()
+            if not rolled_back:
+                controller._handle_unexpected_disconnect()
             return False
+
+        if replacement_hysteria is not None:
+            if not controller._commit_hysteria_replacement(replacement_hysteria):
+                controller._hysteria_last_failure_code = (
+                    HysteriaFailureCode.TRANSITION_ROLLBACK_FAILED
+                )
+                controller._log(
+                    "[hysteria-transition] new generation committed, but the old "
+                    "process did not confirm shutdown"
+                )
+        elif old_hysteria.is_running:
+            old_hysteria.stop(expected=True)
+        controller._hysteria_contract.advance(
+            HysteriaRuntimeState.STOPPING_OLD,
+            generation=controller._hysteria_contract.session.session_generation,
+        )
 
         session_node = node if plan.used_selected_node else None
         if session_node is not None:
@@ -231,6 +282,16 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
             hybrid_relay_selector_tags=plan.hybrid_relay_selector_tags,
             hybrid_relay_selected_tag=plan.hybrid_relay_selected_tag,
         )
+        if hysteria_recovery and not controller._commit_pending_hysteria_selection(session_node):
+            controller._set_connection_status(
+                "error",
+                "Новый runtime готов, но selection commit отклонён.",
+                level="error",
+            )
+            controller._handle_unexpected_disconnect()
+            return False
+        if hysteria_recovery:
+            controller._record_hysteria_switch_commit()
         controller._set_connection_status(
             "running",
             f"Переключено: {session_label}" + (
@@ -241,8 +302,11 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         controller.schedule_save()
         return True
     finally:
+        if hysteria_recovery and controller._pending_hysteria_replacement_node_id:
+            controller._clear_pending_hysteria_selection()
         controller._switching = False
         controller._auto_switch_transitioning = False
+        controller._hysteria_recovery_active = False
         _, controller.connected = controller._refresh_connected_state()
         controller.connection_changed.emit(controller.connected)
         if controller.connected:
@@ -252,12 +316,13 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
 
 
 def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
-    node = controller.selected_node
+    node = controller._runtime_selected_node()
+    hysteria_recovery = bool(controller._hysteria_recovery_active)
     controller._switching = True
     try:
         controller._log(f"[proxy-hot-swap] {reason}")
         try:
-            plan = controller._plan_proxy_runtime_singbox(node)
+            plan = controller._plan_proxy_runtime_singbox(node, replacement=True)
         except ValueError as exc:
             controller._set_connection_status("error", str(exc), level="error")
             return False
@@ -266,27 +331,79 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         _notify_proxy_port_change(controller, plan)
         controller._stop_metrics_worker()
 
+        old_plan = getattr(controller, "_active_singbox_plan", None)
+        old_hysteria = controller.hysteria
+        replacement_hysteria = None
+        if plan.hysteria_sidecar is not None:
+            controller._hysteria_contract.advance(
+                HysteriaRuntimeState.PREPARING_REPLACEMENT,
+                generation=controller._hysteria_contract.session.session_generation,
+            )
+            replacement_hysteria = controller._prepare_hysteria_replacement(plan)
+            if replacement_hysteria is None:
+                controller._set_connection_status(
+                    "error",
+                    "Новый Hysteria sidecar не доказал readiness; прежний runtime сохранён.",
+                    level="error",
+                )
+                if controller._hysteria_recovery_active:
+                    controller._handle_unexpected_disconnect()
+                return False
+
         if controller.singbox.is_running and not controller.singbox.stop():
+            if replacement_hysteria is not None:
+                replacement_hysteria.stop(expected=True)
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс sing-box", level="error")
             return False
         if controller.xray.is_running and not controller.xray.stop():
+            if replacement_hysteria is not None:
+                replacement_hysteria.stop(expected=True)
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray sidecar", level="error")
             return False
-        if controller.hysteria.is_running and not controller.hysteria.stop():
-            controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Hysteria sidecar", level="error")
-            return False
-
         controller._xray_api_port = 0
         controller._protect_ss_port = 0
         controller._protect_ss_password = ""
-        if not controller._start_singbox_runtime_plan(plan):
+        controller._hysteria_contract.advance(
+            HysteriaRuntimeState.COMMITTING_SWITCH,
+            generation=controller._hysteria_contract.session.session_generation,
+        )
+        if not controller._start_singbox_runtime_plan(
+            plan,
+            prepared_hysteria=replacement_hysteria,
+        ):
+            rolled_back = controller._rollback_singbox_front(old_plan)
+            controller._hysteria_contract.terminal(
+                HysteriaFailureCode.LOCAL_FRONT_NOT_READY,
+                generation=controller._hysteria_contract.session.session_generation,
+                degraded=rolled_back,
+            )
             controller._set_connection_status(
                 "error",
-                "Не удалось перезапустить sing-box proxy runtime. Смотрите последние строки лога sing-box.",
+                (
+                    "Новый front не запустился; прежняя generation восстановлена."
+                    if rolled_back
+                    else "Новый front не запустился и rollback прежней generation не удался."
+                ),
                 level="error",
             )
-            controller._handle_unexpected_disconnect()
+            if not rolled_back:
+                controller._handle_unexpected_disconnect()
             return False
+        if replacement_hysteria is not None:
+            if not controller._commit_hysteria_replacement(replacement_hysteria):
+                controller._hysteria_last_failure_code = (
+                    HysteriaFailureCode.TRANSITION_ROLLBACK_FAILED
+                )
+                controller._log(
+                    "[hysteria-transition] new generation committed, but the old "
+                    "process did not confirm shutdown"
+                )
+        elif old_hysteria.is_running:
+            old_hysteria.stop(expected=True)
+        controller._hysteria_contract.advance(
+            HysteriaRuntimeState.STOPPING_OLD,
+            generation=controller._hysteria_contract.session.session_generation,
+        )
         if not _apply_system_proxy(controller, plan):
             controller._handle_unexpected_disconnect()
             return False
@@ -320,13 +437,26 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
             hybrid_relay_selector_tags=plan.hybrid_relay_selector_tags,
             hybrid_relay_selected_tag=plan.hybrid_relay_selected_tag,
         )
+        if hysteria_recovery and not controller._commit_pending_hysteria_selection(session_node):
+            controller._set_connection_status(
+                "error",
+                "Новый runtime готов, но selection commit отклонён.",
+                level="error",
+            )
+            controller._handle_unexpected_disconnect()
+            return False
+        if hysteria_recovery:
+            controller._record_hysteria_switch_commit()
         suffix = _runtime_suffix(plan)
         controller._set_connection_status("running", f"Переключено: {session_label}{suffix}", level="success")
         controller.schedule_save()
         return True
     finally:
+        if hysteria_recovery and controller._pending_hysteria_replacement_node_id:
+            controller._clear_pending_hysteria_selection()
         controller._switching = False
         controller._auto_switch_transitioning = False
+        controller._hysteria_recovery_active = False
         _, controller.connected = controller._refresh_connected_state()
         controller.connection_changed.emit(controller.connected)
         if controller.connected:

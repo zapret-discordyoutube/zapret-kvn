@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 import json
 import os
 from pathlib import Path
 import socket
+import ssl
 import time
 from typing import Any
 
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import HYSTERIA_CONFIG_FILE, HYSTERIA_PATH_DEFAULT, PROXY_HOST, RUNTIME_DIR
+from ...application.hysteria_runtime_contract import HysteriaFailureCode, classify_hysteria_failure
 from ...runtime_logging import RuntimeNodeIdentity, redact_runtime_log
 from ...subprocess_utils import (
     decode_output,
@@ -22,6 +25,13 @@ from ...subprocess_utils import (
 )
 
 
+_FUNCTIONAL_HTTPS_ENDPOINTS: tuple[tuple[str, str, str], ...] = (
+    ("cloudflare-dns.com", "cloudflare-dns.com", "/"),
+    ("dns.google", "dns.google", "/"),
+    ("dns.quad9.net", "dns.quad9.net", "/"),
+)
+
+
 class HysteriaManager(QObject):
     """Run the unmodified official Hysteria client as a local SOCKS sidecar."""
 
@@ -29,6 +39,7 @@ class HysteriaManager(QObject):
     stopped = pyqtSignal(int)
     log_received = pyqtSignal(str)
     error = pyqtSignal(str)
+    failure = pyqtSignal(str, str, int)
     state_changed = pyqtSignal(bool)
 
     def __init__(self, parent: QObject | None = None):
@@ -56,13 +67,28 @@ class HysteriaManager(QObject):
         self._chrome_fallback_used = False
         self._chrome_fallback_in_progress = False
         self._suppress_state_change = False
+        self._process_generation = 0
+        self._config_path = HYSTERIA_CONFIG_FILE
+        self._last_failure_code: HysteriaFailureCode | None = None
+        self._compatibility_allow_parallel = False
+        self._compatibility_verify_remote = True
+        self._attempt_started_at = 0.0
         # A crash can leave a short-lived config behind. It is never reusable:
         # every start writes a fresh one, so remove stale secrets immediately.
         self._cleanup_config()
+        self._cleanup_stale_generation_configs()
 
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def process_generation(self) -> int:
+        return self._process_generation
+
+    @property
+    def last_failure_code(self) -> HysteriaFailureCode | None:
+        return self._last_failure_code
 
     def start(
         self,
@@ -70,6 +96,9 @@ class HysteriaManager(QObject):
         relay_port: int,
         *,
         context: RuntimeNodeIdentity | None = None,
+        process_generation: int = 0,
+        allow_parallel: bool = False,
+        verify_remote: bool = True,
         _compatibility_retry: bool = False,
     ) -> bool:
         if not _compatibility_retry:
@@ -77,6 +106,17 @@ class HysteriaManager(QObject):
             self._chrome_fallback_pending = False
             self._chrome_fallback_used = False
             self._chrome_fallback_in_progress = False
+            self._process_generation = max(0, int(process_generation))
+            self._config_path = (
+                HYSTERIA_CONFIG_FILE.with_name(
+                    f"{HYSTERIA_CONFIG_FILE.stem}-{self._process_generation}.json"
+                )
+                if allow_parallel and self._process_generation > 0
+                else HYSTERIA_CONFIG_FILE
+            )
+            self._compatibility_allow_parallel = bool(allow_parallel)
+            self._compatibility_verify_remote = bool(verify_remote)
+            self._last_failure_code = None
         self._compatibility_config = deepcopy(config)
         self._compatibility_relay_port = relay_port
         self._compatibility_context = context
@@ -112,14 +152,15 @@ class HysteriaManager(QObject):
             self.state_changed.emit(False)
 
         self._begin_attempt(context, config)
-        self._kill_orphaned(exe)
+        if not allow_parallel:
+            self._kill_orphaned(exe)
         self._cleanup_config()
-        temporary = HYSTERIA_CONFIG_FILE.with_suffix(".json.tmp")
+        temporary = self._config_path.with_suffix(".json.tmp")
         try:
             RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
             temporary.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
             temporary.chmod(0o600)
-            temporary.replace(HYSTERIA_CONFIG_FILE)
+            temporary.replace(self._config_path)
         except OSError as exc:
             self._cleanup_config()
             self._emit_error(f"Не удалось записать временный конфиг: {exc}", stage="write_config")
@@ -138,7 +179,7 @@ class HysteriaManager(QObject):
         self._process.setArguments(
             [
                 "--config",
-                str(HYSTERIA_CONFIG_FILE),
+                str(self._config_path),
                 "--disable-update-check",
                 "--log-level",
                 "warn",
@@ -163,6 +204,34 @@ class HysteriaManager(QObject):
             self._emit_error(f"Hysteria sidecar не запустился: {details}", stage="wait_ready")
             return False
 
+        self._emit_log(
+            f"local relay ready in {int((time.monotonic() - self._attempt_started_at) * 1000)} ms",
+            stage="relay_ready",
+        )
+
+        socks = config.get("socks5")
+        socks = socks if isinstance(socks, dict) else {}
+        if verify_remote and not self._wait_until_remote_ready(
+            relay_port,
+            username=str(socks.get("username") or ""),
+            password=str(socks.get("password") or ""),
+        ):
+            details = self._last_output_lines[-1] if self._last_output_lines else "HTTPS probe через relay не завершился"
+            self.stop(expected=True)
+            self._starting = False
+            self._emit_error(
+                f"Hysteria relay локально открыт, но удалённый handshake не готов: {details}",
+                stage="remote_handshake",
+                code=classify_hysteria_failure(details) or HysteriaFailureCode.TARGET_NETWORK_TIMEOUT,
+            )
+            return False
+        if verify_remote:
+            self._emit_log(
+                "functional readiness completed in "
+                f"{int((time.monotonic() - self._attempt_started_at) * 1000)} ms",
+                stage="functional_ready",
+            )
+
         # Hysteria has parsed the config by the time its SOCKS listener is
         # ready. Do not leave the URI/passwords on disk for the whole session.
         self._cleanup_config()
@@ -176,6 +245,7 @@ class HysteriaManager(QObject):
         config: dict[str, Any],
     ) -> None:
         self._attempt += 1
+        self._attempt_started_at = time.monotonic()
         self._context = context
         self._failure_reported = False
         self._stdout_buffer = ""
@@ -214,6 +284,165 @@ class HysteriaManager(QObject):
                 sleep_with_events(0.05)
         return False
 
+    def _wait_until_remote_ready(
+        self,
+        relay_port: int,
+        *,
+        username: str,
+        password: str,
+        timeout: float = 15.0,
+    ) -> bool:
+        """Prove HTTPS egress without making one external provider authoritative."""
+
+        deadline = time.monotonic() + timeout
+        failures: dict[str, str] = {}
+        while time.monotonic() < deadline:
+            if self._process.state() == QProcess.ProcessState.NotRunning:
+                return False
+            probe_timeout = min(4.0, max(0.2, deadline - time.monotonic()))
+            executor = ThreadPoolExecutor(
+                max_workers=len(_FUNCTIONAL_HTTPS_ENDPOINTS),
+                thread_name_prefix="hysteria-ready",
+            )
+            futures: dict[Future[None], tuple[str, str, str]] = {
+                executor.submit(
+                    self._probe_remote_endpoint,
+                    relay_port,
+                    username=username,
+                    password=password,
+                    endpoint=endpoint,
+                    timeout=probe_timeout,
+                ): endpoint
+                for endpoint in _FUNCTIONAL_HTTPS_ENDPOINTS
+            }
+            succeeded: tuple[str, str, str] | None = None
+            while futures and time.monotonic() < deadline:
+                if self._process.state() == QProcess.ProcessState.NotRunning:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return False
+                completed = [future for future in futures if future.done()]
+                for future in completed:
+                    endpoint = futures.pop(future)
+                    error = future.exception()
+                    if error is None:
+                        succeeded = endpoint
+                        break
+                    failures[endpoint[1]] = f"{type(error).__name__}: {error}"
+                if succeeded is not None:
+                    break
+                sleep_with_events(0.05)
+            executor.shutdown(wait=False, cancel_futures=True)
+            if succeeded is not None:
+                self._emit_log(
+                    f"functional HTTPS probe succeeded via {succeeded[1]}",
+                    stage="functional_ready",
+                )
+                return True
+            sleep_with_events(0.1)
+        if failures:
+            summary = "; ".join(
+                f"{host}={detail}" for host, detail in sorted(failures.items())
+            )
+            self._emit_log(f"functional HTTPS probes failed: {summary}", stage="functional_ready")
+        return False
+
+    def _probe_remote_endpoint(
+        self,
+        relay_port: int,
+        *,
+        username: str,
+        password: str,
+        endpoint: tuple[str, str, str],
+        timeout: float,
+    ) -> None:
+        connect_host, server_name, path = endpoint
+        raw = self._open_socks_connection(
+            relay_port,
+            username=username,
+            password=password,
+            timeout=timeout,
+            target_host=connect_host,
+        )
+        context = ssl.create_default_context()
+        try:
+            with context.wrap_socket(raw, server_hostname=server_name) as secure:
+                secure.settimeout(timeout)
+                request = (
+                    f"HEAD {path} HTTP/1.1\r\n"
+                    f"Host: {server_name}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                secure.sendall(request)
+                if not secure.recv(16).startswith(b"HTTP/"):
+                    raise OSError("HTTPS endpoint returned no HTTP response")
+        except BaseException:
+            raw.close()
+            raise
+
+    @staticmethod
+    def _open_socks_connection(
+        relay_port: int,
+        *,
+        username: str,
+        password: str,
+        timeout: float,
+        target_host: str = "cloudflare-dns.com",
+    ) -> socket.socket:
+        sock = socket.create_connection((PROXY_HOST, relay_port), timeout=timeout)
+        try:
+            sock.settimeout(timeout)
+            methods = b"\x02" if username or password else b"\x00"
+            sock.sendall(b"\x05\x01" + methods)
+            response = HysteriaManager._recv_exact(sock, 2)
+            if response != b"\x05" + methods:
+                raise OSError("SOCKS authentication method rejected")
+            if methods == b"\x02":
+                encoded_user = username.encode("utf-8")
+                encoded_password = password.encode("utf-8")
+                if len(encoded_user) > 255 or len(encoded_password) > 255:
+                    raise OSError("SOCKS credentials are too long")
+                sock.sendall(
+                    b"\x01"
+                    + bytes((len(encoded_user),))
+                    + encoded_user
+                    + bytes((len(encoded_password),))
+                    + encoded_password
+                )
+                if HysteriaManager._recv_exact(sock, 2) != b"\x01\x00":
+                    raise OSError("SOCKS authentication rejected")
+            encoded_target = target_host.encode("idna")
+            if not encoded_target or len(encoded_target) > 255:
+                raise OSError("SOCKS target host is invalid")
+            sock.sendall(
+                b"\x05\x01\x00\x03"
+                + bytes((len(encoded_target),))
+                + encoded_target
+                + b"\x01\xbb"
+            )
+            header = HysteriaManager._recv_exact(sock, 4)
+            if len(header) != 4 or header[0] != 5 or header[1] != 0:
+                raise OSError("SOCKS CONNECT rejected")
+            address_length = {1: 4, 4: 16}.get(header[3])
+            if header[3] == 3:
+                address_length = HysteriaManager._recv_exact(sock, 1)[0]
+            if address_length is None:
+                raise OSError("SOCKS returned an invalid address type")
+            HysteriaManager._recv_exact(sock, address_length + 2)
+            return sock
+        except Exception:
+            sock.close()
+            raise
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, size: int) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < size:
+            chunk = sock.recv(size - len(chunks))
+            if not chunk:
+                raise OSError("SOCKS connection closed")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
     @staticmethod
     def _kill_orphaned(exe: Path) -> None:
         if os.name != "nt":
@@ -224,11 +453,21 @@ class HysteriaManager(QObject):
         except Exception:
             pass
 
-    @staticmethod
-    def _cleanup_config() -> None:
+    def _cleanup_config(self) -> None:
         try:
-            HYSTERIA_CONFIG_FILE.unlink(missing_ok=True)
-            HYSTERIA_CONFIG_FILE.with_suffix(".json.tmp").unlink(missing_ok=True)
+            self._config_path.unlink(missing_ok=True)
+            self._config_path.with_suffix(".json.tmp").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _cleanup_stale_generation_configs() -> None:
+        try:
+            for path in HYSTERIA_CONFIG_FILE.parent.glob(
+                f"{HYSTERIA_CONFIG_FILE.stem}-*.json*"
+            ):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -281,11 +520,33 @@ class HysteriaManager(QObject):
         self._last_output_lines.append(formatted)
         self.log_received.emit(formatted)
 
-    def _emit_error(self, message: str, *, stage: str) -> None:
+    def _emit_error(
+        self,
+        message: str,
+        *,
+        stage: str,
+        code: HysteriaFailureCode | None = None,
+    ) -> None:
         if self._failure_reported:
             return
         self._failure_reported = True
-        self.error.emit(self._format_message(message, stage=stage))
+        resolved = code or classify_hysteria_failure(message)
+        if resolved is None:
+            resolved = {
+                "validate": HysteriaFailureCode.LOCAL_CONFIG_INVALID,
+                "write_config": HysteriaFailureCode.LOCAL_CONFIG_INVALID,
+                "spawn": HysteriaFailureCode.LOCAL_PROCESS_START_FAILED,
+                "startup_exit": HysteriaFailureCode.LOCAL_PROCESS_EXITED,
+                "unexpected_exit": HysteriaFailureCode.LOCAL_PROCESS_EXITED,
+                "wait_ready": HysteriaFailureCode.LOCAL_RELAY_NOT_READY,
+                "stop": HysteriaFailureCode.LOCAL_PROCESS_EXITED,
+            }.get(stage, HysteriaFailureCode.LOCAL_PROCESS_EXITED)
+        self._last_failure_code = resolved
+        formatted = self._format_message(message, stage=stage)
+        # The typed cause is published before generic process/state callbacks,
+        # so exit code 62097 cannot replace the original failure episode.
+        self.failure.emit(resolved.value, formatted, self._process_generation)
+        self.error.emit(formatted)
 
     def _on_ready_read(self) -> None:
         chunk = self._process.readAllStandardOutput()
@@ -317,6 +578,9 @@ class HysteriaManager(QObject):
                     "x509",
                     "authentication failed",
                     "server rejected",
+                    "connection refused",
+                    "actively refused",
+                    "forcibly closed",
                 )
             )
             else "runtime"
@@ -336,6 +600,10 @@ class HysteriaManager(QObject):
                     "после одноразовой проверки совместимости сертификата.",
                     stage="remote_handshake",
                 )
+        elif stage == "remote_handshake":
+            failure = classify_hysteria_failure(clean)
+            if failure is not None:
+                self._emit_error(clean, stage=stage, code=failure)
 
     @staticmethod
     def _is_chrome_parrot_compatibility_error(line: str) -> bool:
@@ -385,6 +653,9 @@ class HysteriaManager(QObject):
                 config,
                 relay_port,
                 context=context,
+                process_generation=self._process_generation,
+                allow_parallel=self._compatibility_allow_parallel,
+                verify_remote=self._compatibility_verify_remote,
                 _compatibility_retry=True,
             )
         finally:
@@ -426,8 +697,8 @@ class HysteriaManager(QObject):
             return
         self._running = True
         self._emit_log(
-            "local SOCKS relay ready; remote handshake not checked yet because lazy=true",
-            stage="relay_ready",
+            "local SOCKS relay and functional HTTPS handshake are ready",
+            stage="functional_ready",
         )
         if not self._suppress_state_change:
             self.state_changed.emit(True)
@@ -450,13 +721,12 @@ class HysteriaManager(QObject):
         self._starting = False
         self._stop_requested = False
         compatibility_pending = self._chrome_fallback_pending
-        if was_running and not self._suppress_state_change and not compatibility_pending:
-            self.state_changed.emit(False)
         if not expected and not compatibility_pending:
             details = self._last_output_lines[-1] if self._last_output_lines else "без диагностического сообщения"
             self._emit_error(
                 f"Hysteria неожиданно завершилась (код {exit_code}): {details}",
                 stage="startup_exit" if was_starting else "unexpected_exit",
+                code=self._last_failure_code or classify_hysteria_failure(details, process_exited=True),
             )
             self._clear_compatibility_state()
         elif not expected:
@@ -464,4 +734,6 @@ class HysteriaManager(QObject):
                 f"process exited with code {exit_code}; continuing scheduled compatibility retry",
                 stage="compatibility_retry",
             )
+        if was_running and not self._suppress_state_change and not compatibility_pending:
+            self.state_changed.emit(False)
         self.stopped.emit(exit_code)

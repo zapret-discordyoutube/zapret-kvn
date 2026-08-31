@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "vectors": [
+    {
+      "id": "salamander_ca_dns",
+      "uri": "hy2://fixture-auth@ca.example.test:443/?obfs=salamander&obfs-password=fixture-cover#CA",
+      "metadata": {},
+      "expected": {"valid": true, "obfs_kind": "salamander", "tls_kind": "ca", "endpoint_kind": "dns", "requirements": ["raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "salamander_pinned_dns",
+      "uri": "hy2://fixture-auth@pinned.example.test:443/?obfs=salamander&obfs-password=fixture-cover&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#PinnedDNS",
+      "metadata": {},
+      "expected": {"valid": true, "obfs_kind": "salamander", "tls_kind": "pinned", "endpoint_kind": "dns", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "salamander_pinned_ip",
+      "uri": "hy2://fixture-auth@192.0.2.10:443/?sni=cover.example.test&obfs=salamander&obfs-password=fixture-cover&pinSHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#PinnedIP",
+      "metadata": {},
+      "expected": {"valid": true, "obfs_kind": "salamander", "tls_kind": "pinned", "endpoint_kind": "ipv4", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "gecko_pinned_dns",
+      "uri": "hysteria2://fixture-auth@gecko.example.test:8443/?obfs=gecko&obfs-password=fixture-gecko&pinSHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc#GeckoDNS",
+      "metadata": {},
+      "expected": {"valid": true, "obfs_kind": "gecko", "tls_kind": "pinned", "endpoint_kind": "dns", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "gecko_pinned_ip",
+      "uri": "hy2://fixture-auth@198.51.100.11:443/?sni=gecko.example.test&obfs=gecko&obfs-password=fixture-gecko&pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd#GeckoIP",
+      "metadata": {},
+      "expected": {"valid": true, "obfs_kind": "gecko", "tls_kind": "pinned", "endpoint_kind": "ipv4", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "insecure_without_pin",
+      "uri": "hy2://fixture-auth@unsafe.example.test:443/?insecure=1#Invalid",
+      "metadata": {},
+      "expected": {"valid": false, "obfs_kind": "none", "tls_kind": "ca", "endpoint_kind": "dns", "requirements": ["raw_uri_required"], "failure": "LOCAL_CONFIG_INVALID", "windows_execution": "unsupported", "windows_switch": "unsupported", "android_execution": "unsupported", "android_switch": "unsupported", "windows_native_pool": false, "android_native_pool": false}
+    },
+    {
+      "id": "invalid_pin",
+      "uri": "hy2://fixture-auth@bad-pin.example.test:443/?pinSHA256=deadbeef#InvalidPin",
+      "metadata": {},
+      "expected": {"valid": false, "obfs_kind": "none", "tls_kind": "ca", "endpoint_kind": "dns", "requirements": ["raw_uri_required"], "failure": "LOCAL_CONFIG_INVALID", "windows_execution": "unsupported", "windows_switch": "unsupported", "android_execution": "unsupported", "android_switch": "unsupported", "windows_native_pool": false, "android_native_pool": false}
+    },
+    {
+      "id": "duplicate_known_query",
+      "uri": "hy2://fixture-auth@duplicate.example.test:443/?sni=one.example&sni=two.example#Duplicate",
+      "metadata": {},
+      "expected": {"valid": false, "obfs_kind": "none", "tls_kind": "ca", "endpoint_kind": "dns", "requirements": ["raw_uri_required"], "failure": "LOCAL_CONFIG_INVALID", "windows_execution": "unsupported", "windows_switch": "unsupported", "android_execution": "unsupported", "android_switch": "unsupported", "windows_native_pool": false, "android_native_pool": false}
+    },
+    {
+      "id": "duplicate_alias_query",
+      "uri": "hy2://fixture-auth@duplicate-alias.example.test:443/?sni=one.example&peer=two.example#DuplicateAlias",
+      "metadata": {},
+      "expected": {"valid": false, "obfs_kind": "none", "tls_kind": "ca", "endpoint_kind": "dns", "requirements": ["raw_uri_required"], "failure": "LOCAL_CONFIG_INVALID", "windows_execution": "unsupported", "windows_switch": "unsupported", "android_execution": "unsupported", "android_switch": "unsupported", "windows_native_pool": false, "android_native_pool": false}
+    },
+    {
+      "id": "unbracketed_ipv6",
+      "uri": "hy2://fixture-auth@2001:db8::10:443/#UnbracketedIPv6",
+      "metadata": {},
+      "expected": {"valid": false, "obfs_kind": "none", "tls_kind": "ca", "endpoint_kind": "dns", "requirements": ["raw_uri_required"], "failure": "LOCAL_CONFIG_INVALID", "windows_execution": "unsupported", "windows_switch": "unsupported", "android_execution": "unsupported", "android_switch": "unsupported", "windows_native_pool": false, "android_native_pool": false}
+    },
+    {
+      "id": "malformed_percent_encoding",
+      "uri": "hy2://fixture-auth@encoding.example.test:443/?sni=bad%GG.example#MalformedEncoding",
+      "metadata": {},
+      "expected": {"valid": false, "obfs_kind": "none", "tls_kind": "ca", "endpoint_kind": "dns", "requirements": ["raw_uri_required"], "failure": "LOCAL_CONFIG_INVALID", "windows_execution": "unsupported", "windows_switch": "unsupported", "android_execution": "unsupported", "android_switch": "unsupported", "windows_native_pool": false, "android_native_pool": false}
+    },
+    {
+      "id": "ipv6_endpoint",
+      "uri": "hy2://fixture-auth@[2001:db8::10]:443/?pinSHA256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee#IPv6",
+      "metadata": {},
+      "expected": {"valid": true, "obfs_kind": "none", "tls_kind": "pinned", "endpoint_kind": "ipv6", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "port_range",
+      "uri": "hy2://fixture-auth@ports.example.test:443,5000-5002/?pinSHA256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff#Ports",
+      "metadata": {},
+      "expected": {"valid": true, "obfs_kind": "none", "tls_kind": "pinned", "endpoint_kind": "dns", "requirements": ["pin_required", "port_hopping_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "maintenance_metadata",
+      "uri": "hy2://fixture-auth@maintenance.example.test:443/?pinSHA256=1111111111111111111111111111111111111111111111111111111111111111#Maintenance",
+      "metadata": {"tags": ["maintenance"]},
+      "expected": {"valid": true, "obfs_kind": "none", "tls_kind": "pinned", "endpoint_kind": "dns", "requirements": ["pin_required", "raw_uri_required"], "maintenance": true, "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "sidecar_outside_native_pool",
+      "uri": "hy2://fixture-auth@outside.example.test:443/?pinSHA256=2222222222222222222222222222222222222222222222222222222222222222#Outside",
+      "metadata": {},
+      "expected": {"valid": true, "obfs_kind": "none", "tls_kind": "pinned", "endpoint_kind": "dns", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "native_pool_member",
+      "uri": "hy2://fixture-auth@native.example.test:443/?pinSHA256=3333333333333333333333333333333333333333333333333333333333333333#Native",
+      "metadata": {"native_pool": true},
+      "expected": {"valid": true, "obfs_kind": "none", "tls_kind": "pinned", "endpoint_kind": "dns", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "profile_generation_old",
+      "uri": "hy2://same-auth@generation.example.test:443/?pinSHA256=4444444444444444444444444444444444444444444444444444444444444444#Old",
+      "metadata": {"profile_generation": 7},
+      "expected": {"valid": true, "obfs_kind": "none", "tls_kind": "pinned", "endpoint_kind": "dns", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    },
+    {
+      "id": "profile_generation_new",
+      "uri": "hy2://same-auth@generation.example.test:443/?pinSHA256=5555555555555555555555555555555555555555555555555555555555555555#New",
+      "metadata": {"profile_generation": 8},
+      "expected": {"valid": true, "obfs_kind": "none", "tls_kind": "pinned", "endpoint_kind": "dns", "requirements": ["pin_required", "raw_uri_required"], "windows_execution": "official_hysteria_sidecar", "windows_switch": "full_sidecar_transition", "android_execution": "native", "android_switch": "native_hot_switch", "windows_native_pool": false, "android_native_pool": true}
+    }
+  ]
+}

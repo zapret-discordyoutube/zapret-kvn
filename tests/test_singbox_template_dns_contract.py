@@ -64,7 +64,7 @@ class SingboxTemplateDnsContractTests(unittest.TestCase):
         path = ROOT / "data" / "templates" / "sing-box" / "discord-folder-example.json"
         document = parse_singbox_document(path, path.read_text(encoding="utf-8"))
 
-        node = parse_single("hy2://secret@example.com:443/?insecure=1")
+        node = parse_single("hy2://secret@example.com:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         plans = (
             plan_singbox_runtime(document, node),
             plan_singbox_proxy_runtime(

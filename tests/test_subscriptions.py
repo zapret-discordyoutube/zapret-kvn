@@ -108,7 +108,7 @@ class SubscriptionParserTests(unittest.TestCase):
             "trojan://secret@trojan.example:443#Trojan",
             "ss://YWVzLTI1Ni1nY206c2VjcmV0@ss.example:8388#SS",
             "hysteria://hy.example:8443/?auth=secret&upmbps=50&downmbps=100#HY",
-            "hy2://secret@hy2.example:443/?insecure=1#HY2",
+            "hy2://secret@hy2.example:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#HY2",
             "tuic://44444444-4444-4444-4444-444444444444:secret@tuic.example:443#TUIC",
             "socks://user:pass@socks.example:1080#SOCKS",
             "http://user:pass@http.example:8080#HTTP",
@@ -187,8 +187,8 @@ AllowedIPs = 0.0.0.0/0
         self.assertEqual(aliases.nodes[0].source_key, aliases.nodes[1].source_key)
 
     def test_hysteria2_uri_fingerprint_prevents_distinct_pins_from_collapsing(self) -> None:
-        first = "hy2://secret@h.example:443/?pinSHA256=aaaa#Same"
-        second = "hy2://secret@h.example:443/?pinSHA256=bbbb#Same"
+        first = "hy2://secret@h.example:443/?pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#Same"
+        second = "hy2://secret@h.example:443/?pinSHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#Same"
 
         parsed = parse_subscription_payload(f"{first}\n{second}\n{first}")
 
@@ -303,7 +303,7 @@ class SubscriptionReconcileTests(unittest.TestCase):
 
     def test_hysteria2_uri_only_change_reconnects_but_fragment_change_does_not(self) -> None:
         subscription = Subscription(id="sub", name="Provider")
-        original = "hy2://secret@h.example:443/?pinSHA256=aaaa#Old"
+        original = "hy2://secret@h.example:443/?pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#Old"
         state = AppState(subscriptions=[subscription])
         reconcile_subscription(
             state,
@@ -327,7 +327,7 @@ class SubscriptionReconcileTests(unittest.TestCase):
             state,
             subscription,
             parse_subscription_payload(
-                "hy2://secret@h.example:443/?pinSHA256=bbbb#New"
+                "hy2://secret@h.example:443/?pinSHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#New"
             ),
             self._fetch(),
         )
@@ -376,8 +376,8 @@ class SubscriptionReconcileTests(unittest.TestCase):
         self.assertEqual(state.nodes[0].source_fingerprint, "")
 
     def test_hide_hysteria_uri_variant_keeps_other_pin_visible(self) -> None:
-        first = "hy2://secret@h.example:443/?pinSHA256=aaaa#Same"
-        second = "hysteria2://secret@h.example:443/?pinSHA256=bbbb#Same"
+        first = "hy2://secret@h.example:443/?pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#Same"
+        second = "hysteria2://secret@h.example:443/?pinSHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#Same"
         subscription = Subscription(id="sub", name="Provider", url="https://sub.example/a")
         state = AppState(subscriptions=[subscription])
         reconcile_subscription(
@@ -578,12 +578,12 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         # и не зависит от значения insecure.
         node = parse_single(
             "hysteria2://secret@a.example:8443"
-            "?insecure=1&pinSHA256=0E%3AD6%3A04&obfs=salamander&obfs-password=pw&sni=a.example#Pin"
+            "?insecure=1&pinSHA256=0ed6040ed6040ed6040ed6040ed6040ed6040ed6040ed6040ed6040ed6040ed6&obfs=salamander&obfs-password=pw&sni=a.example#Pin"
         )
         self.assertTrue(node.outbound["tls"]["insecure"])
 
         pinned = parse_single(
-            "hysteria2://secret@a.example:8443?pinSHA256=0E%3AD6%3A04#Pin"
+            "hysteria2://secret@a.example:8443?pinSHA256=0ed6040ed6040ed6040ed6040ed6040ed6040ed6040ed6040ed6040ed6040ed6#Pin"
         )
         self.assertIn("pinSHA256=", pinned.link)
 

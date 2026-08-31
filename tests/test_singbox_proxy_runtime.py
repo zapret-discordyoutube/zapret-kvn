@@ -17,7 +17,7 @@ from xray_fluent.engines.singbox.runtime_planner import (
 )
 from xray_fluent.constants import HYSTERIA_PATH_DEFAULT
 from xray_fluent.engines.hysteria.manager import HysteriaManager
-from xray_fluent.link_parser import parse_single
+from xray_fluent.link_parser import LinkParseError, parse_single
 from xray_fluent.models import Node
 
 
@@ -38,7 +38,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         )
 
     def _restart_controller(self, *, tun: bool):
-        node = parse_single("hy2://secret@example.com:443/?insecure=1#one")
+        node = parse_single("hy2://secret@example.com:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#one")
         tags = {node.id: "subscription/node"}
         plan = SimpleNamespace(
             used_selected_node=True,
@@ -58,7 +58,17 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         )
         controller = Mock()
         controller.selected_node = node
+        controller._runtime_selected_node.return_value = node
         controller.connected = True
+        controller._hysteria_recovery_active = False
+        controller._pending_hysteria_replacement_node_id = None
+        controller._commit_pending_hysteria_selection.return_value = True
+        controller._clear_pending_hysteria_selection.side_effect = lambda: setattr(
+            controller,
+            "_pending_hysteria_replacement_node_id",
+            None,
+        )
+        controller.state.selected_node_id = node.id
         controller.state.settings.enable_system_proxy = False
         controller.singbox.is_running = False
         controller.xray.is_running = False
@@ -92,9 +102,86 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             tags,
         )
 
+    def test_hysteria_replacement_is_ready_before_front_cutover_and_old_stop(self) -> None:
+        for tun, restart_name in ((False, "proxy"), (True, "tun")):
+            with self.subTest(mode=restart_name):
+                controller, _ = self._restart_controller(tun=tun)
+                events: list[str] = []
+                sidecar = SimpleNamespace(relay_port=12001)
+                plan = (
+                    controller._plan_runtime_singbox.return_value
+                    if tun
+                    else controller._plan_proxy_runtime_singbox.return_value
+                )
+                plan.hysteria_sidecar = sidecar
+                plan.is_hysteria_sidecar = True
+                plan.sidecar_kind = "hysteria"
+                controller._active_singbox_plan = SimpleNamespace(singbox_config={"old": True})
+                controller._hysteria_contract.session.session_generation = 7
+                controller._hysteria_recovery_active = False
+                old_hysteria = controller.hysteria
+                old_hysteria.is_running = True
+                replacement = Mock()
+                replacement.is_running = True
+                controller._prepare_hysteria_replacement.side_effect = (
+                    lambda _plan: events.append("replacement_ready") or replacement
+                )
+                controller.singbox.is_running = True
+                controller.singbox.stop.side_effect = lambda: events.append("old_front_stopped") or True
+                controller._start_singbox_runtime_plan.side_effect = (
+                    lambda *_args, **_kwargs: events.append("new_front_ready") or True
+                )
+                controller._commit_hysteria_replacement.side_effect = (
+                    lambda _replacement: events.append("old_sidecar_stopped") or True
+                )
+
+                restart = restart_runtime if tun else restart_proxy_runtime
+                self.assertTrue(restart(controller, "network timeout"))
+
+                self.assertEqual(
+                    events,
+                    [
+                        "replacement_ready",
+                        "old_front_stopped",
+                        "new_front_ready",
+                        "old_sidecar_stopped",
+                    ],
+                )
+                controller._start_singbox_runtime_plan.assert_called_once_with(
+                    plan,
+                    prepared_hysteria=replacement,
+                )
+
+    def test_failed_replacement_does_not_close_old_front_or_try_second_target(self) -> None:
+        controller, _ = self._restart_controller(tun=False)
+        old_node = controller.selected_node
+        replacement_node = parse_single(
+            "hy2://replacement@replacement.example:443/#replacement"
+        )
+        controller._runtime_selected_node.return_value = replacement_node
+        controller._pending_hysteria_replacement_node_id = replacement_node.id
+        plan = controller._plan_proxy_runtime_singbox.return_value
+        plan.hysteria_sidecar = SimpleNamespace(relay_port=12001)
+        plan.is_hysteria_sidecar = True
+        plan.sidecar_kind = "hysteria"
+        controller._hysteria_contract.session.session_generation = 9
+        controller._hysteria_recovery_active = True
+        controller.singbox.is_running = True
+        controller._prepare_hysteria_replacement.return_value = None
+
+        self.assertFalse(restart_proxy_runtime(controller, "replacement failed"))
+
+        controller._prepare_hysteria_replacement.assert_called_once_with(plan)
+        controller.singbox.stop.assert_not_called()
+        controller._start_singbox_runtime_plan.assert_not_called()
+        controller._handle_unexpected_disconnect.assert_called_once_with()
+        self.assertEqual(controller.state.selected_node_id, old_node.id)
+        self.assertIsNone(controller._pending_hysteria_replacement_node_id)
+        controller._commit_pending_hysteria_selection.assert_not_called()
+
     def test_default_proxy_runtime_replaces_tun_with_public_proxy_inbounds(self) -> None:
         plan = self._build_plan(
-            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1"
+            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         )
 
         self.assertEqual(plan.outcome, "hysteria_sidecar")
@@ -125,7 +212,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
     def test_hysteria2_uses_official_sidecar_without_duplicating_uri_conversion(self) -> None:
         link = (
             "hy2://secret@example.com:443/?obfs=gecko&obfs-password=cover"
-            "&pinSHA256=deadbeef&sni=cdn.example.com#Gecko"
+            "&pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd&sni=cdn.example.com#Gecko"
         )
         document = parse_singbox_document(
             TEMPLATE_PATH,
@@ -178,7 +265,8 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         link = (
             "hy2://user%3Apass@[2001:db8::1]:443/?peer=cover.example"
             "&skip-cert-verify=yes&obfs=salamander&obfs_password=masking"
-            "&mport=444,5000-5002&hop_interval=20s&pin_sha256=AA%3ABB"
+            "&mport=444,5000-5002&hop_interval=20s&pin_sha256="
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             "&vendor=a%2Fb#Alias"
         )
         node = parse_single(link)
@@ -197,7 +285,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             {
                 "sni": "cover.example",
                 "insecure": True,
-                "pinSHA256": "AA:BB",
+                "pinSHA256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             },
         )
         self.assertEqual(
@@ -210,25 +298,17 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(sidecar.config["quic"], {"disableChromeParrot": False})
 
-    def test_hysteria2_canonical_sni_wins_without_rewriting_saved_uri(self) -> None:
+    def test_hysteria2_canonical_and_alias_sni_are_rejected_as_ambiguous(self) -> None:
         link = "hy2://secret@example.com:443/?sni=canonical.example&peer=alias.example"
 
-        plan = self._build_plan(link)
-        sidecar = plan.hysteria_sidecar
-        assert sidecar is not None
+        with self.assertRaises(LinkParseError):
+            self._build_plan(link)
 
-        self.assertEqual(sidecar.config["server"], link)
-        self.assertEqual(sidecar.config["tls"]["sni"], "canonical.example")
-
-    def test_hysteria2_empty_sni_uses_nonempty_peer_runtime_alias(self) -> None:
+    def test_hysteria2_empty_sni_and_peer_are_still_duplicate_meanings(self) -> None:
         link = "hy2://secret@example.com:443/?sni=&peer=cover.example"
 
-        plan = self._build_plan(link)
-        sidecar = plan.hysteria_sidecar
-        assert sidecar is not None
-
-        self.assertEqual(sidecar.config["server"], link)
-        self.assertEqual(sidecar.config["tls"]["sni"], "cover.example")
+        with self.assertRaises(LinkParseError):
+            self._build_plan(link)
 
     def test_hysteria2_json_outbound_without_original_uri_stays_native(self) -> None:
         document = parse_singbox_document(
@@ -268,7 +348,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
             blocker.bind(("127.0.0.1", SINGBOX_CLASH_API_PORT))
             plan = self._build_plan(
-                "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1"
+                "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             )
 
         self.assertGreater(plan.clash_api_port, SINGBOX_CLASH_API_PORT)
@@ -285,9 +365,9 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             self.skipTest("Windows sing-box.exe cannot run on this host")
 
         links = (
-            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1",
-            "hysteria://example.com:8443/?auth=secret&upmbps=50&downmbps=100&insecure=1",
-            "tuic://2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365:hello@example.com:443?insecure=1",
+            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "hysteria://example.com:8443/?auth=secret&upmbps=50&downmbps=100&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "tuic://2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365:hello@example.com:443?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             '{"type":"anytls","server":"example.com","server_port":443,'
             '"password":"secret","tls":{"enabled":true,"insecure":true}}',
         )

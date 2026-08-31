@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from PyQt6.QtCore import QProcess
 
+from xray_fluent.application.hysteria_runtime_contract import HysteriaFailureCode
 from xray_fluent.engines.hysteria.manager import HysteriaManager
 from xray_fluent.models import Node
 from xray_fluent.runtime_logging import (
@@ -67,7 +68,7 @@ class RuntimeLoggingTests(unittest.TestCase):
     def test_redaction_removes_ansi_uris_and_named_secrets(self) -> None:
         raw = (
             "\x1b[31mERROR\x1b[0m hy2://auth@example.com:443/"
-            "?obfs-password=cover&pinSHA256=deadbeef password=another "
+            "?obfs-password=cover&pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd password=another "
             '"client_key": "private material"'
         )
 
@@ -86,6 +87,30 @@ class RuntimeLoggingTests(unittest.TestCase):
 
 
 class HysteriaLifecycleLoggingTests(unittest.TestCase):
+    def test_typed_original_failure_precedes_windows_62097_stop_callback(self) -> None:
+        manager = HysteriaManager()
+        manager._running = True
+        manager._failure_reported = False
+        manager._last_failure_code = HysteriaFailureCode.TARGET_NETWORK_TIMEOUT
+        events: list[tuple[str, object]] = []
+        manager.failure.connect(
+            lambda code, _message, _generation: events.append(("failure", code))
+        )
+        manager.stopped.connect(lambda code: events.append(("stopped", code)))
+
+        with patch.object(manager, "_flush_stdout_buffer"), patch.object(
+            manager, "_cleanup_config"
+        ):
+            manager._on_finished(62097, QProcess.ExitStatus.CrashExit)
+
+        self.assertEqual(
+            events,
+            [
+                ("failure", HysteriaFailureCode.TARGET_NETWORK_TIMEOUT.value),
+                ("stopped", 62097),
+            ],
+        )
+
     def test_unexpected_exit_during_start_is_classified_as_startup(self) -> None:
         manager = HysteriaManager()
         manager._starting = True
@@ -234,6 +259,27 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
 
         self.assertEqual(states, [False])
         self.assertIsNone(manager._compatibility_config)
+
+    def test_functional_readiness_accepts_an_independent_endpoint_winner(self) -> None:
+        manager = HysteriaManager()
+
+        def probe(_relay_port, *, endpoint, **_kwargs):
+            if endpoint[1] == "cloudflare-dns.com":
+                raise OSError("provider unavailable")
+
+        with patch.object(
+            manager._process,
+            "state",
+            return_value=QProcess.ProcessState.Running,
+        ), patch.object(manager, "_probe_remote_endpoint", side_effect=probe):
+            self.assertTrue(
+                manager._wait_until_remote_ready(
+                    11809,
+                    username="",
+                    password="",
+                    timeout=1.0,
+                )
+            )
 
 
 if __name__ == "__main__":

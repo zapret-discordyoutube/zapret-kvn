@@ -74,8 +74,8 @@ def xray_nodes():
 
 def udp_nodes():
     return [
-        parse_single("hy2://secret@udp-one.example:443/?insecure=1#udp-one"),
-        parse_single("hy2://secret@udp-two.example:443/?insecure=1#udp-two"),
+        parse_single("hy2://secret@udp-one.example:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#udp-one"),
+        parse_single("hy2://secret@udp-two.example:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#udp-two"),
     ]
 
 

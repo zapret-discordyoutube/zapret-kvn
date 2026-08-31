@@ -67,7 +67,7 @@ class ZapretManagerTests(unittest.TestCase):
     def test_running_zapret_restarts_after_new_udp_proxy_endpoint(self) -> None:
         manager = ZapretManager()
         manager._current_preset = "Default"
-        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
+        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
         with (
             patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
@@ -81,7 +81,7 @@ class ZapretManagerTests(unittest.TestCase):
     def test_running_zapret_is_not_ready_until_replacement_starts(self) -> None:
         manager = ZapretManager()
         manager._current_preset = "Default"
-        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
+        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
         ready: list[int] = []
         manager.proxy_protection_ready.connect(ready.append)
@@ -105,7 +105,7 @@ class ZapretManagerTests(unittest.TestCase):
 
     def test_stopped_zapret_is_ready_noop_without_restart(self) -> None:
         manager = ZapretManager()
-        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
+        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
 
         with (
@@ -120,7 +120,7 @@ class ZapretManagerTests(unittest.TestCase):
     def test_proxy_protection_timeout_emits_failure_generation(self) -> None:
         manager = ZapretManager()
         manager._current_preset = "Default"
-        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
+        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
         failed: list[tuple[int, str]] = []
         manager.proxy_protection_failed.connect(lambda generation, reason: failed.append((generation, reason)))
@@ -143,8 +143,8 @@ class ZapretManagerTests(unittest.TestCase):
     def test_second_endpoint_during_process_start_remains_pending(self) -> None:
         manager = ZapretManager()
         manager._current_preset = "Default"
-        first = parse_single("hy2://secret@203.0.113.7:443/?insecure=1")
-        second = parse_single("hy2://secret@203.0.113.8:443/?insecure=1")
+        first = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        second = parse_single("hy2://secret@203.0.113.8:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
         manager.cache_proxy_resolution("203.0.113.8", {"203.0.113.8"})
 
@@ -174,7 +174,7 @@ class ZapretManagerTests(unittest.TestCase):
 
     def test_cached_endpoint_is_applied_without_dns(self) -> None:
         manager = ZapretManager()
-        node = parse_single("hy2://secret@proxy.example.com:443/?insecure=1")
+        node = parse_single("hy2://secret@proxy.example.com:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         manager.cache_proxy_resolution("proxy.example.com", {"203.0.113.7"})
 
         with patch.object(manager, "_resolve_server_ips") as resolve:
@@ -186,7 +186,7 @@ class ZapretManagerTests(unittest.TestCase):
 
     def test_uncached_endpoint_never_falls_back_to_gui_thread_dns(self) -> None:
         manager = ZapretManager()
-        node = parse_single("hy2://secret@proxy.example.com:443/?insecure=1")
+        node = parse_single("hy2://secret@proxy.example.com:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
         with patch.object(manager, "_resolve_server_ips") as resolve:
             applied = manager.apply_cached_proxy_node(node)
@@ -197,7 +197,7 @@ class ZapretManagerTests(unittest.TestCase):
     def test_new_hysteria2_node_replaces_previous_pass_endpoint(self) -> None:
         manager = ZapretManager()
         manager._protected_proxy_ips = {"203.0.113.7"}
-        node = parse_single("hy2://secret@203.0.113.8:443/?insecure=1")
+        node = parse_single("hy2://secret@203.0.113.8:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
         manager.protect_proxy_node(node)
 

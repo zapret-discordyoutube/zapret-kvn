@@ -32,7 +32,7 @@ config_builder = _load_config_builder()
 class SingboxProtocolParserTests(unittest.TestCase):
     def test_hysteria2_alias_maps_tls_and_obfs(self) -> None:
         node = parse_single(
-            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1"
+            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             "&obfs=salamander&obfs-password=cover#Fast%20HY2"
         )
 
@@ -145,18 +145,18 @@ class SingboxProtocolParserTests(unittest.TestCase):
         self.assertEqual(node.outbound["tag"], "saved")
 
     def test_hysteria2_certificate_pin_is_preserved_by_official_sidecar(self) -> None:
-        link = "hy2://secret@example.com:443/?insecure=1&pinSHA256=deadbeef"
+        link = "hy2://secret@example.com:443/?insecure=1&pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         self.assertTrue(parse_single(link).outbound["tls"]["insecure"])
         self.assertEqual(link_import_warnings(link), [])
 
-        pinned = parse_single("hy2://secret@example.com:443/?pinSHA256=deadbeef")
-        self.assertEqual(pinned.link, "hy2://secret@example.com:443/?pinSHA256=deadbeef")
+        pinned = parse_single("hy2://secret@example.com:443/?pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+        self.assertEqual(pinned.link, "hy2://secret@example.com:443/?pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
         self.assertEqual(link_import_warnings(pinned.link), [])
 
     def test_hysteria2_uri_fingerprint_ignores_only_fragment_and_scheme_alias(self) -> None:
-        first = "hy2://secret@example.com:443/?pinSHA256=deadbeef#One"
-        alias = "hysteria2://secret@example.com:443/?pinSHA256=deadbeef#Two"
-        changed = "hy2://secret@example.com:443/?pinSHA256=cafebabe#One"
+        first = "hy2://secret@example.com:443/?pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd#One"
+        alias = "hysteria2://secret@example.com:443/?pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd#Two"
+        changed = "hy2://secret@example.com:443/?pinSHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc#One"
 
         self.assertEqual(hysteria2_uri_fingerprint(first), hysteria2_uri_fingerprint(alias))
         self.assertNotEqual(hysteria2_uri_fingerprint(first), hysteria2_uri_fingerprint(changed))
@@ -168,7 +168,7 @@ class SingboxProtocolParserTests(unittest.TestCase):
     def test_hysteria2_gecko_is_preserved_for_the_official_sidecar(self) -> None:
         link = (
             "hy2://secret@example.com:443/?obfs=gecko&obfs-password=cover"
-            "&pinSHA256=deadbeef#Gecko"
+            "&pinSHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd#Gecko"
         )
 
         node = parse_single(link)

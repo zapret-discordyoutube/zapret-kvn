@@ -362,7 +362,7 @@ class WireguardRuntimePlannerTests(unittest.TestCase):
             "?type=tcp&security=tls#Regression"
         )
         self.assertEqual(classify_node_for_singbox(vless), "native_singbox")
-        hy2 = parse_single("hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1")
+        hy2 = parse_single("hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         self.assertEqual(classify_node_for_singbox(hy2), "hysteria_sidecar")
 
     def _assert_endpoint_plan(self, plan, *, expect_amnezia: bool) -> None:
@@ -802,7 +802,7 @@ class WireguardRegressionTests(unittest.TestCase):
             "vless://2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365@example.com:443?type=tcp&security=tls#V",
             "trojan://secret@example.com:443?security=tls#T",
             "ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388#S",
-            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1#H",
+            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#H",
         )
         expected = {"vless", "trojan", "ss", "hysteria2"}
         parsed = {parse_single(link).scheme for link in links}

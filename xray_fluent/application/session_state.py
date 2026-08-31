@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .hysteria_runtime_contract import HysteriaFailureCode
+
 
 @dataclass(slots=True)
 class ActiveSessionSnapshot:
@@ -34,6 +36,18 @@ class ActiveSessionSnapshot:
     hybrid_relay_selector_tags: tuple[str, ...] = ()
     hybrid_relay_selected_tag: str = ""
     sidecar_kind: str = ""
+    session_generation: int = 0
+    runtime_kind: str = ""
+    sidecar_process_generation: int = 0
+    relay_host: str = "127.0.0.1"
+    relay_credentials_generation: int = 0
+    front_process_generation: int = 0
+    front_target_generation: int = 0
+    started_at_monotonic: float = 0.0
+    ready_at_monotonic: float = 0.0
+    failure_episode_id: int = 0
+    last_failure_code: HysteriaFailureCode | None = None
+    automatic_switch_attempted: bool = False
 
 
 @dataclass(slots=True)
@@ -96,6 +110,18 @@ def build_active_session_snapshot(
     hybrid_relay_selector_tags: tuple[str, ...] = (),
     hybrid_relay_selected_tag: str = "",
     sidecar_kind: str = "",
+    session_generation: int = 0,
+    runtime_kind: str = "",
+    sidecar_process_generation: int = 0,
+    relay_host: str = "127.0.0.1",
+    relay_credentials_generation: int = 0,
+    front_process_generation: int = 0,
+    front_target_generation: int = 0,
+    started_at_monotonic: float = 0.0,
+    ready_at_monotonic: float = 0.0,
+    failure_episode_id: int = 0,
+    last_failure_code: HysteriaFailureCode | None = None,
+    automatic_switch_attempted: bool = False,
 ) -> ActiveSessionSnapshot:
     return ActiveSessionSnapshot(
         node_id=node_id,
@@ -125,4 +151,16 @@ def build_active_session_snapshot(
         hybrid_relay_selector_tags=tuple(hybrid_relay_selector_tags),
         hybrid_relay_selected_tag=str(hybrid_relay_selected_tag),
         sidecar_kind=str(sidecar_kind),
+        session_generation=int(session_generation),
+        runtime_kind=str(runtime_kind),
+        sidecar_process_generation=int(sidecar_process_generation),
+        relay_host=str(relay_host),
+        relay_credentials_generation=int(relay_credentials_generation),
+        front_process_generation=int(front_process_generation),
+        front_target_generation=int(front_target_generation),
+        started_at_monotonic=float(started_at_monotonic),
+        ready_at_monotonic=float(ready_at_monotonic),
+        failure_episode_id=int(failure_episode_id),
+        last_failure_code=last_failure_code,
+        automatic_switch_attempted=bool(automatic_switch_attempted),
     )

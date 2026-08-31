@@ -8,6 +8,7 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .application.hysteria_runtime_contract import classify_hysteria_uri
 from .models import Node
 
 
@@ -754,6 +755,9 @@ def _parse_hysteria(link: str) -> Node:
 
 
 def _parse_hysteria2(link: str) -> Node:
+    capability = classify_hysteria_uri(link, platform="windows")
+    if not capability.valid:
+        raise LinkParseError(capability.validation_message or "invalid hysteria2 link")
     parsed = urlsplit(link)
     query = parse_qs(parsed.query, keep_blank_values=True)
     params = {key: _first(query, key) for key in query}
@@ -809,6 +813,10 @@ def _parse_hysteria2(link: str) -> Node:
     if _to_bool(_get_param(params, "insecure", "skip-cert-verify", "allow_insecure")):
         tls["insecure"] = True
     outbound["tls"] = tls
+
+    certificate_pin = _get_param(params, "pinSHA256", "pin_sha256", "pinsha256")
+    if certificate_pin:
+        outbound["certificate_sha256"] = certificate_pin.strip().lower().replace(":", "").replace("-", "")
 
     hop_interval = _get_param(params, "hop_interval", "hopInterval")
     if hop_interval and server_ports:

@@ -31,6 +31,7 @@ from ...application.outbound_pool_service import (
     ensure_xray_pool_control_plane,
     singbox_outbound_tag,
 )
+from ...application.hysteria_runtime_contract import classify_hysteria_uri
 from ...models import Node
 from ...runtime_logging import RuntimeNodeIdentity
 from ..hysteria.config_adapter import build_uri_client_config
@@ -502,6 +503,9 @@ def _plan_hysteria_sidecar_runtime(
             "Hysteria2 можно запустить через официальное ядро только из "
             "исходной ссылки hy2:// или hysteria2://. Импортируйте сервер ссылкой."
         )
+    capability = classify_hysteria_uri(raw_link, platform="windows")
+    if not capability.valid:
+        raise ValueError(capability.validation_message or "Hysteria2 URI несовместим с runtime.")
     try:
         relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(
             preferred=HYSTERIA_SIDECAR_RELAY_PORT,
