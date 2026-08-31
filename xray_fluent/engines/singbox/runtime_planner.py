@@ -975,7 +975,7 @@ def _ensure_singbox_proxy_runtime_contract(
     inbounds.extend(
         [
             {
-                "type": "socks",
+                "type": "mixed",
                 "tag": "socks-in",
                 "listen": _PUBLIC_PROXY_LISTEN,
                 "listen_port": selection.socks_port,

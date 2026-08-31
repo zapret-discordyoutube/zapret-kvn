@@ -106,7 +106,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                 for item in plan.singbox_config["inbounds"]
             ],
             [
-                ("socks", "0.0.0.0", 1390),
+                ("mixed", "0.0.0.0", 1390),
                 ("http", "0.0.0.0", 1391),
             ],
         )

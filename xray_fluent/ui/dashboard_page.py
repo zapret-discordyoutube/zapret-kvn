@@ -132,11 +132,15 @@ class DashboardPage(StackedSection):
         self.connection_state_label.setWordWrap(True)
         self.connection_engine_label = BodyLabel("Системный прокси", self.connection_card)
         self.connection_engine_label.setWordWrap(True)
+        self.connection_ports_label = CaptionLabel("", self.connection_card)
+        self.connection_ports_label.setWordWrap(True)
+        self.connection_ports_label.setVisible(False)
         self.connection_status_label = CaptionLabel("Прокси остановлен", self.connection_card)
         self.connection_target_label = CaptionLabel("Активный профиль не выбран", self.connection_card)
         self.connection_target_label.setWordWrap(True)
         connection_layout.addWidget(self.connection_state_label)
         connection_layout.addWidget(self.connection_engine_label)
+        connection_layout.addWidget(self.connection_ports_label)
 
         switches_row = QHBoxLayout()
         switches_row.setSpacing(20)
@@ -446,9 +450,6 @@ class DashboardPage(StackedSection):
     def set_proxy_ports(self, socks_port: int, http_port: int) -> None:
         self._proxy_socks_port = max(0, int(socks_port))
         self._proxy_http_port = max(0, int(http_port))
-        self._settings.tun_mode = False
-        if self._connection_phase in {"idle", "running"}:
-            self._connection_message = self._default_connection_message()
         self._refresh_dashboard()
 
     def set_tun_mode(self, enabled: bool) -> None:
@@ -547,6 +548,9 @@ class DashboardPage(StackedSection):
             status_text = f"{status_text} • {proxy_note}" if status_text else proxy_note
         self.connection_state_label.setText(state_title)
         self.connection_engine_label.setText(self._route_engine_label())
+        ports_text = self._proxy_ports_text()
+        self.connection_ports_label.setText(ports_text)
+        self.connection_ports_label.setVisible(bool(ports_text))
         self.connection_status_label.setText(status_text)
         self.connection_target_label.setText(self._selected_node_summary())
         self.toggle_btn.setText(self._toggle_action_text())
@@ -719,6 +723,20 @@ class DashboardPage(StackedSection):
     def _default_connection_message(self) -> str:
         action = "VPN" if self._settings.tun_mode else "Прокси"
         return f"{action} {'работает' if self._connected else 'остановлен'}"
+
+    def _proxy_ports_text(self) -> str:
+        if (
+            not self._connected
+            or self._settings.tun_mode
+            or self._proxy_socks_port <= 0
+            or self._proxy_http_port <= 0
+        ):
+            return ""
+        socks_role = "Mixed (SOCKS5 + HTTP)" if self._is_singbox_proxy_mode() else "SOCKS5"
+        return (
+            f"{socks_role}: 127.0.0.1:{self._proxy_socks_port}  ·  "
+            f"HTTP: 127.0.0.1:{self._proxy_http_port}"
+        )
 
     def _system_proxy_note(self) -> str:
         """Пояснение о реальном состоянии прокси Windows (чужой прокси / PAC)."""

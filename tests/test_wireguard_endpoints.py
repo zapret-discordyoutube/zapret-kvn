@@ -404,7 +404,7 @@ class WireguardRuntimePlannerTests(unittest.TestCase):
                         (item.get("type"), item.get("listen_port"))
                         for item in plan.singbox_config["inbounds"]
                     ],
-                    [("socks", 1390), ("http", 1391)],
+                    [("mixed", 1390), ("http", 1391)],
                 )
                 if not SINGBOX_CORE.is_file():
                     self.skipTest("bundled sing-box.exe is not present")

@@ -21,9 +21,12 @@ The user-facing product model is now:
   path.
 
 For ordinary proxy mode the compiler removes source TUN/SOCKS/HTTP inbounds and
-adds app-owned SOCKS `0.0.0.0:1390` and HTTP `0.0.0.0:1391` inbounds. Occupied
-ports are moved together to the next free pair. For TUN mode it removes source
-proxy inbounds and assigns a fresh TUN interface name.
+adds an app-owned mixed SOCKS5/HTTP `0.0.0.0:1390` compatibility inbound plus a
+dedicated HTTP `0.0.0.0:1391` inbound. Occupied ports are moved together to the
+next free pair and the dashboard shows the effective pair. Startup is reported
+ready only after the mixed and HTTP protocols plus the Clash control API answer
+their loopback probes. For TUN mode it removes source proxy inbounds and assigns
+a fresh TUN interface name.
 
 This means the older `RoutingSettings`-driven full builder described below is
 legacy architecture context, not the preferred runtime path for the current raw
@@ -89,7 +92,7 @@ In ordinary proxy mode the `inbounds` section is compiled to:
 ```json
 [
   {
-    "type": "socks",
+    "type": "mixed",
     "tag": "socks-in",
     "listen": "0.0.0.0",
     "listen_port": 1390

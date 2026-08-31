@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import json
 import os
-import socket
 import subprocess
 import time
 from collections import deque
@@ -25,6 +24,7 @@ from ...application.async_steps import (
 from ...application.port_allocator import is_tcp_port_bindable
 from ...constants import PROXY_HOST, RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
 from ...path_utils import resolve_configured_path
+from ...proxy_readiness import probe_listener_role
 from ...subprocess_utils import (
     decode_output,
     kill_processes_by_path,
@@ -137,6 +137,7 @@ class XrayManager(QObject):
         ready_elapsed = time.monotonic() - ready_began
 
         self._starting = False
+        self._mark_running()
         self.log_received.emit(
             "[xray-perf] start: "
             f"ensure_ports={ports_elapsed:.2f}s spawn={spawn_elapsed:.2f}s "
@@ -210,6 +211,10 @@ class XrayManager(QObject):
 
     def _on_started(self) -> None:
         self._stop_requested = False
+
+    def _mark_running(self) -> None:
+        if self._running:
+            return
         self._running = True
         self.started.emit()
         self.state_changed.emit(True)
@@ -396,13 +401,17 @@ class XrayManager(QObject):
                 return False
             # Пробные connect'ы (до 0.2с на порт) уходят в worker-пул.
             ready = yield run_in_worker(
-                lambda probe=ports: all(self._is_port_ready(port) for port in probe)
+                lambda probe=ports, roles=port_roles: all(
+                    probe_listener_role(port, roles[port]) for port in probe
+                )
             )
             if ready:
                 return True
             yield sleep_ms(100)
         pending = yield run_in_worker(
-            lambda probe=ports: [port for port in probe if not self._is_port_ready(port)]
+            lambda probe=ports, roles=port_roles: [
+                port for port in probe if not probe_listener_role(port, roles[port])
+            ]
         )
         not_ready = [
             f"{port_roles[port]} {port}" if port_roles[port] else str(port) for port in pending
@@ -411,14 +420,6 @@ class XrayManager(QObject):
         details = ", ".join(not_ready) if not_ready else "нужные порты"
         self._report_startup_failure(f"Xray запустился, но не открыл нужные порты: {details}")
         return False
-
-    @staticmethod
-    def _is_port_ready(port: int) -> bool:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                return True
-        except OSError:
-            return False
 
     def _unexpected_exit_message(
         self,

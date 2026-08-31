@@ -4,7 +4,6 @@ from collections import deque
 import json
 import os
 from pathlib import Path
-import socket
 import time
 from typing import Any
 
@@ -15,6 +14,7 @@ from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 from ... import win_netinfo
 from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from ...path_utils import resolve_configured_path
+from ...proxy_readiness import probe_listener_role
 from .config_check import check_config
 from ...subprocess_utils import (
     decode_output,
@@ -331,13 +331,33 @@ class SingBoxManager(QObject):
             return 0
         return port if 0 < port <= 65535 else 0
 
+    @classmethod
+    def _extract_proxy_port_roles(cls, config: dict[str, Any]) -> dict[int, str]:
+        roles: dict[int, str] = {}
+        for inbound in config.get("inbounds") or []:
+            if not isinstance(inbound, dict):
+                continue
+            inbound_type = str(inbound.get("type") or "").strip().lower()
+            if inbound_type not in {"socks", "mixed", "http"}:
+                continue
+            try:
+                port = int(inbound.get("listen_port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if port > 0:
+                roles[port] = "HTTP" if inbound_type == "http" else "SOCKS"
+        api_port = cls._extract_clash_api_port(config)
+        if api_port > 0:
+            roles[api_port] = "Clash API"
+        return roles
+
     def _wait_until_proxy_ready(
         self,
         config: dict[str, Any],
         max_wait: float = 15.0,
     ) -> bool:
-        port = self._extract_clash_api_port(config)
-        if port <= 0:
+        port_roles = self._extract_proxy_port_roles(config)
+        if not port_roles:
             sleep_with_events(0.75)
             if self._process.state() != QProcess.ProcessState.NotRunning:
                 return True
@@ -361,24 +381,22 @@ class SingBoxManager(QObject):
                     )
                 )
                 return False
-            if self._is_port_ready(port):
+            if all(probe_listener_role(port, role) for port, role in port_roles.items()):
                 return True
             sleep_with_events(0.1)
 
         self._last_start_failure_retryable = True
+        pending = [
+            f"{role} {port}"
+            for port, role in port_roles.items()
+            if not probe_listener_role(port, role)
+        ]
         self.stop(expected=True)
         self._report_startup_failure(
-            f"sing-box запустился, но Clash API не открыл локальный порт {port}."
+            "sing-box запустился, но локальные входы не подтвердили готовность: "
+            + (", ".join(pending) if pending else "неизвестный вход")
         )
         return False
-
-    @staticmethod
-    def _is_port_ready(port: int) -> bool:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                return True
-        except OSError:
-            return False
 
     def _wait_until_tun_ready(self, tun_interface_name: str, max_wait: float = 18.0) -> bool:
         if os.name != "nt" or not tun_interface_name:

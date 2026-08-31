@@ -491,6 +491,11 @@ class MainWindow(FluentWindow):
 
     def _on_connection_changed(self, connected: bool) -> None:
         self.dashboard_page.set_connection(connected)
+        if connected and not self.controller.state.settings.tun_mode:
+            socks_port, http_port = self.controller.get_effective_proxy_ports()
+            self.dashboard_page.set_proxy_ports(socks_port, http_port)
+        else:
+            self.dashboard_page.set_proxy_ports(0, 0)
         # Подключение/отключение меняет системный прокси — обновляем снимок.
         self.dashboard_page.set_system_proxy_state(self.controller.query_system_proxy_state())
         if not connected:

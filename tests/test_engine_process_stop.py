@@ -53,6 +53,21 @@ class XrayStopTests(unittest.TestCase):
 
         self.assertTrue(any(line.startswith("[xray-perf] stop:") for line in lines))
 
+    def test_process_start_does_not_report_running_before_readiness(self) -> None:
+        manager = XrayManager()
+        states: list[bool] = []
+        manager.state_changed.connect(states.append)
+
+        manager._on_started()
+
+        self.assertFalse(manager.is_running)
+        self.assertEqual(states, [])
+
+        manager._mark_running()
+
+        self.assertTrue(manager.is_running)
+        self.assertEqual(states, [True])
+
 
 class XrayEnsurePortsTests(unittest.TestCase):
     def test_bindable_port_skips_netstat_diagnostics(self) -> None:
@@ -109,6 +124,23 @@ class XrayEnsurePortsTests(unittest.TestCase):
             self.assertIsNone(manager._ensure_ports_available({10808: "SOCKS"}))
 
         manager._kill_pid.assert_called_once_with(777)
+
+    def test_readiness_probes_declared_proxy_protocols(self) -> None:
+        manager = XrayManager()
+        fake = Mock()
+        fake.state.return_value = _RUNNING
+        manager._process = fake
+
+        with patch(
+            "xray_fluent.engines.xray.manager.probe_listener_role",
+            return_value=True,
+        ) as probe_mock:
+            self.assertTrue(manager._wait_until_ready({1390: "SOCKS", 1391: "HTTP"}))
+
+        self.assertCountEqual(
+            probe_mock.call_args_list,
+            [unittest.mock.call(1390, "SOCKS"), unittest.mock.call(1391, "HTTP")],
+        )
 
 
 class XrayStopStepsAsyncTests(unittest.TestCase):
@@ -212,31 +244,57 @@ class SingBoxTunReadinessTests(unittest.TestCase):
 
 
 class SingBoxProxyReadinessTests(unittest.TestCase):
-    def test_clash_api_port_is_the_proxy_readiness_contract(self) -> None:
-        config = {
+    @staticmethod
+    def _config() -> dict:
+        return {
+            "inbounds": [
+                {"type": "mixed", "listen_port": 1390},
+                {"type": "http", "listen_port": 1391},
+            ],
             "experimental": {
                 "clash_api": {"external_controller": "127.0.0.1:19090"}
-            }
+            },
         }
-        self.assertEqual(SingBoxManager._extract_clash_api_port(config), 19090)
 
-    def test_proxy_waits_for_clash_api_instead_of_process_age(self) -> None:
+    def test_proxy_readiness_contract_contains_data_and_control_planes(self) -> None:
+        config = self._config()
+        self.assertEqual(SingBoxManager._extract_clash_api_port(config), 19090)
+        self.assertEqual(
+            SingBoxManager._extract_proxy_port_roles(config),
+            {1390: "SOCKS", 1391: "HTTP", 19090: "Clash API"},
+        )
+
+    def test_proxy_waits_for_every_runtime_listener(self) -> None:
         manager = SingBoxManager()
         fake = Mock()
         fake.state.return_value = _RUNNING
         manager._process = fake
+        http_attempts = 0
 
-        with patch.object(manager, "_is_port_ready", side_effect=[False, False, True]), patch(
+        def probe(_port: int, role: str) -> bool:
+            nonlocal http_attempts
+            if role == "HTTP":
+                http_attempts += 1
+                return http_attempts >= 3
+            return True
+
+        with patch(
+            "xray_fluent.engines.singbox.manager.probe_listener_role",
+            side_effect=probe,
+        ) as probe_mock, patch(
             "xray_fluent.engines.singbox.manager.sleep_with_events"
         ) as sleep_mock:
             self.assertTrue(
                 manager._wait_until_proxy_ready(
-                    {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}},
+                    self._config(),
                     max_wait=1.0,
                 )
             )
 
         self.assertEqual(sleep_mock.call_count, 2)
+        self.assertIn(unittest.mock.call(1390, "SOCKS"), probe_mock.call_args_list)
+        self.assertIn(unittest.mock.call(1391, "HTTP"), probe_mock.call_args_list)
+        self.assertIn(unittest.mock.call(19090, "Clash API"), probe_mock.call_args_list)
 
     def test_proxy_readiness_timeout_stops_the_process(self) -> None:
         manager = SingBoxManager()
@@ -247,17 +305,20 @@ class SingBoxProxyReadinessTests(unittest.TestCase):
         errors: list[str] = []
         manager.error.connect(errors.append)
 
-        with patch.object(manager, "_is_port_ready", return_value=False):
+        with patch(
+            "xray_fluent.engines.singbox.manager.probe_listener_role",
+            return_value=False,
+        ):
             self.assertFalse(
                 manager._wait_until_proxy_ready(
-                    {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}},
+                    self._config(),
                     max_wait=0.0,
                 )
             )
 
         manager.stop.assert_called_once_with(expected=True)
         self.assertTrue(manager.last_start_failure_retryable)
-        self.assertTrue(any("19090" in message for message in errors))
+        self.assertTrue(any("SOCKS 1390" in message for message in errors))
 
 
 if __name__ == "__main__":

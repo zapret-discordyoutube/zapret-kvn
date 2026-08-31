@@ -8,7 +8,9 @@ at import time (see tests/test_app_nodes_page_view.py).
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -24,6 +26,7 @@ app = _existing or QApplication([])
 
 from xray_fluent.models import AppSettings, Node
 from xray_fluent.ui.dashboard_page import DashboardPage
+from xray_fluent.ui.main_window import MainWindow
 
 
 def _routing_card_position(page: DashboardPage) -> tuple[int, int, int, int]:
@@ -40,6 +43,7 @@ class DashboardWordWrapTest(unittest.TestCase):
         "connection_status_label",
         "connection_target_label",
         "connection_engine_label",
+        "connection_ports_label",
         "routing_mode_label",
         "routing_dns_label",
         "routing_rules_label",
@@ -75,6 +79,26 @@ class DashboardWordWrapTest(unittest.TestCase):
         self.assertIn("********", page.connection_target_label.text())
         self.assertNotIn("secret.example", page.profile_endpoint_label.text())
         self.assertNotIn("secret.example", page.connection_target_label.text())
+        page.deleteLater()
+        QApplication.processEvents()
+
+    def test_connected_proxy_shows_effective_ports_and_mixed_compatibility(self) -> None:
+        page = DashboardPage()
+        settings = AppSettings(tun_mode=False, proxy_engine="singbox")
+        page.set_settings_snapshot(settings)
+        page.set_proxy_ports(1392, 1393)
+        page.set_connection(True)
+        page._do_refresh_dashboard()
+
+        self.assertFalse(page.connection_ports_label.isHidden())
+        self.assertEqual(
+            page.connection_ports_label.text(),
+            "Mixed (SOCKS5 + HTTP): 127.0.0.1:1392  ·  HTTP: 127.0.0.1:1393",
+        )
+
+        page.set_tun_mode(True)
+        page._do_refresh_dashboard()
+        self.assertTrue(page.connection_ports_label.isHidden())
         page.deleteLater()
         QApplication.processEvents()
 
@@ -128,6 +152,46 @@ class DashboardAdaptiveGridTest(unittest.TestCase):
             page.deleteLater()
             QApplication.processEvents()
 
+
+class DashboardEffectivePortsWiringTest(unittest.TestCase):
+    def test_connection_event_forwards_active_session_ports(self) -> None:
+        dashboard = Mock()
+        controller = Mock()
+        controller.state.settings.tun_mode = False
+        controller.get_effective_proxy_ports.return_value = (1392, 1393)
+        window = SimpleNamespace(
+            dashboard_page=dashboard,
+            controller=controller,
+            tray_connect_action=None,
+            _deferred_dashboard_metrics=None,
+            _deferred_process_stats=None,
+            _has_deferred_process_stats=False,
+            _refresh_tray_tooltip=Mock(),
+        )
+
+        MainWindow._on_connection_changed(window, True)
+
+        dashboard.set_connection.assert_called_once_with(True)
+        dashboard.set_proxy_ports.assert_called_once_with(1392, 1393)
+
+    def test_tun_connection_never_advertises_proxy_ports(self) -> None:
+        dashboard = Mock()
+        controller = Mock()
+        controller.state.settings.tun_mode = True
+        window = SimpleNamespace(
+            dashboard_page=dashboard,
+            controller=controller,
+            tray_connect_action=None,
+            _deferred_dashboard_metrics=None,
+            _deferred_process_stats=None,
+            _has_deferred_process_stats=False,
+            _refresh_tray_tooltip=Mock(),
+        )
+
+        MainWindow._on_connection_changed(window, True)
+
+        dashboard.set_proxy_ports.assert_called_once_with(0, 0)
+        controller.get_effective_proxy_ports.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
