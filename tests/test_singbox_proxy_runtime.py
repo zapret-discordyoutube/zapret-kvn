@@ -174,6 +174,62 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     },
                 )
 
+    def test_hysteria2_sidecar_adapts_legacy_uri_aliases_only_at_runtime(self) -> None:
+        link = (
+            "hy2://user%3Apass@[2001:db8::1]:443/?peer=cover.example"
+            "&skip-cert-verify=yes&obfs=salamander&obfs_password=masking"
+            "&mport=444,5000-5002&hop_interval=20s&pin_sha256=AA%3ABB"
+            "&vendor=a%2Fb#Alias"
+        )
+        node = parse_single(link)
+
+        plan = self._build_plan(link)
+        sidecar = plan.hysteria_sidecar
+        assert sidecar is not None
+
+        self.assertEqual(node.link, link)
+        self.assertIn("@[2001:db8::1]:444,5000-5002/", sidecar.config["server"])
+        self.assertIn("vendor=a%2Fb", sidecar.config["server"])
+        self.assertIn("sni=cover.example", sidecar.config["server"])
+        self.assertIn("obfs-password=masking", sidecar.config["server"])
+        self.assertEqual(
+            sidecar.config["tls"],
+            {
+                "sni": "cover.example",
+                "insecure": True,
+                "pinSHA256": "AA:BB",
+            },
+        )
+        self.assertEqual(
+            sidecar.config["obfs"],
+            {"type": "salamander", "salamander": {"password": "masking"}},
+        )
+        self.assertEqual(
+            sidecar.config["transport"],
+            {"type": "udp", "udp": {"hopInterval": "20s"}},
+        )
+        self.assertEqual(sidecar.config["quic"], {"disableChromeParrot": False})
+
+    def test_hysteria2_canonical_sni_wins_without_rewriting_saved_uri(self) -> None:
+        link = "hy2://secret@example.com:443/?sni=canonical.example&peer=alias.example"
+
+        plan = self._build_plan(link)
+        sidecar = plan.hysteria_sidecar
+        assert sidecar is not None
+
+        self.assertEqual(sidecar.config["server"], link)
+        self.assertEqual(sidecar.config["tls"]["sni"], "canonical.example")
+
+    def test_hysteria2_empty_sni_uses_nonempty_peer_runtime_alias(self) -> None:
+        link = "hy2://secret@example.com:443/?sni=&peer=cover.example"
+
+        plan = self._build_plan(link)
+        sidecar = plan.hysteria_sidecar
+        assert sidecar is not None
+
+        self.assertEqual(sidecar.config["server"], link)
+        self.assertEqual(sidecar.config["tls"]["sni"], "cover.example")
+
     def test_hysteria2_json_outbound_without_original_uri_stays_native(self) -> None:
         document = parse_singbox_document(
             TEMPLATE_PATH,

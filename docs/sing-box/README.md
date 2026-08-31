@@ -59,7 +59,8 @@ Important version note:
     not map directly.
   - `hysteria_sidecar`: URI-backed Hysteria2 is relayed through the unmodified
     official Hysteria client on an authenticated loopback SOCKS listener; the
-    original URI is passed byte-for-byte.
+    saved URI remains byte-for-byte authoritative, while accepted legacy aliases
+    are represented only in the ephemeral official-client config.
 - The current conversion layer supports these outbound families:
   - `vless`
   - `vmess`

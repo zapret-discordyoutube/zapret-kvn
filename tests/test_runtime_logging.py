@@ -120,6 +120,121 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
         self.assertNotIn("auth@", message)
         self.assertNotIn("cover-secret", message)
 
+    def test_remote_tls_internal_error_schedules_one_chrome_compatibility_retry(self) -> None:
+        manager = HysteriaManager()
+        manager._running = True
+        manager._compatibility_generation = 9
+        manager._compatibility_config = {
+            "server": "hy2://secret@example.com:443/",
+            "quic": {"disableChromeParrot": False},
+        }
+        manager._compatibility_relay_port = 11809
+        manager._compatibility_context = RuntimeNodeIdentity.from_node(
+            Node(name="Server A", scheme="hysteria2", server="example.com", port=443)
+        )
+
+        with patch("xray_fluent.engines.hysteria.manager.QTimer.singleShot") as single_shot:
+            manager._emit_process_line(
+                "connect error: CRYPTO_ERROR 0x150 (remote): tls: internal error"
+            )
+
+        self.assertTrue(manager._chrome_fallback_pending)
+        self.assertTrue(manager._chrome_fallback_used)
+        self.assertEqual(single_shot.call_count, 1)
+        callback = single_shot.call_args.args[1]
+        with patch.object(manager, "start", return_value=True) as start:
+            callback()
+
+        self.assertFalse(manager._chrome_fallback_pending)
+        self.assertEqual(start.call_count, 1)
+        retry_config = start.call_args.args[0]
+        self.assertTrue(retry_config["quic"]["disableChromeParrot"])
+        self.assertFalse(manager._compatibility_config["quic"]["disableChromeParrot"])
+        self.assertTrue(start.call_args.kwargs["_compatibility_retry"])
+
+    def test_second_remote_tls_internal_error_is_terminal_without_third_retry(self) -> None:
+        manager = HysteriaManager()
+        manager._attempt = 2
+        manager._running = True
+        manager._chrome_fallback_used = True
+        manager._chrome_fallback_pending = False
+        manager._chrome_fallback_in_progress = False
+        errors: list[str] = []
+        manager.error.connect(errors.append)
+
+        with patch("xray_fluent.engines.hysteria.manager.QTimer.singleShot") as single_shot:
+            manager._emit_process_line(
+                "connect error: CRYPTO_ERROR 0x150 (remote): tls: internal error"
+            )
+
+        self.assertEqual(single_shot.call_count, 0)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("stage=remote_handshake", errors[0])
+        self.assertNotIn("hy2://", errors[0])
+
+    def test_external_stop_invalidates_pending_compatibility_retry(self) -> None:
+        manager = HysteriaManager()
+        manager._compatibility_generation = 3
+        manager._compatibility_config = {"server": "hy2://secret@example.com:443/"}
+        manager._compatibility_relay_port = 11809
+        manager._chrome_fallback_pending = True
+
+        manager.stop(expected=True)
+
+        self.assertGreater(manager._compatibility_generation, 3)
+        self.assertIsNone(manager._compatibility_config)
+        self.assertFalse(manager._chrome_fallback_pending)
+
+    def test_chrome_fallback_survives_unexpected_process_exit(self) -> None:
+        manager = HysteriaManager()
+        manager._running = True
+        manager._compatibility_generation = 11
+        manager._compatibility_config = {
+            "server": "hy2://secret@example.com:443/",
+            "quic": {"disableChromeParrot": False},
+        }
+        manager._compatibility_relay_port = 11809
+        manager._chrome_fallback_pending = True
+        manager._chrome_fallback_used = True
+        states: list[bool] = []
+        errors: list[str] = []
+        manager.state_changed.connect(states.append)
+        manager.error.connect(errors.append)
+
+        with patch.object(manager, "_flush_stdout_buffer"), patch.object(
+            manager, "_cleanup_config"
+        ):
+            manager._on_finished(23, QProcess.ExitStatus.CrashExit)
+
+        self.assertEqual(states, [])
+        self.assertEqual(errors, [])
+        self.assertIsNotNone(manager._compatibility_config)
+        with patch.object(manager, "start", return_value=True) as start:
+            manager._run_chrome_parrot_fallback(11)
+        self.assertEqual(start.call_count, 1)
+
+    def test_failed_compatibility_retry_emits_stopped_state(self) -> None:
+        manager = HysteriaManager()
+        manager._running = True
+        manager._compatibility_generation = 5
+        manager._compatibility_config = {
+            "server": "hy2://secret@example.com:443/",
+            "quic": {"disableChromeParrot": False},
+        }
+        manager._compatibility_relay_port = 11809
+        states: list[bool] = []
+        manager.state_changed.connect(states.append)
+
+        def failed_start(*_args, **_kwargs):
+            manager._running = False
+            return False
+
+        with patch.object(manager, "start", side_effect=failed_start):
+            manager._run_chrome_parrot_fallback(5)
+
+        self.assertEqual(states, [False])
+        self.assertIsNone(manager._compatibility_config)
+
 
 if __name__ == "__main__":
     unittest.main()

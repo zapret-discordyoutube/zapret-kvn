@@ -33,6 +33,7 @@ from ...application.outbound_pool_service import (
 )
 from ...models import Node
 from ...runtime_logging import RuntimeNodeIdentity
+from ..hysteria.config_adapter import build_uri_client_config
 from .config_builder import build_singbox_outbound, is_singbox_endpoint_node
 
 
@@ -531,18 +532,14 @@ def _plan_hysteria_sidecar_runtime(
         relay_username=relay_username,
         relay_password=relay_password,
         context=RuntimeNodeIdentity.from_node(node),
-        config={
-            # Passing the original URI avoids a second, subtly different
-            # converter for auth, TLS pins, ECH and port hopping.
-            "server": raw_link,
-            "lazy": True,
-            "socks5": {
-                "listen": f"{PROXY_HOST}:{relay_port}",
-                "username": relay_username,
-                "password": relay_password,
-                "disableUDP": False,
-            },
-        },
+        config=build_uri_client_config(
+            raw_link,
+            node.outbound if isinstance(node.outbound, dict) else {},
+            relay_host=PROXY_HOST,
+            relay_port=relay_port,
+            relay_username=relay_username,
+            relay_password=relay_password,
+        ),
     )
     return SingboxRuntimePlan(
         outcome="hysteria_sidecar",

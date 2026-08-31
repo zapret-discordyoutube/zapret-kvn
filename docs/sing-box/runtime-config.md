@@ -408,20 +408,24 @@ this subset:
 
 The parser stores `hysteria://`, `hy2://` / `hysteria2://`, and `tuic://`
 nodes. URI-backed Hysteria2 is relayed through the pinned official Hysteria
-client; the exact source URI is its transport source of truth and is never
-rebuilt from sing-box JSON. A native outbound JSON object with a top-level
+client; the exact saved source URI remains its transport source of truth and is
+never rebuilt from sing-box JSON. A native outbound JSON object with a top-level
 `type` field is still passed through as-is, with only its runtime `tag`
 replaced by the app. Consequently `hysteria://` (v1), TUIC, and native
 Hysteria2 JSON remain native sing-box outbounds.
 
 The official Hysteria v2 URI parser recognizes `obfs`, `obfs-password`, `sni`,
 `insecure`, `pinSHA256`, and `ech`. Unknown/vendor query parameters are retained
-verbatim in the saved source and passed on unchanged; whether the pinned core
-uses them is determined by that core. `pinSHA256` pins the complete leaf
-certificate, so it is deliberately not converted into sing-box's SPKI pin.
-Because the sidecar uses `lazy: true`, local SOCKS readiness does not claim that
-the first remote QUIC/TLS handshake has succeeded; the runtime log reports those
-stages separately.
+verbatim in the saved source. Historical aliases already accepted by the app
+(`peer`, insecure/obfs-password variants, and query-based port hopping) are
+expressed only in an ephemeral official full config; this does not mutate the
+saved URI, subscription fingerprint, or reconnect identity. `pinSHA256` pins the
+complete leaf certificate, so it is deliberately not converted into sing-box's
+SPKI pin. Because the sidecar uses `lazy: true`, local SOCKS readiness does not
+claim that the first remote QUIC/TLS handshake has succeeded. A precise remote
+TLS `0x150 internal_error` triggers one compatibility retry with Chrome QUIC
+parroting disabled (needed by some certificate algorithms); a second failure is
+terminal and remains attributed to the same safe node reference.
 
 ### TLS support mapped today
 
