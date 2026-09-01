@@ -387,7 +387,17 @@ def classify_hysteria_uri(raw_uri: str, *, platform: str = "windows") -> Hysteri
 
 def classify_hysteria_failure(message: str, *, process_exited: bool = False) -> HysteriaFailureCode | None:
     value = str(message or "").lower()
-    if "pin" in value and any(marker in value for marker in ("mismatch", "does not match", "invalid")):
+    if "pin" in value and any(
+        marker in value
+        for marker in (
+            "mismatch",
+            # официальное ядро: «no certificate matches the pinned hash»
+            "no certificate matches",
+            # покрывает и «does not match», и «did not match»
+            "not match",
+            "invalid",
+        )
+    ):
         return HysteriaFailureCode.TARGET_PIN_MISMATCH
     if any(marker in value for marker in ("unknown authority", "certificate signed by unknown")):
         return HysteriaFailureCode.TARGET_TLS_UNKNOWN_AUTHORITY

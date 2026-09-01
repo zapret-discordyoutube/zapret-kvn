@@ -130,7 +130,10 @@ class XrayManager(QObject):
         spawn_elapsed = time.monotonic() - spawn_began
 
         ready_began = time.monotonic()
-        ready = yield from self._wait_until_ready_steps(required_ports)
+        ready = yield from self._wait_until_ready_steps(
+            required_ports,
+            credentials=self._extract_socks_credentials(config),
+        )
         if not ready:
             self._starting = False
             return False
@@ -268,6 +271,32 @@ class XrayManager(QObject):
             port_roles[port] = role
         return port_roles
 
+    @staticmethod
+    def _extract_socks_credentials(config: dict[str, Any]) -> dict[int, dict[str, str]]:
+        credentials: dict[int, dict[str, str]] = {}
+        for inbound in config.get("inbounds", []):
+            if not isinstance(inbound, dict):
+                continue
+            if str(inbound.get("protocol") or "").strip().lower() != "socks":
+                continue
+            port = inbound.get("port")
+            if not isinstance(port, int) or port <= 0:
+                continue
+            settings = inbound.get("settings")
+            if not isinstance(settings, dict) or settings.get("auth") != "password":
+                continue
+            accounts = settings.get("accounts")
+            if not isinstance(accounts, list) or not accounts:
+                continue
+            first = accounts[0]
+            if not isinstance(first, dict):
+                continue
+            username = str(first.get("user") or "")
+            password = str(first.get("pass") or "")
+            if username:
+                credentials[port] = {"username": username, "password": password}
+        return credentials
+
     def _ensure_ports_available(self, port_roles: dict[int, str]) -> str | None:
         return run_steps_blocking(self._ensure_ports_available_steps(port_roles))
 
@@ -387,13 +416,28 @@ class XrayManager(QObject):
             hint = " Перезапустите приложение или завершите зависший Xray, который держит API порт."
         return f"{prefix} уже занят {owner}.{hint}"
 
-    def _wait_until_ready(self, port_roles: dict[int, str], timeout_sec: float = 5.0) -> bool:
-        return bool(run_steps_blocking(self._wait_until_ready_steps(port_roles, timeout_sec)))
+    def _wait_until_ready(
+        self,
+        port_roles: dict[int, str],
+        timeout_sec: float = 5.0,
+        credentials: dict[int, dict[str, str]] | None = None,
+    ) -> bool:
+        return bool(
+            run_steps_blocking(
+                self._wait_until_ready_steps(port_roles, timeout_sec, credentials=credentials)
+            )
+        )
 
-    def _wait_until_ready_steps(self, port_roles: dict[int, str], timeout_sec: float = 5.0) -> TransitionSteps:
+    def _wait_until_ready_steps(
+        self,
+        port_roles: dict[int, str],
+        timeout_sec: float = 5.0,
+        credentials: dict[int, dict[str, str]] | None = None,
+    ) -> TransitionSteps:
         if not port_roles:
             return True
         ports = tuple(port_roles)
+        port_credentials = credentials or {}
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
             if self._process.state() == QProcess.ProcessState.NotRunning:
@@ -401,24 +445,35 @@ class XrayManager(QObject):
                 return False
             # Пробные connect'ы (до 0.2с на порт) уходят в worker-пул.
             ready = yield run_in_worker(
-                lambda probe=ports, roles=port_roles: all(
-                    probe_listener_role(port, roles[port]) for port in probe
+                lambda probe=ports, roles=port_roles, creds=port_credentials: all(
+                    probe_listener_role(port, roles[port], **(creds.get(port) or {}))
+                    for port in probe
                 )
             )
             if ready:
                 return True
             yield sleep_ms(100)
         pending = yield run_in_worker(
-            lambda probe=ports, roles=port_roles: [
-                port for port in probe if not probe_listener_role(port, roles[port])
+            lambda probe=ports, roles=port_roles, creds=port_credentials: [
+                port
+                for port in probe
+                if not probe_listener_role(port, roles[port], **(creds.get(port) or {}))
             ]
         )
         not_ready = [
             f"{port_roles[port]} {port}" if port_roles[port] else str(port) for port in pending
         ]
+        # Диагностику ядра нужно снять до stop(): штатная остановка стирает
+        # контекст последних строк как «ожидаемый» выход.
+        last_output = next(
+            (line for line in reversed(self._last_output_lines) if line.strip()), ""
+        )
         yield from self.stop_steps(expected=True)
         details = ", ".join(not_ready) if not_ready else "нужные порты"
-        self._report_startup_failure(f"Xray запустился, но не открыл нужные порты: {details}")
+        message = f"Xray запустился, но не открыл нужные порты: {details}"
+        if last_output:
+            message = f"{message}. Последний вывод ядра: {last_output}"
+        self._report_startup_failure(message)
         return False
 
     def _unexpected_exit_message(

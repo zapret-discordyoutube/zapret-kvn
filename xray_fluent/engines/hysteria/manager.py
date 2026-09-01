@@ -222,7 +222,9 @@ class HysteriaManager(QObject):
             self._emit_error(
                 f"Hysteria relay локально открыт, но удалённый handshake не готов: {details}",
                 stage="remote_handshake",
-                code=classify_hysteria_failure(details) or HysteriaFailureCode.TARGET_NETWORK_TIMEOUT,
+                code=self._last_failure_code
+                or classify_hysteria_failure(details)
+                or HysteriaFailureCode.TARGET_NETWORK_TIMEOUT,
             )
             return False
         if verify_remote:
@@ -575,6 +577,7 @@ class HysteriaManager(QObject):
                     "failed to initialize client",
                     "tls:",
                     "certificate",
+                    "pinned",
                     "x509",
                     "authentication failed",
                     "server rejected",

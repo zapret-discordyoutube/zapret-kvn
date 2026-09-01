@@ -142,6 +142,67 @@ class XrayEnsurePortsTests(unittest.TestCase):
             [unittest.mock.call(1390, "SOCKS"), unittest.mock.call(1391, "HTTP")],
         )
 
+    def test_readiness_forwards_socks_credentials_from_own_config(self) -> None:
+        manager = XrayManager()
+        fake = Mock()
+        fake.state.return_value = _RUNNING
+        manager._process = fake
+
+        with patch(
+            "xray_fluent.engines.xray.manager.probe_listener_role",
+            return_value=True,
+        ) as probe_mock:
+            self.assertTrue(
+                manager._wait_until_ready(
+                    {11808: "SOCKS"},
+                    credentials={11808: {"username": "sidecar-a1", "password": "s3cret"}},
+                )
+            )
+
+        probe_mock.assert_called_once_with(
+            11808, "SOCKS", username="sidecar-a1", password="s3cret"
+        )
+
+    def test_extract_socks_credentials_reads_password_auth_inbounds(self) -> None:
+        config = {
+            "inbounds": [
+                {
+                    "protocol": "socks",
+                    "port": 11808,
+                    "settings": {
+                        "auth": "password",
+                        "accounts": [{"user": "sidecar-a1", "pass": "s3cret"}],
+                        "udp": True,
+                    },
+                },
+                {"protocol": "socks", "port": 10808, "settings": {"auth": "noauth"}},
+                {"protocol": "dokodemo-door", "port": 19085, "tag": "api"},
+            ]
+        }
+        self.assertEqual(
+            {11808: {"username": "sidecar-a1", "password": "s3cret"}},
+            XrayManager._extract_socks_credentials(config),
+        )
+        self.assertEqual({}, XrayManager._extract_socks_credentials({"inbounds": []}))
+
+    def test_singbox_extract_socks_credentials_reads_inbound_users(self) -> None:
+        from xray_fluent.engines.singbox.manager import SingBoxManager
+
+        config = {
+            "inbounds": [
+                {
+                    "type": "mixed",
+                    "listen_port": 2080,
+                    "users": [{"username": "front-user", "password": "front-pass"}],
+                },
+                {"type": "socks", "listen_port": 10808},
+            ]
+        }
+        self.assertEqual(
+            {2080: {"username": "front-user", "password": "front-pass"}},
+            SingBoxManager._extract_socks_credentials(config),
+        )
+
 
 class XrayStopStepsAsyncTests(unittest.TestCase):
     """AC22: горячий путь stop_steps() работает через TransitionRunner без пампинга."""

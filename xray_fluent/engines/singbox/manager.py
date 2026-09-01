@@ -351,12 +351,39 @@ class SingBoxManager(QObject):
             roles[api_port] = "Clash API"
         return roles
 
+    @staticmethod
+    def _extract_socks_credentials(config: dict[str, Any]) -> dict[int, dict[str, str]]:
+        credentials: dict[int, dict[str, str]] = {}
+        for inbound in config.get("inbounds") or []:
+            if not isinstance(inbound, dict):
+                continue
+            if str(inbound.get("type") or "").strip().lower() not in {"socks", "mixed"}:
+                continue
+            try:
+                port = int(inbound.get("listen_port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if port <= 0:
+                continue
+            users = inbound.get("users")
+            if not isinstance(users, list) or not users:
+                continue
+            first = users[0]
+            if not isinstance(first, dict):
+                continue
+            username = str(first.get("username") or "")
+            password = str(first.get("password") or "")
+            if username:
+                credentials[port] = {"username": username, "password": password}
+        return credentials
+
     def _wait_until_proxy_ready(
         self,
         config: dict[str, Any],
         max_wait: float = 15.0,
     ) -> bool:
         port_roles = self._extract_proxy_port_roles(config)
+        port_credentials = self._extract_socks_credentials(config)
         if not port_roles:
             sleep_with_events(0.75)
             if self._process.state() != QProcess.ProcessState.NotRunning:
@@ -381,7 +408,10 @@ class SingBoxManager(QObject):
                     )
                 )
                 return False
-            if all(probe_listener_role(port, role) for port, role in port_roles.items()):
+            if all(
+                probe_listener_role(port, role, **(port_credentials.get(port) or {}))
+                for port, role in port_roles.items()
+            ):
                 return True
             sleep_with_events(0.1)
 
@@ -389,13 +419,21 @@ class SingBoxManager(QObject):
         pending = [
             f"{role} {port}"
             for port, role in port_roles.items()
-            if not probe_listener_role(port, role)
+            if not probe_listener_role(port, role, **(port_credentials.get(port) or {}))
         ]
+        # Диагностику ядра нужно снять до stop(): штатная остановка стирает
+        # контекст последних строк как «ожидаемый» выход.
+        last_output = next(
+            (line for line in reversed(self._last_output_lines) if line.strip()), ""
+        )
         self.stop(expected=True)
-        self._report_startup_failure(
+        message = (
             "sing-box запустился, но локальные входы не подтвердили готовность: "
             + (", ".join(pending) if pending else "неизвестный вход")
         )
+        if last_output:
+            message = f"{message}. Последний вывод ядра: {last_output}"
+        self._report_startup_failure(message)
         return False
 
     def _wait_until_tun_ready(self, tun_interface_name: str, max_wait: float = 18.0) -> bool:

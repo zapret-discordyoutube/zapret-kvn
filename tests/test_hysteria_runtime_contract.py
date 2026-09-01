@@ -79,6 +79,8 @@ class HysteriaFailureAndTransitionTests(unittest.TestCase):
             "tls: internal error": HysteriaFailureCode.TARGET_TLS_INTERNAL,
             "certificate signed by unknown authority": HysteriaFailureCode.TARGET_TLS_UNKNOWN_AUTHORITY,
             "certificate pin mismatch": HysteriaFailureCode.TARGET_PIN_MISMATCH,
+            "connect error: CRYPTO_ERROR 0x12a (local): no certificate matches the pinned hash": HysteriaFailureCode.TARGET_PIN_MISMATCH,
+            "tls: pinned certificate did not match": HysteriaFailureCode.TARGET_PIN_MISMATCH,
             "authentication failed": HysteriaFailureCode.TARGET_AUTH_REJECTED,
             "obfs rejected": HysteriaFailureCode.TARGET_OBFS_REJECTED,
             "address already in use": HysteriaFailureCode.LOCAL_BIND_COLLISION,

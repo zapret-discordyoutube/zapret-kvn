@@ -533,6 +533,43 @@ class HybridRuntimeStartupTests(unittest.TestCase):
         controller._request_transition.assert_not_called()
         self.assertFalse(controller._desired_connected)
 
+    def test_official_core_pin_mismatch_line_closes_admission_without_switch(self) -> None:
+        # Регресс-щит инцидента 31.08–01.09: строка официального ядра про pin
+        # не распознавалась, деградировала до TARGET_NETWORK_TIMEOUT и вызывала
+        # тихое авто-переключение вместо fail-closed остановки.
+        controller = Mock()
+        manager = HysteriaManager()
+        manager._running = True
+        manager._failure_reported = False
+        manager._process_generation = 7
+        controller.hysteria = manager
+        controller._hysteria_active_generation = 7
+        controller._hysteria_contract.session.session_generation = 12
+        controller.connected = True
+        controller._disconnecting = False
+        controller._desired_connected = True
+        controller.singbox.is_running = True
+        manager.failure.connect(
+            lambda code, message, generation: AppController._on_hysteria_failure(
+                controller,
+                manager,
+                code,
+                message,
+                generation,
+            )
+        )
+
+        manager._emit_process_line(
+            "client connect error: CRYPTO_ERROR 0x12a (local): "
+            "no certificate matches the pinned hash"
+        )
+
+        self.assertEqual(HysteriaFailureCode.TARGET_PIN_MISMATCH, manager._last_failure_code)
+        controller.singbox.stop.assert_called_once_with(expected=True)
+        controller._request_transition.assert_not_called()
+        controller._try_hot_switch_selected_node.assert_not_called()
+        self.assertFalse(controller._desired_connected)
+
     def test_network_failure_selects_one_other_target_once(self) -> None:
         current = parse_single("hy2://current@one.example:443/#current")
         first = parse_single("hy2://first@two.example:443/#first")
