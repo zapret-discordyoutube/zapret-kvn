@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from xray_fluent.application.protocol_core import ProtocolCore, protocol_core
+
 _SUPPORTED_NATIVE_PROTOCOLS = {"vmess", "trojan", "shadowsocks", "socks", "http"}
 
 # Типы, которые sing-box 1.13+ принимает только в top-level массиве `endpoints[]`,
@@ -27,8 +29,8 @@ def build_singbox_outbound(node, *, tag: str = "proxy") -> dict[str, Any]:
     source = deepcopy(node.outbound or {})
     protocol = str(source.get("protocol") or "").lower()
     native_type = str(source.get("type") or "").lower()
-    if (protocol or native_type) in {"vless", "hy2", "hysteria", "hysteria2"}:
-        raise ValueError("VLESS belongs to Xray; Hysteria belongs to the official Hysteria core.")
+    if protocol_core(node) is not ProtocolCore.SINGBOX:
+        raise ValueError("VLESS belongs to Xray; Hysteria2 belongs to the official Hysteria core.")
     if native_type and not protocol:
         # Служебные ключи приложения (`_dns` и прочие с префиксом `_`) не входят
         # в схему sing-box, строгий декодер их отвергает — отбрасываем.

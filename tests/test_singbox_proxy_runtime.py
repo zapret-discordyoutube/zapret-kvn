@@ -8,6 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from xray_fluent.application.protocol_core import ProtocolCore, protocol_core
 from xray_fluent.engines.singbox.operations import restart_proxy_runtime, restart_runtime
 from xray_fluent.engines.singbox.runtime_planner import (
     classify_node_for_singbox,
@@ -353,6 +354,23 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             plan.singbox_config["experimental"]["clash_api"]["external_controller"],
             f"127.0.0.1:{plan.clash_api_port}",
         )
+
+    def test_hysteria_v1_remains_native_for_uri_and_json(self) -> None:
+        link = "hysteria://example.com:8443/?auth=secret&upmbps=50&downmbps=100"
+        for raw in (link, json.dumps(parse_single(link).outbound)):
+            with self.subTest(format="uri" if raw == link else "json"):
+                node = parse_single(raw)
+                self.assertIs(protocol_core(node), ProtocolCore.SINGBOX)
+                self.assertEqual(classify_node_for_singbox(node), "native_singbox")
+                plan = self._build_plan(raw)
+                self.assertIsNone(plan.hysteria_sidecar)
+                self.assertIsNone(plan.xray_sidecar)
+                proxy = next(
+                    item for item in plan.singbox_config["outbounds"]
+                    if item.get("tag") == "proxy"
+                )
+                self.assertEqual(proxy["type"], "hysteria")
+                self.assertEqual(proxy["auth_str"], "secret")
 
     def test_extended_core_accepts_new_protocol_proxy_plans(self) -> None:
         core = ROOT / "core" / "sing-box.exe"
