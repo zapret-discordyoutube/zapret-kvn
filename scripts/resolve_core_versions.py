@@ -312,8 +312,7 @@ def download_and_hash(
                         [curl, "--disable", "--fail", "--silent", "--show-error",
                          "--location", "--proto", "=https", "--proto-redir", "=https",
                          "--max-redirs", "5", "--connect-timeout", str(min(timeout, 30.0)),
-                         "--max-time", str(deadline), "--max-filesize", str(ARCHIVE_LIMIT),
-                         "--user-agent", USER_AGENT, url],
+                         "--max-time", str(deadline), "--max-filesize", str(ARCHIVE_LIMIT), url],
                         stdout=output, stderr=subprocess.PIPE, check=True, timeout=deadline + 10,
                     )
                 else:
@@ -336,7 +335,10 @@ def download_and_hash(
                         )
                     digest.update(chunk)
         except (HTTPException, HTTPError, URLError, TimeoutError, OSError, subprocess.SubprocessError) as exc:
-            raise ResolverError(f"archive download failed for {url}: {exc}") from exc
+            detail = str(exc)
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+                detail = exc.stderr.decode("utf-8", errors="replace").strip()
+            raise ResolverError(f"archive download failed for {url}: {detail}") from exc
         if total <= 0:
             raise ResolverError(f"archive download was empty: {url}")
         return total, digest.hexdigest()

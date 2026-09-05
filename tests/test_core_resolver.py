@@ -268,6 +268,7 @@ class CurlArchiveTests(unittest.TestCase):
             self.assertIn("=https", command)
             self.assertIn("--max-filesize", command)
             self.assertNotIn("--insecure", command)
+            self.assertNotIn("--user-agent", command)
             self.assertTrue(kwargs["check"])
             stdout.write(payload)
 
@@ -281,7 +282,7 @@ class CurlArchiveTests(unittest.TestCase):
 
         def interrupted(command, *, stdout, **kwargs):
             stdout.write(b"partial archive")
-            raise resolver.subprocess.CalledProcessError(18, command)
+            raise resolver.subprocess.CalledProcessError(18, command, stderr=b"curl: transfer closed with bytes remaining")
 
         original_mkstemp = resolver.tempfile.mkstemp
         with tempfile.TemporaryDirectory() as directory:
@@ -291,7 +292,7 @@ class CurlArchiveTests(unittest.TestCase):
                 return fd, name
 
             with patch.object(resolver.shutil, "which", return_value="curl"), patch.object(resolver.subprocess, "run", side_effect=interrupted), patch.object(resolver.tempfile, "mkstemp", side_effect=temporary):
-                with self.assertRaisesRegex(resolver.ResolverError, "archive download failed"):
+                with self.assertRaisesRegex(resolver.ResolverError, "curl: transfer closed with bytes remaining"):
                     resolver.download_and_hash("https://github.com/example/archive.zip")
             self.assertTrue(paths)
             self.assertTrue(all(not path.exists() for path in paths))
