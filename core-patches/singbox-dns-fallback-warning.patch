@@ -1,0 +1,29 @@
+--- a/dns/transport/fallback/strategy.go
++++ b/dns/transport/fallback/strategy.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"sync/atomic"
+ 	"time"
+ 
+ 	mDNS "github.com/miekg/dns"
+@@ -52,6 +53,7 @@
+ }
+ 
+ func sequentialStrategy(servers []adapter.DNSTransport, logger logger.ContextLogger, timeout time.Duration) ExchangeStrategy {
++	var selected atomic.Int32
+ 	return func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+ 		ctx, cancel := context.WithTimeout(ctx, timeout)
+ 		defer cancel()
+@@ -64,6 +66,10 @@
+ 				logger.InfoContext(ctx, E.Cause(err, "resolve failed for server ", server.Tag()))
+ 				lastErr = err
+ 				continue
++			}
++			previous := selected.Swap(int32(index))
++			if index > 0 && previous != int32(index) {
++				logger.WarnContext(ctx, "DNS_FALLBACK server=", server.Tag())
+ 			}
+ 			return response, nil
+ 		}

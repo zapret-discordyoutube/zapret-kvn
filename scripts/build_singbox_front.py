@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import shutil
 
 from prepare_sing_udp_patch import extract_module, prepare, sha256
 
@@ -31,8 +32,13 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     stage = Path(tempfile.mkdtemp(prefix="singbox-build-", dir=work))
     source = stage / "source"
     extract_module(module, source)
+    dns_patch = manifest.parent / 'singbox-dns-fallback-warning.patch'
+    subprocess.run(['git', 'apply', '--check', str(dns_patch)], cwd=source, check=True)
+    subprocess.run(['git', 'apply', str(dns_patch)], cwd=source, check=True)
+    shutil.copyfile(manifest.parent / 'singbox_dns_fallback_test.go', source / 'dns/transport/fallback/zapret_fallback_test.go')
     dependency = prepare(source, stage / "dependency", manifest, go)
     subprocess.run([go, "mod", "edit", f"-replace=github.com/sagernet/sing={dependency}"], cwd=source, check=True)
+    subprocess.run([go, 'test', '-mod=readonly', './dns/transport/fallback', '-run', '^TestZapret', '-count=1'], cwd=source, check=True)
     for tags in ("", "with_low_memory"):
         subprocess.run([go, "test", "-mod=readonly", "-tags", tags,
                         "github.com/sagernet/sing/common/network", "-run", "^TestZapret", "-count=1"],
@@ -45,7 +51,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     provenance = {**pin, "go": subprocess.check_output([go, "env", "GOVERSION"], text=True).strip(),
                   "goos": os.environ.get("GOOS", ""), "goarch": os.environ.get("GOARCH", ""),
                   "build_tags": tags, "binary_sha256": sha256(output),
-                  "udp_patch": json.loads((dependency.parent / "provenance.json").read_text())}
+                  "udp_patch": json.loads((dependency.parent / "provenance.json").read_text()),
+                  "dns_warning_patch_sha256": sha256(dns_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
 

@@ -32,8 +32,8 @@ class GroupedServersTests(unittest.TestCase):
         self.page.set_subscriptions([Subscription(id="one", name="Provider", url=""), Subscription(id="two", name="Provider", url="")])
         self.page.set_nodes([Node(id="a", subscription_id="one"), Node(id="b", subscription_id="two"), Node(id="c")])
         model = self.page._group_model
-        self.assertEqual(model.rowCount(), 3)
-        keys = {model.index(row, 0).data(GROUP_KEY_ROLE) for row in range(3)}
+        self.assertEqual(len(model.group_indexes()), 3)
+        keys = {index.data(GROUP_KEY_ROLE) for index in model.group_indexes()}
         self.assertEqual(keys, {"source:one", "source:two", "source:local"})
 
     def test_persistent_selection_and_expansion_survive_metric_sort(self):
@@ -41,7 +41,7 @@ class GroupedServersTests(unittest.TestCase):
         self.page.set_nodes(nodes, "a")
         model = self.page._group_model
         group = model.index(0, 0)
-        persistent = QPersistentModelIndex(model.index(0, 0, group))
+        persistent = QPersistentModelIndex(model.index(1, 0))
         self.page._proxy.set_sort_key("ping")
         self.page.table.collapse(group)
         resets = []
@@ -71,7 +71,7 @@ class GroupedServersTests(unittest.TestCase):
         nodes=[Node(id=str(i), name=f"Server {i}", subscription_id=str(i%20)) for i in range(10000)]
         self.page.set_nodes(nodes)
         model=self.page._group_model
-        self.assertEqual(model.rowCount(),20)
+        self.assertEqual(len(model.group_indexes()),20)
         resets=[]
         model.modelReset.connect(lambda:resets.append(True))
         self.page._table_model.refresh_ping('5000')

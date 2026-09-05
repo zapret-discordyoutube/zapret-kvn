@@ -367,6 +367,7 @@ class MainWindow(FluentWindow):
         self.controller.speed_test_cancelled.connect(self._on_speed_test_cancelled)
 
         self.controller.nodes_changed.connect(self._on_nodes_changed)
+        self.controller.countries_changed.connect(self._on_countries_changed)
         self.controller.subscriptions_changed.connect(self._on_subscriptions_changed)
         self.controller.subscription_update_started.connect(self._on_subscription_update_started)
         self.controller.subscription_update_finished.connect(self._on_subscription_update_finished)
@@ -435,6 +436,11 @@ class MainWindow(FluentWindow):
             for screen in QGuiApplication.screens():
                 screen.availableGeometryChanged.connect(self._fit_current_screen)
                 screen.logicalDotsPerInchChanged.connect(self._fit_current_screen)
+
+    def _on_countries_changed(self, node_ids) -> None:
+        self.nodes_page.update_countries(node_ids)
+        if self.controller.state.selected_node_id in node_ids:
+            self.dashboard_page.set_selected_node(self.controller.selected_node)
 
     def _on_nodes_changed(self, nodes: list[Node]) -> None:
         if not self._nodes_view_prefs_applied:

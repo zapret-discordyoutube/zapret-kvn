@@ -26,23 +26,19 @@ class SingboxTemplateDnsContractTests(unittest.TestCase):
                 dns = payload["dns"]
                 servers = {server["tag"]: server for server in dns["servers"]}
 
-                self.assertEqual(
-                    servers["bootstrap-dns"],
-                    {
-                        "tag": "bootstrap-dns",
-                        "type": "udp",
-                        "server": "1.1.1.1",
-                    },
-                )
-                self.assertEqual(
-                    servers["proxy-dns"],
-                    {
-                        "tag": "proxy-dns",
-                        "type": "tcp",
-                        "server": "8.8.8.8",
-                        "detour": "proxy",
-                    },
-                )
+                self.assertEqual(servers["bootstrap-dns"]["servers"], ["direct-doh", "local-system-dns"])
+                self.assertEqual(servers["proxy-dns"]["servers"], ["vpn-doh", "bootstrap-dns"])
+                self.assertEqual(servers["proxy-dns"]["strategy"], "sequential")
+                self.assertEqual(servers["local-system-dns"]["type"], "local")
+                for prefix in ("vpn", "direct"):
+                    group = servers[prefix + "-doh"]
+                    self.assertEqual(group["strategy"], "parallel")
+                    self.assertEqual(len(group["servers"]), 3)
+                    for tag in group["servers"]:
+                        self.assertEqual(servers[tag]["type"], "https")
+                        self.assertEqual(servers[tag].get("detour"), "proxy" if prefix == "vpn" else None)
+                        self.assertTrue(servers[tag]["tls"]["enabled"])
+                        self.assertNotIn("insecure", servers[tag]["tls"])
                 self.assertEqual(dns["final"], "proxy-dns")
 
                 route = payload["route"]

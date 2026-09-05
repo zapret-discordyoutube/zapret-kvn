@@ -1,10 +1,11 @@
-"""Hierarchical presentation of the filtered server model, without copying nodes."""
+"""Flat grouped rows for a virtualized table; node objects are never copied."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from PyQt6.QtCore import QAbstractProxyModel, QModelIndex, Qt, QSize
 from PyQt6.QtGui import QFont
 from .nodes_table_model import NODE_ID_ROLE, ACTIVE_ROLE, NODE_ROW_HEIGHT, node_type_text
+from ..profiles.node_presentation import node_country
 
 GROUP_KEY_ROLE = int(Qt.ItemDataRole.UserRole) + 20
 GROUP_MODES = {"source": "Подписки", "group": "Группы", "country": "Страны", "type": "Протоколы", "none": "Без группировки"}
@@ -25,8 +26,10 @@ class NodesGroupModel(QAbstractProxyModel):
         super().__init__(parent)
         self.mode = "source"
         self._roots = []
+        self._rows = []
         self._entries = {}
         self._sources = {}
+        self._source_entries = []
         self._nodes = {}
         self._rebuilding = False
 
@@ -52,7 +55,7 @@ class NodesGroupModel(QAbstractProxyModel):
         if self.mode == "group":
             return "group:" + node.group, node.group or "Без группы"
         if self.mode == "country":
-            code = node.country_override or node.country_code
+            code = node_country(node)
             return "country:" + code, code or "Страна не определена"
         value = node_type_text(node)
         return "type:" + value, value
@@ -62,25 +65,38 @@ class NodesGroupModel(QAbstractProxyModel):
             return
         self._rebuilding = True
         try:
-            self.layoutAboutToBeChanged.emit()
-            persistent = self.persistentIndexList()
-            identities = [(i.internalPointer().key, i.column()) for i in persistent]
             source = self.sourceModel()
             base = source.sourceModel()
-            old = self._entries
-            entries, groups, sources, nodes, leaves = {}, {}, {}, {}, []
+            records = []
+            keys = set()
             for row in range(source.rowCount()):
-                index = source.index(row, 0)
-                node = base.node_at_row(source.mapToSource(index).row())
+                node = base.node_at_row(source.mapToSource(source.index(row, 0)).row())
                 if node is None:
                     continue
+                group_key, title = self._group(node) if self.mode != "none" else ("", "")
+                records.append((row, node, group_key, title))
+                keys.add("node:" + node.id)
+                if group_key:
+                    keys.add(group_key)
+            # Layout notifications preserve persistent indexes for sorting.
+            # Membership changes require a reset under the Qt model contract.
+            structural = keys != self._entries.keys()
+            if structural:
+                self.beginResetModel()
+                persistent, identities = [], []
+            else:
+                self.layoutAboutToBeChanged.emit()
+                persistent = self.persistentIndexList()
+                identities = [(i.internalPointer().key, i.column()) for i in persistent]
+            old = self._entries
+            entries, groups, sources, nodes, leaves = {}, {}, {}, {}, []
+            for row, node, group_key, title in records:
                 key = "node:" + node.id
                 item = old.get(key) or Entry(key, node_id=node.id)
                 entries[key] = item
                 sources[node.id] = row
                 nodes[node.id] = node
-                if self.mode != "none":
-                    group_key, title = self._group(node)
+                if group_key:
                     if group_key not in groups:
                         group = old.get(group_key) or Entry(group_key)
                         group.children = []
@@ -88,60 +104,73 @@ class NodesGroupModel(QAbstractProxyModel):
                         groups[group_key] = group
                         entries[group_key] = group
                     item.parent = groups[group_key]
-                    item.row = len(item.parent.children)
                     item.parent.children.append(item)
                 else:
                     item.parent = None
-                    item.row = len(leaves)
                     leaves.append(item)
             roots = sorted(groups.values(), key=lambda e: (e.title.casefold(), e.key)) if self.mode != "none" else leaves
-            for row, item in enumerate(roots):
+            rows = []
+            for item in roots:
+                rows.append(item)
+                if not item.node_id:
+                    rows.extend(item.children)
+            for row, item in enumerate(rows):
                 item.row = row
+            self._rows = rows
             self._roots, self._entries, self._sources, self._nodes = roots, entries, sources, nodes
+            self._source_entries = [entries['node:' + nid] for nid in sources]
             replacements = [self._index_for(entries[key], column) if key in entries else QModelIndex() for key, column in identities]
             self.changePersistentIndexList(persistent, replacements)
-            self.layoutChanged.emit()
+            if structural:
+                self.endResetModel()
+            else:
+                self.layoutChanged.emit()
         finally:
             self._rebuilding = False
 
     def _data_changed(self, top, bottom, roles):
-        source = self.sourceModel()
+        changed = {}
+        grouping_may_change = not roles or (self.mode == 'country' and Qt.ItemDataRole.DecorationRole in roles)
         for row in range(top.row(), bottom.row() + 1):
-            idx = source.index(row, 0)
-            nid = idx.data(NODE_ID_ROLE)
-            item = self._entries.get("node:" + str(nid))
-            if item is None:
+            if row >= len(self._source_entries):
                 self.rebuild()
                 return
-            if self.mode != "none":
-                node = source.sourceModel().node_at_row(source.mapToSource(idx).row())
+            item = self._source_entries[row]
+            if self.mode != "none" and grouping_may_change:
+                base = self.sourceModel().sourceModel()
+                node = base.node_at_row(base.row_for_node(item.node_id))
+                self._nodes[item.node_id] = node
                 if self._group(node)[0] != item.parent.key:
                     self.rebuild()
                     return
-            self.dataChanged.emit(self._index_for(item, top.column()), self._index_for(item, bottom.column()), roles)
+            bounds = changed.setdefault(item.parent, [item, item])
+            if item.row < bounds[0].row:
+                bounds[0] = item
+            if item.row > bounds[1].row:
+                bounds[1] = item
+        # One update per parent range, rather than thousands of Qt signals.
+        for first, last in changed.values():
+            self.dataChanged.emit(self._index_for(first, top.column()), self._index_for(last, bottom.column()), roles)
 
     def _index_for(self, entry, column=0):
         return self.createIndex(entry.row, column, entry)
 
+    def group_indexes(self):
+        return [self._index_for(entry) for entry in self._roots if not entry.node_id]
+
     def index(self, row, column, parent=QModelIndex()):
-        if row < 0 or column < 0 or column >= self.columnCount() or (parent.isValid() and parent.column() != 0):
+        if parent.isValid() or row < 0 or column < 0 or column >= self.columnCount():
             return QModelIndex()
-        children = parent.internalPointer().children if parent.isValid() else self._roots
-        return self._index_for(children[row], column) if row < len(children) else QModelIndex()
+        return self._index_for(self._rows[row], column) if row < len(self._rows) else QModelIndex()
 
     def parent(self, index):
-        if not index.isValid():
-            return QModelIndex()
-        parent = index.internalPointer().parent
-        return self._index_for(parent) if parent else QModelIndex()
+        return QModelIndex()
 
     def rowCount(self, parent=QModelIndex()):
-        if parent.isValid():
-            return len(parent.internalPointer().children) if parent.column() == 0 else 0
-        return len(self._roots)
+        return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent=QModelIndex()):
-        return self.sourceModel().columnCount() if self.sourceModel() else 0
+        return self.sourceModel().columnCount() if not parent.isValid() and self.sourceModel() else 0
 
     def mapToSource(self, index):
         if not index.isValid():
@@ -159,6 +188,8 @@ class NodesGroupModel(QAbstractProxyModel):
         if not index.isValid():
             return None
         item = index.internalPointer()
+        if role == NODE_ID_ROLE:
+            return item.node_id or None
         if role == Qt.ItemDataRole.SizeHintRole:
             return QSize(0, NODE_ROW_HEIGHT)
         if item.node_id:
@@ -171,7 +202,7 @@ class NodesGroupModel(QAbstractProxyModel):
         if role == GROUP_KEY_ROLE:
             return item.key
         if role == Qt.ItemDataRole.DisplayRole and index.column() == 0:
-            return f"{item.title} · {len(item.children)}"
+            return f"    {item.title} · {len(item.children)}"
         if role == Qt.ItemDataRole.FontRole:
             font = QFont()
             font.setBold(True)

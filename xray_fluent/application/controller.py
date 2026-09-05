@@ -300,6 +300,7 @@ class HotSwitchPlan:
 class AppController(QObject):
     runtime_errors_changed = pyqtSignal(object)
     nodes_changed = pyqtSignal(object)
+    countries_changed = pyqtSignal(object)
     subscriptions_changed = pyqtSignal(object)
     subscription_update_started = pyqtSignal(str)
     subscription_update_progress = pyqtSignal(str, str)
@@ -1350,9 +1351,11 @@ class AppController(QObject):
         if sidecar is None:
             return False
         self._amnezia_target_generation = _increment_int(getattr(self, "_amnezia_target_generation", 0))
+        generation = self._transition_generation
         return manager.start(sidecar.config, sidecar.relay_port, context=sidecar.context,
                              session_generation=_increment_int(getattr(self, "_session_generation", 0)),
-                             target_generation=self._amnezia_target_generation)
+                             target_generation=self._amnezia_target_generation,
+                             is_current=lambda: self._desired_connected and self._transition_generation == generation)
 
     def _prepare_amnezia_replacement(self, plan: SingboxRuntimePlan):
         candidate = self._new_amnezia_manager()
@@ -3673,6 +3676,8 @@ class AppController(QObject):
         self._on_core_log("xray", line)
 
     def _on_core_log(self, engine: str, line: str) -> None:
+        if "DNS_FALLBACK server=" in line:
+            self._report_dns_fallback(line)
         if is_core_error_line(line):
             self._record_core_failure(engine, "runtime", line)
         context = self._core_log_contexts.get(engine)
@@ -3696,6 +3701,21 @@ class AppController(QObject):
                 self.log_line.emit(f"[tun] {self._tun_log_count} connections routed...")
             return
         self._log(line)
+
+    def _report_dns_fallback(self, line: str) -> None:
+        if "DNS_FALLBACK server=local-system-dns" in line:
+            level = 2
+            message = "DoH недоступен. Используется обычный DNS системы: запросы могут быть видны провайдеру."
+        elif "DNS_FALLBACK server=bootstrap-dns" in line:
+            level = 1
+            message = "DNS через VPN недоступен. Используется резервное разрешение DNS с устройства."
+        else:
+            return
+        generation = self._transition_generation
+        previous = getattr(self, "_dns_warning_state", None)
+        if not isinstance(previous, tuple) or previous[0] != generation or level > previous[1]:
+            self._dns_warning_state = (generation, level)
+            self.status.emit("warning", message)
 
     def _on_xray_error(self, message: str) -> None:
         self._on_core_error("xray", message)

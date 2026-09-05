@@ -198,7 +198,7 @@ class NodesTableModelTests(unittest.TestCase):
 
     # ── Ping batching (AC4) ──
 
-    def test_finish_ping_batch_emits_single_datachanged(self) -> None:
+    def test_finish_ping_batch_separates_metric_from_row_colors(self) -> None:
         a = Node(id="a", name="A")
         b = Node(id="b", name="B")
         c = Node(id="c", name="C")
@@ -209,7 +209,9 @@ class NodesTableModelTests(unittest.TestCase):
 
         self.model.finish_ping_batch({"a", "c"})
 
-        self.assertEqual(len(changes), 1)
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(changes[0][0].column(), COL_PING)
+        self.assertEqual(changes[1][2], [Qt.ItemDataRole.ForegroundRole])
         top, bottom, _roles = changes[0]
         self.assertEqual(top.row(), 0)
         self.assertEqual(bottom.row(), 2)
@@ -235,7 +237,7 @@ class NodesTableModelTests(unittest.TestCase):
         for top_row, bottom_row, roles in changes:
             self.assertEqual(top_row, bottom_row)
             self.assertIn(ACTIVE_ROLE, roles)
-            self.assertIn(Qt.ItemDataRole.DisplayRole, roles)
+            self.assertIn(Qt.ItemDataRole.FontRole, roles)
 
         self.assertTrue(self.model.index(2, COL_NAME).data(ACTIVE_ROLE))
         self.assertFalse(self.model.index(0, COL_NAME).data(ACTIVE_ROLE))

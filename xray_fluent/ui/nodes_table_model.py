@@ -9,6 +9,7 @@ from qfluentwidgets import qconfig
 
 from ..profiles.country_flags import get_flag_icon
 from ..profiles.models import Node
+from ..profiles.node_presentation import node_country, display_name
 from .privacy import endpoint_text
 from .theme import error_color, success_color, warning_color
 
@@ -18,6 +19,7 @@ PING_BUSY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 SPEED_PROGRESS_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 ACTIVE_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 NODE_ID_ROLE = int(Qt.ItemDataRole.UserRole) + 4
+FILTER_FIELDS_ROLE = int(Qt.ItemDataRole.UserRole) + 5
 
 
 def _dead_brush() -> QBrush:
@@ -219,7 +221,7 @@ class NodesTableModel(QAbstractTableModel):
             self.dataChanged.emit(
                 self.index(row, 0),
                 self.index(row, len(_HEADERS) - 1),
-                [Qt.ItemDataRole.DisplayRole, ACTIVE_ROLE],
+                [Qt.ItemDataRole.FontRole, ACTIVE_ROLE],
             )
 
     def active_node_id(self) -> str | None:
@@ -366,7 +368,7 @@ class NodesTableModel(QAbstractTableModel):
             return self._display_text(node, col)
 
         if role == Qt.ItemDataRole.DecorationRole and col == COL_NAME:
-            return get_flag_icon(node.country_override or node.country_code)
+            return get_flag_icon(node_country(node))
 
         if role == Qt.ItemDataRole.ToolTipRole:
             return self._tooltip_text(node, col)
@@ -380,11 +382,20 @@ class NodesTableModel(QAbstractTableModel):
         return None
 
     def refresh_ping(self, node_id: str) -> None:
-        self._emit_row_changed(node_id)
+        self.finish_ping_batch({node_id})
 
     def finish_ping(self, node_id: str) -> None:
-        self._busy_ping_ids.discard(node_id)
-        self._emit_row_changed(node_id)
+        self.finish_ping_batch({node_id})
+
+    def refresh_countries(self, node_ids) -> None:
+        rows = [self._id_to_row[nid] for nid in node_ids if nid in self._id_to_row]
+        if not rows:
+            return
+        for row in rows:
+            node = self._nodes[row]
+            self._snapshots[node.id] = self._snapshot(node)
+        self.dataChanged.emit(self.index(min(rows), COL_NAME), self.index(max(rows), COL_NAME),
+                              [Qt.ItemDataRole.DecorationRole, Qt.ItemDataRole.ToolTipRole])
 
     def finish_ping_batch(self, node_ids: set[str]) -> None:
         """Flush a batch of ping results with a single dataChanged emission."""
@@ -396,11 +407,10 @@ class NodesTableModel(QAbstractTableModel):
         ]
         if not rows:
             return
-        self.dataChanged.emit(
-            self.index(min(rows), 0),
-            self.index(max(rows), len(_HEADERS) - 1),
-            _ROW_ROLES,
-        )
+        self.dataChanged.emit(self.index(min(rows), COL_PING), self.index(max(rows), COL_PING),
+                              [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole, PING_BUSY_ROLE])
+        self.dataChanged.emit(self.index(min(rows), 0), self.index(max(rows), len(_HEADERS) - 1),
+                              [Qt.ItemDataRole.ForegroundRole])
 
     def refresh_speed(self, node_id: str) -> None:
         self._emit_cell_changed(node_id, COL_SPEED)
@@ -422,7 +432,7 @@ class NodesTableModel(QAbstractTableModel):
 
     def _display_text(self, node: Node, col: int) -> str:
         if col == COL_NAME:
-            return ("★ " if node.is_favorite else "") + (node.name or "Без имени")
+            return ("★ " if node.is_favorite else "") + display_name(node.name)
         if col == COL_TYPE:
             return node_type_text(node)
         if col == COL_ADDRESS:

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from ..network.country_resolver import CountryResolver
 from ..profiles.geoip import endpoint_hosts, normalize_country
+from ..profiles.node_presentation import name_country
 from ..importer.link_parser import is_native_singbox_outbound, repair_node_outbound_from_link, validate_node_outbound
 
 if TYPE_CHECKING:
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 def detect_countries_sync(controller: AppController) -> None:
     # Old persisted guesses are discarded by Node.from_dict. No I/O here.
     for node in controller.state.nodes:
-        if node.country_override:
+        if node.country_override or name_country(node.name):
             node.country_code = normalize_country(node.country_override)
 
 
@@ -40,7 +41,7 @@ def start_country_ip_resolution(controller: AppController) -> None:
     known = getattr(controller, "_country_known_addresses", {})
     needs = []
     for node in controller.state.nodes:
-        if node.country_override:
+        if node.country_override or name_country(node.name):
             node.country_code = normalize_country(node.country_override)
             continue
         fingerprint = endpoint_hosts(node)
@@ -67,17 +68,17 @@ def start_country_ip_resolution(controller: AppController) -> None:
 def on_countries_resolved(controller: AppController, results: dict) -> None:
     if getattr(controller, "_country_shutdown", False):
         return
-    changed = False
+    changed = set()
     for node in controller.state.nodes:
         result = results.get(node.id)
-        if result is None or node.country_override or result[0] != endpoint_hosts(node):
+        if result is None or node.country_override or name_country(node.name) or result[0] != endpoint_hosts(node):
             continue
         code = result[1]
         if node.country_code != code:
             node.country_code = code
-            changed = True
+            changed.add(node.id)
     if changed:
-        controller.nodes_changed.emit(controller.state.nodes)
+        controller.countries_changed.emit(changed)
 
 
 def get_node_by_id(controller: AppController, node_id: str | None) -> Node | None:

@@ -246,15 +246,114 @@
   "dns": {
     "servers": [
       {
-        "tag": "bootstrap-dns",
-        "type": "udp",
-        "server": "1.1.1.1"
+        "type": "https",
+        "tag": "vpn-doh-google",
+        "server": "8.8.8.8",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "dns.google"
+        },
+        "detour": "proxy"
       },
       {
-        "tag": "proxy-dns",
-        "type": "tcp",
-        "server": "8.8.8.8",
+        "type": "https",
+        "tag": "vpn-doh-cloudflare",
+        "server": "1.1.1.1",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "cloudflare-dns.com"
+        },
         "detour": "proxy"
+      },
+      {
+        "type": "https",
+        "tag": "vpn-doh-quad9",
+        "server": "9.9.9.9",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "dns.quad9.net"
+        },
+        "detour": "proxy"
+      },
+      {
+        "type": "fallback",
+        "tag": "vpn-doh",
+        "servers": [
+          "vpn-doh-google",
+          "vpn-doh-cloudflare",
+          "vpn-doh-quad9"
+        ],
+        "strategy": "parallel",
+        "timeout": "3s"
+      },
+      {
+        "type": "https",
+        "tag": "direct-doh-google",
+        "server": "8.8.8.8",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "dns.google"
+        }
+      },
+      {
+        "type": "https",
+        "tag": "direct-doh-cloudflare",
+        "server": "1.1.1.1",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "cloudflare-dns.com"
+        }
+      },
+      {
+        "type": "https",
+        "tag": "direct-doh-quad9",
+        "server": "9.9.9.9",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "dns.quad9.net"
+        }
+      },
+      {
+        "type": "fallback",
+        "tag": "direct-doh",
+        "servers": [
+          "direct-doh-google",
+          "direct-doh-cloudflare",
+          "direct-doh-quad9"
+        ],
+        "strategy": "parallel",
+        "timeout": "3s"
+      },
+      {
+        "type": "local",
+        "tag": "local-system-dns",
+        "prefer_go": true
+      },
+      {
+        "type": "fallback",
+        "tag": "bootstrap-dns",
+        "servers": [
+          "direct-doh",
+          "local-system-dns"
+        ],
+        "strategy": "sequential",
+        "timeout": "4s"
+      },
+      {
+        "type": "fallback",
+        "tag": "proxy-dns",
+        "servers": [
+          "vpn-doh",
+          "bootstrap-dns"
+        ],
+        "strategy": "sequential",
+        "timeout": "6s"
       }
     ],
     "final": "proxy-dns"

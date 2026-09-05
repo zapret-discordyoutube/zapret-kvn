@@ -30,7 +30,7 @@ from .detail_page import StackedSection
 from .node_detail_widget import NodeDetailWidget
 from .node_edit_page import NodeEditPage
 from .nodes_filter_proxy import NodesFilterProxy, SORT_KEYS
-from .nodes_tree_view import NodesTreeView, NodesTreeDelegate
+from .nodes_view import NodesView, NodesDelegate
 from .nodes_group_model import NodesGroupModel, GROUP_MODES, GROUP_KEY_ROLE
 from .nodes_table_model import (
     COL_ADDRESS,
@@ -264,16 +264,17 @@ class NodesPage(StackedSection):
         root.addLayout(toolbar)
 
         # --- Table (source model behind a filter/sort proxy) ---
-        self.table = NodesTreeView(self)
+        self.table = NodesView(self)
         self._table_model = NodesTableModel(self)
         self._proxy = NodesFilterProxy(self)
         self._proxy.setSourceModel(self._table_model)
         self._group_model = NodesGroupModel(self)
         self._group_model.setSourceModel(self._proxy)
         self.table.setModel(self._group_model)
-        self.table.setUniformRowHeights(True)
-        self.table.setAnimated(False)
-        self.table.setRootIsDecorated(True)
+        self.table.verticalHeader().setDefaultSectionSize(NODE_ROW_HEIGHT)
+        self.table.verticalHeader().setMinimumSectionSize(NODE_ROW_HEIGHT)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.verticalHeader().hide()
         self.table.header().setStretchLastSection(False)
         self._proxy.sort(0, Qt.SortOrder.AscendingOrder)
 
@@ -312,7 +313,7 @@ class NodesPage(StackedSection):
         if viewport is not None:
             viewport.installEventFilter(self)
 
-        self._activity_delegate = NodesTreeDelegate(self.table)
+        self._activity_delegate = NodesDelegate(self.table)
         self.table.setItemDelegate(self._activity_delegate)
 
         # The delegate paints the active-row fill/stripe with the accent —
@@ -361,6 +362,7 @@ class NodesPage(StackedSection):
             control.hide()
         root.addWidget(self.table, 1)
         self._group_model.layoutChanged.connect(self._restore_groups)
+        self._group_model.modelReset.connect(self._restore_groups)
         self.table.collapsed.connect(lambda index: self._group_expanded(index, False))
         self.table.expanded.connect(lambda index: self._group_expanded(index, True))
         horizontal_header.sectionHandleDoubleClicked.connect(self._fit_column)
@@ -532,6 +534,9 @@ class NodesPage(StackedSection):
         self._ping_batch_ids.add(node_id)
         if not self._ping_batch_timer.isActive():
             self._ping_batch_timer.start()
+
+    def update_countries(self, node_ids) -> None:
+        self._table_model.refresh_countries(node_ids)
 
     def update_speed(self, node_id: str, _speed_mbps: float | None) -> None:
         self._pending_speed_progress.pop(node_id, None)
@@ -945,7 +950,6 @@ class NodesPage(StackedSection):
 
     def _change_grouping(self, *_):
         self._group_model.set_group_mode(self.group_by_combo.currentData())
-        self.table.setRootIsDecorated(self._group_model.mode != "none")
         self._emit_selection()
         self._emit_view_prefs()
 
@@ -965,16 +969,8 @@ class NodesPage(StackedSection):
             self.counter_label.setText(f"Показано: {self._proxy.rowCount()} из {len(self._nodes)} · Выбрано: {len(self._selected_ids())}")
 
     def _restore_groups(self):
-        self._restoring_groups = True
-        try:
-            for row in range(self._group_model.rowCount()):
-                index = self._group_model.index(row, 0)
-                key = index.data(GROUP_KEY_ROLE)
-                if key:
-                    self.table.setExpanded(index, key not in self._collapsed_groups)
-        finally:
-            self._restoring_groups = False
-        self._update_counter()
+        self.table.apply_collapsed_groups(self._collapsed_groups)
+        self._emit_selection(notify=False)
 
     def _group_expanded(self, index, expanded):
         if self._restoring_groups:
@@ -1061,14 +1057,14 @@ class NodesPage(StackedSection):
         if proxy_index.isValid():
             self.table.select_index(self._group_model.mapFromSource(proxy_index))
 
-    def _emit_selection(self) -> None:
+    def _emit_selection(self, *, notify=True) -> None:
         ids = self._selected_ids()
         self.bulk_edit_btn.setVisible(len(ids) > 1)
         self._update_counter()
         is_manual = self._manual_moves_allowed()
         self.move_up_btn.setEnabled(is_manual and len(ids) == 1)
         self.move_down_btn.setEnabled(is_manual and len(ids) == 1)
-        if len(ids) == 1 and not self._restoring_nodes:
+        if notify and len(ids) == 1 and not self._restoring_nodes:
             self.selected_node_changed.emit(next(iter(ids)))
 
     # ── Button handlers ──

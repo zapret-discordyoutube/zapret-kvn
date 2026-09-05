@@ -322,13 +322,12 @@ class NodesActiveRowFillSeamTests(NodesPageViewTestCase):
 
 
 class NodesActivityDelegateTests(NodesPageViewTestCase):
-    def test_active_server_uses_stock_tree_delegate_and_bold_font(self):
-        from qfluentwidgets import TreeItemDelegate
+    def test_active_server_uses_stock_table_delegate_and_bold_font(self):
+        from qfluentwidgets import TableItemDelegate
         self.page.set_nodes([Node(id="a", name="A")])
         self.page.set_active_node("a")
-        self.assertIsInstance(self.page.table.itemDelegate(), TreeItemDelegate)
-        parent = self.page._group_model.index(0, 0)
-        index = self.page._group_model.index(0, 0, parent)
+        self.assertIsInstance(self.page.table.itemDelegate(), TableItemDelegate)
+        index = self.page._group_model.index(1, 0)
         self.assertTrue(index.data(Qt.ItemDataRole.FontRole).bold())
 
 

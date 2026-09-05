@@ -65,6 +65,7 @@ class AmneziaManager(QObject):
         self._context: RuntimeNodeIdentity | None = None
         self.stats: dict = {}
         self.diagnostic_config = None
+        self._is_current = None
 
     @property
     def is_running(self) -> bool:
@@ -79,10 +80,11 @@ class AmneziaManager(QObject):
         self.error.emit(message)
         self.failure.emit(core_failure("amnezia", stage, clean, **self._identity))
 
-    def start(self, config: dict, relay_port: int, *, context=None, session_generation=0, target_generation=0) -> bool:
+    def start(self, config: dict, relay_port: int, *, context=None, session_generation=0, target_generation=0, is_current=None) -> bool:
         if not self.stop():
             return False
         self._expected = self._failed = self._relay_ready = False
+        self._is_current = is_current
         self._buffer = b""
         self.stats = {}
         self._context = context
@@ -91,6 +93,8 @@ class AmneziaManager(QObject):
         payload = deepcopy(config)
         try:
             payload.update(physical_network())
+            if self._cancelled():
+                return False
             payload.update(session_generation=session_generation, target_generation=target_generation,
                            target_ref=self._identity["target_id"])
             if not AMNEZIA_PATH_DEFAULT.is_file():
@@ -105,10 +109,13 @@ class AmneziaManager(QObject):
             if len(encoded) > 1024 * 1024 or self._process.write(encoded) != len(encoded):
                 raise OSError("Failed to send bounded configuration to Amnezia stdin")
             deadline = time.monotonic() + 10
-            while not self._relay_ready and time.monotonic() < deadline and not self._failed:
+            while not self._relay_ready and time.monotonic() < deadline and not self._failed and not self._cancelled():
                 if self._process.state() == QProcess.ProcessState.NotRunning:
                     break
                 sleep_with_events(0.025)
+            if self._cancelled():
+                self.stop()
+                return False
             if not self._relay_ready or self._failed:
                 raise OSError("Amnezia local relay did not become ready")
             if not self._ready(relay_port, payload):
@@ -126,17 +133,22 @@ class AmneziaManager(QObject):
     def verify_front_dns(self, config: dict) -> bool:
         return self._ready(int(config["listen"].rsplit(":", 1)[1]), config, via_dns=True)
 
+    def _cancelled(self) -> bool:
+        return self._expected or (self._is_current is not None and not self._is_current())
+
     def _ready(self, port: int, config: dict, *, via_dns: bool = False) -> bool:
         deadline = time.monotonic() + 20
         failures: dict[str, str] = {}
         executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="amnezia-ready")
         try:
-            while time.monotonic() < deadline and not self._failed:
+            attempts = 0
+            while time.monotonic() < deadline and not self._failed and not self._cancelled() and attempts < 3:
+                attempts += 1
                 endpoints = tuple((name, name, path) if via_dns else (ip, name, path) for ip, name, path in PROBES)
                 futures = {executor.submit(probe_https, port, username=config["username"], password=config["password"],
-                                            endpoint=e, timeout=4): e[1] for e in endpoints}
+                                            endpoint=e, timeout=min(8 if via_dns else 4, max(0.2, deadline-time.monotonic()))): e[1] for e in endpoints}
                 success = False
-                while futures and time.monotonic() < deadline and not self._failed:
+                while (futures or success) and time.monotonic() < deadline and not self._failed and not self._cancelled():
                     if self._process.state() == QProcess.ProcessState.NotRunning:
                         return False
                     for future in list(futures):
@@ -153,7 +165,9 @@ class AmneziaManager(QObject):
                     sleep_with_events(0.025)
                 for future in futures:
                     future.cancel()
-            if not self._failed:
+                if not success and not self._cancelled():
+                    sleep_with_events(0.25 * attempts)
+            if not self._failed and not self._cancelled():
                 handshake = any(p.get("last_handshake_time_sec", 0) for p in self.stats.get("peers", []))
                 self._report("https_readiness" if handshake else "handshake_readiness",
                              ("HTTPS probes failed: " if handshake else "No authenticated handshake observed; ") +

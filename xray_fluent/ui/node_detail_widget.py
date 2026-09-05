@@ -22,6 +22,7 @@ from qfluentwidgets import (
 )
 
 from ..profiles.models import Node
+from ..profiles.node_presentation import node_country, name_country
 from .detail_page import DetailPage
 from .nodes_table_model import node_type_text
 from .privacy import HoldToRevealButton, endpoint_text
@@ -147,8 +148,8 @@ class NodeDetailWidget(DetailPage):
         )
         self.details_label.setText(
             f"Группа: {node.group or 'Default'}  |  "
-            f"Страна: {node.country_override or node.country_code or 'не определена'} "
-            f"({'вручную' if node.country_override else 'локальная GeoIP'})  |  "
+            f"Страна: {node_country(node) or 'не определена'} "
+            f"({'вручную' if node.country_override else 'флаг в имени' if name_country(node.name) else 'локальная GeoIP'})  |  "
             f"Теги: {', '.join(node.tags) or chr(8212)}"
         )
 

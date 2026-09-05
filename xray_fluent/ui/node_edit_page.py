@@ -71,7 +71,7 @@ class NodeEditPage(DetailPage):
 
         from ..profiles.country_flags import _VALID_CODES
         self.country_combo = ComboBox(card)
-        self.country_combo.addItem("Автоматически — локальная GeoIP", userData="")
+        self.country_combo.addItem("Автоматически — флаг в имени или GeoIP", userData="")
         for code in sorted(_VALID_CODES):
             self.country_combo.addItem(code, userData=code)
         form.addRow(BodyLabel("Страна", card), self.country_combo)
