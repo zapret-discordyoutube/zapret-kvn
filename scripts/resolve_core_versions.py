@@ -307,7 +307,7 @@ def download_and_hash(
                     # curl negotiates HTTP/2. GitHub's HTTP/1.1 archive stream
                     # can be throttled until it is cut off with IncompleteRead.
                     # No API credentials are needed for public release archives.
-                    deadline = max(timeout, 600.0)
+                    deadline = max(timeout, 3600.0)
                     subprocess.run(
                         [curl, "--disable", "--fail", "--silent", "--show-error",
                          "--location", "--proto", "=https", "--proto-redir", "=https",
