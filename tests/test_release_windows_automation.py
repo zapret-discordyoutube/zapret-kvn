@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -332,6 +333,20 @@ class BuildPayloadTests(unittest.TestCase):
             with patch.object(build.shutil, "rmtree", side_effect=PermissionError("locked")):
                 with self.assertRaisesRegex(RuntimeError, "Cannot remove build path"):
                     build._remove_path_strict(path)
+
+    def test_remove_previous_payload_with_readonly_module_license(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / "previous-payload"
+            (payload / "core").mkdir(parents=True)
+            license_file = payload / "core" / "LICENSE-Amnezia.txt"
+            license_file.write_text("test license", encoding="utf-8")
+            license_file.chmod(stat.S_IREAD)
+            try:
+                build._remove_path_strict(payload)
+                self.assertFalse(payload.exists())
+            finally:
+                if license_file.exists():
+                    license_file.chmod(stat.S_IREAD | stat.S_IWRITE)
 
     def test_release_gate_asserts_clean_payload(self) -> None:
         source = (Path(__file__).parents[1] / "scripts" / "release_windows_gate.ps1").read_text(

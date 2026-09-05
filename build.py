@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -92,11 +93,26 @@ def _remove_path_strict(path: Path) -> None:
     """Remove a build path and fail if Windows still has a file locked."""
     if not path.exists() and not path.is_symlink():
         return
+
+    def retry_readonly(remove, filename, error_info):
+        error = error_info[1]
+        target = Path(filename)
+        # Go module licenses retain the cache's read-only bit when copied into
+        # a payload. Clear that bit only; actual locks/ACL failures still fail.
+        if (os.name != "nt" or not isinstance(error, PermissionError)
+                or target.is_symlink() or target.stat().st_mode & stat.S_IWRITE):
+            raise error
+        target.chmod(target.stat().st_mode | stat.S_IWRITE)
+        remove(filename)
+
     try:
         if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
+            shutil.rmtree(path, onerror=retry_readonly)
         else:
-            path.unlink()
+            try:
+                path.unlink()
+            except PermissionError:
+                retry_readonly(os.unlink, path, sys.exc_info())
     except PermissionError as exc:
         raise RuntimeError(
             f"Cannot remove build path because it is locked: {path}"
