@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "unknown_code": "CORE_UNCLASSIFIED",
+  "rules": [
+    {
+      "code": "LOCAL_RELAY_AUTH_REJECTED",
+      "action": "stop",
+      "pattern": "(?:no matching auth method|no acceptable authentication methods|SOCKS authentication (?:method )?rejected|SOCKS credentials.*rejected)"
+    },
+    {
+      "code": "TARGET_PIN_MISMATCH",
+      "action": "stop",
+      "pattern": "(?:no certificate matches the pinned hash|server certificate SHA-256 mismatch|(?:pin(?:ned)?|certificate[_ -]?(?:sha256|hash)).*(?:mismatch|(?:does|did) not match|invalid)|certificate pin mismatch)"
+    },
+    {
+      "code": "TARGET_TLS_UNKNOWN_AUTHORITY",
+      "action": "stop",
+      "pattern": "(?:unknown authority|certificate signed by unknown|CERTIFICATE_VERIFY_FAILED|Trust anchor for certification path not found)"
+    },
+    {
+      "code": "TARGET_TLS_INTERNAL",
+      "action": "stop",
+      "pattern": "(?:tls: internal error|CRYPTO_ERROR 0x150)"
+    },
+    {
+      "code": "TARGET_TLS_REJECTED",
+      "action": "stop",
+      "pattern": "(?:certificate (?:has expired|is not valid for|is valid for)|hostname.*(?:mismatch|not verified)|SSLPeerUnverifiedException|tls: (?:bad certificate|failed to verify certificate))"
+    },
+    {
+      "code": "TARGET_AUTH_REJECTED",
+      "action": "stop",
+      "pattern": "(?:authentication (?:failed|error)|auth rejected|access denied|unauthorized|invalid (?:user|password|UUID))"
+    },
+    {
+      "code": "TARGET_OBFS_REJECTED",
+      "action": "stop",
+      "pattern": "obfs.*(?:reject|invalid|failed)"
+    },
+    {
+      "code": "LOCAL_BIND_COLLISION",
+      "action": "stop",
+      "pattern": "(?:address already in use|only one usage of each socket|EADDRINUSE)"
+    },
+    {
+      "code": "LOCAL_SOCKET_PROTECTION_FAILED",
+      "action": "stop",
+      "pattern": "(?:Android не разрешил исключить .*сокет|failed to protect socket|socket protection failed)"
+    },
+    {
+      "code": "TARGET_NETWORK_TIMEOUT",
+      "action": "recover_once",
+      "pattern": "(?:no recent network activity|i/o timeout|network timeout|deadline exceeded|handshake timeout|SocketTimeoutException|operation timed out)"
+    },
+    {
+      "code": "TARGET_CONNECTION_REFUSED",
+      "action": "recover_once",
+      "pattern": "(?:connection refused|actively refused|forcibly closed|ECONNREFUSED)"
+    },
+    {
+      "code": "TARGET_CONNECTION_CLOSED",
+      "action": "stop",
+      "pattern": "(?:connection reset|broken pipe|unexpected EOF|(?:^|[ :])EOF(?:$|[ ,;]))"
+    }
+  ]
+}

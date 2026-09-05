@@ -14,6 +14,7 @@ class LogsPage(QWidget):
         self.setObjectName("logs")
         self._lines: list[str] = []
         self._pending_lines: list[str] = []
+        self._error_lines: list[str] = []
         self._full_refresh_needed = False
 
         root = QVBoxLayout(self)
@@ -29,6 +30,9 @@ class LogsPage(QWidget):
         self.export_btn = PrimaryPushButton("Экспорт диагностики", self)
 
         toolbar.addWidget(self.search, 1)
+        self.errors_btn = PushButton("Ошибки ядер", self)
+        self.errors_btn.setCheckable(True)
+        toolbar.addWidget(self.errors_btn)
         toolbar.addWidget(self.clear_btn)
         toolbar.addWidget(self.export_btn)
         root.addLayout(toolbar)
@@ -45,6 +49,7 @@ class LogsPage(QWidget):
         self._refresh_timer.timeout.connect(self._flush_updates)
 
         self.search.textChanged.connect(self._schedule_full_refresh)
+        self.errors_btn.toggled.connect(self._schedule_full_refresh)
         self.clear_btn.clicked.connect(self.clear_requested)
         self.export_btn.clicked.connect(self.export_diag_requested)
 
@@ -61,6 +66,15 @@ class LogsPage(QWidget):
         self._lines = list(lines)
         self._pending_lines.clear()
         self._schedule_full_refresh()
+
+    def set_error_records(self, records) -> None:
+        self._error_lines = [
+            f"[{r.failure.component}][{r.failure.stage}] {r.failure.message}\n"
+            f"{r.failure.code}; событий: {r.occurrences}"
+            for r in records
+        ]
+        if self.errors_btn.isChecked():
+            self._schedule_full_refresh()
 
     def clear_view(self) -> None:
         self._lines = []
@@ -79,6 +93,15 @@ class LogsPage(QWidget):
 
     def _flush_updates(self) -> None:
         query = self.search.text().strip().lower()
+        if self.errors_btn.isChecked():
+            self.log_edit.document().setMaximumBlockCount(0)
+            self.log_edit.setPlainText("\n\n".join(
+                line for line in self._error_lines if not query or query in line.lower()
+            ))
+            self._pending_lines.clear()
+            self._full_refresh_needed = False
+            return
+        self.log_edit.document().setMaximumBlockCount(2000)
         if self._full_refresh_needed or query:
             if not query:
                 data = self._lines

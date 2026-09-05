@@ -310,7 +310,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         with self.assertRaises(LinkParseError):
             self._build_plan(link)
 
-    def test_hysteria2_json_outbound_without_original_uri_stays_native(self) -> None:
+    def test_hysteria2_without_uri_does_not_fall_back_to_another_core(self) -> None:
         document = parse_singbox_document(
             TEMPLATE_PATH,
             TEMPLATE_PATH.read_text(encoding="utf-8"),
@@ -328,11 +328,8 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             },
         )
 
-        plan = plan_singbox_runtime(document, node)
-        self.assertEqual(plan.outcome, "native_singbox")
-        self.assertIsNone(plan.hysteria_sidecar)
-        proxy = next(item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy")
-        self.assertEqual(proxy["type"], "hysteria2")
+        with self.assertRaisesRegex(ValueError, "исходной ссылки"):
+            plan_singbox_runtime(document, node)
 
     def test_hysteria_log_redaction_never_exposes_share_uri(self) -> None:
         secret = "hy2://secret@example.com:443/?obfs=gecko&obfs-password=cover"
@@ -547,7 +544,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                 allowed_proxy_ports={1390, 1391},
             )
 
-    def test_vless_reality_stays_native_in_tun_and_proxy_modes(self) -> None:
+    def test_vless_reality_uses_xray_in_tun_and_proxy_modes(self) -> None:
         link = (
             "vless://11111111-1111-1111-1111-111111111111@reality.example:8443"
             "?type=tcp&encryption=none&security=reality"
@@ -560,7 +557,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         )
         node = parse_single(link)
 
-        self.assertEqual(classify_node_for_singbox(node), "native_singbox")
+        self.assertEqual(classify_node_for_singbox(node), "hybrid_xray_sidecar")
         self.assertEqual(node.outbound["streamSettings"]["realitySettings"]["spiderX"], "/")
 
         plans = (
@@ -573,31 +570,16 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         )
         for plan in plans:
             with self.subTest(mode="proxy" if plan.socks_port else "tun"):
-                self.assertEqual(plan.outcome, "native_singbox")
-                self.assertIsNone(plan.xray_sidecar)
-                proxy = next(
-                    item
-                    for item in plan.singbox_config["outbounds"]
-                    if item.get("tag") == "proxy"
-                )
-                self.assertEqual(proxy["type"], "vless")
-                self.assertEqual(proxy["server"], "reality.example")
-                self.assertEqual(proxy["server_port"], 8443)
-                self.assertEqual(
-                    proxy["tls"],
-                    {
-                        "enabled": True,
-                        "server_name": "www.example.com",
-                        "utls": {"enabled": True, "fingerprint": "edge"},
-                        "reality": {
-                            "enabled": True,
-                            "public_key": "Ie4ld0x7PvMRA2idLXq58rXRhefsved2eKgqtBtS2Hg",
-                            "short_id": "0123456789abcdef",
-                        },
-                    },
-                )
+                self.assertEqual(plan.outcome, "hybrid_xray_sidecar")
+                self.assertIsNotNone(plan.xray_sidecar)
+                proxy = plan.xray_sidecar.config["outbounds"][0]
+                self.assertEqual(proxy["protocol"], "vless")
+                self.assertEqual(proxy["settings"], node.outbound["settings"])
+                for key in ("network", "security", "realitySettings"):
+                    self.assertEqual(proxy["streamSettings"][key], node.outbound["streamSettings"][key])
+                self.assertFalse(any(o.get("type") == "vless" for o in plan.singbox_config["outbounds"]))
 
-    def test_vless_encryption_stays_native_in_tun_and_proxy_modes(self) -> None:
+    def test_vless_encryption_uses_xray_in_tun_and_proxy_modes(self) -> None:
         encryption = (
             "mlkem768x25519plus.native.0rtt."
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -616,7 +598,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
 
         user = node.outbound["settings"]["vnext"][0]["users"][0]
         self.assertEqual(user["encryption"], encryption)
-        self.assertEqual(classify_node_for_singbox(node), "native_singbox")
+        self.assertEqual(classify_node_for_singbox(node), "hybrid_xray_sidecar")
 
         plans = (
             plan_singbox_runtime(document, node),
@@ -628,14 +610,10 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         )
         for plan in plans:
             with self.subTest(mode="proxy" if plan.socks_port else "tun"):
-                self.assertEqual(plan.outcome, "native_singbox")
-                self.assertIsNone(plan.xray_sidecar)
-                proxy = next(
-                    item
-                    for item in plan.singbox_config["outbounds"]
-                    if item.get("tag") == "proxy"
-                )
-                self.assertEqual(proxy["encryption"], encryption)
+                self.assertEqual(plan.outcome, "hybrid_xray_sidecar")
+                self.assertIsNotNone(plan.xray_sidecar)
+                proxy = plan.xray_sidecar.config["outbounds"][0]
+                self.assertEqual(proxy["settings"]["vnext"][0]["users"][0]["encryption"], encryption)
 
 if __name__ == "__main__":
     unittest.main()

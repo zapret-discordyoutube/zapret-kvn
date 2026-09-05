@@ -542,7 +542,7 @@ class HysteriaManager(QObject):
                 "unexpected_exit": HysteriaFailureCode.LOCAL_PROCESS_EXITED,
                 "wait_ready": HysteriaFailureCode.LOCAL_RELAY_NOT_READY,
                 "stop": HysteriaFailureCode.LOCAL_PROCESS_EXITED,
-            }.get(stage, HysteriaFailureCode.LOCAL_PROCESS_EXITED)
+            }.get(stage, HysteriaFailureCode.CORE_UNCLASSIFIED)
         self._last_failure_code = resolved
         formatted = self._format_message(message, stage=stage)
         # The typed cause is published before generic process/state callbacks,
@@ -598,12 +598,8 @@ class HysteriaManager(QObject):
                 and not self._chrome_fallback_pending
                 and not self._chrome_fallback_in_progress
             ):
-                self._emit_error(
-                    "Удалённое TLS-рукопожатие Hysteria2 завершилось tls: internal error "
-                    "после одноразовой проверки совместимости сертификата.",
-                    stage="remote_handshake",
-                )
-        elif stage == "remote_handshake":
+                self._emit_error(clean, stage="remote_handshake")
+        else:
             failure = classify_hysteria_failure(clean)
             if failure is not None:
                 self._emit_error(clean, stage=stage, code=failure)

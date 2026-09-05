@@ -5,22 +5,15 @@ import socket
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT, DEFAULT_XRAY_STATS_API_PORT
+from ..constants import DEFAULT_XRAY_STATS_API_PORT
 from ..engines.singbox import (
     SingboxRuntimePlan,
     start_proxy as start_singbox_proxy,
     start_tun as start_singbox_tun,
 )
-from ..engines.tun2socks import hot_swap as hot_swap_tun2socks, start_tun as start_tun2socks_tun
-from ..engines.xray import (
-    restart_proxy_core as restart_xray_proxy_core,
-    start_proxy as start_xray_proxy,
-    start_tun as start_xray_tun,
-)
 
 if TYPE_CHECKING:
     from ..app_controller import AppController
-    from ..application.session_state import XrayRuntimeConfig
 
 
 def find_free_api_port(preferred: int | None = None, excluded: set[int] | None = None) -> int:
@@ -56,21 +49,9 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             return False
 
         node = controller.selected_node
-        singbox_editor_mode = controller.is_singbox_editor_mode()
-        xray_raw_mode = controller.uses_xray_raw_config()
-        tun2socks_mode = controller.is_tun2socks_mode()
         if node is None and not controller._can_connect_without_selected_node():
-            message = "Сначала выберите сервер."
-            if singbox_editor_mode or xray_raw_mode:
-                message = "В конфиге есть outbound tag `proxy`. Сначала выберите сервер."
+            message = "В конфиге есть outbound tag `proxy`. Сначала выберите сервер."
             controller._set_connection_status("error", message, level="warning")
-            return False
-        if (
-            node is not None
-            and not singbox_editor_mode
-            and not xray_raw_mode
-            and not controller.target_profile_allows_core_start(node)
-        ):
             return False
 
         controller._reset_auto_switch_state(
@@ -81,32 +62,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
         prev_active_core = controller._active_core
         tun = controller.state.settings.tun_mode
         controller._xray_api_port = 0
-        if tun2socks_mode:
-            try:
-                controller._xray_api_port = find_free_api_port(
-                    excluded={DEFAULT_SOCKS_PORT, DEFAULT_HTTP_PORT},
-                )
-            except RuntimeError:
-                controller._set_connection_status("error", "Не удалось найти свободный порт для API Xray", level="error")
-                return False
-
-        singbox_plan: SingboxRuntimePlan | None = None
-        runtime_xray: XrayRuntimeConfig | None = None
-        tun2socks_socks_port = 0
-        tun2socks_http_port = 0
-        if singbox_editor_mode:
-            session_label = node.name if node else controller.get_active_singbox_config_name()
-        elif xray_raw_mode:
-            session_label = node.name if node else controller.get_active_xray_config_name()
-        else:
-            session_label = node.name if node else "unknown"
-
-        if node is not None:
-            if not singbox_editor_mode and not xray_raw_mode:
-                problem = controller._prepare_node_for_runtime(node)
-                if problem:
-                    controller._set_connection_status("error", problem, level="error")
-                    return False
+        session_label = node.name if node else controller.get_active_singbox_config_name()
 
         if tun:
             controller._log(f"[tun] attempting TUN connect, admin={_is_admin()}")
@@ -126,73 +82,23 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             controller.proxy.release_if_owned(restore_previous=True)
 
             controller._tun_log_count = 0
-            engine = controller.state.settings.tun_engine
-
-            if engine == "singbox":
-                result = start_singbox_tun(controller, node, prev_active_core=prev_active_core)
-                if result is None:
-                    return False
-                singbox_plan = result.plan
-                session_label = result.session_label
-            elif engine == "xray":
-                result = start_xray_tun(controller, node, prev_active_core=prev_active_core)
-                if result is None:
-                    return False
-                runtime_xray = result.runtime
-                session_label = result.session_label
-            elif engine == "tun2socks":
-                if node is None:
-                    controller._active_core = prev_active_core
-                    return False
-                result = start_tun2socks_tun(controller, node, prev_active_core=prev_active_core)
-                if result is None:
-                    return False
-                session_label = result.session_label
-                tun2socks_socks_port = result.socks_port
-                tun2socks_http_port = result.http_port
-            else:
-                controller._active_core = prev_active_core
-                controller._set_connection_status("error", f"Неизвестный TUN engine: {engine}", level="error")
-                return False
+            result = start_singbox_tun(controller, node, prev_active_core=prev_active_core)
         else:
-            if controller.is_singbox_proxy_mode():
-                result = start_singbox_proxy(controller, node, prev_active_core=prev_active_core)
-                if result is None:
-                    return False
-                singbox_plan = result.plan
-                session_label = result.session_label
-            else:
-                result = start_xray_proxy(controller, node, prev_active_core=prev_active_core)
-                if result is None:
-                    return False
-                runtime_xray = result.runtime
-                session_label = result.session_label
+            result = start_singbox_proxy(controller, node, prev_active_core=prev_active_core)
+        if result is None:
+            return False
+        singbox_plan: SingboxRuntimePlan = result.plan
+        session_label = result.session_label
 
         session_node = node
-        if singbox_editor_mode and singbox_plan is not None and not singbox_plan.used_selected_node:
-            session_node = None
-        if xray_raw_mode and runtime_xray is not None and not runtime_xray.used_selected_node:
+        if not singbox_plan.used_selected_node:
             session_node = None
 
         if session_node is not None:
             session_node.last_used_at = datetime.now(timezone.utc).isoformat()
 
-        outbound_pool_tags = (
-            runtime_xray.outbound_pool_tags
-            if runtime_xray is not None
-            else singbox_plan.selector_tags
-            if singbox_plan is not None
-            else controller.xray_outbound_pool().tags
-            if controller._active_core == "tun2socks"
-            else None
-        )
-        control_core = (
-            "xray"
-            if singbox_plan is not None and singbox_plan.is_hybrid
-            else "singbox"
-            if controller._active_core == "singbox"
-            else "xray"
-        )
+        outbound_pool_tags = singbox_plan.selector_tags
+        control_core = "xray" if singbox_plan.is_hybrid else "singbox"
         if not controller._pin_started_outbound(session_node, control_core, outbound_pool_tags):
             controller._set_connection_status(
                 "error",
@@ -227,19 +133,8 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             api_port=controller._xray_api_port,
             hybrid=bool(singbox_plan is not None and singbox_plan.is_hybrid),
             sidecar_kind=singbox_plan.sidecar_kind if singbox_plan is not None else "",
-            socks_port=(
-                runtime_xray.socks_port
-                if runtime_xray is not None
-                else singbox_plan.socks_port if singbox_plan is not None and singbox_plan.socks_port > 0
-                else tun2socks_socks_port if tun2socks_socks_port > 0 else None
-            ),
-            http_port=(
-                runtime_xray.http_port
-                if runtime_xray is not None
-                else singbox_plan.http_port if singbox_plan is not None and singbox_plan.http_port > 0
-                else tun2socks_http_port if tun2socks_http_port > 0 else None
-            ),
-            xray_inbound_tags=runtime_xray.inbound_tags if runtime_xray is not None else (),
+            socks_port=singbox_plan.socks_port or None,
+            http_port=singbox_plan.http_port or None,
             sidecar_relay_port=(
                 singbox_plan.xray_sidecar.relay_port
                 if singbox_plan and singbox_plan.xray_sidecar
@@ -250,18 +145,14 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             protect_ss_port=controller._protect_ss_port,
             protect_ss_password=controller._protect_ss_password,
             ping_host=(
-                runtime_xray.ping_host
-                if runtime_xray is not None
-                else controller._infer_singbox_ping_target(
-                    singbox_plan.singbox_config if singbox_plan is not None else {},
+                controller._infer_singbox_ping_target(
+                    singbox_plan.singbox_config,
                     session_node,
                 )[0]
             ),
             ping_port=(
-                runtime_xray.ping_port
-                if runtime_xray is not None
-                else controller._infer_singbox_ping_target(
-                    singbox_plan.singbox_config if singbox_plan is not None else {},
+                controller._infer_singbox_ping_target(
+                    singbox_plan.singbox_config,
                     session_node,
                 )[1]
             ),
@@ -274,8 +165,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             ),
         )
         controller.schedule_save()
-        session_mode = "xray-tun" if tun and controller._active_core == "xray" else controller._active_core
-        controller._traffic_history.start_session(session_label, session_mode)
+        controller._traffic_history.start_session(session_label, "singbox")
         # П5 (AC13): подключение состоялось (сессия зафиксирована, статус
         # running) — фоновый прогрев DNS-кэша zapret для всех нод пула.
         controller._start_proxy_dns_prewarm()
@@ -297,12 +187,7 @@ def disconnect_current(controller: AppController, disable_proxy: bool = True, em
             controller.status.emit("info", "Остановка VPN...")
         stopped = controller._stop_active_connection_processes(disable_proxy=disable_proxy)
         if stopped:
-            controller._active_core = (
-                "singbox"
-                if not controller.state.settings.tun_mode
-                and str(controller.state.settings.proxy_engine) == "singbox"
-                else "xray"
-            )
+            controller._active_core = "singbox"
             controller._clear_active_session()
         if emit_status:
             if stopped:

@@ -74,6 +74,7 @@ from .application.auto_switch_service import (
     begin_auto_switch_warmup,
     transport_kind_for_node,
 )
+from .application.runtime_errors import RuntimeErrorJournal, core_failure, is_core_error_line
 from .application.hysteria_runtime_contract import (
     AUTOMATIC_SWITCH_FAILURES,
     SECURITY_FAILURES,
@@ -167,8 +168,6 @@ from .engines.xray import (
     build_xray_config,
     get_windows_default_route_context,
     get_xray_version,
-    restart_proxy_core as restart_xray_proxy_core,
-    restart_proxy_core_steps as restart_xray_proxy_core_steps,
 )
 from .engines.hysteria import HysteriaManager
 from .engines.singbox import (
@@ -231,10 +230,6 @@ from .runtime_logging import (
     contextualize_runtime_log,
     identities_for_tags,
     runtime_mapping_lines,
-)
-from .engines.tun2socks import (
-    Tun2SocksManager,
-    hot_swap_steps as hot_swap_tun2socks_steps,
 )
 from .storage import PassphraseRequired, StateStorage
 from .startup import build_startup_command, set_startup_enabled
@@ -302,6 +297,7 @@ class HotSwitchPlan:
 
 
 class AppController(QObject):
+    runtime_errors_changed = pyqtSignal(object)
     nodes_changed = pyqtSignal(object)
     subscriptions_changed = pyqtSignal(object)
     subscription_update_started = pyqtSignal(str)
@@ -333,7 +329,6 @@ class AppController(QObject):
         self.xray = XrayManager(self)
         self.singbox = SingBoxManager(self)
         self.hysteria = HysteriaManager(self)
-        self.tun2socks = Tun2SocksManager(self)
         self._xray_tun_routes = XrayTunRouteManager(self)
         self.zapret = ZapretManager(self)
         self.proxy = ProxyManager()
@@ -344,6 +339,7 @@ class AppController(QObject):
         self._node_lookup_size = -1
         self._node_by_id: dict[str, Node] = {}
         self.recent_logs: list[str] = []
+        self.runtime_errors = RuntimeErrorJournal()
         self.connected = False
         self.locked = False
 
@@ -460,10 +456,6 @@ class AppController(QObject):
 
         self._bind_hysteria_manager(self.hysteria)
 
-        self.tun2socks.log_received.connect(lambda line: self._on_core_log("tun2socks", line))
-        self.tun2socks.error.connect(lambda message: self._on_core_error("tun2socks", message))
-        self.tun2socks.state_changed.connect(self._on_core_state_changed)
-        self.tun2socks.stopped.connect(lambda code: self._on_core_stopped("tun2socks", code))
         self._xray_tun_routes.log_received.connect(self._on_xray_log)
         self.zapret.target_profile_ready.connect(self._on_proxy_protection_ready)
         self.zapret.target_profile_failed.connect(self._on_proxy_protection_failed)
@@ -598,38 +590,27 @@ class AppController(QObject):
 
     def is_singbox_tun_mode(self, settings: AppSettings | None = None) -> bool:
         settings = settings or self.state.settings
-        return bool(settings.tun_mode and str(settings.tun_engine) == "singbox")
+        return bool(settings.tun_mode)
 
     def is_singbox_proxy_mode(self, settings: AppSettings | None = None) -> bool:
         settings = settings or self.state.settings
-        return bool(not settings.tun_mode and str(settings.proxy_engine) == "singbox")
+        return not settings.tun_mode
 
     def is_singbox_editor_mode(self, settings: AppSettings | None = None) -> bool:
-        return self.is_singbox_tun_mode(settings) or self.is_singbox_proxy_mode(settings)
+        return True
 
     def is_xray_tun_mode(self, settings: AppSettings | None = None) -> bool:
-        settings = settings or self.state.settings
-        return bool(settings.tun_mode and str(settings.tun_engine) == "xray")
+        return False
 
     def is_tun2socks_mode(self, settings: AppSettings | None = None) -> bool:
-        settings = settings or self.state.settings
-        return bool(settings.tun_mode and str(settings.tun_engine) == "tun2socks")
+        return False
 
     def uses_xray_raw_config(self, settings: AppSettings | None = None) -> bool:
-        settings = settings or self.state.settings
-        if settings.tun_mode:
-            return self.is_xray_tun_mode(settings)
-        return str(settings.proxy_engine) == "xray"
+        return False
 
     def _can_connect_without_selected_node(self, settings: AppSettings | None = None) -> bool:
-        settings = settings or self.state.settings
-        if self.is_singbox_editor_mode(settings):
-            _, _, has_proxy_outbound = self._inspect_active_singbox_config()
-            return not has_proxy_outbound
-        if self.uses_xray_raw_config(settings):
-            _, _, has_proxy_outbound, _, _, _ = self._inspect_active_xray_config()
-            return not has_proxy_outbound
-        return False
+        _, _, has_proxy_outbound = self._inspect_active_singbox_config()
+        return not has_proxy_outbound
 
     def _system_proxy_bypass_lan(self, settings: AppSettings | None = None) -> bool:
         return system_proxy_bypass_lan_operation(self, settings)
@@ -1425,7 +1406,7 @@ class AppController(QObject):
         try:
             code = HysteriaFailureCode(code_text)
         except ValueError:
-            code = HysteriaFailureCode.LOCAL_PROCESS_EXITED
+            code = HysteriaFailureCode.CORE_UNCLASSIFIED
         self._log(
             f"[hysteria-failure] code={code.value} process_generation={process_generation}"
         )
@@ -1441,7 +1422,7 @@ class AppController(QObject):
             )
             self._set_connection_status(
                 "error",
-                f"Hysteria2 остановлена без ослабления TLS: {code.value}.",
+                message,
                 level="error",
             )
             self._desired_connected = False
@@ -2313,9 +2294,9 @@ class AppController(QObject):
         """Привести процессы к консистентному виду после отменённого перехода.
 
         Отмена по generation может остановить hot-swap между шагами: например
-        xray уже убит, а tun2socks ещё жив (connected=False, но процессы есть).
+        транспорт уже остановлен, а sing-box ещё жив (connected=False).
         Тогда очередь не вычислит disconnect (connected=False), и без уборки
-        остался бы осиротевший tun2socks/xray. Частично живая связка гасится,
+        остался бы частично работающий runtime. Такая связка гасится,
         сессия очищается; следующий drain пересчитает актуальное действие
         (connect при desired_connected=True даёт полный переезд на новую ноду).
         """
@@ -2325,7 +2306,6 @@ class AppController(QObject):
             self.xray.is_running
             or self.singbox.is_running
             or self.hysteria.is_running
-            or self.tun2socks.is_running
         )
         if any_running:
             self._log("[transition] cancelled mid-swap — stopping partial connection processes")
@@ -2895,15 +2875,11 @@ class AppController(QObject):
             self.status.emit(level, message)
 
     def _compute_connected_state(self) -> bool:
-        if self._active_core == "singbox":
-            if self._active_session is not None and self._active_session.hybrid:
-                return self.singbox.is_running and self.xray.is_running
-            if self._active_session is not None and self._active_session.sidecar_kind == "hysteria":
-                return self.singbox.is_running and self.hysteria.is_running
-            return self.singbox.is_running
-        if self._active_core == "tun2socks":
-            return self.tun2socks.is_running and self.xray.is_running
-        return self.xray.is_running
+        if self._active_session is not None and self._active_session.hybrid:
+            return self.singbox.is_running and self.xray.is_running
+        if self._active_session is not None and self._active_session.sidecar_kind == "hysteria":
+            return self.singbox.is_running and self.hysteria.is_running
+        return self.singbox.is_running
 
     def _refresh_connected_state(self) -> tuple[bool, bool]:
         previous = self.connected
@@ -3367,16 +3343,12 @@ class AppController(QObject):
         return disconnect_current_operation(self, disable_proxy=disable_proxy, emit_status=emit_status)
 
     def _restart_proxy_core(self, reason: str) -> bool:
-        if self._active_core == "singbox":
-            return restart_singbox_proxy_runtime_operation(self, reason)
-        return restart_xray_proxy_core(self, reason)
+        return restart_singbox_proxy_runtime_operation(self, reason)
 
     def _restart_proxy_core_steps(self, reason: str) -> TransitionSteps:
-        """Генераторная версия proxy hot-swap для TransitionRunner (AC22)."""
-        if self._active_core == "singbox":
-            # Холодный путь: sing-box proxy runtime остаётся синхронным.
-            return restart_singbox_proxy_runtime_operation(self, reason)
-        return (yield from restart_xray_proxy_core_steps(self, reason))
+        """Keep the transition runner interface for the single front runtime."""
+        yield from ()
+        return restart_singbox_proxy_runtime_operation(self, reason)
 
     def _restart_singbox_runtime(self, reason: str) -> bool:
         return restart_singbox_runtime_operation(self, reason)
@@ -3429,6 +3401,8 @@ class AppController(QObject):
             self._request_transition("routing changed")
 
     def update_settings(self, settings: AppSettings) -> None:
+        settings.proxy_engine = "singbox"
+        settings.tun_engine = "singbox"
         old_settings = self.state.settings
         old_launch = old_settings.launch_on_startup
         old_tun = old_settings.tun_mode
@@ -3539,7 +3513,8 @@ class AppController(QObject):
     def build_diagnostics(self) -> Path:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = LOG_DIR / f"diagnostics_{stamp}.zip"
-        return export_diagnostics(output, self.state, self.recent_logs)
+        return export_diagnostics(output, self.state, self.recent_logs,
+                                  runtime_errors=self.runtime_errors.snapshot())
 
     def auto_connect_if_needed(self) -> None:
         if not self.state.settings.auto_connect_last or self.locked:
@@ -3603,6 +3578,8 @@ class AppController(QObject):
         self._on_core_log("xray", line)
 
     def _on_core_log(self, engine: str, line: str) -> None:
+        if is_core_error_line(line):
+            self._record_core_failure(engine, "runtime", line)
         context = self._core_log_contexts.get(engine)
         if context is None:
             context = RuntimeLogContext(
@@ -3629,6 +3606,7 @@ class AppController(QObject):
         self._on_core_error("xray", message)
 
     def _on_core_error(self, engine: str, message: str) -> None:
+        self._record_core_failure(engine, "operation", message)
         context = self._core_log_contexts.get(engine)
         if context is None:
             context = RuntimeLogContext(
@@ -3640,6 +3618,19 @@ class AppController(QObject):
         detailed = contextualize_runtime_log(message, context=context, error=True)
         self._log(detailed)
         self._set_connection_status("error", detailed, level="error")
+
+    def _record_core_failure(self, engine: str, stage: str, message: str) -> None:
+        journal = getattr(self, "runtime_errors", None)
+        if journal is None:
+            self.runtime_errors = journal = RuntimeErrorJournal()
+        context = self._core_log_contexts.get(engine)
+        journal.record(core_failure(
+            engine, stage, message,
+            session_generation=context.generation if context else 0,
+            # A shared log stream does not prove which pooled target emitted it.
+            # Never attribute late output to the currently selected node.
+        ))
+        self.runtime_errors_changed.emit(journal.snapshot())
 
     def _on_singbox_error(self, message: str) -> None:
         self._on_core_error("sing-box", message)
@@ -3719,7 +3710,7 @@ class AppController(QObject):
 
     def _hot_swap_node_steps(self, reason: str) -> TransitionSteps:
         """Handle node switch while TUN is active."""
-        node = self._runtime_selected_node()
+        yield from ()
         session = self._active_session
         if session is None:
             self._auto_switch_transitioning = False
@@ -3729,26 +3720,10 @@ class AppController(QObject):
         self._protect_ss_port = session.protect_ss_port
         self._protect_ss_password = session.protect_ss_password
 
-        if self._active_core == "singbox":
-            # Холодный путь: sing-box native TUN остаётся синхронным.
-            try:
-                return self._restart_singbox_runtime(reason)
-            finally:
-                self._auto_switch_transitioning = False
-
-        # tun2socks mode: restart only xray while the TUN adapter stays up
-        if self._active_core == "tun2socks":
-            if node is None:
-                self._auto_switch_transitioning = False
-                return False
-            try:
-                return (yield from hot_swap_tun2socks_steps(self, reason, node))
-            finally:
-                self._auto_switch_transitioning = False
-
-        # sing-box raw mode keeps the user config as the source of truth and may
-        # switch between native and hybrid planner outcomes, so reconnect.
-        return self._reconnect(f"{reason} (sing-box config change)")
+        try:
+            return self._restart_singbox_runtime(reason)
+        finally:
+            self._auto_switch_transitioning = False
 
     def _reconnect(self, reason: str) -> bool:
         return reconnect_operation(self, reason)

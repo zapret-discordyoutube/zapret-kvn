@@ -320,6 +320,8 @@ def build_exe() -> None:
         "--hidden-import", "encodings.idna",
         # Imported lazily by QR support and therefore must be explicit for PyInstaller.
         "--hidden-import", "zxingcpp",
+        "--add-data", _windows_path(ROOT / "xray_fluent" / "application" / "runtime-errors.json")
+        + ";xray_fluent/application",
     ]
     _run(cmd, cwd=str(ROOT))
 

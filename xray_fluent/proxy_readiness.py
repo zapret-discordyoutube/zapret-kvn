@@ -30,21 +30,14 @@ def probe_socks5_listener(
     username: str = "",
     password: str = "",
 ) -> bool:
-    """Complete the SOCKS5 method negotiation on loopback.
-
-    The probe proves that a real SOCKS5 server owns the port, not that this
-    client may relay through it.  ``\\xff`` (no acceptable methods) is
-    therefore a positive proof: only a live SOCKS5 listener answers that way,
-    for example an Xray inbound with mandatory password auth when the caller
-    has no credentials.  When credentials are supplied, both methods are
-    offered and the RFC 1929 subnegotiation is completed so an auth-rejecting
-    listener is still reported as not ready.
-    """
+    """Verify that the configured SOCKS authentication succeeds on loopback."""
 
     user_bytes = username.encode("utf-8") if username else b""
     pass_bytes = password.encode("utf-8") if password else b""
     has_credentials = bool(user_bytes) and len(user_bytes) <= 255 and len(pass_bytes) <= 255
-    methods = b"\x00\x02" if has_credentials else b"\x00"
+    if username and not has_credentials:
+        return False
+    methods = b"\x02" if has_credentials else b"\x00"
     try:
         with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout) as client:
             client.settimeout(timeout)
@@ -54,7 +47,7 @@ def probe_socks5_listener(
                 return False
             chosen = reply[1]
             if chosen == 0xFF:
-                return True
+                return False
             if chosen not in methods:
                 return False
             if chosen == 0x02:

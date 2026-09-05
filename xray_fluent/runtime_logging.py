@@ -14,10 +14,12 @@ _SHARE_URI_RE = re.compile(
 )
 _SECRET_PAIR_RE = re.compile(
     r"(?i)((?:[\"']?)(?:auth|password|passwd|obfs[-_]?password|pinsha256|pin_sha256|"
-    r"clientkey|client_key|privatekey|private_key|presharedkey|token|ech)(?:[\"']?)"
+    r"clientkey|client_key|privatekey|private_key|publickey|public_key|shortid|"
+    r"uuid|presharedkey|pre_shared_key|headerprotectionkey|certificate_sha256|token|ech)(?:[\"']?)"
     r"\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
 )
 _OUTBOUND_RE = re.compile(r"outbound/[^\[]+\[([^\]]+)\]")
+_UUID_RE = re.compile(r"(?i)\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b")
 
 
 def redact_runtime_log(text: str, *, secrets: Iterable[str] = ()) -> str:
@@ -27,6 +29,7 @@ def redact_runtime_log(text: str, *, secrets: Iterable[str] = ()) -> str:
     clean = _CONTROL_RE.sub("", clean)
     clean = _SHARE_URI_RE.sub("<ссылка скрыта>", clean)
     clean = _SECRET_PAIR_RE.sub(lambda match: f"{match.group(1)}<скрыто>", clean)
+    clean = _UUID_RE.sub("<скрыто>", clean)
     for secret in secrets:
         value = str(secret or "")
         if len(value) >= 4:

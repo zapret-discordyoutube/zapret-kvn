@@ -101,8 +101,6 @@ def cleanup_connection_runtime_state(
     controller._singbox_clash_api_port = 0
     controller._protect_ss_port = 0
     controller._protect_ss_password = ""
-    controller._tun2socks_proxy_username = ""
-    controller._tun2socks_proxy_password = ""
     controller._traffic_save_counter = 0
     controller._active_singbox_plan = None
     controller._hysteria_failure_started_at = 0.0
@@ -121,30 +119,10 @@ def cleanup_connection_runtime_state(
 def stop_active_connection_processes(controller: AppController, *, disable_proxy: bool) -> bool:
     stopped = True
 
-    if controller.hysteria.is_running:
-        stopped = controller.hysteria.stop() and stopped
-
-    if controller._active_core == "singbox":
-        if controller.singbox.is_running:
-            stopped = controller.singbox.stop() and stopped
-        if controller.xray.is_running:
-            stopped = controller.xray.stop() and stopped
-        if controller.tun2socks.is_running:
-            stopped = controller.tun2socks.stop() and stopped
-    elif controller._active_core == "tun2socks":
-        if controller.tun2socks.is_running:
-            stopped = controller.tun2socks.stop() and stopped
-        if controller.xray.is_running:
-            stopped = controller.xray.stop() and stopped
-        if controller.singbox.is_running:
-            stopped = controller.singbox.stop() and stopped
-    else:
-        if controller.xray.is_running:
-            stopped = controller.xray.stop() and stopped
-        if controller.singbox.is_running:
-            stopped = controller.singbox.stop() and stopped
-        if controller.tun2socks.is_running:
-            stopped = controller.tun2socks.stop() and stopped
+    # Close traffic admission before stopping its transport.
+    for manager in (controller.singbox, controller.xray, controller.hysteria):
+        if manager.is_running:
+            stopped = manager.stop() and stopped
 
     if disable_proxy and controller.state.settings.enable_system_proxy:
         controller.proxy.disable(restore_previous=True)
@@ -285,8 +263,6 @@ def shutdown(controller: AppController) -> None:
     controller.disconnect_current()
     if controller.hysteria.is_running:
         controller.hysteria.stop()
-    if controller.tun2socks.is_running:
-        controller.tun2socks.stop()
     if controller.singbox.is_running:
         controller.singbox.stop()
     if controller.xray.is_running:

@@ -8,6 +8,8 @@ import time
 from typing import Callable, Iterable, Protocol
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from .runtime_errors import classify_core_error
+
 
 class HysteriaExecutionKind(str, Enum):
     NATIVE = "native"
@@ -39,6 +41,11 @@ class HysteriaRuntimeState(str, Enum):
 
 
 class HysteriaFailureCode(str, Enum):
+    CORE_UNCLASSIFIED = "CORE_UNCLASSIFIED"
+    LOCAL_RELAY_AUTH_REJECTED = "LOCAL_RELAY_AUTH_REJECTED"
+    LOCAL_SOCKET_PROTECTION_FAILED = "LOCAL_SOCKET_PROTECTION_FAILED"
+    TARGET_TLS_REJECTED = "TARGET_TLS_REJECTED"
+    TARGET_CONNECTION_CLOSED = "TARGET_CONNECTION_CLOSED"
     TARGET_NETWORK_TIMEOUT = "TARGET_NETWORK_TIMEOUT"
     TARGET_CONNECTION_REFUSED = "TARGET_CONNECTION_REFUSED"
     TARGET_TLS_INTERNAL = "TARGET_TLS_INTERNAL"
@@ -76,6 +83,7 @@ AUTOMATIC_SWITCH_FAILURES = frozenset(
 
 SECURITY_FAILURES = frozenset(
     {
+        HysteriaFailureCode.TARGET_TLS_REJECTED,
         HysteriaFailureCode.TARGET_TLS_INTERNAL,
         HysteriaFailureCode.TARGET_TLS_UNKNOWN_AUTHORITY,
         HysteriaFailureCode.TARGET_PIN_MISMATCH,
@@ -386,35 +394,9 @@ def classify_hysteria_uri(raw_uri: str, *, platform: str = "windows") -> Hysteri
 
 
 def classify_hysteria_failure(message: str, *, process_exited: bool = False) -> HysteriaFailureCode | None:
-    value = str(message or "").lower()
-    if "pin" in value and any(
-        marker in value
-        for marker in (
-            "mismatch",
-            # официальное ядро: «no certificate matches the pinned hash»
-            "no certificate matches",
-            # покрывает и «does not match», и «did not match»
-            "not match",
-            "invalid",
-        )
-    ):
-        return HysteriaFailureCode.TARGET_PIN_MISMATCH
-    if any(marker in value for marker in ("unknown authority", "certificate signed by unknown")):
-        return HysteriaFailureCode.TARGET_TLS_UNKNOWN_AUTHORITY
-    if "tls: internal error" in value or "crypto_error 0x150" in value:
-        return HysteriaFailureCode.TARGET_TLS_INTERNAL
-    if any(marker in value for marker in ("authentication failed", "auth rejected", "access denied")):
-        return HysteriaFailureCode.TARGET_AUTH_REJECTED
-    if "obfs" in value and any(marker in value for marker in ("reject", "invalid", "failed")):
-        return HysteriaFailureCode.TARGET_OBFS_REJECTED
-    if any(marker in value for marker in ("no recent network activity", "i/o timeout", "network timeout", "deadline exceeded")):
-        return HysteriaFailureCode.TARGET_NETWORK_TIMEOUT
-    if any(marker in value for marker in ("connection refused", "actively refused", "forcibly closed")):
-        return HysteriaFailureCode.TARGET_CONNECTION_REFUSED
-    if "address already in use" in value or "only one usage of each socket" in value:
-        return HysteriaFailureCode.LOCAL_BIND_COLLISION
-    if "relay" in value and any(marker in value for marker in ("not ready", "did not open", "не запуст")):
-        return HysteriaFailureCode.LOCAL_RELAY_NOT_READY
+    code, _action = classify_core_error(str(message or ""))
+    if code != "CORE_UNCLASSIFIED":
+        return HysteriaFailureCode(code)
     if process_exited:
         return HysteriaFailureCode.LOCAL_PROCESS_EXITED
     return None

@@ -9,7 +9,6 @@ from PyQt6.QtCore import QCoreApplication, QProcess
 
 from xray_fluent.application.async_steps import TransitionRunner
 from xray_fluent.engines.singbox.manager import SingBoxManager
-from xray_fluent.engines.tun2socks.manager import Tun2SocksManager
 from xray_fluent.engines.xray.manager import XrayManager
 
 _APP = QCoreApplication.instance() or QCoreApplication([])
@@ -227,26 +226,6 @@ class XrayStopStepsAsyncTests(unittest.TestCase):
         self.assertIs(runner.result, True)
         self.assertIsNone(runner.error)
         self.assertEqual(manager._process.state(), _NOT_RUNNING)
-
-
-class Tun2SocksStopTests(unittest.TestCase):
-    def test_stop_kills_immediately_without_terminate(self) -> None:
-        manager = Tun2SocksManager()
-        fake = Mock()
-        fake.state.return_value = _RUNNING
-        manager._process = fake
-        manager._cleanup_routes = Mock()
-
-        with patch(
-            "xray_fluent.engines.tun2socks.manager.wait_for_qprocess_finished",
-            return_value=True,
-        ) as wait_mock:
-            self.assertTrue(manager.stop())
-
-        fake.kill.assert_called_once_with()
-        fake.terminate.assert_not_called()
-        wait_mock.assert_called_once_with(fake, 2000)
-        manager._cleanup_routes.assert_called_once_with()
 
 
 class SingBoxStopTests(unittest.TestCase):

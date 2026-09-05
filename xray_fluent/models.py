@@ -599,7 +599,13 @@ class AppSettings:
         return AppSettings(
             theme=str(data.get("theme") or "system"),
             accent_color=normalize_accent_color(data.get("accent_color")),
-            auto_connect_last=bool(data.get("auto_connect_last", True)),
+            # Do not automatically connect with different routing after migration.
+            # Keep the old raw Xray files, but require an explicit first connect.
+            auto_connect_last=(
+                bool(data.get("auto_connect_last", True))
+                and str(data.get("proxy_engine") or "singbox") == "singbox"
+                and str(data.get("tun_engine") or "singbox") == "singbox"
+            ),
             start_minimized=bool(data.get("start_minimized", False)),
             enable_system_proxy=bool(data.get("enable_system_proxy", True)),
             system_proxy_bypass_lan=bool(data.get("system_proxy_bypass_lan", True)),
@@ -615,8 +621,8 @@ class AppSettings:
             xray_update_feed_url=str(data.get("xray_update_feed_url") or ""),
             xray_auto_update=bool(data.get("xray_auto_update", False)),
             tun_mode=bool(data.get("tun_mode", False)),
-            proxy_engine=str(data.get("proxy_engine") or "singbox"),
-            tun_engine=str(data.get("tun_engine") or "singbox"),
+            proxy_engine="singbox",
+            tun_engine="singbox",
             xray_config_file=str(data.get("xray_config_file") or ""),
             xray_template_file=str(data.get("xray_template_file") or ""),
             singbox_path=str(data.get("singbox_path") or ""),

@@ -32,6 +32,7 @@ from ...application.outbound_pool_service import (
     singbox_outbound_tag,
 )
 from ...application.hysteria_runtime_contract import classify_hysteria_uri
+from ...application.protocol_core import ProtocolCore, protocol_core
 from ...models import Node
 from ...runtime_logging import RuntimeNodeIdentity
 from ..hysteria.config_adapter import build_uri_client_config
@@ -220,11 +221,9 @@ def classify_node_for_singbox(node: Node | None) -> str:
         return "native_singbox"
     if is_singbox_endpoint_node(node):
         return "native_singbox_endpoint"
-    if _is_hysteria2_uri_node(node):
+    if protocol_core(node) is ProtocolCore.HYSTERIA:
         return "hysteria_sidecar"
-    try:
-        build_singbox_outbound(node, tag="proxy")
-    except ValueError:
+    if protocol_core(node) is ProtocolCore.XRAY:
         return "hybrid_xray_sidecar"
     return "native_singbox"
 
@@ -365,7 +364,7 @@ def _plan_runtime_outbound(
             clash_api_port=clash_api_port,
         )
 
-    if _is_hysteria2_uri_node(node):
+    if protocol_core(node) is ProtocolCore.HYSTERIA:
         return _plan_hysteria_sidecar_runtime(
             document,
             runtime_config=runtime_config,
@@ -379,9 +378,7 @@ def _plan_runtime_outbound(
             clash_api_port=clash_api_port,
         )
 
-    try:
-        native_proxy = build_singbox_outbound(node, tag="proxy")
-    except ValueError:
+    if protocol_core(node) is ProtocolCore.XRAY:
         return _plan_hybrid_runtime(
             document,
             runtime_config=runtime_config,
@@ -398,12 +395,13 @@ def _plan_runtime_outbound(
             pool_nodes=pool_nodes,
         )
 
+    native_proxy = build_singbox_outbound(node, tag="proxy")
     selector_tags: dict[str, str] = {}
     provider_outbounds: list[dict[str, Any]] = []
     for pooled in pool_nodes or []:
         if is_singbox_endpoint_node(pooled):
             continue
-        if _is_hysteria2_uri_node(pooled):
+        if protocol_core(pooled) is not ProtocolCore.SINGBOX:
             continue
         tag = singbox_outbound_tag(pooled.id)
         try:
@@ -475,13 +473,6 @@ def _plan_runtime_outbound(
         http_port=http_port,
         clash_api_port=clash_api_port,
     )
-
-
-def _is_hysteria2_uri_node(node: Node) -> bool:
-    outbound = node.outbound if isinstance(node.outbound, dict) else {}
-    if str(outbound.get("type") or "").strip().lower() != "hysteria2":
-        return False
-    return str(node.link or "").partition(":")[0].strip().lower() in {"hy2", "hysteria2"}
 
 
 def _plan_hysteria_sidecar_runtime(

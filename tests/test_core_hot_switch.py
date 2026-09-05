@@ -62,7 +62,7 @@ class XrayPoolTests(unittest.TestCase):
         config = build_xray_config(nodes[0], routing, AppSettings(), outbound_pool=pool)
 
         tags = [outbound["tag"] for outbound in config["outbounds"]]
-        self.assertEqual(tags[:2], [pool.tag_for(node.id) for node in pool.nodes])
+        self.assertEqual(tags[:len(pool.nodes)], [pool.tag_for(node.id) for node in pool.nodes])
         self.assertEqual(config["routing"]["balancers"][0]["tag"], XRAY_BALANCER_TAG)
         self.assertTrue(
             any(rule.get("balancerTag") == XRAY_BALANCER_TAG for rule in config["routing"]["rules"])
@@ -85,31 +85,32 @@ class SingboxPoolTests(unittest.TestCase):
             "vless://11111111-1111-1111-1111-111111111111@two.example:443"
             "?type=tcp&security=tls&sni=two.example#two"
         )
-        nodes = [salamander, gecko, vless]
+        native = parse_single("trojan://secret@native.example:443?security=tls#native")
+        nodes = [salamander, gecko, vless, native]
         document = parse_singbox_document(
             SINGBOX_TEMPLATE,
             SINGBOX_TEMPLATE.read_text(encoding="utf-8"),
         )
 
         plans = (
-            plan_singbox_proxy_runtime(document, vless, pool_nodes=nodes),
-            plan_singbox_runtime(document, vless, pool_nodes=nodes),
+            plan_singbox_proxy_runtime(document, native, pool_nodes=nodes),
+            plan_singbox_runtime(document, native, pool_nodes=nodes),
         )
 
         for plan in plans:
             with self.subTest(mode="proxy" if plan.socks_port else "tun"):
                 self.assertEqual(plan.outcome, "native_singbox")
-                self.assertIn(vless.id, plan.selector_tags)
+                self.assertIn(native.id, plan.selector_tags)
+                self.assertNotIn(vless.id, plan.selector_tags)
                 self.assertNotIn(salamander.id, plan.selector_tags)
                 self.assertNotIn(gecko.id, plan.selector_tags)
                 provider = (plan.provider_payload or {})["outbounds"]
-                self.assertFalse(any(item.get("type") == "hysteria2" for item in provider))
+                self.assertFalse(any(item.get("type") in {"hysteria2", "vless"} for item in provider))
 
     def test_native_nodes_are_exposed_through_provider_selector(self) -> None:
         nodes = [
             parse_single(
-                "vless://11111111-1111-1111-1111-111111111111@two.example:443"
-                "?type=tcp&security=tls&sni=two.example#two"
+                "trojan://secret@two.example:443?security=tls&sni=two.example#two"
             ),
             parse_single("trojan://secret@three.example:443?security=tls&sni=three.example#three"),
         ]
@@ -137,7 +138,7 @@ class SingboxPoolTests(unittest.TestCase):
 
         self.assertTrue(plan.is_hybrid)
         self.assertGreater(plan.xray_sidecar.api_port, 0)
-        self.assertEqual(set(plan.selector_tags or {}), {node.id for node in nodes})
+        self.assertEqual(set(plan.selector_tags or {}), {nodes[0].id})
         sidecar = plan.xray_sidecar.config
         self.assertEqual(sidecar["routing"]["balancers"][0]["tag"], XRAY_BALANCER_TAG)
         self.assertIn("RoutingService", sidecar["api"]["services"])

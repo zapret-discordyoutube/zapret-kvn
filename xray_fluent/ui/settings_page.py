@@ -357,27 +357,24 @@ class SettingsPage(ScrollablePage):
             parent=paths_group,
         )
         self.singbox_path_card = _BrowseCard(
-            FIF.COMMAND_PROMPT, "Путь к sing-box", "Необязательно; относительные пути разрешаются от папки приложения",
+            FIF.COMMAND_PROMPT, "Путь к sing-box", "Маршрутизация и DNS для всех протоколов; относительные пути — от папки приложения",
             parent=paths_group,
         )
 
         self.proxy_engine_card = _ComboCard(
             FIF.DEVELOPER_TOOLS, "Движок прокси",
-            "sing-box extended поддерживает native-протоколы; Xray остаётся совместимым резервным движком",
+            "Маршрутизация и DNS — sing-box; VLESS — Xray; Hysteria2 — Hysteria",
             [
-                ("sing-box extended (recommended)", "singbox"),
-                ("Xray", "xray"),
+                ("sing-box", "singbox"),
             ],
             parent=paths_group,
         )
 
         self.tun_engine_card = _ComboCard(
             FIF.DEVELOPER_TOOLS, "Движок TUN",
-            "sing-box — рекомендуемый TUN engine; xray — experimental native TUN; tun2socks — отдельный fallback engine",
+            "Единственный TUN и общие правила всех протоколов — sing-box",
             [
-                ("sing-box (recommended)", "singbox"),
-                ("xray (experimental)", "xray"),
-                ("tun2socks", "tun2socks"),
+                ("sing-box", "singbox"),
             ],
             parent=paths_group,
         )

@@ -320,6 +320,8 @@ class MainWindow(FluentWindow):
         self.controller.routing_changed.connect(self._on_routing_changed)
         self.controller.settings_changed.connect(self._on_settings_changed)
         self.controller.log_line.connect(self.logs_page.append_line)
+        self.controller.runtime_errors_changed.connect(self.logs_page.set_error_records)
+        self.logs_page.set_error_records(self.controller.runtime_errors.snapshot())
         self.controller.status.connect(self._show_status)
         self.controller.bulk_task_progress.connect(self._on_bulk_task_progress)
         self.controller.ping_updated.connect(self._on_ping_updated)
@@ -869,7 +871,7 @@ class MainWindow(FluentWindow):
         return template_path
 
     def _load_config_editor_documents(self) -> None:
-        for core in ("singbox", "xray"):
+        for core in ("singbox",):
             self._load_core_config_document(core)
 
     def _load_core_config_document(self, core: str) -> None:

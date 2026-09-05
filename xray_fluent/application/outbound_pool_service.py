@@ -13,6 +13,7 @@ import hashlib
 from typing import Iterable
 
 from ..models import Node
+from .protocol_core import ProtocolCore, protocol_core
 
 
 XRAY_BALANCER_TAG = "__app_proxy_selector"
@@ -35,16 +36,7 @@ def singbox_outbound_tag(node_id: str) -> str:
 
 
 def is_xray_pool_node(node: Node) -> bool:
-    """Any node carrying an Xray outbound can live in the Xray control plane.
-
-    A node may also be convertible to native sing-box; that is not a reason to
-    exclude it from a running hybrid sidecar.  Excluding dual-compatible nodes
-    forced a full sing-box/Xray restart whenever the user moved from XHTTP to a
-    common VLESS/Trojan/VMess server.
-    """
-
-    outbound = node.outbound if isinstance(node.outbound, dict) else {}
-    return bool(str(outbound.get("protocol") or "").strip())
+    return protocol_core(node) is ProtocolCore.XRAY
 
 
 @dataclass(slots=True)

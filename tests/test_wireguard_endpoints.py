@@ -361,7 +361,7 @@ class WireguardRuntimePlannerTests(unittest.TestCase):
             "vless://2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365@example.com:443"
             "?type=tcp&security=tls#Regression"
         )
-        self.assertEqual(classify_node_for_singbox(vless), "native_singbox")
+        self.assertEqual(classify_node_for_singbox(vless), "hybrid_xray_sidecar")
         hy2 = parse_single("hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         self.assertEqual(classify_node_for_singbox(hy2), "hysteria_sidecar")
 

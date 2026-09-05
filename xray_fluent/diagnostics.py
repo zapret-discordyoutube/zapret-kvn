@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import asdict
 import json
 from pathlib import Path
 import platform
@@ -58,7 +59,7 @@ def _redact_log_line(line: str) -> str:
     return _URL_RE.sub("<URL скрыт>", str(line))
 
 
-def export_diagnostics(zip_path: Path, state: AppState, logs: list[str]) -> Path:
+def export_diagnostics(zip_path: Path, state: AppState, logs: list[str], *, runtime_errors=()) -> Path:
     zip_path.parent.mkdir(parents=True, exist_ok=True)
 
     safe_state = _redact(state.to_dict())
@@ -72,5 +73,8 @@ def export_diagnostics(zip_path: Path, state: AppState, logs: list[str]) -> Path
         archive.writestr("state_redacted.json", json.dumps(safe_state, ensure_ascii=True, indent=2))
         archive.writestr("meta.json", json.dumps(meta, ensure_ascii=True, indent=2))
         archive.writestr("recent_logs.txt", "\n".join(_redact_log_line(line) for line in logs[-2000:]))
+        archive.writestr("runtime_errors.json", json.dumps(
+            [asdict(record) for record in runtime_errors], ensure_ascii=False, indent=2,
+        ))
 
     return zip_path

@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-_SUPPORTED_NATIVE_PROTOCOLS = {"vless", "vmess", "trojan", "shadowsocks", "socks", "http"}
+_SUPPORTED_NATIVE_PROTOCOLS = {"vmess", "trojan", "shadowsocks", "socks", "http"}
 
 # Типы, которые sing-box 1.13+ принимает только в top-level массиве `endpoints[]`,
 # а не в `outbounds[]`.
@@ -27,6 +27,8 @@ def build_singbox_outbound(node, *, tag: str = "proxy") -> dict[str, Any]:
     source = deepcopy(node.outbound or {})
     protocol = str(source.get("protocol") or "").lower()
     native_type = str(source.get("type") or "").lower()
+    if (protocol or native_type) in {"vless", "hy2", "hysteria", "hysteria2"}:
+        raise ValueError("VLESS belongs to Xray; Hysteria belongs to the official Hysteria core.")
     if native_type and not protocol:
         # Служебные ключи приложения (`_dns` и прочие с префиксом `_`) не входят
         # в схему sing-box, строгий декодер их отвергает — отбрасываем.
@@ -57,22 +59,14 @@ def _convert_outbound(xray_ob: dict[str, Any]) -> dict[str, Any]:
 
     sb: dict[str, Any] = {"type": protocol}
 
-    if protocol in ("vless", "vmess"):
+    if protocol == "vmess":
         vnext = (xray_settings.get("vnext") or [{}])[0]
         sb["server"] = str(vnext.get("address") or "")
         sb["server_port"] = int(vnext.get("port") or 0)
         users = (vnext.get("users") or [{}])[0]
         sb["uuid"] = str(users.get("id") or "")
-        if protocol == "vless":
-            encryption = str(users.get("encryption") or "none").strip()
-            if encryption and encryption.lower() != "none":
-                sb["encryption"] = encryption
-            flow = str(users.get("flow") or "")
-            if flow:
-                sb["flow"] = flow
-        else:
-            sb["alter_id"] = int(users.get("alterId") or 0)
-            sb["security"] = str(users.get("security") or "auto")
+        sb["alter_id"] = int(users.get("alterId") or 0)
+        sb["security"] = str(users.get("security") or "auto")
 
     elif protocol == "trojan":
         servers = (xray_settings.get("servers") or [{}])[0]

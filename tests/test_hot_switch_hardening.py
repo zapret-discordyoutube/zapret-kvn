@@ -35,14 +35,11 @@ from xray_fluent.application import async_steps
 from xray_fluent.application.async_steps import RunInWorkerStep
 from xray_fluent.application.auto_switch_service import check_auto_switch
 from xray_fluent.application.outbound_pool_service import build_xray_outbound_pool
-from xray_fluent.application.session_state import XrayRuntimeConfig
 from xray_fluent.application.zapret_prewarm_service import (
     collect_prewarm_servers,
     prewarm_proxy_resolutions,
     start_proxy_dns_prewarm,
 )
-from xray_fluent.engines.tun2socks.operations import hot_swap_steps
-from xray_fluent.engines.xray.operations import restart_proxy_core_steps
 from xray_fluent.link_parser import parse_single
 from xray_fluent.models import AppSettings, RoutingSettings
 from xray_fluent.zapret_manager import ZapretManager
@@ -67,8 +64,8 @@ def xray_nodes():
             "vless://11111111-1111-1111-1111-111111111111@one.example:443"
             "?type=tcp&security=tls&sni=one.example#one"
         ),
-        parse_single("trojan://secret@two.example:443?security=tls&sni=two.example#two"),
-        parse_single("trojan://secret@three.example:443?security=tls&sni=three.example#three"),
+        parse_single("vless://22222222-2222-2222-2222-222222222222@two.example:443?security=tls&sni=two.example#two"),
+        parse_single("vless://33333333-3333-3333-3333-333333333333@three.example:443?security=tls&sni=three.example#three"),
     ]
 
 
@@ -179,14 +176,6 @@ class CaptureActiveSessionDefaultTagsTests(unittest.TestCase):
         self.assertEqual(session.outbound_pool_tags, pool.tags)
         self.assertIn(nodes[0].id, session.outbound_pool_tags)
 
-    def test_default_tags_derived_for_tun2socks_core(self) -> None:
-        nodes = xray_nodes()
-        controller = SessionCaptureController(nodes)
-
-        session = self._capture(controller, nodes[1], core="tun2socks")
-
-        self.assertEqual(session.outbound_pool_tags, build_xray_outbound_pool(nodes).tags)
-
     def test_explicit_tags_override_derived_default(self) -> None:
         nodes = xray_nodes()
         controller = SessionCaptureController(nodes)
@@ -231,157 +220,6 @@ class CaptureActiveSessionDefaultTagsTests(unittest.TestCase):
         )
 
 
-class FakeCoreSteps:
-    """QProcess-обёртка ядра: генераторные stop/start без реального процесса."""
-
-    def __init__(self):
-        self.is_running = True
-        self.started_configs: list[dict] = []
-        self._exe_path = "xray.exe"
-
-    def stop_steps(self):
-        self.is_running = False
-        return True
-        yield  # unreachable — генераторная форма как у XrayManager
-
-    def start_steps(self, path, config):
-        self.is_running = True
-        self.started_configs.append(config)
-        return True
-        yield  # unreachable
-
-
-class OperationsController(SessionCaptureController):
-    """Фейк-контроллер для генераторных операций рестарта/hot-swap."""
-
-    def __init__(self, nodes):
-        super().__init__(nodes)
-        self.xray = FakeCoreSteps()
-        self.proxy = Mock()
-        self._switching = False
-        self._auto_switch_transitioning = False
-        self._xray_api_port = 0
-        self._tun2socks_proxy_username = "relay-user"
-        self._tun2socks_proxy_password = "relay-pass"
-        self.statuses: list[tuple[str, str]] = []
-        self.saves = 0
-        self.status = SimpleNamespace(emit=lambda *args: None)
-        self.connection_changed = SimpleNamespace(emit=lambda *args: None)
-
-    def _set_connection_status(self, phase, message, level=None):
-        self.statuses.append((phase, message))
-
-    def _stop_metrics_worker(self):
-        pass
-
-    def _start_metrics_worker(self):
-        pass
-
-    def _refresh_connected_state(self):
-        self.connected = True
-        return True, True
-
-    def schedule_save(self):
-        self.saves += 1
-
-    def _handle_unexpected_disconnect(self):
-        raise AssertionError("unexpected disconnect in test")
-
-    def _prepare_node_for_runtime(self, node):
-        return None
-
-
-class RestartProxyCoreSessionTagsTests(unittest.TestCase):
-    """AC2: после restart_proxy_core_steps hot-switch снова проходит по пулу."""
-
-    def _run_restart(self, controller, nodes):
-        pool = build_xray_outbound_pool(nodes)
-        runtime = XrayRuntimeConfig(
-            config={"outbounds": []},
-            source_path=Path("active.json"),
-            has_proxy_outbound=True,
-            used_selected_node=True,
-            requested_socks_port=10808,
-            requested_http_port=10809,
-            socks_port=10808,
-            http_port=10809,
-            api_port=19100,
-            tun_interface_name="",
-            loop_prevention_interface="",
-            loop_prevention_patched_outbounds=0,
-            inbound_tags=("socks-in", "http-in"),
-            ping_host=nodes[0].server,
-            ping_port=443,
-            outbound_pool_tags=dict(pool.tags),
-        )
-        controller._build_runtime_xray_config = lambda node, tun_mode=False: runtime
-        controller.state.settings.enable_system_proxy = False
-        return drive_sync_generator(restart_proxy_core_steps(controller, "fallback restart"))
-
-    def test_session_keeps_pool_tags_after_fallback_restart(self) -> None:
-        nodes = xray_nodes()
-        controller = OperationsController(nodes)
-
-        self.assertTrue(self._run_restart(controller, nodes))
-
-        session = controller._active_session
-        pool = build_xray_outbound_pool(nodes)
-        self.assertEqual(session.outbound_pool_tags, pool.tags)
-        self.assertIn(controller.state.selected_node_id, session.outbound_pool_tags)
-
-    def test_pool_tag_check_passes_after_restart(self) -> None:
-        nodes = xray_nodes()
-        controller = OperationsController(nodes)
-        self.assertTrue(self._run_restart(controller, nodes))
-
-        controller.logs.clear()
-        plan = controller._hot_switch_precheck()
-
-        # Проверка пула пройдена: fallback «not loaded in ... pool» не логируется.
-        self.assertFalse(any("is not loaded in" in line for line in controller.logs))
-        # Чистый xray-core честно уходит в переход из-за отсутствия interrupt API —
-        # но уже ПОСЛЕ успешной проверки пула (это контракт AC2, а не деградация П1).
-        self.assertIsNone(plan)
-        self.assertTrue(any("cannot interrupt" in line for line in controller.logs))
-
-
-class Tun2SocksHotSwapSessionTagsTests(unittest.TestCase):
-    """AC3: TUN hot-swap захватывает теги пула, реально встроенного в конфиг."""
-
-    def _run_hot_swap(self, controller, node):
-        controller._active_session = make_session(
-            node_id=controller.state.nodes[0].id,
-            active_core="tun2socks",
-            tun_mode=True,
-            socks_port=10808,
-        )
-        controller._xray_api_port = 19100
-        controller.state.selected_node_id = node.id
-        return drive_sync_generator(hot_swap_steps(controller, "node switched", node))
-
-    def test_session_keeps_pool_tags_after_tun_hot_swap(self) -> None:
-        nodes = xray_nodes()
-        controller = OperationsController(nodes)
-
-        self.assertTrue(self._run_hot_swap(controller, nodes[1]))
-
-        session = controller._active_session
-        pool = build_xray_outbound_pool(nodes)
-        self.assertEqual(session.outbound_pool_tags, pool.tags)
-        self.assertIn(nodes[1].id, session.outbound_pool_tags)
-        # Конфиг действительно собран с пулом (все теги пула присутствуют).
-        config = controller.xray.started_configs[-1]
-        config_tags = {outbound.get("tag") for outbound in config.get("outbounds", [])}
-        self.assertTrue(set(pool.tags.values()) <= config_tags)
-
-    def test_pool_tag_check_passes_after_tun_hot_swap(self) -> None:
-        nodes = xray_nodes()
-        controller = OperationsController(nodes)
-        self.assertTrue(self._run_hot_swap(controller, nodes[1]))
-
-        controller.logs.clear()
-        controller._hot_switch_precheck()
-        self.assertFalse(any("is not loaded in" in line for line in controller.logs))
 
 
 class HotSwitchController:
@@ -660,7 +498,7 @@ class OutboundPoolCacheTests(unittest.TestCase):
         before = controller.xray_outbound_pool()
 
         extra = parse_single(
-            "trojan://secret@four.example:443?security=tls&sni=four.example#four"
+            "vless://44444444-4444-4444-4444-444444444444@four.example:443?security=tls&sni=four.example#four"
         )
         controller.state.nodes = nodes + [extra]  # замена объекта списка
         after = controller.xray_outbound_pool()

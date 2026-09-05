@@ -55,13 +55,12 @@ class ProxyReadinessTests(unittest.TestCase):
         http_probe.assert_called_once_with(1391)
 
     @patch("xray_fluent.proxy_readiness.socket.create_connection")
-    def test_socks_probe_treats_no_acceptable_methods_as_live_listener(self, connect: Mock) -> None:
-        # Xray sidecar с обязательной авторизацией отвечает \xff на no-auth
-        # greeting: так отвечает только настоящий SOCKS5-сервер (кейс Bevora).
+    def test_socks_probe_rejects_listener_without_usable_auth(self, connect: Mock) -> None:
+        # A listening SOCKS server is not ready when it rejects admission.
         client = _client(b"\x05\xff")
         connect.return_value = client
 
-        self.assertTrue(probe_socks5_listener(11808))
+        self.assertFalse(probe_socks5_listener(11808))
 
         client.sendall.assert_called_once_with(b"\x05\x01\x00")
 
@@ -76,7 +75,7 @@ class ProxyReadinessTests(unittest.TestCase):
         )
 
         greeting = client.sendall.call_args_list[0].args[0]
-        self.assertEqual(b"\x05\x02\x00\x02", greeting)
+        self.assertEqual(b"\x05\x01\x02", greeting)
         auth_frame = client.sendall.call_args_list[1].args[0]
         self.assertEqual(
             b"\x01" + bytes((len(b"sidecar-a1b2c3"),)) + b"sidecar-a1b2c3"
@@ -93,13 +92,13 @@ class ProxyReadinessTests(unittest.TestCase):
         self.assertFalse(probe_socks5_listener(11808, username="user", password="bad"))
 
     @patch("xray_fluent.proxy_readiness.socket.create_connection")
-    def test_socks_probe_accepts_no_auth_choice_with_credentials(self, connect: Mock) -> None:
+    def test_socks_probe_rejects_auth_downgrade(self, connect: Mock) -> None:
         client = _client(b"\x05\x00")
         connect.return_value = client
 
-        self.assertTrue(probe_socks5_listener(11808, username="user", password="pass"))
+        self.assertFalse(probe_socks5_listener(11808, username="user", password="pass"))
 
-        client.sendall.assert_called_once_with(b"\x05\x02\x00\x02")
+        client.sendall.assert_called_once_with(b"\x05\x01\x02")
 
     @patch("xray_fluent.proxy_readiness.socket.create_connection")
     def test_socks_probe_rejects_unoffered_method_choice(self, connect: Mock) -> None:

@@ -57,25 +57,11 @@ def _singbox_runtime_signature_payload(
     if has_proxy_outbound and node is not None:
         planner_outcome = classify_node_for_singbox(node)
     selector_pool: object | None = None
-    active_session = getattr(controller, "_active_session", None)
     if has_proxy_outbound and node is not None and planner_outcome == "hybrid_xray_sidecar":
         # Initial capture and all later comparisons must describe the same
         # runtime.  Previously the pool appeared in the signature only after
         # _active_session existed, so a successful connect immediately looked
         # stale and scheduled another full proxy-hot-swap.
-        pool = controller.xray_outbound_pool()
-        selector_pool = {"xray_sidecar": pool.signature_payload()}
-    if (
-        has_proxy_outbound
-        and node is not None
-        and active_session is not None
-        and active_session.hybrid
-        and node.id in (active_session.outbound_pool_tags or {})
-    ):
-        # Once the hybrid Xray sidecar is alive it can also serve protocols
-        # that sing-box supports natively.  Preserve that real control-plane
-        # identity instead of pretending a core restart already happened.
-        planner_outcome = "hybrid_xray_sidecar"
         pool = controller.xray_outbound_pool()
         selector_pool = {"xray_sidecar": pool.signature_payload()}
     if has_proxy_outbound and node is not None and planner_outcome == "native_singbox":
@@ -126,60 +112,14 @@ def transition_signature(
     routing: RoutingSettings | None = None,
 ) -> str:
     settings = settings or controller.state.settings
-    routing = routing or controller.state.routing
     node = node or controller.selected_node
-    if controller.is_singbox_editor_mode(settings):
-        signature_payload = _singbox_runtime_signature_payload(controller, node, settings)
-        if controller.is_singbox_proxy_mode(settings):
-            signature_payload.update(
-                {
-                    "proxy_enabled": bool(settings.enable_system_proxy),
-                    "proxy_bypass_lan": system_proxy_bypass_lan(controller, settings),
-                }
-            )
-        return signature(signature_payload)
-    if controller.uses_xray_raw_config(settings):
-        source_path, config_hash, has_proxy_outbound, socks_port, http_port, api_port = controller._inspect_active_xray_config()
-        pool = controller.xray_outbound_pool()
-        pooled = bool(has_proxy_outbound and node is not None and pool.contains(node.id))
-        signature_payload = {
-            "mode": "xray-tun" if controller.is_xray_tun_mode(settings) else "xray-direct",
-            "proxy_engine": "xray" if not settings.tun_mode else None,
-            "xray_path": str(settings.xray_path),
-            "config_file": str(source_path.name),
-            "config_hash": config_hash,
-            "has_proxy_outbound": has_proxy_outbound,
-            "node_id": node.id if has_proxy_outbound and node else None,
-            "node_outbound": node.outbound if has_proxy_outbound and node and not pooled else None,
-            "outbound_pool": pool.signature_payload() if pooled else None,
-            "api_port": int(api_port),
-        }
-        if controller.is_xray_tun_mode(settings):
-            signature_payload.update({"tun_mode": True, "tun_engine": "xray"})
-        else:
-            signature_payload.update(
-                {
-                    "proxy_enabled": bool(settings.enable_system_proxy),
-                    "proxy_bypass_lan": system_proxy_bypass_lan(controller, settings),
-                    "socks_port": int(socks_port),
-                    "http_port": int(http_port),
-                }
-            )
-        return signature(signature_payload)
-    return signature(
-        {
-            "node_id": node_identity(controller, node, settings),
-            "tun_mode": bool(settings.tun_mode),
-            "tun_engine": str(settings.tun_engine),
-            "proxy_enabled": bool(settings.enable_system_proxy),
-            "proxy_bypass_lan": bool(routing.bypass_lan),
-            "socks_port": int(DEFAULT_SOCKS_PORT),
-            "http_port": int(DEFAULT_HTTP_PORT),
-            "xray_path": str(settings.xray_path),
-            "singbox_path": str(settings.singbox_path),
-            "routing": routing.to_dict(),
-        }
-    )
+    payload = _singbox_runtime_signature_payload(controller, node, settings)
+    if not settings.tun_mode:
+        payload.update(
+            proxy_enabled=bool(settings.enable_system_proxy),
+            proxy_bypass_lan=system_proxy_bypass_lan(controller, settings),
+        )
+    return signature(payload)
 
 
 def xray_layer_signature(
@@ -189,41 +129,9 @@ def xray_layer_signature(
     routing: RoutingSettings | None = None,
 ) -> str:
     settings = settings or controller.state.settings
-    routing = routing or controller.state.routing
-    node = node or controller.selected_node
-    if controller.is_singbox_proxy_mode(settings):
-        return signature(_singbox_runtime_signature_payload(controller, node, settings))
-    if controller.uses_xray_raw_config(settings):
-        source_path, config_hash, has_proxy_outbound, socks_port, http_port, api_port = controller._inspect_active_xray_config()
-        pool = controller.xray_outbound_pool()
-        pooled = bool(has_proxy_outbound and node is not None and pool.contains(node.id))
-        signature_payload = {
-            "mode": "xray-tun" if controller.is_xray_tun_mode(settings) else "xray-direct",
-            "xray_path": str(settings.xray_path),
-            "config_file": str(source_path.name),
-            "config_hash": config_hash,
-            "has_proxy_outbound": has_proxy_outbound,
-            "node_id": node.id if has_proxy_outbound and node else None,
-            "node_outbound": node.outbound if has_proxy_outbound and node and not pooled else None,
-            "outbound_pool": pool.signature_payload() if pooled else None,
-            "socks_port": int(socks_port),
-            "http_port": int(http_port),
-            "api_port": int(api_port),
-        }
-        if controller.is_xray_tun_mode(settings):
-            signature_payload.update({"tun_mode": True, "tun_engine": "xray"})
-        return signature(signature_payload)
-    return signature(
-        {
-            "node_id": node_identity(controller, node, settings),
-            "tun_mode": bool(settings.tun_mode),
-            "tun_engine": str(settings.tun_engine),
-            "socks_port": int(DEFAULT_SOCKS_PORT),
-            "http_port": int(DEFAULT_HTTP_PORT),
-            "xray_path": str(settings.xray_path),
-            "routing": routing.to_dict(),
-        }
-    )
+    return signature(_singbox_runtime_signature_payload(
+        controller, node or controller.selected_node, settings,
+    ))
 
 
 def tun_layer_signature(
@@ -233,42 +141,4 @@ def tun_layer_signature(
     routing: RoutingSettings | None = None,
 ) -> str:
     settings = settings or controller.state.settings
-    routing = routing or controller.state.routing
-    node = node or controller.selected_node
-    if not settings.tun_mode:
-        return ""
-    if controller.is_singbox_editor_mode(settings):
-        return transition_signature(controller, node, settings, routing)
-    if controller.is_tun2socks_mode(settings):
-        pool_factory = getattr(controller, "xray_outbound_pool", None)
-        pool = pool_factory() if callable(pool_factory) else None
-        return signature(
-            {
-                "mode": "tun2socks",
-                # Обходные маршруты ставятся на все серверы пула сразу, поэтому
-                # слой TUN переживает смену активного сервера внутри пула.
-                "server": (
-                    sorted({pooled.server for pooled in pool.nodes})
-                    if pool is not None and pool.nodes
-                    else (node.server if node else "")
-                ),
-                "socks_port": int(DEFAULT_SOCKS_PORT),
-            }
-        )
-    if controller.is_xray_tun_mode(settings):
-        return signature(
-            {
-                "mode": "xray-native-tun",
-                "xray_layer_signature": xray_layer_signature(controller, node, settings, routing),
-            }
-        )
-    return signature(
-        {
-            "mode": "singbox-native",
-            "node_id": node.id if node else None,
-            "node_outbound": (node.outbound if node else {}),
-            "routing": routing.to_dict(),
-            "xray_path": str(settings.xray_path),
-            "singbox_path": str(settings.singbox_path),
-        }
-    )
+    return transition_signature(controller, node, settings) if settings.tun_mode else ""

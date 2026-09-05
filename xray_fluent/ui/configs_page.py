@@ -337,30 +337,19 @@ class ConfigsPage(ScrollablePage):
                 hint_text="Если в конфиге есть outbound tag `proxy`, он будет заменён на выбранный сервер перед запуском.",
                 detail_hint_text=(
                     "В режиме sing-box TUN правила процесса и пути применяются к перехваченному системному трафику. "
-                    "Если выбранный сервер нельзя запустить нативным sing-box outbound, приложение автоматически "
-                    "оставит этот же raw sing-box.json базой и поднимет local xray sidecar только для proxy path."
-                ),
-                parent=self,
-            ),
-            "xray": _RawConfigEditor(
-                "xray",
-                hint_text="Если в конфиге есть outbound tag `proxy`, он будет заменён на выбранный сервер перед запуском.",
-                detail_hint_text=(
-                    "Direct xray mode использует тот же raw xray.json только для трафика, который уже вошёл в xray "
-                    "через системный прокси Windows или ручную proxy-настройку приложения. "
-                    "xray TUN mode использует этот же raw xray.json как true TUN path, поэтому process/path rules "
-                    "из xray routing начинают работать на системный трафик."
+                    "VLESS всегда обслуживает Xray, Hysteria2 — Hysteria, остальные протоколы — sing-box. "
+                    "Маршрутизация и DNS во всех случаях берутся только из этого JSON. "
+                    "Старые файлы Xray сохранены, но их правила больше не применяются."
                 ),
                 parent=self,
             ),
         }
         self._labels = {
             "singbox": "sing-box",
-            "xray": "xray",
         }
         self._indexes: dict[str, int] = {}
 
-        for index, core in enumerate(("singbox", "xray")):
+        for index, core in enumerate(("singbox",)):
             editor = self._editors[core]
             self._indexes[core] = index
             self.stack.addWidget(editor)
