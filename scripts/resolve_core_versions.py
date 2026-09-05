@@ -16,10 +16,13 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from typing import Any
@@ -88,7 +91,7 @@ def fetch_bytes(url: str, *, timeout: float = 30.0, limit: int = METADATA_LIMIT)
     try:
         with urlopen(request, timeout=timeout) as response:
             return _read_bounded(response, limit=limit)
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+    except (HTTPException, HTTPError, URLError, TimeoutError, OSError) as exc:
         raise ResolverError(f"download failed for {url}: {exc}") from exc
 
 
@@ -297,10 +300,33 @@ def download_and_hash(
     try:
         request = Request(url, headers=_request_headers(url, "application/octet-stream"))
         try:
-            with urlopen(request, timeout=timeout) as response, os.fdopen(fd, "wb") as output:
+            with os.fdopen(fd, "w+b") as output:
                 fd = -1
+                curl = shutil.which("curl")
+                if curl:
+                    # curl negotiates HTTP/2. GitHub's HTTP/1.1 archive stream
+                    # can be throttled until it is cut off with IncompleteRead.
+                    # No API credentials are needed for public release archives.
+                    deadline = max(timeout, 300.0)
+                    subprocess.run(
+                        [curl, "--disable", "--fail", "--silent", "--show-error",
+                         "--location", "--proto", "=https", "--proto-redir", "=https",
+                         "--max-redirs", "5", "--connect-timeout", str(min(timeout, 30.0)),
+                         "--max-time", str(deadline), "--max-filesize", str(ARCHIVE_LIMIT),
+                         "--user-agent", USER_AGENT, url],
+                        stdout=output, stderr=subprocess.PIPE, check=True, timeout=deadline + 10,
+                    )
+                else:
+                    with urlopen(request, timeout=timeout) as response:
+                        received = 0
+                        while chunk := response.read(1024 * 1024):
+                            received += len(chunk)
+                            if received > ARCHIVE_LIMIT:
+                                raise ResolverError(f"archive exceeds the {ARCHIVE_LIMIT}-byte safety limit")
+                            output.write(chunk)
+                output.seek(0)
                 while True:
-                    chunk = response.read(1024 * 1024)
+                    chunk = output.read(1024 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
@@ -309,8 +335,7 @@ def download_and_hash(
                             f"archive exceeds the {ARCHIVE_LIMIT}-byte safety limit"
                         )
                     digest.update(chunk)
-                    output.write(chunk)
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        except (HTTPException, HTTPError, URLError, TimeoutError, OSError, subprocess.SubprocessError) as exc:
             raise ResolverError(f"archive download failed for {url}: {exc}") from exc
         if total <= 0:
             raise ResolverError(f"archive download was empty: {url}")

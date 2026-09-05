@@ -97,6 +97,11 @@ class StableSelectionTests(unittest.TestCase):
 
 
 class AssetVerificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        no_curl = patch.object(resolver.shutil, "which", return_value=None)
+        no_curl.start()
+        self.addCleanup(no_curl.stop)
+
     def test_exact_asset_rejects_other_windows_variants(self) -> None:
         payload = b"xray archive"
         release = _release(
@@ -252,6 +257,44 @@ class AssetVerificationTests(unittest.TestCase):
         with patch.object(resolver, "fetch_json", return_value={"sha": "release"}):
             with self.assertRaisesRegex(resolver.ResolverError, "invalid commit"):
                 resolver.github_branch_commit("owner/repo", "release")
+
+
+class CurlArchiveTests(unittest.TestCase):
+    def test_curl_bytes_are_hashed_and_https_is_required(self) -> None:
+        payload = b"HTTP/2 archive bytes"
+
+        def download(command, *, stdout, **kwargs):
+            self.assertEqual(command[1], "--disable")
+            self.assertIn("=https", command)
+            self.assertIn("--max-filesize", command)
+            self.assertNotIn("--insecure", command)
+            self.assertTrue(kwargs["check"])
+            stdout.write(payload)
+
+        with patch.object(resolver.shutil, "which", return_value="curl"), patch.object(resolver.subprocess, "run", side_effect=download):
+            self.assertEqual(resolver.download_and_verify("https://github.com/example/archive.zip", hashlib.sha256(payload).hexdigest()), len(payload))
+            with self.assertRaisesRegex(resolver.ResolverError, "SHA-256 mismatch"):
+                resolver.download_and_verify("https://github.com/example/archive.zip", "00" * 32)
+
+    def test_partial_curl_download_is_rejected_and_removed(self) -> None:
+        paths = []
+
+        def interrupted(command, *, stdout, **kwargs):
+            stdout.write(b"partial archive")
+            raise resolver.subprocess.CalledProcessError(18, command)
+
+        original_mkstemp = resolver.tempfile.mkstemp
+        with tempfile.TemporaryDirectory() as directory:
+            def temporary(**kwargs):
+                fd, name = original_mkstemp(dir=directory, **kwargs)
+                paths.append(Path(name))
+                return fd, name
+
+            with patch.object(resolver.shutil, "which", return_value="curl"), patch.object(resolver.subprocess, "run", side_effect=interrupted), patch.object(resolver.tempfile, "mkstemp", side_effect=temporary):
+                with self.assertRaisesRegex(resolver.ResolverError, "archive download failed"):
+                    resolver.download_and_hash("https://github.com/example/archive.zip")
+            self.assertTrue(paths)
+            self.assertTrue(all(not path.exists() for path in paths))
 
 
 class LockUpdateTests(unittest.TestCase):
