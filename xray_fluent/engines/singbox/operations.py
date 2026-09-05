@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .runtime_planner import SingboxRuntimePlan
-from ...application.hysteria_runtime_contract import HysteriaFailureCode, HysteriaRuntimeState
+from ...application.hysteria_runtime_contract import SECURITY_FAILURES, HysteriaFailureCode, HysteriaRuntimeState
 
 if TYPE_CHECKING:
     from ...app_controller import AppController
@@ -157,11 +157,27 @@ def start_tun(
     return SingboxStartResult(plan=plan, session_label=session_label)
 
 
+def _abort_security_recovery(controller: AppController, recovery: bool, replacement=None) -> bool:
+    if not recovery or getattr(controller, "_hysteria_last_failure_code", None) not in SECURITY_FAILURES:
+        return False
+    # QProcess events are pumped while replacement/HTTP readiness is pending.
+    # A security escalation from the still-owned old target forbids commit or
+    # rollback, even when the initial timeout already requested a replacement.
+    controller._desired_connected = False
+    if replacement is not None:
+        replacement.stop(expected=True)
+    controller._clear_pending_hysteria_selection()
+    controller._handle_unexpected_disconnect()
+    return True
+
+
 def restart_runtime(controller: AppController, reason: str) -> bool:
     node = controller._runtime_selected_node()
     hysteria_recovery = bool(controller._hysteria_recovery_active)
     controller._switching = True
     try:
+        if _abort_security_recovery(controller, hysteria_recovery):
+            return False
         controller._log(f"[tun-hot-swap] {reason}")
         try:
             plan = controller._plan_runtime_singbox(node, replacement=True)
@@ -188,6 +204,8 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
                 generation=controller._hysteria_contract.session.session_generation,
             )
             replacement_hysteria = controller._prepare_hysteria_replacement(plan)
+            if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
+                return False
             if replacement_hysteria is None:
                 controller._set_connection_status(
                     "error",
@@ -211,14 +229,19 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         controller._xray_api_port = 0
         controller._protect_ss_port = 0
         controller._protect_ss_password = ""
+        if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
+            return False
         controller._hysteria_contract.advance(
             HysteriaRuntimeState.COMMITTING_SWITCH,
             generation=controller._hysteria_contract.session.session_generation,
         )
-        if not controller._start_singbox_runtime_plan(
+        front_ready = controller._start_singbox_runtime_plan(
             plan,
             prepared_hysteria=replacement_hysteria,
-        ):
+        )
+        if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
+            return False
+        if not front_ready:
             rolled_back = controller._rollback_singbox_front(old_plan)
             controller._hysteria_contract.terminal(
                 HysteriaFailureCode.LOCAL_FRONT_NOT_READY,
@@ -320,6 +343,8 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
     hysteria_recovery = bool(controller._hysteria_recovery_active)
     controller._switching = True
     try:
+        if _abort_security_recovery(controller, hysteria_recovery):
+            return False
         controller._log(f"[proxy-hot-swap] {reason}")
         try:
             plan = controller._plan_proxy_runtime_singbox(node, replacement=True)
@@ -340,6 +365,8 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
                 generation=controller._hysteria_contract.session.session_generation,
             )
             replacement_hysteria = controller._prepare_hysteria_replacement(plan)
+            if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
+                return False
             if replacement_hysteria is None:
                 controller._set_connection_status(
                     "error",
@@ -363,14 +390,19 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         controller._xray_api_port = 0
         controller._protect_ss_port = 0
         controller._protect_ss_password = ""
+        if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
+            return False
         controller._hysteria_contract.advance(
             HysteriaRuntimeState.COMMITTING_SWITCH,
             generation=controller._hysteria_contract.session.session_generation,
         )
-        if not controller._start_singbox_runtime_plan(
+        front_ready = controller._start_singbox_runtime_plan(
             plan,
             prepared_hysteria=replacement_hysteria,
-        ):
+        )
+        if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
+            return False
+        if not front_ready:
             rolled_back = controller._rollback_singbox_front(old_plan)
             controller._hysteria_contract.terminal(
                 HysteriaFailureCode.LOCAL_FRONT_NOT_READY,

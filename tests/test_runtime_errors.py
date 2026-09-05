@@ -14,12 +14,48 @@ from xray_fluent.application.runtime_errors import RuntimeErrorJournal, core_fai
 from xray_fluent.diagnostics import export_diagnostics
 from xray_fluent.engines.hysteria.manager import HysteriaManager
 from xray_fluent.models import AppState
+from xray_fluent.link_parser import parse_single
 
 
 _APP = QCoreApplication.instance() or QCoreApplication([])
 
 
 class RuntimeErrorTests(unittest.TestCase):
+    def test_manager_security_escalation_reaches_controller_after_timeout(self):
+        current = parse_single('hy2://current@one.example:443/#current')
+        replacement = parse_single('hy2://replacement@two.example:443/#replacement')
+        manager = HysteriaManager()
+        manager._running = True
+        manager._process_generation = 7
+        controller = Mock()
+        controller.hysteria = manager
+        controller._hysteria_active_generation = 7
+        controller._hysteria_contract = HysteriaTransitionContract()
+        controller._hysteria_contract.begin(3, current.id, 'official_hysteria_sidecar')
+        controller.connected = True
+        controller._disconnecting = False
+        controller._desired_connected = True
+        controller._hysteria_recovery_active = False
+        controller._hysteria_cooldown_until = {}
+        controller._hysteria_failure_episode_id = 0
+        controller.selected_node = current
+        controller.state = AppState(nodes=[current, replacement], selected_node_id=current.id)
+        journal = RuntimeErrorJournal()
+        manager.log_received.connect(lambda message: journal.record(core_failure('hysteria', 'runtime', message)))
+        manager.failure.connect(lambda code, message, generation:
+            AppController._on_hysteria_failure(controller, manager, code, message, generation))
+        manager._emit_process_line('WARN connect error: timeout: no recent network activity')
+        manager._emit_process_line('WARN x509: certificate signed by unknown authority')
+        manager._emit_process_line('WARN connect error: timeout: no recent network activity')
+        self.assertEqual(controller._request_transition.call_count, 1)
+        self.assertFalse(controller._desired_connected)
+        self.assertEqual(controller._hysteria_last_failure_code.value, 'TARGET_TLS_UNKNOWN_AUTHORITY')
+        self.assertIn('unknown authority', controller._set_connection_status.call_args.args[1])
+        self.assertEqual([record.failure.code for record in journal.snapshot()],
+                         ['TARGET_NETWORK_TIMEOUT', 'TARGET_TLS_UNKNOWN_AUTHORITY'])
+        self.assertEqual(controller.state.selected_node_id, current.id)
+        self.assertEqual(controller._hysteria_contract.session.failure_episode_id, 1)
+
     def test_unknown_error_is_kept_with_no_invented_diagnosis(self):
         message = 'ERROR upstream returned odd status 781: untouched details'
         failure = core_failure('xray', 'dial', message)

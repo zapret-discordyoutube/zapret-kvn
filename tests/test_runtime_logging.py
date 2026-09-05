@@ -295,6 +295,34 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
         probe.assert_not_called()
         self.assertEqual(manager.last_failure_code, HysteriaFailureCode.TARGET_PIN_MISMATCH)
 
+    def test_security_error_supersedes_earlier_timeout_without_losing_raw_logs(self) -> None:
+        for security_line, code in (
+            ('x509: certificate signed by unknown authority', HysteriaFailureCode.TARGET_TLS_UNKNOWN_AUTHORITY),
+            ('no certificate matches the pinned hash', HysteriaFailureCode.TARGET_PIN_MISMATCH),
+            ('authentication error: invalid user', HysteriaFailureCode.TARGET_AUTH_REJECTED),
+            ('obfs rejected', HysteriaFailureCode.TARGET_OBFS_REJECTED),
+        ):
+            with self.subTest(code=code):
+                manager = HysteriaManager()
+                failures = []
+                manager.failure.connect(lambda *event: failures.append(event))
+                timeout = 'connect error: timeout: no recent network activity'
+                manager._emit_process_line(timeout)
+                manager._emit_process_line(security_line)
+                manager._emit_process_line(timeout)
+                manager._emit_process_line(security_line)
+                self.assertEqual([event[0] for event in failures],
+                                 [HysteriaFailureCode.TARGET_NETWORK_TIMEOUT.value, code.value])
+                self.assertEqual(manager.last_failure_code, code)
+                self.assertTrue(any(timeout in line for line in manager._last_output_lines))
+                self.assertTrue(any(security_line in line for line in manager._last_output_lines))
+                with (
+                    patch.object(manager._process, 'state', return_value=QProcess.ProcessState.Running),
+                    patch.object(manager, '_probe_remote_endpoint') as probe,
+                ):
+                    self.assertFalse(manager._wait_until_remote_ready(11809, username='', password=''))
+                probe.assert_not_called()
+
     def test_process_log_security_failure_stops_readiness_retry_wave(self) -> None:
         manager = HysteriaManager()
         original = "connect error: INTERNAL_ERROR (local): no certificate matches the pinned hash"

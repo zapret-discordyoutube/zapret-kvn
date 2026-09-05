@@ -544,9 +544,6 @@ class HysteriaManager(QObject):
         stage: str,
         code: HysteriaFailureCode | None = None,
     ) -> None:
-        if self._failure_reported:
-            return
-        self._failure_reported = True
         resolved = code or classify_hysteria_failure(message)
         if resolved is None:
             resolved = {
@@ -558,6 +555,14 @@ class HysteriaManager(QObject):
                 "wait_ready": HysteriaFailureCode.LOCAL_RELAY_NOT_READY,
                 "stop": HysteriaFailureCode.LOCAL_PROCESS_EXITED,
             }.get(stage, HysteriaFailureCode.CORE_UNCLASSIFIED)
+        if self._failure_reported and not (
+            resolved in SECURITY_FAILURES and self._last_failure_code not in SECURITY_FAILURES
+        ):
+            return
+        # A transient timeout can be logged by one parallel probe before
+        # another reports a definitive TLS/auth rejection. Preserve both raw
+        # log entries, but security must take precedence for recovery policy.
+        self._failure_reported = True
         self._last_failure_code = resolved
         formatted = self._format_message(message, stage=stage)
         # The typed cause is published before generic process/state callbacks,

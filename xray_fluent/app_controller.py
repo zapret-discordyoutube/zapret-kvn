@@ -1415,11 +1415,17 @@ class AppController(QObject):
             return
         self._hysteria_last_failure_code = code
         if code in SECURITY_FAILURES and self.connected and not self._disconnecting:
-            self._hysteria_contract.fail(
-                code,
-                generation=self._hysteria_contract.session.session_generation,
-                automatic_switch=False,
-            )
+            if getattr(self, "_hysteria_recovery_active", False):
+                self._hysteria_contract.terminal(
+                    code,
+                    generation=self._hysteria_contract.session.session_generation,
+                )
+            else:
+                self._hysteria_contract.fail(
+                    code,
+                    generation=self._hysteria_contract.session.session_generation,
+                    automatic_switch=False,
+                )
             self._set_connection_status(
                 "error",
                 message,
