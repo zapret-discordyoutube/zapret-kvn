@@ -117,7 +117,9 @@ New-Item -ItemType Directory -Force -Path $DownloadCache | Out-Null
 $outputDirectory = Split-Path -Parent $OutputArchive
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 
-$temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ZapretKVN-core-" + [guid]::NewGuid().ToString("N"))
+# Go vet starts child processes inside dependency package directories. Keep the
+# disposable root short enough for Windows CreateProcess current-directory limits.
+$temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("zk-" + [guid]::NewGuid().ToString("N").Substring(0, 16))
 $stagingDirectory = Join-Path $temporaryRoot "core"
 $partialOutputArchive = "$OutputArchive.partial"
 New-Item -ItemType Directory -Force -Path $stagingDirectory | Out-Null
