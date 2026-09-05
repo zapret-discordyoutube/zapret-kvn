@@ -30,7 +30,7 @@ from typing import Any, Callable, Generator
 
 from PyQt6.QtCore import QObject, QProcess, Qt, QTimer, pyqtSignal
 
-from ..subprocess_utils import (
+from ..platform.windows.subprocess_utils import (
     _SUBPROCESS_EXECUTOR,
     pump_qt_events,
     sleep_with_events,

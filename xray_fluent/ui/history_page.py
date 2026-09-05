@@ -15,7 +15,7 @@ from qfluentwidgets import (
     TitleLabel,
 )
 
-from ..traffic_history import TrafficHistoryStorage, TrafficSession
+from ..diagnostics.traffic_history import TrafficHistoryStorage, TrafficSession
 from .base_page import ScrollablePage
 from .theme import info_color, success_color
 

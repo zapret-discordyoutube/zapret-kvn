@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import hashlib
 from typing import Iterable
 
-from ..models import Node
+from ..profiles.models import Node
 from .protocol_core import ProtocolCore, protocol_core
 
 

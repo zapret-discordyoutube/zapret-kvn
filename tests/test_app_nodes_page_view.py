@@ -19,8 +19,9 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QHeaderView
 
-from xray_fluent.models import AppSettings, Node
+from xray_fluent.profiles.models import AppSettings, Node
 from xray_fluent.ui.nodes_filter_proxy import SORT_KEYS
+from xray_fluent.ui.nodes_table_model import COL_PING, COL_SPEED
 from xray_fluent.ui.nodes_page import _COLUMN_WIDTHS, _FLAG_ICON_SIZE, _ROW_HEIGHT, NodesPage
 from xray_fluent.ui.nodes_table_delegate import NodesActivityDelegate
 from xray_fluent.ui.nodes_table_model import (
@@ -61,12 +62,12 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
     """AC8: compact table — 30px rows, ~18x13 flag icon, default visible columns."""
 
     def test_row_height_constant_is_30(self) -> None:
-        self.assertEqual(_ROW_HEIGHT, 30)
+        self.assertEqual(_ROW_HEIGHT, 36)
 
     def test_table_rows_are_30px(self) -> None:
-        vertical_header = self.page.table.verticalHeader()
-        self.assertIsNotNone(vertical_header)
-        self.assertEqual(vertical_header.defaultSectionSize(), 30)
+        self.page.set_nodes([Node(name="A")])
+        index = self.page._group_model.index(0, 0)
+        self.assertEqual(index.data(Qt.ItemDataRole.SizeHintRole).height(), 36)
 
     def test_flag_icon_size_is_18x13(self) -> None:
         self.assertEqual((_FLAG_ICON_SIZE.width(), _FLAG_ICON_SIZE.height()), (18, 13))
@@ -74,7 +75,7 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
         self.assertEqual((icon_size.width(), icon_size.height()), (18, 13))
 
     def test_default_visible_columns_include_type_and_masked_address(self) -> None:
-        expected = ["name", "type", "address", "ping", "speed"]
+        expected = ["name", "type", "ping", "speed"]
         self.assertEqual(list(DEFAULT_VISIBLE_COLUMNS), expected)
         self.assertEqual(self.page.visible_column_keys(), expected)
 
@@ -91,7 +92,7 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
             )
 
     def test_type_column_has_compact_default_width(self) -> None:
-        self.assertEqual(_COLUMN_WIDTHS[COL_TYPE], 58)
+        self.assertEqual(_COLUMN_WIDTHS[COL_TYPE], 110)
 
     def test_type_column_is_clamped_to_compact_interactive_range(self) -> None:
         # AC7: the live drag is clamped only by the generous sanity bounds
@@ -102,7 +103,7 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
         header.resizeSection(COL_TYPE, 300)
         self.assertEqual(header.sectionSize(COL_TYPE), 200)
         header.resizeSection(COL_TYPE, 20)
-        self.assertEqual(header.sectionSize(COL_TYPE), 44)
+        self.assertEqual(header.sectionSize(COL_TYPE), 90)
 
     def test_reveal_button_masks_again_after_mouse_and_keyboard_release(self) -> None:
         self.page.set_nodes(
@@ -144,7 +145,7 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
             nodes_group_filter="EU",
             nodes_tag_filter="fast",
             nodes_visible_columns=["name", "address", "ping"],
-            nodes_column_widths={"type": 52, "address": 240},
+            nodes_column_widths={"type": 110, "address": 240},
             nodes_column_order=["name", "address", "type", "ping", "speed"],
         )
 
@@ -158,7 +159,7 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
         self.assertEqual(self.page.group_filter.currentText(), "EU")
         self.assertEqual(self.page.tag_filter.currentText(), "fast")
         self.assertEqual(self.page.visible_column_keys(), ["name", "address", "ping"])
-        self.assertEqual(self.page.column_widths()["type"], 52)
+        self.assertEqual(self.page.column_widths()["type"], 110)
         self.assertEqual(self.page.column_widths()["address"], 240)
         self.assertEqual(self.page.column_order()[:3], ["name", "address", "type"])
 
@@ -180,7 +181,10 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
                 "nodes_visible_columns": ["name", "address", "ping"],
                 "nodes_column_widths": self.page.column_widths(),
                 "nodes_column_order": self.page.column_order(),
-                "nodes_column_layout_version": 1,
+                "nodes_column_layout_version": 2,
+                "nodes_group_by": "source",
+                "nodes_collapsed_groups": [],
+                "nodes_favorites_only": False,
             },
         )
 
@@ -192,7 +196,7 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
         self.page.apply_view_settings(settings)
         self.assertEqual(
             self.page.visible_column_keys(),
-            ["name", "type", "address", "ping", "speed"],
+            ["name", "type", "ping", "speed"],
         )
 
     def test_user_sort_change_emits_view_prefs(self) -> None:
@@ -214,146 +218,32 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
         self.assertEqual(_proxy_order(self.page), ["d", "b", "a", "c"])
 
 
-class NodesPageFlexLayoutTests(NodesPageViewTestCase):
-    """Flex-column layout: "name" absorbs the leftover viewport width (AC2-AC6, AC8)."""
-
-    def _show_page(self, width: int = 1000, height: int = 500) -> None:
-        self.page.resize(width, height)
+class NodesPageColumnLayoutTests(NodesPageViewTestCase):
+    def test_resize_preserves_all_column_widths(self):
+        self.page.resize(1000, 600)
         self.page.show()
         _APP.processEvents()
-
-    def _header(self):
-        return self.page.table.horizontalHeader()
-
-    def _visible_total(self) -> int:
-        header = self._header()
-        return sum(
-            header.sectionSize(col)
-            for col in range(header.count())
-            if not self.page.table.isColumnHidden(col)
-        )
-
-    def test_flex_layout_fills_viewport_exactly(self) -> None:
-        # AC2: with enough room the visible columns fill the viewport exactly
-        # and "name" sits above its minimum (no horizontal scrollbar needed).
-        self._show_page(1000, 500)
-        header = self._header()
-        viewport_width = self.page.table.viewport().width()
-        self.assertGreater(viewport_width, 0)
-        self.assertEqual(self._visible_total(), viewport_width)
-        self.assertGreater(
-            header.sectionSize(COL_NAME), COLUMN_BY_KEY["name"].minimum_width
-        )
-
-        # A viewport resize re-runs the relayout and fills the new width too.
-        self.page.resize(1200, 500)
+        before = self.page.column_widths()
+        self.page.resize(1800, 800)
         _APP.processEvents()
-        new_viewport_width = self.page.table.viewport().width()
-        self.assertGreater(new_viewport_width, viewport_width)
-        self.assertEqual(self._visible_total(), new_viewport_width)
+        self.assertEqual(before, self.page.column_widths())
+        self.assertEqual(self.page.table.header().sectionSize(COL_NAME), 360)
 
-    def test_resizing_non_flex_column_is_absorbed_by_name(self) -> None:
-        # AC3: a user drag of a non-flex column is compensated by "name";
-        # the total width of visible columns does not change.
-        self._show_page(1000, 500)
-        header = self._header()
-        viewport_width = self.page.table.viewport().width()
-        name_before = header.sectionSize(COL_NAME)
-        address_before = header.sectionSize(COL_ADDRESS)
+    def test_name_drag_does_not_resize_neighbors_and_is_persisted(self):
+        header = self.page.table.header()
+        others = [header.sectionSize(c) for c in (COL_TYPE, COL_PING, COL_SPEED)]
+        header.resizeSection(COL_NAME, 500)
+        self.assertEqual(self.page.column_widths()["name"], 500)
+        self.assertEqual(others, [header.sectionSize(c) for c in (COL_TYPE, COL_PING, COL_SPEED)])
+        header.resizeSection(COL_NAME, 5000)
+        self.assertEqual(header.sectionSize(COL_NAME), 640)
 
-        header.resizeSection(COL_ADDRESS, address_before + 100)
-
-        self.assertEqual(header.sectionSize(COL_ADDRESS), address_before + 100)
-        self.assertEqual(header.sectionSize(COL_NAME), name_before - 100)
-        self.assertEqual(self._visible_total(), viewport_width)
-        # AC8: the flex column width is derived and never persisted.
-        self.assertNotIn("name", self.page.column_widths())
-        self.assertEqual(self.page.column_widths()["address"], address_before + 100)
-
-    def test_resizing_name_shifts_delta_to_right_neighbor(self) -> None:
-        # AC4: growing "name" shrinks the first visible column to its right
-        # in visual order ("type"), cascading further right on shortage.
-        self._show_page(1000, 500)
-        header = self._header()
-        viewport_width = self.page.table.viewport().width()
-        name_before = header.sectionSize(COL_NAME)
-        type_before = header.sectionSize(COL_TYPE)  # 58, minimum 44
-        address_before = header.sectionSize(COL_ADDRESS)
-
-        header.resizeSection(COL_NAME, name_before + 10)
-        self.assertEqual(header.sectionSize(COL_NAME), name_before + 10)
-        self.assertEqual(header.sectionSize(COL_TYPE), type_before - 10)
-        self.assertEqual(self._visible_total(), viewport_width)
-
-        # Cascade: "type" has only 4px left above its minimum; the remaining
-        # 16px of the next 20px drag are taken from "address".
-        header.resizeSection(COL_NAME, name_before + 30)
-        self.assertEqual(header.sectionSize(COL_NAME), name_before + 30)
-        self.assertEqual(
-            header.sectionSize(COL_TYPE), COLUMN_BY_KEY["type"].minimum_width
-        )
-        self.assertEqual(header.sectionSize(COL_ADDRESS), address_before - 16)
-        self.assertEqual(self._visible_total(), viewport_width)
-        self.assertNotIn("name", self.page.column_widths())
-
-    def test_resizing_name_clamps_when_no_neighbor_can_absorb(self) -> None:
-        # AC4 (clamp case): with no visible neighbor to the right able to
-        # absorb the delta, the "name" drag itself is clamped.
-        self._show_page(1000, 500)
-        for col, key in enumerate(COLUMN_KEYS):
-            if key != "name":
-                self.page._set_column_visible(col, False)
-        _APP.processEvents()
-        header = self._header()
-        name_before = header.sectionSize(COL_NAME)
-        self.assertEqual(name_before, self.page.table.viewport().width())
-
-        header.resizeSection(COL_NAME, name_before + 50)
-        self.assertEqual(header.sectionSize(COL_NAME), name_before)
-
-    def test_min_widths_overflow_enables_horizontal_scroll(self) -> None:
-        # AC5: once "name" is at its minimum, further widening of other
-        # columns is NOT rolled back; the sections overflow the viewport,
-        # which is the horizontal-scrollbar condition.
-        self._show_page(900, 500)
-        header = self._header()
-        viewport_width = self.page.table.viewport().width()
-        name_minimum = COLUMN_BY_KEY["name"].minimum_width
-        address_before = header.sectionSize(COL_ADDRESS)
-
-        header.resizeSection(COL_ADDRESS, address_before + 800)
-
-        self.assertEqual(header.sectionSize(COL_ADDRESS), address_before + 800)
-        self.assertEqual(header.sectionSize(COL_NAME), name_minimum)
-        self.assertGreater(self._visible_total(), viewport_width)
-
-        # A further drag while "name" sits at its minimum still sticks
-        # (address maximum is 1000, so +10 stays inside the sanity bound).
-        wide = header.sectionSize(COL_ADDRESS)
-        header.resizeSection(COL_ADDRESS, wide + 10)
-        self.assertEqual(header.sectionSize(COL_ADDRESS), wide + 10)
-        self.assertEqual(header.sectionSize(COL_NAME), name_minimum)
-
-    def test_programmatic_relayout_does_not_emit_view_prefs(self) -> None:
-        # AC6: apply_view_settings, viewport resizes and the relayouts they
-        # trigger must not emit view_prefs_changed nor arm the save debounce.
-        prefs: list[dict] = []
-        self.page.view_prefs_changed.connect(prefs.append)
-
-        settings = AppSettings(
-            nodes_visible_columns=["name", "type", "address", "ping", "speed"],
-            nodes_column_widths={"address": 240},
-            nodes_column_layout_version=1,
-        )
-        self.page.apply_view_settings(settings)
-        self._show_page(1000, 500)
-        self.page.resize(1200, 500)
-        _APP.processEvents()
-
-        self.assertEqual(self._visible_total(), self.page.table.viewport().width())
-        self.assertFalse(self.page._column_layout_timer.isActive())
-        QTest.qWait(250)  # let any (wrongly) armed debounce timer fire
-        self.assertEqual(prefs, [])
+    def test_programmatic_resize_does_not_save_preferences(self):
+        events = []
+        self.page.view_prefs_changed.connect(events.append)
+        self.page.resize(1600, 900)
+        self.page._relayout_flex_column()
+        self.assertEqual(events, [])
 
 
 class NodesActiveRowFillSeamTests(NodesPageViewTestCase):
@@ -406,30 +296,15 @@ class NodesActiveRowFillSeamTests(NodesPageViewTestCase):
                 )
 
 
-class NodesActivityDelegateStripeTests(NodesPageViewTestCase):
-    """Active-node stripe must not double the qfluentwidgets selection pill."""
-
-    def test_stripe_yields_to_selection_pill(self) -> None:
-        self.page.set_nodes(
-            [Node(id="a", name="A", server="s.example", port=1, scheme="vless")]
-        )
-        delegate = self.page.table.itemDelegate()
-        self.assertIsInstance(delegate, NodesActivityDelegate)
-        index = self.page._proxy.index(0, COL_NAME)
-
-        # Unselected row: no pill, the stripe may paint.
-        self.assertFalse(delegate._selection_indicator_visible(index))
-
-        # Selected row at hscroll 0: qfluentwidgets paints its pill instead.
-        delegate.selectedRows.add(index.row())
-        self.assertTrue(delegate._selection_indicator_visible(index))
-
-        # qfluentwidgets hides the pill while scrolled horizontally, so the
-        # stripe must take over again.
-        bar = self.page.table.horizontalScrollBar()
-        bar.setRange(0, 100)
-        bar.setValue(50)
-        self.assertFalse(delegate._selection_indicator_visible(index))
+class NodesActivityDelegateTests(NodesPageViewTestCase):
+    def test_active_server_uses_stock_tree_delegate_and_bold_font(self):
+        from qfluentwidgets import TreeItemDelegate
+        self.page.set_nodes([Node(id="a", name="A")])
+        self.page.set_active_node("a")
+        self.assertIsInstance(self.page.table.itemDelegate(), TreeItemDelegate)
+        parent = self.page._group_model.index(0, 0)
+        index = self.page._group_model.index(0, 0, parent)
+        self.assertTrue(index.data(Qt.ItemDataRole.FontRole).bold())
 
 
 if __name__ == "__main__":

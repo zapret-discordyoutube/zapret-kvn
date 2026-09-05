@@ -8,12 +8,12 @@ import zipfile
 
 from PyQt6.QtCore import QCoreApplication
 
-from xray_fluent.app_controller import AppController
-from xray_fluent.application.runtime_errors import RuntimeErrorJournal, core_failure
-from xray_fluent.diagnostics import capture_runtime_config, export_diagnostics
+from xray_fluent.application.controller import AppController
+from xray_fluent.diagnostics.runtime_errors import RuntimeErrorJournal, core_failure
+from xray_fluent.diagnostics.export import capture_runtime_config, export_diagnostics
 from xray_fluent.engines.singbox.manager import SingBoxManager
-from xray_fluent.models import AppState
-from xray_fluent.runtime_logging import RuntimeLogContext, RuntimeNodeIdentity
+from xray_fluent.profiles.models import AppState
+from xray_fluent.diagnostics.runtime_logging import RuntimeLogContext, RuntimeNodeIdentity
 
 _APP = QCoreApplication.instance() or QCoreApplication([])
 
@@ -85,7 +85,7 @@ class DiagnosticRuntimeSnapshotTests(unittest.TestCase):
             hysteria=SimpleNamespace(is_running=False, diagnostic_config=None),
         )
         with tempfile.TemporaryDirectory() as folder:
-            with patch('xray_fluent.app_controller.LOG_DIR', Path(folder)):
+            with patch('xray_fluent.application.controller.LOG_DIR', Path(folder)):
                 path = AppController.build_diagnostics(controller)
             with zipfile.ZipFile(path) as archive:
                 runtime = json.loads(archive.read('runtime_redacted.json'))

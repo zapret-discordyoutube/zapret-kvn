@@ -1,7 +1,7 @@
 from pathlib import Path
 import unittest
 
-from xray_fluent.app_updater import _build_update_script
+from xray_fluent.updates.app_updater import _build_update_script
 
 
 class UpdateScriptTests(unittest.TestCase):

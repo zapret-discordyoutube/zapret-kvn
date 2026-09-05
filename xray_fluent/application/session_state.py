@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .hysteria_runtime_contract import HysteriaFailureCode
+from ..engines.hysteria.runtime_contract import HysteriaFailureCode
 
 
 @dataclass(slots=True)

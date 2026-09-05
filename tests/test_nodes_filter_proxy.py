@@ -2,7 +2,7 @@ import unittest
 
 from PyQt6.QtCore import QItemSelectionModel, Qt
 
-from xray_fluent.models import Node
+from xray_fluent.profiles.models import Node
 from xray_fluent.ui.nodes_filter_proxy import SORT_KEYS, NodesFilterProxy
 from xray_fluent.ui.nodes_table_model import NODE_ID_ROLE, NodesTableModel
 

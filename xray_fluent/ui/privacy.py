@@ -36,6 +36,16 @@ def endpoint_text(server: str, port: int, revealed: bool) -> str:
     return format_endpoint(server, port) if revealed else masked_endpoint()
 
 
+def node_name_text(node, *, revealed: bool = False) -> str:
+    """Generated WG/AWG names can contain the endpoint itself."""
+    name = node.name or "Без имени"
+    host = (node.server or "").strip()
+    if host and not revealed:
+        name = name.replace(format_endpoint(host, node.port), MASKED_VALUE)
+        name = name.replace(host, MASKED_VALUE)
+    return name
+
+
 class HoldToRevealButton(TransparentToolButton):
     """A non-toggle button that reveals sensitive text only while held."""
 

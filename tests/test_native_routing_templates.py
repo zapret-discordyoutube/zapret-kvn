@@ -8,8 +8,8 @@ import zipfile
 
 from xray_fluent.engines.xray.config_builder import build_xray_config
 from xray_fluent.engines.xray.core_updater import _install_zip_archive
-from xray_fluent.link_parser import parse_single
-from xray_fluent.models import AppSettings, RoutingSettings
+from xray_fluent.importer.link_parser import parse_single
+from xray_fluent.profiles.models import AppSettings, RoutingSettings
 
 
 ROOT = Path(__file__).resolve().parents[1]

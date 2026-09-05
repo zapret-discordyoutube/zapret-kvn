@@ -7,7 +7,7 @@ import json
 from urllib.parse import urlsplit
 
 from ..constants import SUBSCRIPTION_PARSER_REVISION
-from ..models import (
+from ..profiles.models import (
     AppState,
     Node,
     Subscription,
@@ -15,8 +15,8 @@ from ..models import (
     normalize_subscription_warnings,
     utc_now_iso,
 )
-from ..subscription_http import SubscriptionFetchResult, sanitize_fetch_error
-from ..subscription_parser import (
+from ..importer.subscription_http import SubscriptionFetchResult, sanitize_fetch_error
+from ..importer.subscription_parser import (
     ParsedSubscription,
     hidden_source_key_for_node,
     source_fingerprint_for_node,
@@ -161,7 +161,9 @@ def reconcile_subscription(
         incoming.ping_ms = match.ping_ms
         incoming.last_used_at = match.last_used_at
         incoming.created_at = match.created_at
-        incoming.country_code = match.country_code
+        incoming.country_override = match.country_override
+        incoming.is_favorite = match.is_favorite
+        incoming.country_code = match.country_code if incoming.server == match.server else ""
         incoming.speed_mbps = match.speed_mbps
         incoming.is_alive = match.is_alive
         incoming.ping_history = list(match.ping_history)

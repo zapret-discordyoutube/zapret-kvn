@@ -35,6 +35,15 @@ if (-not $singBoxSource -or [string]$singBoxSource.version -notmatch "extended")
     throw "Core manifest does not identify an extended sing-box build"
 }
 $singBoxPath = Join-Path $CoreDirectory "sing-box.exe"
+if (-not ($manifest.PSObject.Properties.Name -contains "singbox_build")) {
+    throw "Missing patched sing-box build provenance"
+}
+$frontBuild = $manifest.singbox_build
+if ([string]$frontBuild.commit -notmatch '^[0-9a-f]{40}$' -or
+    [string]$frontBuild.udp_patch.patch_sha256 -notmatch '^[0-9a-f]{64}$' -or
+    [string]$frontBuild.binary_sha256 -ne (Get-FileHash -LiteralPath $singBoxPath -Algorithm SHA256).Hash.ToLowerInvariant()) {
+    throw "Patched sing-box source/binary provenance mismatch"
+}
 $singBoxVersionOutput = (& $singBoxPath version 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0) {
     throw "Bundled sing-box failed its version command with exit code $LASTEXITCODE"
@@ -67,5 +76,12 @@ if ($hysteriaVersionOutput -notmatch [regex]::Escape($expectedHysteriaVersion)) 
 }
 
 Write-Host "[core] verified $($manifest.files.Count) files"
+$amneziaSource = @($manifest.sources | Where-Object { [string]$_.id -eq "amnezia" })
+if ($amneziaSource.Count -ne 1) { throw "Core manifest must identify official Amnezia" }
+$amneziaOutput = (& (Join-Path $CoreDirectory "zapret-amnezia.exe") --version 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $amneziaOutput -notmatch [regex]::Escape([string]$amneziaSource[0].version)) {
+    throw "Bundled Amnezia version does not match its manifest"
+}
+Write-Host "[core] Amnezia: $($amneziaSource[0].version)"
 Write-Host "[core] sing-box: $($singBoxSource.version)"
 Write-Host "[core] Hysteria: $($hysteriaSource.version)"

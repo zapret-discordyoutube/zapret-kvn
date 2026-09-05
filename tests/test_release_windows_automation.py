@@ -102,7 +102,7 @@ class ReleaseStateTests(unittest.TestCase):
         resolver = str(release_windows.CORE_RESOLVER_PATH.relative_to(release_windows.ROOT))
         self.assertEqual(
             run.call_args_list[0].args[0],
-            [release_windows.sys.executable, resolver, "--write"],
+            [release_windows.sys.executable, resolver, "--write", "--update-runtime"],
         )
         self.assertEqual(
             run.call_args_list[1].args[0],
@@ -117,11 +117,17 @@ class ReleaseStateTests(unittest.TestCase):
             "version": "0.4.95",
             "commit": "a" * 40,
             "templates_verified": 4,
+            "geoip": json.loads(release_windows.GEOIP_LOCK_PATH.read_text()),
             "executable": {"size": 1, "sha256": "b" * 64},
             "core": {
                 "lock_sha256": "c" * 64,
                 "manifest_sha256": "d" * 64,
                 "sources": [
+                    {
+                        "id": "amnezia", "repository": "amnezia-vpn/amneziawg-go",
+                        "channel": "official-tags", "release_prerelease": True,
+                        "archive_sha256": "9" * 64, "asset_size": 5,
+                    },
                     {
                         "id": "xray-core",
                         "channel": "stable",

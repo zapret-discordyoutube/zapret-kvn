@@ -63,7 +63,7 @@ def _location(path: str, field: str) -> str:
 def check_config(exe: Path, config_path: Path, *, timeout: float = 15.0) -> tuple[bool, str]:
     """Спросить ядро, годится ли конфигурация. Возвращает (ок, объяснение)."""
 
-    from ...subprocess_utils import result_output_text, run_text_pumped
+    from ...platform.windows.subprocess_utils import result_output_text, run_text_pumped
 
     try:
         result = run_text_pumped(

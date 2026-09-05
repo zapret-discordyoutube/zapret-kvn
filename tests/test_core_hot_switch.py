@@ -4,8 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from xray_fluent.app_controller import AppController
-from xray_fluent.application.hysteria_runtime_contract import HysteriaFailureCode
+from xray_fluent.application.controller import AppController
+from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
 from xray_fluent.application.node_service import set_selected_node
 from xray_fluent.application.signature_service import transition_signature
 from xray_fluent.application.outbound_pool_service import (
@@ -25,8 +25,8 @@ from xray_fluent.engines.singbox.selector_api import (
 )
 from xray_fluent.engines.hysteria.manager import HysteriaManager
 from xray_fluent.engines.xray.config_builder import build_xray_config
-from xray_fluent.link_parser import parse_single
-from xray_fluent.models import AppSettings, RoutingSettings
+from xray_fluent.importer.link_parser import parse_single
+from xray_fluent.profiles.models import AppSettings, RoutingSettings
 
 from pathlib import Path
 
@@ -664,7 +664,7 @@ class HybridRuntimeStartupTests(unittest.TestCase):
         controller.singbox.start.return_value = True
         controller._apply_core_outbound_tag.side_effect = [False, True]
 
-        with patch("xray_fluent.app_controller.sleep_with_events") as sleep_mock:
+        with patch("xray_fluent.application.controller.sleep_with_events") as sleep_mock:
             self.assertTrue(AppController._start_singbox_runtime_plan(controller, plan))
 
         self.assertEqual(controller.singbox.start.call_count, 2)
@@ -695,7 +695,7 @@ class HybridRuntimeStartupTests(unittest.TestCase):
         controller.singbox.last_start_failure_retryable = True
         controller._apply_core_outbound_tag.return_value = True
 
-        with patch("xray_fluent.app_controller.sleep_with_events") as sleep_mock:
+        with patch("xray_fluent.application.controller.sleep_with_events") as sleep_mock:
             self.assertTrue(AppController._start_singbox_runtime_plan(controller, plan))
 
         self.assertEqual(controller.singbox.start.call_count, 2)

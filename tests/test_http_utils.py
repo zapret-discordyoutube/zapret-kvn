@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import urllib.error
 import urllib.request
 
-from xray_fluent import http_utils
+from xray_fluent.network import http_utils
 
 
 class _FakeSslContext:

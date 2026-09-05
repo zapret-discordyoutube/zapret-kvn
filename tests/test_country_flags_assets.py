@@ -27,8 +27,9 @@ if _existing is not None and not isinstance(_existing, QApplication):
     )
 _APP = _existing or QApplication([])
 
-from xray_fluent import constants, country_flags
-from xray_fluent.country_flags import _VALID_CODES, _draw_flag, get_flag_icon
+from xray_fluent import constants
+from xray_fluent.profiles import country_flags
+from xray_fluent.profiles.country_flags import _VALID_CODES, get_flag_icon
 
 ROOT = Path(__file__).resolve().parents[1]
 FLAGS_DIR = ROOT / "assets" / "flags"
@@ -65,7 +66,7 @@ class FlagAssetsTests(unittest.TestCase):
         self.assertIn("flagpedia", text)
 
     def test_country_flags_module_has_no_network_calls(self) -> None:
-        source = (ROOT / "xray_fluent" / "country_flags.py").read_text(
+        source = (ROOT / "xray_fluent" / "profiles" / "country_flags.py").read_text(
             encoding="utf-8"
         )
         for needle in ("urllib", "requests", "QNetwork", "socket", "http"):
@@ -83,9 +84,8 @@ class FlagIconLoadingTests(unittest.TestCase):
         icon = get_flag_icon("gb")
         self.assertIsNotNone(icon)
         file_img = _icon_image(icon)
-        stripe_img = _image(_draw_flag("GB"))
-        self.assertEqual(file_img.size(), stripe_img.size())
-        self.assertNotEqual(file_img, stripe_img)
+        self.assertFalse(file_img.isNull())
+        self.assertNotEqual(file_img, _icon_image(get_flag_icon("NL")))
 
     def test_icon_scaled_to_18x13(self) -> None:
         pm = country_flags._load_flag_pixmap("GB")
@@ -97,13 +97,11 @@ class FlagIconLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(country_flags, "FLAGS_DIR", Path(tmp)):
                 icon = get_flag_icon("gb")
-        self.assertIsNotNone(icon)
-        self.assertEqual(_icon_image(icon), _image(_draw_flag("GB")))
+        self.assertIsNone(icon)
 
     def test_unknown_code_falls_back_without_exception(self) -> None:
         icon = get_flag_icon("zz")
-        self.assertIsNotNone(icon)
-        self.assertEqual(_icon_image(icon), _image(_draw_flag("ZZ")))
+        self.assertIsNone(icon)
 
     def test_empty_code_returns_none(self) -> None:
         self.assertIsNone(get_flag_icon(""))
@@ -112,9 +110,9 @@ class FlagIconLoadingTests(unittest.TestCase):
         calls: list[str] = []
         original = country_flags._load_flag_pixmap
 
-        def counting(code: str):
+        def counting(code: str, ratio=1.0):
             calls.append(code)
-            return original(code)
+            return original(code, ratio)
 
         with patch.object(country_flags, "_load_flag_pixmap", counting):
             first = get_flag_icon("de")
@@ -141,12 +139,9 @@ class FlagThemeTests(unittest.TestCase):
     def test_rendered_flag_differs_between_themes(self) -> None:
         with patch.object(country_flags, "isDarkTheme", return_value=True):
             dark_file = _image(country_flags._load_flag_pixmap("GB"))
-            dark_stripe = _image(_draw_flag("GB"))
         with patch.object(country_flags, "isDarkTheme", return_value=False):
             light_file = _image(country_flags._load_flag_pixmap("GB"))
-            light_stripe = _image(_draw_flag("GB"))
         self.assertNotEqual(dark_file, light_file)
-        self.assertNotEqual(dark_stripe, light_stripe)
 
     def test_cache_cleared_on_theme_changed_signal(self) -> None:
         get_flag_icon("fr")

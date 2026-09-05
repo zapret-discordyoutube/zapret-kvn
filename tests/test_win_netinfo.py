@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from PyQt6.QtCore import QCoreApplication
 
-from xray_fluent import win_netinfo
+from xray_fluent.platform.windows import win_netinfo
 from xray_fluent.engines.singbox.manager import SingBoxManager
 from xray_fluent.engines.xray.tun_route_manager import WindowsTunInterface, XrayTunRouteManager
 
@@ -138,7 +138,7 @@ class WinNetInfoHelperTests(unittest.TestCase):
             _adapter("xftun0", description="sing-box TUN", if_index=21, ipv4=["172.19.0.1"]),
             _adapter("Ethernet", description="Realtek PCIe", if_index=7),
         ]
-        with patch("xray_fluent.win_netinfo.list_adapters", return_value=adapters):
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=adapters):
             self.assertIs(win_netinfo.find_adapter("XFTUN0"), adapters[0])
             self.assertIs(win_netinfo.find_adapter("sing-box tun"), adapters[0])
             self.assertIs(win_netinfo.find_adapter("Ethernet"), adapters[1])
@@ -150,14 +150,14 @@ class WinNetInfoHelperTests(unittest.TestCase):
             _adapter("xftun0", if_index=21, ipv4=["172.19.0.1"]),
             _adapter("Ethernet", if_index=7),
         ]
-        with patch("xray_fluent.win_netinfo.list_adapters", return_value=adapters):
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=adapters):
             self.assertTrue(win_netinfo.adapter_has_ipv4("xftun0"))
             self.assertFalse(win_netinfo.adapter_has_ipv4("Ethernet"))
             self.assertFalse(win_netinfo.adapter_has_ipv4("missing"))
 
     def test_any_adapter_name_contains(self) -> None:
         adapters = [_adapter("xftun3", description="wintun")]
-        with patch("xray_fluent.win_netinfo.list_adapters", return_value=adapters):
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=adapters):
             self.assertTrue(win_netinfo.any_adapter_name_contains("xftun"))
             self.assertTrue(win_netinfo.any_adapter_name_contains("WINTUN"))
             self.assertFalse(win_netinfo.any_adapter_name_contains("tap-windows"))
@@ -171,7 +171,7 @@ class WinNetInfoHelperTests(unittest.TestCase):
             return win_netinfo._ERROR_NO_DATA
 
         with patch.object(win_netinfo.os, "name", "nt"), patch(
-            "xray_fluent.win_netinfo._resolve_get_adapters_addresses",
+            "xray_fluent.platform.windows.win_netinfo._resolve_get_adapters_addresses",
             return_value=fake_get_adapters_addresses,
         ):
             self.assertEqual(win_netinfo.list_adapters(), [])
@@ -182,8 +182,8 @@ class WinNetInfoHelperTests(unittest.TestCase):
 
 class SingBoxTunProbeTests(unittest.TestCase):
     def test_fast_path_skips_powershell(self) -> None:
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.adapter_has_ipv4", return_value=True
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.adapter_has_ipv4", return_value=True
         ) as fast_mock, patch.object(
             SingBoxManager, "_tun_interface_has_ipv4"
         ) as powershell_mock:
@@ -193,8 +193,8 @@ class SingBoxTunProbeTests(unittest.TestCase):
         powershell_mock.assert_not_called()
 
     def test_fast_negative_is_verified_by_powershell(self) -> None:
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.adapter_has_ipv4", return_value=False
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.adapter_has_ipv4", return_value=False
         ) as fast_mock, patch.object(
             SingBoxManager, "_tun_interface_has_ipv4", return_value=True
         ) as powershell_mock:
@@ -204,8 +204,8 @@ class SingBoxTunProbeTests(unittest.TestCase):
         powershell_mock.assert_called_once_with("xftun0")
 
     def test_both_providers_must_report_negative_before_waiting_again(self) -> None:
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.adapter_has_ipv4", return_value=False
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.adapter_has_ipv4", return_value=False
         ), patch.object(
             SingBoxManager, "_tun_interface_has_ipv4", return_value=False
         ) as powershell_mock:
@@ -214,8 +214,8 @@ class SingBoxTunProbeTests(unittest.TestCase):
         powershell_mock.assert_called_once_with("xftun0")
 
     def test_ctypes_failure_falls_back_to_powershell(self) -> None:
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.adapter_has_ipv4",
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.adapter_has_ipv4",
             side_effect=win_netinfo.WinNetInfoError("boom"),
         ), patch.object(
             SingBoxManager, "_tun_interface_has_ipv4", return_value=True
@@ -225,8 +225,8 @@ class SingBoxTunProbeTests(unittest.TestCase):
         powershell_mock.assert_called_once_with("xftun0")
 
     def test_unavailable_ctypes_uses_powershell(self) -> None:
-        with patch("xray_fluent.win_netinfo.is_available", return_value=False), patch(
-            "xray_fluent.win_netinfo.adapter_has_ipv4"
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=False), patch(
+            "xray_fluent.platform.windows.win_netinfo.adapter_has_ipv4"
         ) as fast_mock, patch.object(
             SingBoxManager, "_tun_interface_has_ipv4", return_value=False
         ):
@@ -235,8 +235,8 @@ class SingBoxTunProbeTests(unittest.TestCase):
         fast_mock.assert_not_called()
 
     def test_tun_gone_fast_path(self) -> None:
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.any_adapter_name_contains", return_value=False
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.any_adapter_name_contains", return_value=False
         ) as fast_mock, patch(
             "xray_fluent.engines.singbox.manager.run_text_pumped"
         ) as netsh_mock:
@@ -247,8 +247,8 @@ class SingBoxTunProbeTests(unittest.TestCase):
 
     def test_tun_gone_falls_back_to_netsh(self) -> None:
         completed = Mock(returncode=0, stdout=b"Ethernet\n", stderr=b"")
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.any_adapter_name_contains",
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.any_adapter_name_contains",
             side_effect=win_netinfo.WinNetInfoError("boom"),
         ), patch(
             "xray_fluent.engines.singbox.manager.run_text_pumped", return_value=completed
@@ -259,7 +259,7 @@ class SingBoxTunProbeTests(unittest.TestCase):
 
     def test_tun_gone_netsh_still_lists_adapter(self) -> None:
         completed = Mock(returncode=0, stdout=b"xftun0\n", stderr=b"")
-        with patch("xray_fluent.win_netinfo.is_available", return_value=False), patch(
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=False), patch(
             "xray_fluent.engines.singbox.manager.run_text_pumped", return_value=completed
         ):
             self.assertEqual(SingBoxManager._probe_tun_adapter_gone(), (False, False))
@@ -268,8 +268,8 @@ class SingBoxTunProbeTests(unittest.TestCase):
 class XrayTunRouteProbeTests(unittest.TestCase):
     def test_fast_path_builds_interface_from_adapter_info(self) -> None:
         adapter = _adapter("xftun0", if_index=33, ipv4=["172.19.0.1"], ipv6=["fd00::2"])
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.find_adapter", return_value=adapter
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.find_adapter", return_value=adapter
         ), patch.object(
             XrayTunRouteManager, "_read_tun_interface_powershell"
         ) as powershell_mock:
@@ -283,8 +283,8 @@ class XrayTunRouteProbeTests(unittest.TestCase):
         powershell_mock.assert_not_called()
 
     def test_fast_path_reports_missing_adapter_without_fallback(self) -> None:
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.find_adapter", return_value=None
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.find_adapter", return_value=None
         ), patch.object(
             XrayTunRouteManager, "_read_tun_interface_powershell"
         ) as powershell_mock:
@@ -296,8 +296,8 @@ class XrayTunRouteProbeTests(unittest.TestCase):
 
     def test_adapter_without_ipv4_is_not_ready(self) -> None:
         adapter = _adapter("xftun0", if_index=33, ipv4=[], ipv6=["fd00::2"])
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.find_adapter", return_value=adapter
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.find_adapter", return_value=adapter
         ):
             interface, fast_probe = XrayTunRouteManager._read_tun_interface("xftun0")
 
@@ -306,8 +306,8 @@ class XrayTunRouteProbeTests(unittest.TestCase):
 
     def test_ctypes_failure_falls_back_to_powershell(self) -> None:
         sentinel = WindowsTunInterface(interface_index=5, ipv4_address="172.19.0.1", ipv6_address="")
-        with patch("xray_fluent.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.win_netinfo.find_adapter",
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
+            "xray_fluent.platform.windows.win_netinfo.find_adapter",
             side_effect=win_netinfo.WinNetInfoError("boom"),
         ), patch.object(
             XrayTunRouteManager, "_read_tun_interface_powershell", return_value=sentinel

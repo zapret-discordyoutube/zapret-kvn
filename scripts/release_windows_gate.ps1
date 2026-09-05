@@ -62,6 +62,12 @@ function Assert-StableCoreLock([string]$LockFile) {
             throw "Core source $($entry.Key) has no verified asset size"
         }
     }
+    if ([string]$lock.amnezia.repository -ne "amnezia-vpn/amneziawg-go" -or
+        [string]$lock.amnezia.channel -ne "official-tags" -or
+        [string]$lock.amnezia.commit -notmatch '^[0-9a-f]{40}$' -or
+        [string]$lock.amnezia.sha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Core lock must pin the official Amnezia module and source digest"
+    }
     return $lock
 }
 
@@ -70,7 +76,7 @@ function Stop-ReleaseProcesses([string]$Root) {
         [IO.Path]::GetFullPath((Join-Path $Root "dist\ZapretKVN")),
         [IO.Path]::GetFullPath((Join-Path $Root "core"))
     )
-    $names = @("ZapretKVN", "sing-box", "xray", "hysteria", "tun2socks")
+    $names = @("ZapretKVN", "sing-box", "xray", "hysteria", "zapret-amnezia", "tun2socks")
     foreach ($process in Get-Process -Name $names -ErrorAction SilentlyContinue) {
         $path = $null
         try { $path = $process.Path } catch { $path = $null }
@@ -116,8 +122,9 @@ function Install-VerifiedCore([string]$Root) {
     $lockFile = Join-Path $Root "scripts\core-lock.windows-x64.json"
     $null = Assert-StableCoreLock $lockFile
     $archive = Join-Path $Root ".cache\core-bundle\core-windows-x64.7z"
-    $stamp = "$archive.lock.sha256"
-    $lockHash = Get-Sha256 $lockFile
+    $stamp = "$archive.inputs.sha256"
+    $lockHash = (& py -3 (Join-Path $Root "scripts\core_bundle_fingerprint.py") --root $Root --lock $lockFile | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $lockHash -notmatch '^[0-9a-f]{64}$') { throw "Cannot fingerprint current core sources" }
     $cachedHash = if (Test-Path -LiteralPath $stamp) {
         (Get-Content -LiteralPath $stamp -Raw).Trim().ToLowerInvariant()
     } else { "" }
@@ -125,7 +132,7 @@ function Install-VerifiedCore([string]$Root) {
         Write-Host "[release] rebuilding pinned core bundle"
         & (Join-Path $Root "scripts\build_core_bundle.ps1")
     } else {
-        Write-Host "[release] reusing pinned core bundle for lock $lockHash"
+        Write-Host "[release] reusing core bundle for verified inputs $lockHash"
     }
     & (Join-Path $Root "scripts\install_core_bundle.ps1")
 }
@@ -138,8 +145,13 @@ function Get-CoreProof([string]$Root) {
         throw "Installed core manifest is missing: $manifestPath"
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $sources = @($lock.sources | Where-Object {
-        [string]$_.id -in @("xray-core", "sing-box-extended", "hysteria")
+    $expectedInputs = (& py -3 (Join-Path $Root "scripts\core_bundle_fingerprint.py") --root $Root --lock $lockFile | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]$manifest.inputs_sha256 -ne $expectedInputs -or
+        [string]$manifest.lock_sha256 -ne (Get-Sha256 $lockFile)) {
+        throw "Installed cores were built from different source/patch inputs"
+    }
+    $sources = @((@($lock.sources) + @($lock.amnezia)) | Where-Object {
+        [string]$_.id -in @("xray-core", "sing-box-extended", "hysteria", "amnezia")
     } | ForEach-Object {
         [ordered]@{
             id = [string]$_.id
@@ -155,6 +167,8 @@ function Get-CoreProof([string]$Root) {
         lock_sha256 = Get-Sha256 $lockFile
         manifest_sha256 = Get-Sha256 $manifestPath
         sources = $sources
+        singbox_build = $manifest.singbox_build
+        inputs_sha256 = $manifest.inputs_sha256
     }
 }
 
@@ -317,6 +331,9 @@ Ensure-DependenciesAndTests $RepoRoot
 $exePath = Build-Application $RepoRoot
 Assert-CleanPayload $RepoRoot
 $templateCount = Test-ShippedTemplates $RepoRoot
+$geoipJson = & (Join-Path $RepoRoot ".venv\Scripts\python.exe") (Join-Path $RepoRoot "scripts\prepare_geoip.py") --verify (Join-Path $RepoRoot "dist\ZapretKVN\assets")
+if ($LASTEXITCODE -ne 0) { throw "Packaged GeoIP verification failed" }
+$geoipProof = $geoipJson | ConvertFrom-Json
 $assets = if ($Mode -eq "stable") { @(New-StableAssets $RepoRoot $Version) } else { @() }
 
 if (-not $ManifestPath) {
@@ -337,6 +354,7 @@ $manifest = [ordered]@{
     }
     templates_verified = $templateCount
     core = $coreProof
+    geoip = $geoipProof
     assets = $assets
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ManifestPath -Encoding utf8

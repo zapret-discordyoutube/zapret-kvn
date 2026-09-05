@@ -20,7 +20,7 @@ from xray_fluent.application.auto_switch_service import (
     AUTO_SWITCH_HYSTERIA_LOW_SEC,
     check_auto_switch,
 )
-from xray_fluent.models import AppSettings, Node
+from xray_fluent.profiles.models import AppSettings, Node
 
 
 class _Recorder:
@@ -102,7 +102,7 @@ def _tick(
 
 def _hysteria_controller() -> FakeController:
     controller = FakeController()
-    from xray_fluent.link_parser import parse_single
+    from xray_fluent.importer.link_parser import parse_single
 
     node = parse_single(
         "hysteria2://secret@udp.example:443/?obfs=salamander"
@@ -273,7 +273,7 @@ class MetricsWorkerPingTargetTests(unittest.TestCase):
 
     def _worker_class(self):
         if sys.platform == "win32":
-            from xray_fluent.live_metrics_worker import LiveMetricsWorker
+            from xray_fluent.diagnostics.live_metrics_worker import LiveMetricsWorker
             return LiveMetricsWorker
         original_windll = getattr(ctypes, "windll", None)
 
@@ -288,7 +288,7 @@ class MetricsWorkerPingTargetTests(unittest.TestCase):
 
         ctypes.windll = _AnyLib()  # type: ignore[attr-defined]
         try:
-            from xray_fluent.live_metrics_worker import LiveMetricsWorker
+            from xray_fluent.diagnostics.live_metrics_worker import LiveMetricsWorker
         finally:
             if original_windll is None:
                 del ctypes.windll

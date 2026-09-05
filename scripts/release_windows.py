@@ -25,6 +25,7 @@ from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 CONSTANTS_PATH = ROOT / "xray_fluent" / "constants.py"
+GEOIP_LOCK_PATH = ROOT / "scripts" / "geoip-lock.json"
 CORE_LOCK_PATH = ROOT / "scripts" / "core-lock.windows-x64.json"
 CORE_RESOLVER_PATH = ROOT / "scripts" / "resolve_core_versions.py"
 STATE_PATH = ROOT / ".git" / "zapret-kvn-release-state.json"
@@ -262,7 +263,23 @@ def refresh_stable_core_lock(*, write: bool) -> None:
     ]
     if not write:
         command.append("--require-current")
+    else:
+        command.append("--update-runtime")
     run(command)
+
+
+def refresh_stable_geoip_lock(*, write: bool) -> None:
+    python = sys.executable
+    if write:
+        import importlib.util
+        if importlib.util.find_spec("maxminddb") is None:
+            environment = ROOT / ".cache" / "geoip-tools"
+            python_path = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            if not python_path.exists():
+                run([sys.executable, "-m", "venv", str(environment)])
+            run([str(python_path), "-m", "pip", "install", "maxminddb==3.1.1"])
+            python = str(python_path)
+    run([python, "scripts/prepare_geoip.py", "--refresh" if write else "--check"])
 
 
 def prepare_source(version: str) -> str:
@@ -276,13 +293,32 @@ def prepare_source(version: str) -> str:
     )
     if ancestor.returncode != 0:
         raise ReleaseError("local main does not contain origin/main; reconcile it first")
-    refresh_stable_core_lock(write=True)
+    previous_geoip = GEOIP_LOCK_PATH.read_bytes()
+    refresh_stable_geoip_lock(write=True)
+    try:
+        freeze_path = ROOT / "core-release-freeze.json"
+        freeze = json.loads(freeze_path.read_text(encoding="utf-8")) if freeze_path.exists() else None
+        if freeze is not None and freeze.get("releases", {}).get("windows") == version:
+            if __package__:
+                from .check_core_release_freeze import verify
+            else:
+                from check_core_release_freeze import verify
+            verify(ROOT, "windows", version)
+            log("using the coordinated core freeze; no second upstream version selection")
+        else:
+            refresh_stable_core_lock(write=True)
+    except Exception:
+        GEOIP_LOCK_PATH.write_bytes(previous_geoip)
+        raise
     set_app_version(version)
     run(["git", "diff", "--check"])
     run([sys.executable, "-m", "compileall", "-q", "xray_fluent", "tests"])
     release_paths = [
         str(CONSTANTS_PATH.relative_to(ROOT)),
         str(CORE_LOCK_PATH.relative_to(ROOT)),
+        str(GEOIP_LOCK_PATH.relative_to(ROOT)),
+        "runtime/amnezia/go.mod",
+        "runtime/amnezia/go.sum",
     ]
     run(["git", "add", "--", *release_paths])
     staged = output(["git", "diff", "--cached", "--name-only"]).splitlines()
@@ -381,6 +417,10 @@ def verify_gate_manifest(
             raise ReleaseError(f"{mode} manifest mismatch for {key}")
     if int(manifest.get("templates_verified") or 0) <= 0:
         raise ReleaseError(f"{mode} manifest did not verify templates")
+    geoip = manifest.get("geoip") or {}
+    expected_geoip = read_json(GEOIP_LOCK_PATH)
+    if any(geoip.get(key) != expected_geoip.get(key) for key in ("version", "sha256", "size")):
+        raise ReleaseError(f"{mode} manifest GeoIP does not match release lock")
     core = manifest.get("core") or {}
     for digest_key in ("lock_sha256", "manifest_sha256"):
         if not re.fullmatch(r"[0-9a-f]{64}", str(core.get(digest_key) or "")):
@@ -390,10 +430,14 @@ def verify_gate_manifest(
         "xray-core",
         "sing-box-extended",
         "hysteria",
+        "amnezia",
     }:
         raise ReleaseError(f"{mode} manifest core source set mismatch")
     for source in core_sources:
-        if source.get("channel") != "stable" or source.get("release_prerelease") is not False:
+        approved_amnezia = source.get("id") == "amnezia" and source.get("repository") == "amnezia-vpn/amneziawg-go" and source.get("channel") == "official-tags"
+        if source.get("id") == "amnezia" and not approved_amnezia:
+            raise ReleaseError(f"{mode} manifest contains an unapproved Amnezia source")
+        if not approved_amnezia and (source.get("channel") != "stable" or source.get("release_prerelease") is not False):
             raise ReleaseError(f"{mode} manifest contains a non-stable core source")
         if not re.fullmatch(r"[0-9a-f]{64}", str(source.get("archive_sha256") or "")):
             raise ReleaseError(f"{mode} manifest contains an invalid core archive digest")
@@ -687,6 +731,7 @@ def preflight(version: str | None, changes: list[str], telegram: bool) -> str:
     if current_app_version() != latest.removeprefix("v"):
         raise ReleaseError("APP_VERSION must match the latest stable before a fresh release")
     refresh_stable_core_lock(write=False)
+    refresh_stable_geoip_lock(write=False)
     Forgejo.load()
     run(["ssh", WINDOWS_HOST, "powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], capture=True, timeout=30)
     if telegram:

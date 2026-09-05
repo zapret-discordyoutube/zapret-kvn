@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from xray_fluent.models import Subscription, SubscriptionInfo
-from xray_fluent.subscription_http import describe_http_failure
+from xray_fluent.profiles.models import Subscription, SubscriptionInfo
+from xray_fluent.importer.subscription_http import describe_http_failure
 from xray_fluent.ui.subscriptions_page import _format_expire, _format_traffic
 
 
@@ -72,7 +72,7 @@ class CheckResultPresentationTests(unittest.TestCase):
     нельзя показывать теми же счётчиками, что и результат обновления."""
 
     def test_check_reports_both_counts(self) -> None:
-        from xray_fluent.models import SubscriptionUpdateResult
+        from xray_fluent.profiles.models import SubscriptionUpdateResult
 
         result = SubscriptionUpdateResult(
             subscription_id="s1",

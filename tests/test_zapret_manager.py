@@ -4,8 +4,8 @@ import socket
 import unittest
 from unittest.mock import PropertyMock, patch
 
-from xray_fluent.link_parser import parse_single
-from xray_fluent.zapret_manager import ZapretManager
+from xray_fluent.importer.link_parser import parse_single
+from xray_fluent.engines.zapret.manager import ZapretManager
 
 
 class ZapretManagerTests(unittest.TestCase):
@@ -47,7 +47,7 @@ class ZapretManagerTests(unittest.TestCase):
             (socket.AF_INET, socket.SOCK_DGRAM, 17, "", ("203.0.113.7", 0)),
             (socket.AF_INET6, socket.SOCK_DGRAM, 17, "", ("2001:0db8::7", 0, 0, 0)),
         ]
-        with patch("xray_fluent.zapret_manager.socket.getaddrinfo", return_value=answers):
+        with patch("xray_fluent.engines.zapret.manager.socket.getaddrinfo", return_value=answers):
             resolved = ZapretManager._resolve_server_ips("proxy.example.com")
 
         self.assertEqual(resolved, {"203.0.113.7", "2001:db8::7"})

@@ -10,14 +10,14 @@ import shutil
 import tempfile
 from urllib.request import Request
 
-from ...http_utils import urlopen
+from ...network.http_utils import urlopen
 import zipfile
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ...constants import XRAY_PATH_DEFAULT, XRAY_RELEASES_API
-from ...path_utils import resolve_configured_path
-from ...update_checker import check_update
+from ...profiles.path_utils import resolve_configured_path
+from ...updates.update_checker import check_update
 from .manager import get_xray_version
 
 

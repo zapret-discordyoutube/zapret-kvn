@@ -11,27 +11,25 @@ import unittest
 
 from PyQt6.QtCore import QCoreApplication
 
-from xray_fluent import ping_worker, speed_test_worker
+from xray_fluent.network import ping_worker
+from xray_fluent.network import speed_test_worker
 from xray_fluent.engines.singbox.config_builder import (
     is_singbox_endpoint_node,
     is_singbox_endpoint_outbound,
 )
 from xray_fluent.engines.singbox.runtime_planner import (
-    EndpointProxyDnsPolicy,
     classify_node_for_singbox,
-    endpoint_proxy_dns_policy,
     inspect_singbox_document_text,
     parse_singbox_document,
     plan_singbox_proxy_runtime,
     plan_singbox_runtime,
-    select_endpoint_proxy_dns,
 )
-from xray_fluent.link_parser import (
+from xray_fluent.importer.link_parser import (
     parse_links_text,
     parse_single,
     validate_node_outbound,
 )
-from xray_fluent.models import Node
+from xray_fluent.profiles.models import Node
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -351,8 +349,8 @@ class WireguardRuntimePlannerTests(unittest.TestCase):
         )
 
     def test_ac6_classification(self) -> None:
-        self.assertEqual(classify_node_for_singbox(_parse_wg_node()), "native_singbox_endpoint")
-        self.assertEqual(classify_node_for_singbox(_parse_awg_node()), "native_singbox_endpoint")
+        self.assertEqual(classify_node_for_singbox(_parse_wg_node()), "amnezia_sidecar")
+        self.assertEqual(classify_node_for_singbox(_parse_awg_node()), "amnezia_sidecar")
         self.assertNotEqual(classify_node_for_singbox(_parse_wg_node()), "hybrid_xray_sidecar")
         self.assertTrue(is_singbox_endpoint_node(_parse_awg_node()))
         self.assertTrue(is_singbox_endpoint_outbound(_parse_wg_node().outbound))
@@ -366,17 +364,18 @@ class WireguardRuntimePlannerTests(unittest.TestCase):
         self.assertEqual(classify_node_for_singbox(hy2), "hysteria_sidecar")
 
     def _assert_endpoint_plan(self, plan, *, expect_amnezia: bool) -> None:
-        endpoints = plan.singbox_config.get("endpoints")
-        self.assertIsInstance(endpoints, list)
-        proxies = [item for item in endpoints if item.get("tag") == "proxy"]
-        self.assertEqual(len(proxies), 1)
-        self.assertEqual(proxies[0]["type"], "wireguard")
+        self.assertFalse(plan.singbox_config.get("endpoints"))
+        self.assertEqual(plan.outcome, "amnezia_sidecar")
+        self.assertEqual(plan.sidecar_kind, "amnezia")
+        endpoint = plan.amnezia_sidecar.config["endpoint"]
         if expect_amnezia:
-            self.assertIn("amnezia", proxies[0])
-            self.assertEqual(proxies[0]["amnezia"]["h2"], "9077-9177")
-        self.assertFalse(
-            any(item.get("tag") == "proxy" for item in plan.singbox_config["outbounds"])
-        )
+            self.assertEqual(endpoint["amnezia"]["h2"], "9077-9177")
+        else:
+            self.assertNotIn("amnezia", endpoint)
+        proxy = next(item for item in plan.singbox_config["outbounds"] if item.get("tag") == "proxy")
+        self.assertEqual(proxy["type"], "socks")
+        self.assertEqual(proxy["server"], "127.0.0.1")
+        self.assertGreaterEqual(len(proxy["password"]), 32)
         self.assertEqual(plan.singbox_config["route"]["final"], "proxy")
 
     def test_ac7_tun_plan_injects_endpoint_and_passes_check(self) -> None:
@@ -403,6 +402,7 @@ class WireguardRuntimePlannerTests(unittest.TestCase):
                     [
                         (item.get("type"), item.get("listen_port"))
                         for item in plan.singbox_config["inbounds"]
+                        if item.get("type") in {"mixed", "http"}
                     ],
                     [("mixed", 1390), ("http", 1391)],
                 )
@@ -575,181 +575,40 @@ class WireguardDedupTests(unittest.TestCase):
         self.assertEqual(len(controller.state.nodes), 1)
 
 
-class WireguardDnsOverrideTests(unittest.TestCase):
-    """DNS-контракт обычного WireGuard и AmneziaWG."""
+class WireguardDnsPreservationTests(unittest.TestCase):
+    def test_user_dns_and_rules_survive_every_imported_profile(self):
+        for fixture in (FIXTURE_WG_CONF_PRIVATE_DNS, FIXTURE_WG_CONF_PUBLIC_DNS,
+                        FIXTURE_WG_ENDPOINT_JSON, FIXTURE_WG_CONF_NO_DNS_NO_ADDRESS):
+            nodes, errors = parse_links_text(fixture)
+            self.assertEqual(errors, [])
+            raw = json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
+            before = json.loads(json.dumps(raw))
+            for planner in (plan_singbox_runtime, plan_singbox_proxy_runtime):
+                plan = planner(parse_singbox_document(TEMPLATE_PATH, json.dumps(raw)), nodes[0])
+                self.assertEqual(raw, before)
+                self.assertEqual(plan.singbox_config["dns"], raw["dns"])
+                self.assertEqual(plan.singbox_config["route"]["rules"][1:], raw["route"]["rules"])
+                self.assertNotIn("_dns", plan.amnezia_sidecar.config["endpoint"])
+                self.assertNotIn("awg3-direct", json.dumps(plan.singbox_config))
 
-    def _document(self):
-        return parse_singbox_document(
-            TEMPLATE_PATH,
-            TEMPLATE_PATH.read_text(encoding="utf-8"),
-        )
+    def test_amnezia_does_not_guess_a_gateway(self):
+        raw = json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
+        plan = plan_singbox_runtime(parse_singbox_document(TEMPLATE_PATH, json.dumps(raw)), _parse_awg_node())
+        self.assertEqual(plan.singbox_config["dns"], raw["dns"])
+        self.assertNotIn("10.8.1.1", json.dumps(plan.singbox_config))
+        dns_inbound = next(i for i in plan.singbox_config["inbounds"] if i.get("tag") == "__app_amnezia_dns")
+        self.assertEqual(dns_inbound["listen"], "127.0.0.1")
+        self.assertEqual(plan.amnezia_sidecar.config["dns_address"], f"127.0.0.1:{dns_inbound['listen_port']}")
 
-    def _template_dns(self) -> dict:
-        return json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))["dns"]
-
-    def _proxy_dns_entry(self, plan) -> dict:
-        servers = plan.singbox_config["dns"]["servers"]
-        entries = [item for item in servers if item.get("tag") == "proxy-dns"]
-        self.assertEqual(len(entries), 1)
-        return entries[0]
-
-    def test_endpoint_proxy_dns_policy_uses_amnezia_capability(self) -> None:
-        self.assertEqual(
-            endpoint_proxy_dns_policy(_parse_wg_node().outbound),
-            EndpointProxyDnsPolicy.CONFIGURED,
-        )
-        self.assertEqual(
-            endpoint_proxy_dns_policy(_parse_awg_node().outbound),
-            EndpointProxyDnsPolicy.AMNEZIA_GATEWAY,
-        )
-
-    def test_native_wireguard_dns_selection_has_no_gateway_heuristic(self) -> None:
-        policy = EndpointProxyDnsPolicy.CONFIGURED
-        self.assertEqual(
-            select_endpoint_proxy_dns(
-                ["9.9.9.9", "8.8.4.4", "1.1.1.1"],
-                ["10.88.0.2/32"],
-                policy=policy,
-            ),
-            "9.9.9.9",
-        )
-        self.assertEqual(
-            select_endpoint_proxy_dns(
-                ["1.1.1.1", "10.64.0.1"],
-                ["10.8.0.78/32"],
-                policy=policy,
-            ),
-            "1.1.1.1",
-        )
-        self.assertIsNone(
-            select_endpoint_proxy_dns(None, ["10.8.0.78/32"], policy=policy)
-        )
-
-    def test_amnezia_dns_selection_can_use_tunnel_gateway(self) -> None:
-        policy = EndpointProxyDnsPolicy.AMNEZIA_GATEWAY
-        # Явно заданный приватный резолвер важнее вычисленного шлюза.
-        self.assertEqual(
-            select_endpoint_proxy_dns(
-                ["1.1.1.1", "10.64.0.1"],
-                ["10.8.0.78/32"],
-                policy=policy,
-            ),
-            "10.64.0.1",
-        )
-        # /32 считается адресом внутри /24, шлюзом выбирается первый хост.
-        self.assertEqual(
-            select_endpoint_proxy_dns(None, ["10.8.0.78/32"], policy=policy),
-            "10.8.0.1",
-        )
-        self.assertEqual(
-            select_endpoint_proxy_dns(
-                [],
-                ["fd42:42:42::2/128", "10.66.66.2/24"],
-                policy=policy,
-            ),
-            "10.66.66.1",
-        )
-        self.assertEqual(
-            select_endpoint_proxy_dns(["1.1.1.1"], ["fd42::2/128"], policy=policy),
-            "1.1.1.1",
-        )
-        self.assertIsNone(select_endpoint_proxy_dns(None, None, policy=policy))
-
-    def test_fac1_private_conf_dns_overrides_proxy_dns(self) -> None:
-        nodes, errors = parse_links_text(FIXTURE_WG_CONF_PRIVATE_DNS)
-        self.assertEqual(errors, [])
-        node = nodes[0]
-        self.assertEqual(node.outbound["_dns"], ["10.64.0.1"])
-
-        plan = plan_singbox_runtime(self._document(), node)
-        self.assertEqual(
-            self._proxy_dns_entry(plan),
-            {"tag": "proxy-dns", "type": "udp", "server": "10.64.0.1", "detour": "proxy"},
-        )
-        endpoints = plan.singbox_config["endpoints"]
-        proxies = [item for item in endpoints if item.get("tag") == "proxy"]
-        self.assertEqual(len(proxies), 1)
-        self.assertNotIn("_dns", proxies[0])
-        self.assertFalse(any(str(key).startswith("_") for key in proxies[0]))
-
-    def test_fac2_native_wireguard_uses_first_configured_dns(self) -> None:
-        nodes, errors = parse_links_text(FIXTURE_WG_CONF_PUBLIC_DNS)
-        self.assertEqual(errors, [])
-        node = nodes[0]
+    def test_import_keeps_explicit_dns_metadata_without_changing_active_json(self):
+        node = parse_links_text(FIXTURE_WG_CONF_PUBLIC_DNS)[0][0]
         self.assertEqual(node.outbound["_dns"], ["9.9.9.9", "8.8.4.4", "1.1.1.1"])
 
-        plan = plan_singbox_runtime(self._document(), node)
-        self.assertEqual(
-            self._proxy_dns_entry(plan),
-            {"tag": "proxy-dns", "type": "udp", "server": "9.9.9.9", "detour": "proxy"},
-        )
-
-    def test_awg_without_private_dns_uses_tunnel_gateway(self) -> None:
-        plan = plan_singbox_runtime(self._document(), _parse_awg_node())
-        self.assertEqual(
-            self._proxy_dns_entry(plan),
-            {"tag": "proxy-dns", "type": "udp", "server": "10.8.1.1", "detour": "proxy"},
-        )
-
-    def test_native_wireguard_without_dns_keeps_template_dns(self) -> None:
-        nodes, errors = parse_links_text(FIXTURE_WG_ENDPOINT_JSON)
-        self.assertEqual(errors, [])
-        self.assertEqual(nodes[0].scheme, "wireguard")
-
-        plan = plan_singbox_runtime(self._document(), nodes[0])
-        self.assertEqual(plan.singbox_config["dns"], self._template_dns())
-
-    def test_fac3_no_dns_and_no_address_keeps_template_dns(self) -> None:
-        nodes, errors = parse_links_text(FIXTURE_WG_CONF_NO_DNS_NO_ADDRESS)
-        self.assertEqual(errors, [])
-        node = nodes[0]
-        self.assertNotIn("_dns", node.outbound)
-        self.assertNotIn("address", node.outbound)
-
-        plan = plan_singbox_runtime(self._document(), node)
-        self.assertEqual(plan.singbox_config["dns"], self._template_dns())
-
-    def test_fac4_dns_override_plans_pass_singbox_check(self) -> None:
-        if not SINGBOX_CORE.is_file():
-            self.skipTest("bundled sing-box.exe is not present")
-        wg = parse_links_text(FIXTURE_WG_CONF_PUBLIC_DNS)[0][0]
-        awg = _parse_awg_node()
-        for node in (wg, awg):
-            for label, plan in (
-                ("tun", plan_singbox_runtime(self._document(), node)),
-                (
-                    "proxy",
-                    plan_singbox_proxy_runtime(
-                        self._document(),
-                        node,
-                        allowed_proxy_ports={1390, 1391},
-                    ),
-                ),
-            ):
-                with self.subTest(scheme=node.scheme, plan=label):
-                    entry = self._proxy_dns_entry(plan)
-                    self.assertEqual(entry["type"], "udp")
-                    self.assertEqual(entry["detour"], "proxy")
-                    result = _run_singbox_check(plan.singbox_config)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_fac6_non_endpoint_plans_keep_template_dns(self) -> None:
-        vless = parse_single(
-            "vless://2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365@example.com:443"
-            "?type=tcp&security=tls#Regression"
-        )
-        template_dns_text = json.dumps(self._template_dns(), sort_keys=True)
-        tun_plan = plan_singbox_runtime(self._document(), vless)
-        proxy_plan = plan_singbox_proxy_runtime(
-            self._document(),
-            vless,
-            allowed_proxy_ports={1390, 1391},
-        )
-        for plan in (tun_plan, proxy_plan):
-            self.assertEqual(
-                json.dumps(plan.singbox_config["dns"], sort_keys=True),
-                template_dns_text,
-            )
+    def test_non_endpoint_plans_keep_dns(self):
+        node = parse_single("vless://2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365@example.com:443?type=tcp&security=tls")
+        raw = json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
+        plan = plan_singbox_runtime(parse_singbox_document(TEMPLATE_PATH, json.dumps(raw)), node)
+        self.assertEqual(plan.singbox_config["dns"], raw["dns"])
 
 
 class AwgOddHexValidationTests(unittest.TestCase):

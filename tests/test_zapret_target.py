@@ -4,12 +4,12 @@ import unittest
 from unittest.mock import patch
 from unittest.mock import Mock
 
-from xray_fluent.app_controller import AppController
-from xray_fluent.link_parser import parse_single
-from xray_fluent.models import AppSettings, Node, ZapretTargetSettings
-from xray_fluent.zapret_manager import ZapretManager
-from xray_fluent.zapret_blobs import lua_init_arguments
-from xray_fluent.zapret_target import (
+from xray_fluent.application.controller import AppController
+from xray_fluent.importer.link_parser import parse_single
+from xray_fluent.profiles.models import AppSettings, Node, ZapretTargetSettings
+from xray_fluent.engines.zapret.manager import ZapretManager
+from xray_fluent.engines.zapret.blobs import lua_init_arguments
+from xray_fluent.engines.zapret.target import (
     ResolvedZapretEndpoint,
     ZapretEndpointSpec,
     endpoint_spec_for_node,
@@ -332,7 +332,7 @@ class ZapretTargetBarrierTests(unittest.TestCase):
         controller._proxy_protection_wait_token = 0
         worker = Mock()
 
-        with patch("xray_fluent.app_controller.TargetProfileResolver", return_value=worker):
+        with patch("xray_fluent.application.controller.TargetProfileResolver", return_value=worker):
             waiting = AppController._prepare_proxy_protection(controller, 12)
 
         self.assertTrue(waiting)
@@ -368,7 +368,7 @@ class ZapretTargetBarrierTests(unittest.TestCase):
         controller._proxy_protection_wait_token = 0
         worker = Mock()
 
-        with patch("xray_fluent.app_controller.TargetProfileResolver", return_value=worker):
+        with patch("xray_fluent.application.controller.TargetProfileResolver", return_value=worker):
             waiting = AppController._prepare_proxy_protection(controller, 21)
 
         self.assertTrue(waiting)

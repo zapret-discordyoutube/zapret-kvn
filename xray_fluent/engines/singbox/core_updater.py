@@ -21,8 +21,8 @@ import zipfile
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ...constants import SINGBOX_PATH_DEFAULT
-from ...path_utils import resolve_configured_path
-from ...subprocess_utils import result_output_text, run_text
+from ...profiles.path_utils import resolve_configured_path
+from ...platform.windows.subprocess_utils import result_output_text, run_text
 
 
 SINGBOX_RELEASES_API = "https://api.github.com/repos/shtorm-7/sing-box-extended/releases"

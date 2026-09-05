@@ -32,7 +32,7 @@ if _existing is not None and not isinstance(_existing, QApplication):
     )
 app = _existing or QApplication([])
 
-from xray_fluent.models import Node, Subscription
+from xray_fluent.profiles.models import Node, Subscription
 from xray_fluent.ui.detail_page import DetailPage, StackedSection
 from xray_fluent.ui.nodes_page import NodesPage
 from xray_fluent.ui.subscriptions_page import SubscriptionsPage, _subscription_status

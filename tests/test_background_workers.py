@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock
 
-from xray_fluent.background_workers import ProxyProtectionResolver, StateSaveWorker
+from xray_fluent.network.background_workers import ProxyProtectionResolver, StateSaveWorker
 
 
 class BackgroundWorkerTests(unittest.TestCase):

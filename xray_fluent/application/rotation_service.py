@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import random
 
-from ..models import AppSettings, Node
+from ..profiles.models import AppSettings, Node
 
 
 ROTATION_MODES = ("random", "sequential")

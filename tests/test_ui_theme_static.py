@@ -34,19 +34,19 @@ class ThemeStartupOrderTest(unittest.TestCase):
 
     def test_apply_initial_theme_precedes_main_window(self) -> None:
         source = _read(REPO_ROOT / "main.py")
-        apply_call = source.find("apply_initial_theme()")
+        apply_call = source.find("apply_theme(settings.theme, settings.accent_color, force=True)")
         window_ctor = source.find("MainWindow(defer_init")
-        self.assertGreater(apply_call, -1, "main.py must call apply_initial_theme()")
+        self.assertGreater(apply_call, -1, "main.py must call apply_theme(settings.theme, settings.accent_color, force=True)")
         self.assertGreater(window_ctor, -1, "MainWindow construction not found")
         self.assertLess(
             apply_call,
             window_ctor,
-            "apply_initial_theme() must run before MainWindow is constructed",
+            "apply_theme(settings.theme, settings.accent_color, force=True) must run before MainWindow is constructed",
         )
 
     def test_password_dialog_created_after_window(self) -> None:
         # PasswordDialog instances are created only inside MainWindow methods,
-        # which run after apply_initial_theme() in main().
+        # which run after apply_theme(settings.theme, settings.accent_color, force=True) in main().
         source = _read(REPO_ROOT / "main.py")
         self.assertNotIn("PasswordDialog(", source)
         window_source = _read(UI_DIR / "main_window.py")

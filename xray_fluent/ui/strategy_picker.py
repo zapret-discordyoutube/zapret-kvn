@@ -21,7 +21,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.components.widgets.list_view import ListItemDelegate
 
-from ..zapret_target import STRATEGY_LABELS, STRATEGY_LABEL_TITLES, ZapretStrategyEntry
+from ..engines.zapret.target import STRATEGY_LABELS, STRATEGY_LABEL_TITLES, ZapretStrategyEntry
 from .theme import (
     accent_color,
     error_color,

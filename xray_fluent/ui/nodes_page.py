@@ -10,6 +10,11 @@ from PyQt6.QtWidgets import (
 )
 from qfluentwidgets import (
     ComboBox,
+    BodyLabel,
+    PushButton,
+    PrimaryPushButton,
+    ToggleButton,
+    FlowLayout,
     FluentIcon as FIF,
     PrimaryToolButton,
     SearchLineEdit,
@@ -21,13 +26,14 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import RoundMenu, Action
 
-from ..models import Node, Subscription
+from ..profiles.models import Node, Subscription
 from .bulk_edit_page import BulkEditPage
 from .detail_page import StackedSection
 from .node_detail_widget import NodeDetailWidget
 from .node_edit_page import NodeEditPage
 from .nodes_filter_proxy import NodesFilterProxy, SORT_KEYS
-from .nodes_table_delegate import NodesActivityDelegate
+from .nodes_tree_view import NodesTreeView, NodesTreeDelegate
+from .nodes_group_model import NodesGroupModel, GROUP_MODES, GROUP_KEY_ROLE
 from .nodes_table_model import (
     COL_ADDRESS,
     COL_GROUP,
@@ -48,7 +54,7 @@ from .nodes_table_model import (
 from .privacy import HoldToRevealButton
 from .theme import on_accent_changed
 
-_ROW_HEIGHT = 30
+_ROW_HEIGHT = 36
 _FLAG_ICON_SIZE = QSize(18, 13)
 
 # Kept as a compatibility export; values come from the column contract above.
@@ -97,12 +103,15 @@ class NodesPage(StackedSection):
     copy_link_requested = pyqtSignal(str)           # node_id
     reorder_requested = pyqtSignal(str, str)        # node_id, direction
     hide_subscription_nodes_requested = pyqtSignal(object)  # set[str]
+    favorite_requested = pyqtSignal(object, bool)
     view_prefs_changed = pyqtSignal(object)         # dict of AppSettings nodes_* fields
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("nodes")
 
+        self._collapsed_groups: set[str] = set()
+        self._restoring_groups = False
         self._nodes: list[Node] = []
         self._id_to_node: dict[str, Node] = {}
         self._sort_ascending = True
@@ -138,12 +147,12 @@ class NodesPage(StackedSection):
         root.addWidget(title)
 
         # --- Filter row ---
-        filter_row = QHBoxLayout()
+        filter_row = FlowLayout()
         filter_row.setSpacing(8)
 
         self.search_edit = SearchLineEdit(self)
         self.search_edit.setPlaceholderText("Поиск серверов")
-        filter_row.addWidget(self.search_edit, 1)
+        root.addWidget(self.search_edit)
 
         self.group_filter = ComboBox(self)
         self.group_filter.setMinimumWidth(120)
@@ -178,13 +187,12 @@ class NodesPage(StackedSection):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
 
-        self.import_btn = PrimaryToolButton(FIF.ADD, self)
+        self.import_btn = PrimaryPushButton(FIF.ADD, "Добавить", self)
         self.import_btn.setToolTip("Импорт из буфера (Ctrl+V)")
         toolbar.addWidget(self.import_btn)
 
-        toolbar.addWidget(VerticalSeparator(self))
 
-        self.edit_btn = TransparentToolButton(FIF.EDIT, self)
+        self.edit_btn = PushButton(FIF.EDIT, "Изменить", self)
         self.edit_btn.setToolTip("Редактировать")
         toolbar.addWidget(self.edit_btn)
 
@@ -193,14 +201,12 @@ class NodesPage(StackedSection):
         self.bulk_edit_btn.setVisible(False)
         toolbar.addWidget(self.bulk_edit_btn)
 
-        toolbar.addWidget(VerticalSeparator(self))
 
         self.reveal_addresses_btn = HoldToRevealButton(self, plural=True)
         toolbar.addWidget(self.reveal_addresses_btn)
 
-        toolbar.addWidget(VerticalSeparator(self))
 
-        self.ping_btn = TransparentToolButton(FIF.SEND, self)
+        self.ping_btn = PushButton(FIF.SEND, "Пинг", self)
         self.ping_btn.setToolTip("Пинг выбранных")
         toolbar.addWidget(self.ping_btn)
 
@@ -208,9 +214,8 @@ class NodesPage(StackedSection):
         self.ping_all_btn.setToolTip("Пинг всех")
         toolbar.addWidget(self.ping_all_btn)
 
-        toolbar.addWidget(VerticalSeparator(self))
 
-        self.speed_test_btn = TransparentToolButton(FIF.SPEED_HIGH, self)
+        self.speed_test_btn = PushButton(FIF.SPEED_HIGH, "Скорость", self)
         self.speed_test_btn.setToolTip("Тест скорости выбранных")
         toolbar.addWidget(self.speed_test_btn)
 
@@ -223,7 +228,6 @@ class NodesPage(StackedSection):
         self.stop_speed_test_btn.setVisible(False)
         toolbar.addWidget(self.stop_speed_test_btn)
 
-        toolbar.addWidget(VerticalSeparator(self))
 
         self.export_outbound_btn = TransparentToolButton(FIF.SAVE_AS, self)
         self.export_outbound_btn.setToolTip("Экспорт outbound JSON")
@@ -233,13 +237,11 @@ class NodesPage(StackedSection):
         self.export_runtime_btn.setToolTip("Экспорт runtime конфига")
         toolbar.addWidget(self.export_runtime_btn)
 
-        toolbar.addWidget(VerticalSeparator(self))
 
         self.delete_btn = TransparentToolButton(FIF.DELETE, self)
         self.delete_btn.setToolTip("Удалить выбранные")
         toolbar.addWidget(self.delete_btn)
 
-        toolbar.addWidget(VerticalSeparator(self))
 
         self.move_up_btn = TransparentToolButton(FIF.UP, self)
         self.move_up_btn.setToolTip("Переместить вверх")
@@ -256,17 +258,18 @@ class NodesPage(StackedSection):
         root.addLayout(toolbar)
 
         # --- Table (source model behind a filter/sort proxy) ---
-        self.table = TableView(self)
+        self.table = NodesTreeView(self)
         self._table_model = NodesTableModel(self)
         self._proxy = NodesFilterProxy(self)
         self._proxy.setSourceModel(self._table_model)
-        self.table.setModel(self._proxy)
+        self._group_model = NodesGroupModel(self)
+        self._group_model.setSourceModel(self._proxy)
+        self.table.setModel(self._group_model)
+        self.table.setUniformRowHeights(True)
+        self.table.setAnimated(False)
+        self.table.setRootIsDecorated(True)
+        self.table.header().setStretchLastSection(False)
         self._proxy.sort(0, Qt.SortOrder.AscendingOrder)
-
-        vertical_header = cast(QHeaderView, self.table.verticalHeader())
-        vertical_header.setVisible(False)
-        vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        vertical_header.setDefaultSectionSize(_ROW_HEIGHT)
 
         horizontal_header = cast(QHeaderView, self.table.horizontalHeader())
         horizontal_header.setMinimumSectionSize(
@@ -303,7 +306,7 @@ class NodesPage(StackedSection):
         if viewport is not None:
             viewport.installEventFilter(self)
 
-        self._activity_delegate = NodesActivityDelegate(self.table)
+        self._activity_delegate = NodesTreeDelegate(self.table)
         self.table.setItemDelegate(self._activity_delegate)
 
         # The delegate paints the active-row fill/stripe with the accent —
@@ -322,7 +325,35 @@ class NodesPage(StackedSection):
 
         self.table.mousePressEvent = _no_deselect_mouse_press
 
+        self.group_by_combo = ComboBox(self)
+        for mode, title in GROUP_MODES.items():
+            self.group_by_combo.addItem(title, userData=mode)
+        filter_row.addWidget(self.group_by_combo)
+        self.group_by_combo.currentIndexChanged.connect(self._change_grouping)
+        self.favorites_filter = ToggleButton("★ Избранное", self)
+        filter_row.addWidget(self.favorites_filter)
+        self.favorites_filter.toggled.connect(self._change_favorites_filter)
+        self.clear_filters_btn = PushButton("Сбросить фильтры", self)
+        filter_row.addWidget(self.clear_filters_btn)
+        self.clear_filters_btn.clicked.connect(self._clear_filters)
+        self.view_btn = PushButton("Вид", self)
+        toolbar.addWidget(self.view_btn)
+        self.view_btn.clicked.connect(lambda: self._on_header_context_menu(self.table.header().rect().bottomLeft()))
+        self.more_btn = PushButton("Ещё", self)
+        toolbar.addWidget(self.more_btn)
+        self.more_btn.clicked.connect(self._show_more_menu)
+        for button in (self.ping_all_btn, self.speed_test_all_btn, self.export_outbound_btn,
+                       self.export_runtime_btn, self.delete_btn, self.move_up_btn, self.move_down_btn):
+            toolbar.removeWidget(button)
+            button.hide()
+        self.counter_label = BodyLabel("Серверов: 0", self)
+        root.addWidget(self.counter_label)
         root.addWidget(self.table, 1)
+        self._group_model.layoutChanged.connect(self._restore_groups)
+        self.table.collapsed.connect(lambda index: self._group_expanded(index, False))
+        self.table.expanded.connect(lambda index: self._group_expanded(index, True))
+        horizontal_header.sectionHandleDoubleClicked.connect(self._fit_column)
+
 
         self.set_root_page(list_page)
 
@@ -425,6 +456,7 @@ class NodesPage(StackedSection):
             self.source_filter.blockSignals(False)
             self._cached_sources = sources
         self._proxy.set_source_names(self._source_names)
+        self._group_model.rebuild()
         self._try_apply_pending_filters()
 
     def apply_view_settings(self, settings) -> None:
@@ -434,6 +466,7 @@ class NodesPage(StackedSection):
         Group/tag/source filters are applied lazily once the value shows up
         in the corresponding combo box.
         """
+        previous_suppression = self._suppress_pref_signals
         self._suppress_pref_signals = True
         try:
             key = getattr(settings, "nodes_sort_key", "manual")
@@ -448,13 +481,15 @@ class NodesPage(StackedSection):
             self._apply_sort_order()
 
             columns = list(getattr(settings, "nodes_visible_columns", []) or [])
-            if int(getattr(settings, "nodes_column_layout_version", 0) or 0) < 1:
-                # The old default omitted both useful value columns.  Preserve
-                # custom visibility while making the repaired Type/Address
-                # contract available after an upgrade.
-                legacy_visible = set(columns or DEFAULT_VISIBLE_COLUMNS)
-                legacy_visible.update(("type", "address"))
-                columns = [key for key in COLUMN_KEYS if key in legacy_visible]
+            if int(getattr(settings, "nodes_column_layout_version", 0) or 0) < 2:
+                if not columns or columns in (["name", "type", "address", "ping", "speed"], ["name", "ping", "speed"]):
+                    columns = list(DEFAULT_VISIBLE_COLUMNS)
+            self._collapsed_groups = set(getattr(settings, "nodes_collapsed_groups", []))
+            mode = getattr(settings, "nodes_group_by", "source")
+            if mode not in GROUP_MODES:
+                mode = "source"
+            self.group_by_combo.setCurrentIndex(list(GROUP_MODES).index(mode))
+            self.favorites_filter.setChecked(bool(getattr(settings, "nodes_favorites_only", False)))
             widths = dict(getattr(settings, "nodes_column_widths", {}) or {})
             order = list(getattr(settings, "nodes_column_order", []) or [])
             self._apply_column_widths(widths)
@@ -467,7 +502,7 @@ class NodesPage(StackedSection):
             self._pending_source_filter = getattr(settings, "nodes_source_filter", "") or None
             self._try_apply_pending_filters()
         finally:
-            self._suppress_pref_signals = False
+            self._suppress_pref_signals = previous_suppression
 
     def set_active_node(self, node_id: str | None) -> None:
         self._table_model.set_active_node_id(node_id)
@@ -711,29 +746,8 @@ class NodesPage(StackedSection):
         return columns
 
     def _relayout_flex_column(self) -> None:
-        """Size "name" so the visible columns fill the viewport exactly.
-
-        width(name) = max(minimum, viewport - sum(other visible columns)).
-        When the minimums overflow the viewport, "name" stays at its minimum
-        and the horizontal scrollbar takes over (by design).
-        """
-        viewport = self.table.viewport()
-        if viewport is None:
-            return
-        viewport_width = viewport.width()
-        if viewport_width <= 0:
-            return
-        header = cast(QHeaderView, self.table.horizontalHeader())
-        others = sum(
-            header.sectionSize(col)
-            for col in range(len(COLUMN_SPECS))
-            if col != COL_NAME and not self.table.isColumnHidden(col)
-        )
-        target = max(
-            COLUMN_BY_KEY["name"].minimum_width, viewport_width - others
-        )
-        if header.sectionSize(COL_NAME) != target:
-            self._resize_section_quietly(COL_NAME, target)
+        # Kept for callers that also change visibility. No automatic stretching.
+        return
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self.table.viewport() and event.type() == QEvent.Type.Resize:
@@ -792,61 +806,10 @@ class NodesPage(StackedSection):
         if self.table.isColumnHidden(logical_index):
             return
         spec = COLUMN_SPECS[logical_index]
-        if spec.stretch:
-            self._on_flex_column_dragged(old_size, new_size)
-        else:
-            self._on_fixed_column_dragged(logical_index, spec, old_size, new_size)
-        self._queue_column_layout_save()
-
-    def _on_fixed_column_dragged(
-        self, logical_index: int, spec, old_size: int, new_size: int
-    ) -> None:
-        """User drag of a non-flex column: "name" absorbs the opposite delta."""
         width = self._clamp_column_width(spec.key, new_size)
-        if width != new_size:
-            self._resize_section_quietly(logical_index, width)
+        self._resize_section_quietly(logical_index, width)
         self._column_widths[spec.key] = width
-        delta = width - old_size
-        if not delta:
-            return
-        header = cast(QHeaderView, self.table.horizontalHeader())
-        name_current = header.sectionSize(COL_NAME)
-        name_target = max(COLUMN_BY_KEY["name"].minimum_width, name_current - delta)
-        if name_target != name_current:
-            self._resize_section_quietly(COL_NAME, name_target)
-        # When "name" is already at its minimum the remaining delta stays:
-        # the sections overflow the viewport and horizontal scrolling kicks
-        # in — the user's drag is never rolled back.
-
-    def _on_flex_column_dragged(self, old_size: int, new_size: int) -> None:
-        """User drag of "name": push the delta to visible right neighbors.
-
-        The first visible neighbor to the right (visual order) absorbs the
-        delta, cascading further right on shortage; every neighbor is clamped
-        to its min/max. Whatever nobody absorbed clamps the drag itself.
-        """
-        header = cast(QHeaderView, self.table.horizontalHeader())
-        clamped = max(COLUMN_BY_KEY["name"].minimum_width, new_size)
-        remaining = clamped - old_size
-        if remaining:
-            for col in self._visible_columns_right_of(COL_NAME):
-                if not remaining:
-                    break
-                neighbor = COLUMN_SPECS[col]
-                current = header.sectionSize(col)
-                if remaining > 0:
-                    # "name" grew: shrink the neighbor down to its minimum.
-                    absorbed = min(remaining, max(0, current - neighbor.minimum_width))
-                else:
-                    # "name" shrank: grow the neighbor up to its maximum.
-                    absorbed = max(remaining, min(0, current - neighbor.maximum_width))
-                if absorbed:
-                    self._resize_section_quietly(col, current - absorbed)
-                    self._column_widths[neighbor.key] = current - absorbed
-                    remaining -= absorbed
-        target = clamped - remaining
-        if target != new_size:
-            self._resize_section_quietly(COL_NAME, target)
+        self._queue_column_layout_save()
 
     def _on_column_moved(
         self, _logical_index: int, _old_visual_index: int, _new_visual_index: int
@@ -891,6 +854,13 @@ class NodesPage(StackedSection):
 
     def _on_header_context_menu(self, pos) -> None:
         menu = RoundMenu(parent=self)
+        for title, callback in (("Сбросить размеры", self._reset_columns),
+                                ("Раскрыть группы", self.table.expandAll),
+                                ("Свернуть группы", self.table.collapseAll)):
+            action = Action(title, self)
+            action.triggered.connect(callback)
+            menu.addAction(action)
+        menu.addSeparator()
         for col, _key in enumerate(COLUMN_KEYS):
             if col == COL_NAME:
                 continue
@@ -919,9 +889,90 @@ class NodesPage(StackedSection):
                 "nodes_visible_columns": self.visible_column_keys(),
                 "nodes_column_widths": self.column_widths(),
                 "nodes_column_order": self.column_order(),
-                "nodes_column_layout_version": 1,
+                "nodes_column_layout_version": 2,
+                "nodes_group_by": self._group_model.mode,
+                "nodes_collapsed_groups": sorted(self._collapsed_groups),
+                "nodes_favorites_only": self.favorites_filter.isChecked(),
             }
         )
+
+    def _manual_moves_allowed(self) -> bool:
+        return (self._current_sort_key() == "manual" and self._group_model.mode == "none"
+                and not self.search_edit.text().strip() and not self.favorites_filter.isChecked()
+                and all(combo.currentIndex() == 0 for combo in (self.group_filter, self.tag_filter, self.source_filter)))
+
+    def _change_grouping(self, *_):
+        self._group_model.set_group_mode(self.group_by_combo.currentData())
+        self.table.setRootIsDecorated(self._group_model.mode != "none")
+        self._emit_selection()
+        self._emit_view_prefs()
+
+    def _change_favorites_filter(self, enabled):
+        self._proxy.set_favorites_only(enabled)
+        self._emit_view_prefs()
+
+    def _clear_filters(self):
+        self.search_edit.clear()
+        self._proxy.set_query("")
+        for combo in (self.group_filter, self.tag_filter, self.source_filter):
+            combo.setCurrentIndex(0)
+        self.favorites_filter.setChecked(False)
+
+    def _update_counter(self):
+        if hasattr(self, "counter_label"):
+            self.counter_label.setText(f"Показано: {self._proxy.rowCount()} из {len(self._nodes)} · Выбрано: {len(self._selected_ids())}")
+
+    def _restore_groups(self):
+        self._restoring_groups = True
+        try:
+            for row in range(self._group_model.rowCount()):
+                index = self._group_model.index(row, 0)
+                key = index.data(GROUP_KEY_ROLE)
+                if key:
+                    self.table.setExpanded(index, key not in self._collapsed_groups)
+        finally:
+            self._restoring_groups = False
+        self._update_counter()
+
+    def _group_expanded(self, index, expanded):
+        if self._restoring_groups:
+            return
+        key = index.data(GROUP_KEY_ROLE)
+        if key:
+            if expanded:
+                self._collapsed_groups.discard(key)
+            else:
+                self._collapsed_groups.add(key)
+            self._queue_column_layout_save()
+
+    def _reset_columns(self):
+        self._apply_column_widths({})
+        self._emit_view_prefs()
+
+    def _fit_column(self, column):
+        spec = COLUMN_SPECS[column]
+        metrics = self.table.fontMetrics()
+        width = metrics.horizontalAdvance(spec.title) + 36
+        # Bounded sampling: no full-table resize scans on large subscriptions.
+        for row in range(min(200, self._proxy.rowCount())):
+            width = max(width, metrics.horizontalAdvance(str(self._proxy.index(row, column).data() or "")) + 64)
+        self.table.header().resizeSection(column, self._clamp_column_width(spec.key, width))
+
+    def _show_more_menu(self):
+        menu = RoundMenu(parent=self)
+        ids = self._selected_ids()
+        favorite = bool(ids) and not all(self._id_to_node[nid].is_favorite for nid in ids)
+        action = Action("Добавить в избранное" if favorite else "Убрать из избранного", self)
+        action.setEnabled(bool(ids))
+        action.triggered.connect(lambda: self.favorite_requested.emit(ids, favorite))
+        menu.addAction(action)
+        for button in (self.ping_all_btn, self.speed_test_all_btn, self.export_outbound_btn,
+                       self.export_runtime_btn, self.delete_btn, self.move_up_btn, self.move_down_btn):
+            action = Action(button.toolTip(), self)
+            action.setEnabled(button.isEnabled())
+            action.triggered.connect(button.click)
+            menu.addAction(action)
+        menu.exec(self.more_btn.mapToGlobal(self.more_btn.rect().bottomLeft()))
 
     # ── Selection helpers ──
 
@@ -942,12 +993,13 @@ class NodesPage(StackedSection):
             return
         proxy_index = self._proxy.mapFromSource(self._table_model.index(row, 0))
         if proxy_index.isValid():
-            self.table.selectRow(proxy_index.row())
+            self.table.select_index(self._group_model.mapFromSource(proxy_index))
 
     def _emit_selection(self) -> None:
         ids = self._selected_ids()
         self.bulk_edit_btn.setVisible(len(ids) > 1)
-        is_manual = self._current_sort_key() == "manual"
+        self._update_counter()
+        is_manual = self._manual_moves_allowed()
         self.move_up_btn.setEnabled(is_manual and len(ids) == 1)
         self.move_down_btn.setEnabled(is_manual and len(ids) == 1)
         if len(ids) == 1:
@@ -957,12 +1009,12 @@ class NodesPage(StackedSection):
 
     def _on_move_up(self) -> None:
         ids = self._selected_ids()
-        if len(ids) == 1:
+        if len(ids) == 1 and self._manual_moves_allowed():
             self.reorder_requested.emit(next(iter(ids)), "up")
 
     def _on_move_down(self) -> None:
         ids = self._selected_ids()
-        if len(ids) == 1:
+        if len(ids) == 1 and self._manual_moves_allowed():
             self.reorder_requested.emit(next(iter(ids)), "down")
 
     def _on_edit(self) -> None:
@@ -1046,13 +1098,17 @@ class NodesPage(StackedSection):
         current_ids = self._selected_ids()
         if clicked_id not in current_ids:
             self.table.clearSelection()
-            self.table.selectRow(index.row())
+            self.table.select_index(index)
             ids = {clicked_id}
         else:
             ids = current_ids
 
         menu = RoundMenu(parent=self)
         count = len(ids)
+        favorite = not all(self._id_to_node[nid].is_favorite for nid in ids)
+        action = Action("Добавить в избранное" if favorite else "Убрать из избранного", self)
+        action.triggered.connect(lambda: self.favorite_requested.emit(ids, favorite))
+        menu.addAction(action)
 
         if count == 1:
             node_id = next(iter(ids))
@@ -1094,7 +1150,7 @@ class NodesPage(StackedSection):
         delete_action.triggered.connect(self._on_delete_selected)
         menu.addAction(delete_action)
 
-        if count == 1 and self._current_sort_key() == "manual":
+        if count == 1 and self._manual_moves_allowed():
             node_id = next(iter(ids))
             menu.addSeparator()
             move_top = Action("В начало списка", self)

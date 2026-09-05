@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from xray_fluent.application.protocol_core import ProtocolCore, protocol_core
-from xray_fluent.application.hysteria_runtime_contract import HysteriaFailureCode
+from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
 from xray_fluent.engines.singbox.operations import restart_proxy_runtime, restart_runtime
 from xray_fluent.engines.singbox.runtime_planner import (
     classify_node_for_singbox,
@@ -19,8 +19,8 @@ from xray_fluent.engines.singbox.runtime_planner import (
 )
 from xray_fluent.constants import HYSTERIA_PATH_DEFAULT
 from xray_fluent.engines.hysteria.manager import HysteriaManager
-from xray_fluent.link_parser import LinkParseError, parse_single
-from xray_fluent.models import Node
+from xray_fluent.importer.link_parser import LinkParseError, parse_single
+from xray_fluent.profiles.models import Node
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +52,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             singbox_config={},
             xray_sidecar=None,
             hysteria_sidecar=None,
+            amnezia_sidecar=None,
             is_hysteria_sidecar=False,
             sidecar_kind="",
             proxy_ports_changed=False,
@@ -62,6 +63,9 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         controller.selected_node = node
         controller._runtime_selected_node.return_value = node
         controller.connected = True
+        controller._desired_connected = True
+        controller._transition_generation = 1
+        controller._pending_amnezia_node_id = None
         controller._hysteria_recovery_active = False
         controller._pending_hysteria_replacement_node_id = None
         controller._commit_pending_hysteria_selection.return_value = True
@@ -93,6 +97,101 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             controller._capture_active_session.call_args.kwargs["outbound_pool_tags"],
             tags,
         )
+
+    def test_amnezia_cancelled_replacement_never_commits_selection(self) -> None:
+        for tun in (False, True):
+            for stage in ("sidecar", "front_stop", "front_ready"):
+                for disconnect in (False, True):
+                    with self.subTest(tun=tun, stage=stage, disconnect=disconnect):
+                        controller, _ = self._restart_controller(tun=tun)
+                        candidate_node = controller._runtime_selected_node.return_value
+                        controller.state.selected_node_id = "old-committed"
+                        controller._pending_amnezia_node_id = candidate_node.id
+                        plan = (controller._plan_runtime_singbox.return_value if tun else controller._plan_proxy_runtime_singbox.return_value)
+                        plan.amnezia_sidecar = SimpleNamespace(relay_port=11819)
+                        plan.sidecar_kind = "amnezia"
+                        old_manager = controller.amnezia
+                        replacement = Mock(is_running=True)
+                        controller._prepare_amnezia_replacement.return_value = replacement
+                        controller.singbox.is_running = True
+                        controller._rollback_singbox_front.return_value = True
+
+                        def supersede(result):
+                            controller._transition_generation += 1
+                            controller._desired_connected = not disconnect
+                            controller._pending_amnezia_node_id = "newer-candidate"
+                            return result
+
+                        if stage == "sidecar":
+                            controller._prepare_amnezia_replacement.side_effect = lambda _plan: supersede(replacement)
+                        elif stage == "front_stop":
+                            controller.singbox.stop.side_effect = lambda: supersede(True)
+                        else:
+                            controller._start_singbox_runtime_plan.side_effect = lambda *_a, **_k: supersede(True)
+
+                        restart = restart_runtime if tun else restart_proxy_runtime
+                        self.assertFalse(restart(controller, "test supersession"))
+                        self.assertEqual(controller.state.selected_node_id, "old-committed")
+                        self.assertEqual(controller._pending_amnezia_node_id, "newer-candidate")
+                        self.assertIs(controller.amnezia, old_manager)
+                        controller._capture_active_session.assert_not_called()
+                        controller.selection_changed.assert_not_called()
+                        controller.schedule_save.assert_not_called()
+                        replacement.stop.assert_called_once()
+                        replacement.deleteLater.assert_called_once()
+                        if stage == "sidecar":
+                            controller.singbox.stop.assert_not_called()
+                        elif disconnect:
+                            controller._rollback_singbox_front.assert_not_called()
+                            controller._handle_unexpected_disconnect.assert_called_once()
+                        else:
+                            controller._rollback_singbox_front.assert_called_once()
+
+    def test_amnezia_selection_is_committed_only_after_front_and_session(self) -> None:
+        for tun in (False, True):
+            for failure in ("sidecar", "front", None):
+                with self.subTest(tun=tun, failure=failure):
+                    controller, _ = self._restart_controller(tun=tun)
+                    node = controller._runtime_selected_node.return_value
+                    controller.state.selected_node_id = "old-committed"
+                    controller._pending_amnezia_node_id = node.id
+                    plan = (controller._plan_runtime_singbox.return_value if tun else controller._plan_proxy_runtime_singbox.return_value)
+                    plan.amnezia_sidecar = SimpleNamespace(relay_port=11819)
+                    plan.sidecar_kind = "amnezia"
+                    old_manager = controller.amnezia
+                    replacement = Mock(is_running=True)
+
+                    def prepare(_plan):
+                        self.assertEqual(controller.state.selected_node_id, "old-committed")
+                        return None if failure == "sidecar" else replacement
+
+                    def front(*_a, **_k):
+                        self.assertEqual(controller.state.selected_node_id, "old-committed")
+                        return failure != "front"
+
+                    def capture(*_a, **_k):
+                        self.assertEqual(controller.state.selected_node_id, "old-committed")
+                        self.assertIs(controller.amnezia, old_manager)
+
+                    controller._prepare_amnezia_replacement.side_effect = prepare
+                    controller._start_singbox_runtime_plan.side_effect = front
+                    controller._capture_active_session.side_effect = capture
+                    controller._rollback_singbox_front.return_value = True
+                    restart = restart_runtime if tun else restart_proxy_runtime
+                    self.assertEqual(restart(controller, "test replacement"), failure is None)
+                    self.assertIsNone(controller._pending_amnezia_node_id)
+                    if failure is None:
+                        self.assertEqual(controller.state.selected_node_id, node.id)
+                        self.assertIs(controller.amnezia, replacement)
+                        controller.selection_changed.emit.assert_called_once_with(node)
+                        controller.schedule_save.assert_called_once()
+                        old_manager.stop.assert_called_once()
+                    else:
+                        self.assertEqual(controller.state.selected_node_id, "old-committed")
+                        self.assertIs(controller.amnezia, old_manager)
+                        controller._capture_active_session.assert_not_called()
+                        controller.selection_changed.emit.assert_not_called()
+                        controller.schedule_save.assert_not_called()
 
     def test_security_escalation_aborts_pending_or_inflight_recovery(self) -> None:
         for tun in (False, True):

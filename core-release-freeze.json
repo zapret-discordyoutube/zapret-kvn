@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "releases": {
+    "windows": "0.5.8",
+    "android": "v0.3.27"
+  },
+  "checked_at_utc": "2026-09-05T21:00:49.064992+00:00",
+  "amnezia": {
+    "id": "amnezia",
+    "repository": "amnezia-vpn/amneziawg-go",
+    "channel": "official-tags",
+    "version": "v3.1.20260828",
+    "commit": "b5928efb6ca19f0153958460c3d141f04abc5c2e",
+    "module": "github.com/amnezia-vpn/amneziawg-go/v3",
+    "module_sum": "h1:D8d8gGvwXcTxUIsE4z6F6vjy4/VZddu95vMNtOygh1c=",
+    "module_go_mod_sum": "h1:YoPc6qcOZqD7TXZ1xpedD8Sx3aSKsxN05ZqEFmXDNHk=",
+    "sha256": "14f378d365a612a60aa4352e257d06a02a0091023fd47cb0b4fa7a3e27a174dd",
+    "asset_size": 197242,
+    "release_prerelease": false,
+    "url": "https://github.com/amnezia-vpn/amneziawg-go/tree/b5928efb6ca19f0153958460c3d141f04abc5c2e",
+    "toolchain": {
+      "version": "go1.26.4",
+      "archive": "go1.26.4.windows-amd64.zip",
+      "sha256": "3ca8fb4630b07c419cbdd51f754e31363cfcfb83b3a5354d9e895c90be2cc345",
+      "url": "https://go.dev/dl/go1.26.4.windows-amd64.zip"
+    }
+  },
+  "inputs": {
+    "windows": {
+      "scripts/core-lock.windows-x64.json": "11887815ce3955f62bd81ad385843913d0e101ba69d0b622b9fd460ba8470e1f",
+      "runtime/amnezia/go.mod": "d855786545c947cee939fc3fda5fce83a5530f0341b109ccce9853447d6241f1",
+      "runtime/amnezia/go.sum": "b6e8c738a3eec160d0cc58d10ea6dbbf17886b122ed140a379bd9a29eec8df82"
+    },
+    "android": {
+      "core.properties": "7e2deebdbdef437d6b1f3b36e7ff158c2d6b3f2e9f2840b1cf1aeaf1695765ac",
+      "core-patches/series.sha256": "1a1d0e6a9a6b5aa5ff7f36a4a62d978f8e1a75ec6d587c890112b747c30026fb",
+      "core-patches/0005-official-amnezia-wg-unified.patch": "7afa8fcc9ec3965e1c651c51df2103f0410bac43b96df35a2be7c92844b1791e"
+    }
+  }
+}

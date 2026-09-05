@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 
-from ..models import Node
+from ..profiles.models import Node
 from .nodes_table_model import NodesTableModel, node_type_text
 
 # Stable english sort keys (persisted in AppSettings.nodes_sort_key).
@@ -22,6 +22,7 @@ class NodesFilterProxy(QSortFilterProxyModel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._favorites_only = False
         self._query = ""
         self._group = ""
         self._tag = ""
@@ -32,6 +33,10 @@ class NodesFilterProxy(QSortFilterProxyModel):
         self.setDynamicSortFilter(True)
 
     # ── Filter setters ──
+
+    def set_favorites_only(self, enabled: bool) -> None:
+        self._favorites_only = enabled
+        self.invalidateFilter()
 
     def set_query(self, query: str) -> None:
         query = (query or "").strip().lower()
@@ -94,6 +99,8 @@ class NodesFilterProxy(QSortFilterProxyModel):
         node = model.node_at_row(source_row)
         if node is None:
             return True
+        if self._favorites_only and not node.is_favorite:
+            return False
         if self._group and node.group != self._group:
             return False
         if self._tag and self._tag not in node.tags:

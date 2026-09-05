@@ -278,7 +278,7 @@ def apply_initial_theme(storage=None) -> tuple[str, str]:
     theme_name, accent = "system", DEFAULT_ACCENT
     try:
         if storage is None:
-            from ..storage import StateStorage
+            from ..profiles.storage import StateStorage
 
             storage = StateStorage()
         if not storage.is_encrypted():

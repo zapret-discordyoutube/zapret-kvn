@@ -316,6 +316,10 @@ def stage_singbox_rule_sets(
 def ensure_venv() -> None:
     if VENV_PYTHON.exists():
         _print(f"venv OK: {VENV_PYTHON}")
+        try:
+            _run([str(VENV_PYTHON), "-c", "import maxminddb"])
+        except subprocess.CalledProcessError:
+            _run([str(VENV_PYTHON), "-m", "pip", "install", "maxminddb==3.1.1"])
         return
     _print("Creating virtual environment ...")
     _run([sys.executable, "-m", "venv", str(VENV_DIR)])
@@ -336,7 +340,6 @@ def clean() -> None:
 
 def build_exe() -> None:
     ensure_venv()
-
     # Build into a temporary directory so PyInstaller doesn't touch the live
     # APP_DIR while it is being assembled.  The destination was removed by
     # clean(); it must remain empty so copy failures cannot leave an older file
@@ -363,8 +366,8 @@ def build_exe() -> None:
         "--hidden-import", "encodings.idna",
         # Imported lazily by QR support and therefore must be explicit for PyInstaller.
         "--hidden-import", "zxingcpp",
-        "--add-data", _windows_path(ROOT / "xray_fluent" / "application" / "runtime-errors.json")
-        + ";xray_fluent/application",
+        "--add-data", _windows_path(ROOT / "xray_fluent" / "diagnostics" / "runtime-errors.json")
+        + ";xray_fluent/diagnostics",
     ]
     _run(cmd, cwd=str(ROOT))
 
@@ -391,11 +394,13 @@ def build_exe() -> None:
     dst_templates.parent.mkdir(parents=True, exist_ok=True)
     _copy_tree_strict(DATA_TEMPLATES_DIR, dst_templates)
 
-    # Keep the high-resolution PNG available to Qt for the window, splash,
+    # Keep the high-resolution PNG available to Qt for the window,
     # and tray while the multi-size ICO is embedded into the executable.
     dst_assets = APP_DIR / "assets"
     _print(f"Staging assets -> {dst_assets}")
     _copy_tree_strict(ASSETS_DIR, dst_assets)
+    _remove_path_strict(dst_assets / "geoip")
+    _run([str(VENV_PYTHON), _windows_path(ROOT / "scripts" / "prepare_geoip.py"), "--stage", _windows_path(dst_assets)])
 
     # app_updater.py preserves the installed data/ directory. Carry a second,
     # generated copy outside data/ so the updated executable can safely merge

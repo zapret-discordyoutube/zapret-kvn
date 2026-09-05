@@ -13,7 +13,7 @@ from ..engines.singbox import (
 )
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
+    from .controller import AppController
 
 
 def find_free_api_port(preferred: int | None = None, excluded: set[int] | None = None) -> int:
@@ -140,6 +140,8 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
                 if singbox_plan and singbox_plan.xray_sidecar
                 else singbox_plan.hysteria_sidecar.relay_port
                 if singbox_plan and singbox_plan.hysteria_sidecar
+                else singbox_plan.amnezia_sidecar.relay_port
+                if singbox_plan and singbox_plan.amnezia_sidecar
                 else 0
             ),
             protect_ss_port=controller._protect_ss_port,

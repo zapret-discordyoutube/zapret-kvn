@@ -208,4 +208,4 @@ pipeline.
 - [../template-editor-v1.md](../template-editor-v1.md)
 - [../profile-format-v1.md](../profile-format-v1.md)
 - `xray_fluent/singbox_config_builder.py`
-- `xray_fluent/app_controller.py`
+- `xray_fluent/application/controller.py`

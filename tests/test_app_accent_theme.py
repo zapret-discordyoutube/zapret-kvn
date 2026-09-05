@@ -30,7 +30,7 @@ app = _existing or QApplication([])
 from qfluentwidgets import Theme, qconfig, setTheme, setThemeColor, themeColor
 
 from xray_fluent.constants import DEFAULT_ACCENT_COLOR
-from xray_fluent.models import AppSettings, normalize_accent_color
+from xray_fluent.profiles.models import AppSettings, normalize_accent_color
 from xray_fluent.ui import theme
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -151,7 +151,7 @@ class NormalizeAccentTest(unittest.TestCase):
         self.assertEqual(normalize_accent_color("#0078D4"), "#0078D4")
 
     def test_models_module_has_no_accent_literal_and_no_qt(self) -> None:
-        source = (REPO_ROOT / "xray_fluent" / "models.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "xray_fluent" / "profiles" / "models.py").read_text(encoding="utf-8")
         self.assertNotIn("#0078D4", source)
         self.assertNotIn("PyQt6", source)
         self.assertNotIn("qfluentwidgets", source)

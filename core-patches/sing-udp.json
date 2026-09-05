@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "test_sha256": "5f4c67143d273ea6cc79f3b11a5c8d6ce4d794b9b92db45a31e508613591a88c",
+  "module": "github.com/shtorm-7/sing",
+  "versions": {
+    "v0.8.12-extended-1.2.0": {
+      "commit": "2a83676f898727844ee250528085eb5eb2d744b0",
+      "module_sum": "h1:/CYLFBi+Xrj0R6hFvYoqmDfcLe3WB6McZq5t9UvVhrc=",
+      "zip_sha256": "3269105f7d0e9f3dfa9a3b715ae3b754cc216e6f7166b7d383cbcd96d4e89062",
+      "patch": "sing-udp-v8.patch",
+      "patch_sha256": "587efd67ad1339513d5746c9ae8d33ef62e7ad5c8c844a897c33277011fdbaca"
+    },
+    "v0.9.0-beta.4-extended-1.2.1": {
+      "commit": "bfcdc864f6770aaaf7b4f558cf23d66c15e67f45",
+      "module_sum": "h1:wpPAKAhHdipRcA4wWtHF16JIrObOTCg9a1O7uowAumg=",
+      "zip_sha256": "6753f348d1bc4a41f3db0a5bce7dc2d376914f4df6881c523751ff01f715ab66",
+      "patch": "sing-udp-v9.patch",
+      "patch_sha256": "e061e10f97928565e4b09f3bfe98c80eacc72fae00c8faa15b92fabe59046dd8"
+    }
+  }
+}

@@ -32,9 +32,9 @@ from qfluentwidgets import (
     setCustomStyleSheet,
 )
 
-from ..models import RoutingSettings
-from ..process_presets import PROCESS_PRESETS
-from ..service_presets import SERVICE_PRESETS
+from ..profiles.models import RoutingSettings
+from ..platform.windows.process_presets import PROCESS_PRESETS
+from ..profiles.service_presets import SERVICE_PRESETS
 from .base_page import ScrollablePage
 from .theme import token_pair
 

@@ -21,7 +21,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from ..models import Node
+from ..profiles.models import Node
 from .detail_page import DetailPage
 from .nodes_table_model import node_type_text
 from .privacy import HoldToRevealButton, endpoint_text
@@ -147,7 +147,8 @@ class NodeDetailWidget(DetailPage):
         )
         self.details_label.setText(
             f"Группа: {node.group or 'Default'}  |  "
-            f"Страна: {node.country_code.upper() or '?'}  |  "
+            f"Страна: {node.country_override or node.country_code or 'не определена'} "
+            f"({'вручную' if node.country_override else 'локальная GeoIP'})  |  "
             f"Теги: {', '.join(node.tags) or chr(8212)}"
         )
 

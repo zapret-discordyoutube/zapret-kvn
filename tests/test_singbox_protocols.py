@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import unittest
 
-from xray_fluent.link_parser import (
+from xray_fluent.importer.link_parser import (
     LinkParseError,
     hysteria2_uri_fingerprint,
     link_import_warnings,

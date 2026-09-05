@@ -46,6 +46,8 @@ XRAY_ASSET_NAME = "Xray-windows-64.zip"
 SINGBOX_REPOSITORY = "shtorm-7/sing-box-extended"
 ROUTING_REPOSITORY = "runetfreedom/russia-v2ray-rules-dat"
 ROUTING_BRANCH = "release"
+AMNEZIA_REPOSITORY = "amnezia-vpn/amneziawg-go"
+AMNEZIA_MODULE = "github.com/amnezia-vpn/amneziawg-go/v3"
 
 _XRAY_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _SINGBOX_TAG_RE = re.compile(
@@ -470,6 +472,95 @@ def _replace_routing_source(
     return updated
 
 
+def amnezia_tag_key(tag: str) -> tuple | None:
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", tag)
+    if not match:
+        return None
+    major, minor, patch = map(int, match.groups()[:3])
+    pre = match.group(4)
+    suffix = tuple((0, int(p)) if p.isdigit() else (1, p) for p in (pre or "").split("."))
+    return major, minor, patch, pre is None, suffix
+
+
+def resolve_amnezia_source(current: dict, *, timeout: float = 30.0) -> dict:
+    """The official project publishes tags, not necessarily GitHub Releases."""
+    tags = []
+    for page in range(1, 17):
+        rows = fetch_json(f"{GITHUB_API_ROOT}/repos/{AMNEZIA_REPOSITORY}/tags?per_page=100&page={page}", timeout=timeout)
+        if not isinstance(rows, list):
+            raise ResolverError("Invalid official Amnezia tag response")
+        tags.extend(row for row in rows if isinstance(row, dict) and amnezia_tag_key(str(row.get("name", ""))))
+        if len(rows) < 100:
+            break
+    else:
+        raise ResolverError("Amnezia tag pagination exceeded its bound")
+    if not tags:
+        raise ResolverError("No versioned official Amnezia tag found")
+    selected = max(tags, key=lambda row: amnezia_tag_key(row["name"]))
+    version = selected["name"]
+    if amnezia_tag_key(version)[0] != 3:
+        raise ResolverError("Latest Amnezia major version requires an adapter update; refusing to ship an older tag")
+    commit = str(selected.get("commit", {}).get("sha", ""))
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ResolverError("Invalid Amnezia commit")
+    result = subprocess.run(["go", "mod", "download", "-json", f"{AMNEZIA_MODULE}@{version}"],
+                            cwd=ROOT, text=True, capture_output=True, timeout=max(60, timeout * 4))
+    if result.returncode:
+        raise ResolverError("Verified Amnezia module download failed: " + result.stderr.strip())
+    module = json.loads(result.stdout)
+    if module.get("Origin", {}).get("Hash") != commit or module.get("Version") != version:
+        raise ResolverError("Amnezia Git tag and Go module commit differ")
+    archive = Path(module["Zip"])
+    toolchain = str(current["toolchain"]["version"])
+    versions = fetch_json("https://go.dev/dl/?mode=json&include=all", timeout=timeout)
+    sdk = next((f for item in versions if item.get("version") == toolchain for f in item.get("files", [])
+                if f.get("os") == "windows" and f.get("arch") == "amd64" and f.get("kind") == "archive"), None)
+    if sdk is None or re.fullmatch(r"[0-9a-f]{64}", str(sdk.get("sha256", ""))) is None:
+        raise ResolverError("Pinned Windows Go SDK is missing from official metadata")
+    return {
+        "id": "amnezia", "repository": AMNEZIA_REPOSITORY, "channel": "official-tags",
+        "version": version, "commit": commit, "module": AMNEZIA_MODULE,
+        "module_sum": module["Sum"], "module_go_mod_sum": module["GoModSum"],
+        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "asset_size": archive.stat().st_size,
+        "release_prerelease": "-" in version, "url": f"https://github.com/{AMNEZIA_REPOSITORY}/tree/{commit}",
+        "toolchain": {"version": toolchain, "archive": sdk["filename"], "sha256": sdk["sha256"],
+                      "url": f"https://go.dev/dl/{sdk['filename']}"},
+    }
+
+
+def update_amnezia_runtime(source: dict, root: Path = ROOT) -> None:
+    directory = root / "runtime" / "amnezia"
+    version = source["version"]
+    subprocess.run(["go", "mod", "edit", f"-require={AMNEZIA_MODULE}@{version}"], cwd=directory, check=True)
+    subprocess.run(["go", "mod", "tidy"], cwd=directory, check=True, timeout=300)
+    # This also catches an upstream API/dependency change before publication.
+    subprocess.run(["go", "test", "-mod=readonly", "./..."], cwd=directory, check=True, timeout=300)
+
+
+def resolve_singbox_build(version: str, *, timeout: float = 30.0) -> dict:
+    """Freeze the source matching the release asset, not a different moving ref."""
+    path = f"github.com/{SINGBOX_REPOSITORY}"
+    result = subprocess.run(["go", "mod", "download", "-json", f"{path}@{version}"],
+                            cwd=ROOT, text=True, capture_output=True, timeout=max(60, timeout * 4))
+    if result.returncode:
+        raise ResolverError("Verified sing-box source download failed: " + result.stderr.strip())
+    module = json.loads(result.stdout)
+    commit = module.get("Origin", {}).get("Hash", "")
+    if module.get("Version") != version or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ResolverError("sing-box source revision mismatch")
+    # Refuse an unreviewed dependency/patch combination before writing the lock.
+    mod_text = Path(module["GoMod"]).read_text(encoding="utf-8")
+    match = re.search(r"^replace github.com/sagernet/sing => github.com/shtorm-7/sing (\S+)$", mod_text, re.M)
+    manifest = ROOT / "core-patches/sing-udp.json"
+    patches = json.loads(manifest.read_text(encoding="utf-8"))
+    if not match or match.group(1) not in patches["versions"]:
+        raise ResolverError("Latest sing-box needs a verified UDP patch; refusing an older-core fallback")
+    return {"module": path, "version": version, "commit": commit,
+            "module_sum": module["Sum"], "module_go_mod_sum": module["GoModSum"],
+            "zip_sha256": hashlib.sha256(Path(module["Zip"]).read_bytes()).hexdigest(),
+            "udp_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}
+
+
 def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     """Resolve stable cores and one immutable routing-data snapshot."""
 
@@ -519,6 +610,10 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
             candidate["sources"][index] = replacement_singbox
         elif source.get("id") == "runetfreedom-routing-data":
             candidate["sources"][index] = replacement_routing
+    if "amnezia" in candidate:
+        candidate["amnezia"] = resolve_amnezia_source(candidate["amnezia"], timeout=timeout)
+    if "singbox_build" in candidate:
+        candidate["singbox_build"] = resolve_singbox_build(singbox_tag, timeout=timeout)
     return candidate
 
 
@@ -606,6 +701,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK_PATH)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--update-runtime", action="store_true", help="with --write, update and test the pinned Amnezia Go module")
     parser.add_argument(
         "--require-current",
         action="store_true",
@@ -630,13 +726,15 @@ def main(argv: list[str] | None = None) -> int:
                 if args.require_current:
                     return 2
             return 0
+        if args.update_runtime:
+            update_amnezia_runtime(candidate["amnezia"])
         if candidate == current:
             print("Core lock is already up to date; no files were written.")
             return 0
         atomic_write_lock(args.lock_file, candidate)
         print(f"Updated core lock atomically: {args.lock_file}")
         return 0
-    except (ResolverError, OSError) as exc:
+    except (ResolverError, OSError, subprocess.SubprocessError, ValueError) as exc:
         print(f"core resolver error: {exc}", file=sys.stderr)
         return 1
 

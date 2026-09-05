@@ -119,7 +119,7 @@ Ensure the referenced direct outbound exists, normally:
 ## Files to trace before architecture changes
 
 - `xray_fluent/application/profile_service.py`: template, active-config, reset, and save ownership.
-- `xray_fluent/template_sync.py`: updater-safe delivery of shipped templates and preservation of user-edited active JSON.
+- `xray_fluent/application/template_sync.py`: updater-safe delivery of shipped templates and preservation of user-edited active JSON.
 - `xray_fluent/engines/singbox/runtime_planner.py`: proxy/TUN inbound contracts, selected outbound, bootstrap rule, and hybrid sidecar.
 - `xray_fluent/application/xray_runtime_service.py`: raw Xray metrics, TUN, selected outbound, and loop-prevention contracts.
 - `xray_fluent/ui/configs_page.py` and `ui/dashboard_page.py`: user-facing mode semantics.

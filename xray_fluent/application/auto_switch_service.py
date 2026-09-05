@@ -4,8 +4,8 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
-    from ..models import Node
+    from .controller import AppController
+    from ..profiles.models import Node
 
 
 AUTO_SWITCH_HIGH_TICKS_REQUIRED = 10

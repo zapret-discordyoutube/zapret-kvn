@@ -42,3 +42,6 @@ CLAUDE.md
 HANDOFF.md
 sing-box.md
 cache.db
+
+# Generated GeoIP payload (prepared only by build tooling)
+/assets/geoip/

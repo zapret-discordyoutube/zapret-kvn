@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from ..engines.xray import XrayCoreUpdateResult, XrayCoreUpdateWorker
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
+    from .controller import AppController
 
 
 def run_xray_core_update(controller: AppController, apply_update: bool, silent: bool = False) -> None:

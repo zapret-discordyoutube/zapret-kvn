@@ -10,7 +10,7 @@ from xray_fluent.engines.singbox.runtime_planner import (
     plan_singbox_proxy_runtime,
     plan_singbox_runtime,
 )
-from xray_fluent.link_parser import parse_single
+from xray_fluent.importer.link_parser import parse_single
 
 
 ROOT = Path(__file__).resolve().parents[1]

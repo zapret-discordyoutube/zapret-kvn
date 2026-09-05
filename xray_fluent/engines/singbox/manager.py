@@ -11,13 +11,13 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
-from ... import win_netinfo
-from ...diagnostics import capture_runtime_config
+from ...platform.windows import win_netinfo
+from ...diagnostics.export import capture_runtime_config
 from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
-from ...path_utils import resolve_configured_path
-from ...proxy_readiness import probe_listener_role
+from ...profiles.path_utils import resolve_configured_path
+from ...network.proxy_readiness import probe_listener_role
 from .config_check import check_config
-from ...subprocess_utils import (
+from ...platform.windows.subprocess_utils import (
     decode_output,
     kill_processes_by_path,
     result_output_text,

@@ -31,9 +31,9 @@ from qfluentwidgets import (
 from qfluentwidgets import RoundMenu, Action
 from qfluentwidgets.components.widgets.list_view import ListItemDelegate
 
-from ..models import Node, ZapretTargetSettings
-from ..zapret_manager import PresetInfo, ZapretManager
-from ..zapret_target import (
+from ..profiles.models import Node, ZapretTargetSettings
+from ..engines.zapret.manager import PresetInfo, ZapretManager
+from ..engines.zapret.target import (
     ResolvedZapretEndpoint,
     endpoint_spec_for_node,
     load_strategy_catalog,

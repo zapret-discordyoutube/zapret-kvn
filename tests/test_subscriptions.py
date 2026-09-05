@@ -27,17 +27,17 @@ from xray_fluent.constants import (
     STATE_SCHEMA_VERSION,
     SUBSCRIPTION_PARSER_REVISION,
 )
-from xray_fluent.diagnostics import export_diagnostics
-from xray_fluent.models import (
+from xray_fluent.diagnostics.export import export_diagnostics
+from xray_fluent.profiles.models import (
     AppState,
     Node,
     Subscription,
     normalize_subscription_warnings,
 )
-from xray_fluent.qr_utils import QrDecodeError, decode_subscription_qr
-from xray_fluent.storage import StateStorage
-from xray_fluent.link_parser import LinkParseError, parse_single
-from xray_fluent.subscription_http import (
+from xray_fluent.importer.qr_utils import QrDecodeError, decode_subscription_qr
+from xray_fluent.profiles.storage import StateStorage
+from xray_fluent.importer.link_parser import LinkParseError, parse_single
+from xray_fluent.importer.subscription_http import (
     SubscriptionFetchError,
     SubscriptionFetchResult,
     _SafeRedirectHandler,
@@ -53,7 +53,7 @@ from xray_fluent.subscription_http import (
     sanitize_fetch_error,
     subscription_request_headers,
 )
-from xray_fluent.subscription_parser import (
+from xray_fluent.importer.subscription_parser import (
     SubscriptionParseError,
     parse_subscription_payload,
     validate_filter_patterns,
@@ -121,11 +121,11 @@ class SubscriptionParserTests(unittest.TestCase):
 
         wireguard = """# WireGuard
 [Interface]
-PrivateKey = private
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 Address = 10.0.0.2/32
 
 [Peer]
-PublicKey = public
+PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=
 Endpoint = wg.example:51820
 AllowedIPs = 0.0.0.0/0
 """
@@ -621,7 +621,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
                 raise OSError("direct failed")
             return SubscriptionFetchResult(data=b"ok", via_proxy=True)
 
-        with patch("xray_fluent.subscription_http._fetch_once", side_effect=fake_once):
+        with patch("xray_fluent.importer.subscription_http._fetch_once", side_effect=fake_once):
             result = fetch_subscription(subscription, mode="auto", proxy_port=1391)
         self.assertTrue(result.via_proxy)
         self.assertEqual(calls, [(False, None), (True, 1391)])
@@ -641,7 +641,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
                 raise OSError("direct failed")
             return SubscriptionFetchResult(data=b"ok", via_proxy=True)
 
-        with patch("xray_fluent.subscription_http._fetch_once", side_effect=fake_once):
+        with patch("xray_fluent.importer.subscription_http._fetch_once", side_effect=fake_once):
             result = fetch_subscription(
                 subscription,
                 mode="auto",
@@ -687,7 +687,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
                 return b"payload"
 
         opener = SimpleNamespace(open=lambda request, timeout: Response())
-        with patch("xray_fluent.subscription_http.build_opener", return_value=opener):
+        with patch("xray_fluent.importer.subscription_http.build_opener", return_value=opener):
             result = fetch_subscription(subscription, mode="direct")
         self.assertEqual(result.headers["etag"], '"next"')
         self.assertEqual(default_subscription_user_agent().split("/", 1)[0], "ZapretKVN")
@@ -699,7 +699,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
             return Response()
 
         opener.open = open_and_capture
-        with patch("xray_fluent.subscription_http.build_opener", return_value=opener):
+        with patch("xray_fluent.importer.subscription_http.build_opener", return_value=opener):
             fetch_subscription(subscription, mode="direct")
         request, timeout = captured[0]
         self.assertEqual(request.get_header("If-none-match"), '"abc"')
@@ -712,7 +712,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
                 return b"x" * limit
 
         opener.open = lambda _request, timeout: OversizedResponse()
-        with patch("xray_fluent.subscription_http.build_opener", return_value=opener):
+        with patch("xray_fluent.importer.subscription_http.build_opener", return_value=opener):
             with self.assertRaisesRegex(SubscriptionFetchError, "превышает"):
                 fetch_subscription(subscription, mode="direct", max_bytes=8)
 
@@ -724,7 +724,7 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
             None,
         )
         opener.open = lambda _request, timeout: (_ for _ in ()).throw(http_error)
-        with patch("xray_fluent.subscription_http.build_opener", return_value=opener):
+        with patch("xray_fluent.importer.subscription_http.build_opener", return_value=opener):
             not_modified = fetch_subscription(subscription, mode="direct")
         self.assertTrue(not_modified.not_modified)
 
@@ -736,13 +736,13 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         )
         captured.clear()
         opener.open = open_and_capture
-        with patch("xray_fluent.subscription_http.build_opener", return_value=opener):
+        with patch("xray_fluent.importer.subscription_http.build_opener", return_value=opener):
             fetch_subscription(stale, mode="direct")
         stale_request = captured[0][0]
         self.assertIsNone(stale_request.get_header("If-none-match"))
         self.assertIsNone(stale_request.get_header("If-modified-since"))
         opener.open = lambda _request, timeout: (_ for _ in ()).throw(http_error)
-        with patch("xray_fluent.subscription_http.build_opener", return_value=opener):
+        with patch("xray_fluent.importer.subscription_http.build_opener", return_value=opener):
             with self.assertRaisesRegex(SubscriptionFetchError, "304 без условного"):
                 fetch_subscription(stale, mode="direct")
 

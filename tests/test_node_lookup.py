@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from xray_fluent.application.node_runtime_service import get_node_by_id
-from xray_fluent.models import Node
+from xray_fluent.profiles.models import Node
 
 
 class _CountingNodes(list):

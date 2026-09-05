@@ -13,7 +13,7 @@ if _existing is not None and not isinstance(_existing, QApplication):
     raise RuntimeError("Zapret widget tests require QApplication")
 app = _existing or QApplication([])
 
-from xray_fluent.models import Node, ZapretTargetSettings
+from xray_fluent.profiles.models import Node, ZapretTargetSettings
 from xray_fluent.ui.detail_page import DetailPage
 from xray_fluent.ui.zapret_page import DEFAULT_UDP_STRATEGY, ZapretPage
 

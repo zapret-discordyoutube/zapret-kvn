@@ -38,9 +38,9 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from ..models import Node, Subscription
-from ..qr_utils import QrDecodeError, decode_subscription_qr
-from ..subscription_http import (
+from ..profiles.models import Node, Subscription
+from ..importer.qr_utils import QrDecodeError, decode_subscription_qr
+from ..importer.subscription_http import (
     default_subscription_user_agent,
     mask_subscription_url,
     normalize_client_profile,
@@ -49,7 +49,7 @@ from ..subscription_http import (
     is_panel_compatible_hwid,
     validate_hwid,
 )
-from ..subscription_parser import validate_filter_patterns
+from ..importer.subscription_parser import validate_filter_patterns
 from .detail_page import DetailPage, StackedSection
 from .fluent_dialog import FluentDialog
 from .theme import accent_color, on_accent_changed

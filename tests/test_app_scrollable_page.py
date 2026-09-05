@@ -188,7 +188,7 @@ class MinimumWidthsTest(unittest.TestCase):
             page.connection_card,
             page.routing_card,
             page.traffic_card,
-            page._proc_traffic_card,
+            page.process_link,
         )
         for card in cards:
             policy = card.sizePolicy()

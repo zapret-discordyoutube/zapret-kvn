@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from xray_fluent.application.hysteria_runtime_contract import (
+from xray_fluent.engines.hysteria.runtime_contract import (
     AUTOMATIC_SWITCH_FAILURES,
     SECURITY_FAILURES,
     HysteriaFailureCode,
@@ -15,7 +15,7 @@ from xray_fluent.application.hysteria_runtime_contract import (
     classify_hysteria_uri,
     node_is_maintenance,
 )
-from xray_fluent.link_parser import parse_single
+from xray_fluent.importer.link_parser import parse_single
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "hysteria_golden_vectors.json"

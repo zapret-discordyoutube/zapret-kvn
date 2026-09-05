@@ -7,8 +7,8 @@ from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PyQt6.QtGui import QBrush
 from qfluentwidgets import qconfig
 
-from ..country_flags import get_flag_icon
-from ..models import Node
+from ..profiles.country_flags import get_flag_icon
+from ..profiles.models import Node
 from .privacy import endpoint_text
 from .theme import error_color, success_color, warning_color
 
@@ -64,13 +64,13 @@ class NodeColumnSpec:
 # Maximums are deliberately generous sanity bounds (persisted values clamp
 # against them); live layout is governed by the flex relayout in NodesPage.
 COLUMN_SPECS = (
-    NodeColumnSpec("name", "Имя", True, 420, 180, 1600, "name", stretch=True),
-    NodeColumnSpec("type", "Тип", True, 58, 44, 200, "type", centered=True),
-    NodeColumnSpec("address", "Адрес", True, 190, 112, 1000),
+    NodeColumnSpec("name", "Имя", True, 360, 220, 640, "name"),
+    NodeColumnSpec("type", "Тип", True, 110, 90, 200, "type", centered=True),
+    NodeColumnSpec("address", "Адрес", False, 180, 120, 360),
     NodeColumnSpec("group", "Группа", False, 140, 80, 800, "group"),
     NodeColumnSpec("tags", "Теги", False, 160, 90, 1000),
-    NodeColumnSpec("ping", "Пинг", True, 82, 64, 240, "ping", centered=True),
-    NodeColumnSpec("speed", "Скорость", True, 106, 82, 300, "speed", centered=True),
+    NodeColumnSpec("ping", "Пинг", True, 96, 80, 160, "ping", centered=True),
+    NodeColumnSpec("speed", "Скорость", True, 112, 96, 200, "speed", centered=True),
     NodeColumnSpec(
         "last_used", "Последнее использование", False, 156, 120, 480, "last_used"
     ),
@@ -121,6 +121,7 @@ class NodesTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._nodes: list[Node] = []
         self._id_to_row: dict[str, int] = {}
+        self._snapshots = {}
         self._busy_ping_ids: set[str] = set()
         self._speed_progress: dict[str, int] = {}
         self._source_names: dict[str, str] = {}
@@ -145,7 +146,15 @@ class NodesTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._nodes = list(nodes)
         self._id_to_row = {node.id: row for row, node in enumerate(self._nodes)}
+        self._snapshots = {node.id: self._snapshot(node) for node in self._nodes}
         self.endResetModel()
+
+    @staticmethod
+    def _snapshot(node):
+        return (node.name, node_type_text(node), node.server, node.port, node.group,
+                tuple(node.tags), node.ping_ms, node.speed_mbps, node.is_alive,
+                bool(node.speed_history), node.country_code, node.country_override,
+                node.is_favorite, node.subscription_id, node.last_used_at, node.sort_order)
 
     def update_nodes(self, nodes: list[Node]) -> None:
         """Diff-update by node id: no modelReset for point changes."""
@@ -186,12 +195,12 @@ class NodesTableModel(QAbstractTableModel):
         else:
             self._id_to_row = {node.id: row for row, node in enumerate(self._nodes)}
 
-        if self._nodes:
-            # One wide dataChanged for updated rows (all roles).
-            self.dataChanged.emit(
-                self.index(0, 0),
-                self.index(len(self._nodes) - 1, len(_HEADERS) - 1),
-            )
+        snapshots = {node.id: self._snapshot(node) for node in self._nodes}
+        changed = [row for row, node in enumerate(self._nodes)
+                   if self._snapshots.get(node.id) != snapshots[node.id]]
+        self._snapshots = snapshots
+        for first, last in _contiguous_ranges(changed):
+            self.dataChanged.emit(self.index(first, 0), self.index(last, len(_HEADERS) - 1))
 
     def set_active_node_id(self, node_id: str | None) -> None:
         node_id = node_id or None
@@ -319,6 +328,8 @@ class NodesTableModel(QAbstractTableModel):
         return len(_HEADERS)
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.TextAlignmentRole and orientation == Qt.Orientation.Horizontal:
+            return int(Qt.AlignmentFlag.AlignCenter if section in _CENTERED_COLUMNS else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             if 0 <= section < len(_HEADERS):
                 return _HEADERS[section]
@@ -353,7 +364,7 @@ class NodesTableModel(QAbstractTableModel):
             return self._display_text(node, col)
 
         if role == Qt.ItemDataRole.DecorationRole and col == COL_NAME:
-            return get_flag_icon(node.country_code)
+            return get_flag_icon(node.country_override or node.country_code)
 
         if role == Qt.ItemDataRole.ToolTipRole:
             return self._tooltip_text(node, col)
@@ -409,7 +420,7 @@ class NodesTableModel(QAbstractTableModel):
 
     def _display_text(self, node: Node, col: int) -> str:
         if col == COL_NAME:
-            return node.name or "Без имени"
+            return ("★ " if node.is_favorite else "") + (node.name or "Без имени")
         if col == COL_TYPE:
             return node_type_text(node)
         if col == COL_ADDRESS:

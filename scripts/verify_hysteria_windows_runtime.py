@@ -26,7 +26,7 @@ if str(_ROOT) not in sys.path:
 
 from PyQt6.QtCore import QCoreApplication
 
-from xray_fluent.application.hysteria_runtime_contract import classify_hysteria_uri
+from xray_fluent.engines.hysteria.runtime_contract import classify_hysteria_uri
 from xray_fluent.constants import (
     HYSTERIA_CONFIG_FILE,
     HYSTERIA_PATH_DEFAULT,
@@ -43,7 +43,7 @@ from xray_fluent.engines.singbox.runtime_planner import (
     plan_singbox_runtime,
 )
 from xray_fluent.engines.singbox.manager import SingBoxManager
-from xray_fluent.link_parser import parse_single
+from xray_fluent.importer.link_parser import parse_single
 
 
 _HTTPS_ENDPOINTS: tuple[tuple[str, str], ...] = (

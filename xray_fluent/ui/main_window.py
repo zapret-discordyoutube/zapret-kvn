@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import time
+import logging
 
 from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QGuiApplication, QIcon
@@ -16,14 +18,15 @@ from qfluentwidgets import (
     NavigationItemPosition,
 )
 
-from ..app_controller import AppController
-from ..storage import PassphraseRequired
+from ..application.controller import AppController
+from ..profiles.storage import PassphraseRequired
 from ..constants import APP_ICON_PATH, APP_NAME, APP_VERSION, BASE_DIR, LOG_DIR
-from ..models import AppSettings, Node, RoutingSettings, Subscription, SubscriptionUpdateResult
-from ..subscription_http import mask_subscription_url
-from ..app_updater import AppUpdate, UpdateChecker, UpdateDownloader
+from ..profiles.models import AppSettings, Node, RoutingSettings, Subscription, SubscriptionUpdateResult
+from ..importer.subscription_http import mask_subscription_url
+from ..updates.app_updater import AppUpdate, UpdateChecker, UpdateDownloader
 from ..engines.xray import XrayCoreUpdateResult
 from .dashboard_page import DashboardPage
+from .deferred_page import DeferredPage
 from .lock_dialog import PasswordDialog
 from .logs_page import LogsPage
 from .nodes_page import NodesPage
@@ -57,7 +60,11 @@ class MainWindow(FluentWindow):
         super().__init__()
         self._quitting = False
         self._tray_notified = False
+        self._state_loaded = False
         self._initialized = False
+        self._startup_loader = None
+        self._metadata_worker = None
+        self._startup_started = time.perf_counter()
         self._bulk_task_tip: InfoBar | None = None
         self._bulk_task_type: str | None = None
         self._speed_test_was_cancelled = False
@@ -66,6 +73,8 @@ class MainWindow(FluentWindow):
         self._deferred_process_stats: list | None = None
         self._has_deferred_process_stats = False
         self._geometry_persistence_ready = False
+        self._restoring_geometry = False
+        self._geometry_applied = False
         self._app_update_scheduler_ready = False
         self._app_update_timer = QTimer(self)
         self._app_update_timer.setSingleShot(True)
@@ -84,12 +93,12 @@ class MainWindow(FluentWindow):
         self._app_icon = QIcon(str(APP_ICON_PATH))
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(self._app_icon)
-        self.resize(1280, 720)
+        self.resize(1000, 720)
 
         if not defer_init:
             self.initialize()
 
-    def initialize(self) -> None:
+    def initialize(self, *, load_state: bool = True) -> None:
         if self._initialized:
             return
 
@@ -97,15 +106,15 @@ class MainWindow(FluentWindow):
         self._nodes_view_prefs_applied = False
         self.controller = AppController(self)
         self.dashboard_page = DashboardPage(self)
-        self.nodes_page = NodesPage(self)
-        self.subscriptions_page = SubscriptionsPage(self)
-        self.configs_page = ConfigsPage(self)
-        self.zapret_page = ZapretPage(self)
-        self.logs_page = LogsPage(self)
-        self.settings_page = SettingsPage(self)
-        self.updates_page = UpdatesPage(self)
-        self.history_page = HistoryPage(self)
-        self.about_page = AboutPage(self)
+        self.nodes_page = DeferredPage(NodesPage, "nodes", self)
+        self.subscriptions_page = DeferredPage(SubscriptionsPage, "subscriptions", self)
+        self.configs_page = DeferredPage(ConfigsPage, "configs", self)
+        self.zapret_page = DeferredPage(ZapretPage, "zapret", self)
+        self.logs_page = DeferredPage(LogsPage, "logs", self)
+        self.settings_page = DeferredPage(SettingsPage, "settings", self)
+        self.updates_page = DeferredPage(UpdatesPage, "updates", self)
+        self.history_page = DeferredPage(HistoryPage, "history", self)
+        self.about_page = DeferredPage(AboutPage, "about", self)
 
         self._create_navigation()
         self._create_tray()
@@ -115,49 +124,94 @@ class MainWindow(FluentWindow):
         self.controller._log(_runtime_identity_log_line())
         self._init_window()
 
-        loaded = self._load_with_passphrase()
-        if loaded:
-            self._load_config_editor_documents()
+        self.dashboard_page.set_initializing(True)
+        self.navigationInterface.setEnabled(False)
+        for action in (self.tray_connect_action, self.tray_next_action):
+            if action:
+                action.setEnabled(False)
+        self.configs_page.created.connect(self._load_config_editor_documents)
+        if load_state:
+            from ..application.startup_service import StartupLoader
+            self._startup_loader = StartupLoader(self)
+            self._startup_loader.early.connect(lambda settings, _locked: self._apply_window_geometry(settings))
+            self._startup_loader.loaded.connect(self.complete_initialization)
+            self._startup_loader.password_needed.connect(self._ask_startup_password)
+            self._startup_loader.failed.connect(self._startup_failed)
+            QTimer.singleShot(0, self._startup_loader.start)
 
-        unlocked = True
-        if loaded and self.controller.state.security.enabled:
+    def _ask_startup_password(self):
+        if self._quitting:
+            return
+        dialog = PasswordDialog("Зашифрованные данные", self)
+        if dialog.exec() != int(QDialog.DialogCode.Accepted):
+            self._quit_app()
+            return
+        self._startup_loader.start(dialog.password())
+
+    def _startup_failed(self, message):
+        if self._quitting:
+            return
+        self.dashboard_page.set_initializing(False)
+        self.dashboard_page.set_runtime_status("error", message)
+        self.dashboard_page.set_transition_busy(True)
+        self._show_status("error", message)
+
+    def complete_initialization(self, state, history):
+        if self._quitting or self._geometry_persistence_ready:
+            return
+        if self._startup_loader is not None:
+            self.controller.storage.passphrase = self._startup_loader.storage.passphrase
+            self.controller.storage._known_encrypted = self._startup_loader.storage.is_encrypted()
+        self.controller.load(state, history)
+        self._state_loaded = True
+        self._apply_theme(state.settings.theme, state.settings.accent_color)
+        self._apply_window_geometry(state.settings)
+        if state.security.enabled:
             self.controller.locked = True
-            unlocked = self._ensure_unlocked(startup=True)
-
-        if loaded and unlocked:
-            self.history_page.set_storage(self.controller.traffic_history)
-            self.controller.auto_connect_if_needed()
-            self._app_update_scheduler_ready = True
-            self._sync_app_update_timer(self.controller.state.settings)
-
+            if not self._ensure_unlocked(startup=True):
+                return
+        self._geometry_persistence_ready = True
+        self.dashboard_page.set_initializing(False)
+        self.navigationInterface.setEnabled(True)
+        for action in (self.tray_connect_action, self.tray_next_action):
+            if action:
+                action.setEnabled(True)
+        self.history_page.set_storage(self.controller.traffic_history)
+        self.controller.auto_connect_if_needed()
+        self._app_update_scheduler_ready = True
+        self._sync_app_update_timer(state.settings)
         self._consume_update_error_log()
-
-        # Set Xray version on updates page
-        from ..engines.xray import get_xray_version
-        xv = get_xray_version(self.controller.state.settings.xray_path)
-        self.updates_page.set_xray_version(xv or "")
-
-        from ..engines.singbox.core_updater import installed_version as singbox_installed_version
-        from ..path_utils import resolve_configured_path
+        from ..application.startup_service import MetadataWorker
+        from ..profiles.path_utils import resolve_configured_path
         from ..constants import SINGBOX_PATH_DEFAULT
+        sb_path = resolve_configured_path(state.settings.singbox_path, default_path=SINGBOX_PATH_DEFAULT, use_default_if_empty=True) or SINGBOX_PATH_DEFAULT
+        self._metadata_worker = MetadataWorker(state.settings.xray_path, str(sb_path), self)
+        self._metadata_worker.ready.connect(self._metadata_ready)
+        self._metadata_worker.start()
+        if state.settings.xray_auto_update:
+            QTimer.singleShot(4500, lambda: self.controller.run_xray_core_update(True, silent=True) if not self._quitting else None)
+        logging.getLogger("xray_fluent.bootstrap").info("controls_ready_ms=%.1f", (time.perf_counter() - self._startup_started) * 1000)
 
-        singbox_exe = resolve_configured_path(
-            self.controller.state.settings.singbox_path,
-            default_path=SINGBOX_PATH_DEFAULT,
-            use_default_if_empty=True,
-            migrate_default_location=True,
-        ) or SINGBOX_PATH_DEFAULT
-        self.updates_page.set_singbox_version(
-            singbox_installed_version(singbox_exe) if singbox_exe.exists() else ""
-        )
+    def _metadata_ready(self, result):
+        if self._quitting:
+            return
+        self.updates_page.set_xray_version(result["xray"])
+        self.updates_page.set_singbox_version(result["singbox"])
+        self._init_zapret_page(result["presets"])
 
-        if self.controller.state.settings.xray_auto_update:
-            QTimer.singleShot(4500, lambda: self.controller.run_xray_core_update(True, silent=True))
-
-        self._init_zapret_page()
+    def finish_background_shutdown(self):
+        if self._startup_loader:
+            self._startup_loader.finish_shutdown()
+        if self._metadata_worker and self._metadata_worker.isRunning():
+            self._metadata_worker.requestInterruption()
+            self._metadata_worker.wait()
+        worker = getattr(getattr(self, "controller", None), "_country_resolver", None)
+        if worker and worker.isRunning():
+            worker.requestInterruption()
+            worker.wait()
 
     def _create_navigation(self) -> None:
-        self.navigationInterface.setMinimumExpandWidth(700)
+        self.navigationInterface.setMinimumExpandWidth(1100)
         self.navigationInterface.setExpandWidth(200)
         self.addSubInterface(self.dashboard_page, FIF.SPEED_HIGH, "Панель")
         self.addSubInterface(self.nodes_page, FIF.LINK, "Серверы")
@@ -222,6 +276,7 @@ class MainWindow(FluentWindow):
         self.tray_mode_direct.triggered.connect(lambda: self._set_mode_from_tray("direct"))
 
     def _connect_signals(self) -> None:
+        self.dashboard_page.logs_requested.connect(lambda: self.switchTo(self.logs_page))
         self.dashboard_page.mode_changed.connect(self._set_mode_only)
         self.dashboard_page.toggle_connection_requested.connect(self.controller.toggle_connection)
         self.dashboard_page.tun_toggled.connect(self._on_dashboard_tun_toggled)
@@ -238,6 +293,7 @@ class MainWindow(FluentWindow):
         self.nodes_page.node_edit_saved.connect(self._on_node_edit_saved)
         self.nodes_page.bulk_edit_requested.connect(self._on_bulk_edit_nodes)
         self.nodes_page.bulk_edit_applied.connect(self._on_bulk_edit_applied)
+        self.nodes_page.favorite_requested.connect(self._set_favorites)
         self.nodes_page.view_prefs_changed.connect(self._on_nodes_view_prefs_changed)
 
         self.subscriptions_page.add_requested.connect(self._add_subscription)
@@ -341,19 +397,44 @@ class MainWindow(FluentWindow):
         self._apply_window_geometry(self.controller.state.settings)
 
     def _apply_window_geometry(self, settings: AppSettings) -> None:
-        width = max(self.minimumWidth(), int(settings.window_width or 1000))
-        height = max(self.minimumHeight(), int(settings.window_height or 720))
-        self.resize(width, height)
-        if settings.window_x >= 0 and settings.window_y >= 0:
-            if self._is_position_on_screen(settings.window_x, settings.window_y):
-                self.move(settings.window_x, settings.window_y)
+        from .window_geometry import fitted_geometry
+        screens = QGuiApplication.screens()
+        primary = screens.index(QGuiApplication.primaryScreen()) if screens else 0
+        rect, minimum = fitted_geometry(settings, [screen.availableGeometry() for screen in screens], primary)
+        self._restoring_geometry = True
+        try:
+            self.setMinimumSize(minimum)
+            self.setGeometry(rect)
+            self._geometry_applied = True
+        finally:
+            self._restoring_geometry = False
 
-    @staticmethod
-    def _is_position_on_screen(x: int, y: int) -> bool:
-        for screen in QGuiApplication.screens():
-            if screen.availableGeometry().contains(x, y):
-                return True
-        return False
+    def _fit_current_screen(self, *_):
+        if not self._geometry_persistence_ready or self._restoring_geometry:
+            return
+        from copy import copy
+        settings = copy(self.controller.state.settings)
+        geo = self.normalGeometry() if self.isMaximized() else self.geometry()
+        settings.window_x, settings.window_y = geo.x(), geo.y()
+        settings.window_width, settings.window_height = geo.width(), geo.height()
+        if not self.isMaximized():
+            self._apply_window_geometry(settings)
+        else:
+            from .window_geometry import MINIMUM_SIZE
+            area = self.screen().availableGeometry()
+            self.setMinimumSize(min(MINIMUM_SIZE.width(), area.width()), min(MINIMUM_SIZE.height(), area.height()))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_first_show_logged", False):
+            self._first_show_logged = True
+            QTimer.singleShot(0, lambda: logging.getLogger("xray_fluent.bootstrap").info("first_window_ms=%.1f", (time.perf_counter() - self._startup_started) * 1000))
+        if not getattr(self, "_screen_signals_connected", False) and self.windowHandle():
+            self._screen_signals_connected = True
+            self.windowHandle().screenChanged.connect(self._fit_current_screen)
+            for screen in QGuiApplication.screens():
+                screen.availableGeometryChanged.connect(self._fit_current_screen)
+                screen.logicalDotsPerInchChanged.connect(self._fit_current_screen)
 
     def _on_nodes_changed(self, nodes: list[Node]) -> None:
         if not self._nodes_view_prefs_applied:
@@ -471,6 +552,13 @@ class MainWindow(FluentWindow):
         else:
             self._show_status("error", result.message)
 
+    def _set_favorites(self, node_ids: set[str], favorite: bool) -> None:
+        for node in self.controller.state.nodes:
+            if node.id in node_ids:
+                node.is_favorite = favorite
+        self.controller.nodes_changed.emit(self.controller.state.nodes)
+        self.controller.schedule_save()
+
     def _on_nodes_view_prefs_changed(self, prefs: dict) -> None:
         controller = getattr(self, "controller", None)
         if controller is None:
@@ -530,7 +618,6 @@ class MainWindow(FluentWindow):
         # чтение реестра; на не-Windows вернётся supported=False).
         self.dashboard_page.set_system_proxy_state(self.controller.query_system_proxy_state())
         self.dashboard_page.set_settings_snapshot(settings)
-        self._apply_window_geometry(settings)
         self._apply_theme(settings.theme, settings.accent_color)
         routing_controls_enabled = bool(settings.tun_mode and settings.tun_engine == "tun2socks")
         for action in (self.tray_mode_global, self.tray_mode_rule, self.tray_mode_direct):
@@ -682,6 +769,12 @@ class MainWindow(FluentWindow):
         long_duration = level.endswith("-long")
         if long_duration:
             level = level[:-5]
+        dashboard = getattr(self, "dashboard_page", None)
+        if (level == "error" and dashboard is not None
+                and dashboard._connection_phase == "error"
+                and dashboard._connection_message == message
+                and self._is_dashboard_active()):
+            return
         if level == "error":
             InfoBar.error("Ошибка", message, position=InfoBarPosition.TOP_RIGHT, duration=6000, parent=self)
         elif level == "warning":
@@ -1079,9 +1172,10 @@ class MainWindow(FluentWindow):
 
     # ── Zapret ───────────────────────────────────────────────
 
-    def _init_zapret_page(self) -> None:
-        from ..zapret_manager import ZapretManager
-        infos = ZapretManager.list_preset_infos()
+    def _init_zapret_page(self, infos=None) -> None:
+        if infos is None:
+            from ..engines.zapret.manager import ZapretManager
+            infos = ZapretManager.list_preset_infos()
         saved = self.controller.state.settings.zapret_preset
         self.zapret_page.set_presets(infos, saved)
         self.zapret_page.set_target_settings(self.controller.state.settings.zapret_target)
@@ -1347,7 +1441,7 @@ class MainWindow(FluentWindow):
     def _quit_for_update(self) -> None:
         self._quitting = True
         self._save_geometry()
-        self.controller.shutdown()
+        self._shutdown_controller()
         app = QApplication.instance()
         if app is not None:
             app.quit()
@@ -1463,6 +1557,7 @@ class MainWindow(FluentWindow):
 
     def _load_with_passphrase(self) -> bool:
         if self.controller.load():
+            self._apply_window_geometry(self.controller.state.settings)
             self._geometry_persistence_ready = True
             return True
 
@@ -1519,7 +1614,7 @@ class MainWindow(FluentWindow):
         raw = path.read_text(encoding="utf-8").strip()
 
         passphrase = ""
-        from ..security import is_passphrase_encrypted
+        from ..platform.windows.security import is_passphrase_encrypted
         if is_passphrase_encrypted(raw):
             dialog = PasswordDialog("Расшифровать резервную копию", self)
             dialog.password_edit.setPlaceholderText("Введите пароль резервной копии")
@@ -1556,22 +1651,33 @@ class MainWindow(FluentWindow):
         if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
             self._toggle_window_visible()
 
+    def _shutdown_controller(self):
+        if self._startup_loader:
+            self._startup_loader.cancel()
+        if self._state_loaded:
+            self.controller.shutdown()
+        else:
+            # Cancelling startup must never overwrite the real state with defaults.
+            self.controller.network_monitor.stop()
+
     def _quit_app(self) -> None:
         self._quitting = True
+        if self._startup_loader:
+            self._startup_loader.cancel()
         self._stop_app_update_timer()
         self._save_geometry()
-        self.controller.shutdown()
+        self._shutdown_controller()
         app = QApplication.instance()
         if app is not None:
             app.quit()
 
     def _save_geometry(self) -> None:
         controller = getattr(self, "controller", None)
-        if controller is None:
+        if controller is None or self._restoring_geometry or not self._geometry_persistence_ready:
             return
-        if self.isMinimized() or self.isMaximized():
+        if self.isMinimized():
             return
-        geo = self.geometry()
+        geo = self.normalGeometry() if self.isMaximized() else self.geometry()
         s = controller.state.settings
         s.window_x = geo.x()
         s.window_y = geo.y()
@@ -1597,7 +1703,7 @@ class MainWindow(FluentWindow):
             self._quitting = True
             self._stop_app_update_timer()
             self._save_geometry()
-            self.controller.shutdown()
+            self._shutdown_controller()
             e.accept()
             app = QApplication.instance()
             if app is not None:
@@ -1605,7 +1711,8 @@ class MainWindow(FluentWindow):
             return
 
         self._save_geometry()
-        self.controller.save()
+        if self._state_loaded:
+            self.controller.save()
         e.ignore()
         self.hide()
         if self.tray is not None and not self._tray_notified:

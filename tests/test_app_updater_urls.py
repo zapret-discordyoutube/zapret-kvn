@@ -1,6 +1,6 @@
 import unittest
 
-from xray_fluent.app_updater import _is_trusted_release_url
+from xray_fluent.updates.app_updater import _is_trusted_release_url
 
 
 class AppUpdaterUrlPolicyTests(unittest.TestCase):

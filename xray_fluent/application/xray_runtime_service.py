@@ -15,8 +15,8 @@ from .runtime_security import strip_xray_proxy_inbounds
 from .session_state import XrayRuntimeConfig
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
-    from ..models import Node
+    from .controller import AppController
+    from ..profiles.models import Node
 
 
 APP_METRICS_API_TAG = "__app_metrics_api"

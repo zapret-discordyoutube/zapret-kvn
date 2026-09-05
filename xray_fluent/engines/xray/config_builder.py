@@ -18,8 +18,8 @@ from ...application.outbound_pool_service import (
     XrayOutboundPool,
     ensure_xray_pool_control_plane,
 )
-from ...models import AppSettings, Node, RoutingSettings
-from ...service_presets import SERVICE_PRESETS_BY_ID
+from ...profiles.models import AppSettings, Node, RoutingSettings
+from ...profiles.service_presets import SERVICE_PRESETS_BY_ID
 
 
 _VPN_DETECTION_DOMAINS = (

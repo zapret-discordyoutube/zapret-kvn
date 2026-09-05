@@ -23,10 +23,10 @@ from ...application.async_steps import (
 )
 from ...application.port_allocator import is_tcp_port_bindable
 from ...constants import PROXY_HOST, RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
-from ...diagnostics import capture_runtime_config
-from ...path_utils import resolve_configured_path
-from ...proxy_readiness import probe_listener_role
-from ...subprocess_utils import (
+from ...diagnostics.export import capture_runtime_config
+from ...profiles.path_utils import resolve_configured_path
+from ...network.proxy_readiness import probe_listener_role
+from ...platform.windows.subprocess_utils import (
     decode_output,
     kill_processes_by_path,
     result_output_text,

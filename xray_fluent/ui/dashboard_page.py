@@ -4,7 +4,7 @@ import math
 from collections import deque
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
 from PyQt6.QtGui import QBrush
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -20,6 +20,11 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    SwitchSettingCard,
+    ExpandGroupSettingCard,
+    PushSettingCard,
+    PushButton,
+    IndeterminateProgressBar,
     ComboBox,
     FluentIcon as FIF,
     PrimaryPushButton,
@@ -29,11 +34,11 @@ from qfluentwidgets import (
     TableWidget,
 )
 
-from ..models import AppSettings, Node, RoutingSettings
-from ..proxy_manager import SystemProxyState
+from ..profiles.models import AppSettings, Node, RoutingSettings
+from ..platform.windows.proxy_manager import SystemProxyState
 from .base_page import ScrollablePage
 from .detail_page import DetailPage, StackedSection
-from .privacy import masked_endpoint
+from .privacy import masked_endpoint, node_name_text
 from .theme import success_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 
@@ -66,6 +71,7 @@ def _mode_title(mode: str) -> str:
 
 
 class DashboardPage(StackedSection):
+    logs_requested = pyqtSignal()
     toggle_connection_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)
     tun_toggled = pyqtSignal(bool)
@@ -89,6 +95,7 @@ class DashboardPage(StackedSection):
         self._proxy_socks_port = 0
         self._proxy_http_port = 0
         self._transition_busy = False
+        self._initializing = False
         self._last_down_bps = 0.0
         self._last_up_bps = 0.0
         self._peak_bps = 0.0
@@ -113,7 +120,8 @@ class DashboardPage(StackedSection):
         root.addWidget(SubtitleLabel("Панель управления", container))
         self.summary_label = CaptionLabel("Краткий обзор подключения, профиля, трафика и маршрутизации.", self)
         self.summary_label.setWordWrap(True)
-        root.addWidget(self.summary_label)
+        self.summary_label.hide()
+        self._main_page.scroll_area.viewport().installEventFilter(self)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -142,27 +150,16 @@ class DashboardPage(StackedSection):
         connection_layout.addWidget(self.connection_engine_label)
         connection_layout.addWidget(self.connection_ports_label)
 
-        switches_row = QHBoxLayout()
-        switches_row.setSpacing(20)
-        tun_label = CaptionLabel("VPN (TUN)", self.connection_card)
-        self.tun_switch = SwitchButton(self.connection_card)
-        self.tun_switch.setOnText("Вкл")
-        self.tun_switch.setOffText("Выкл")
-        switches_row.addWidget(tun_label)
-        switches_row.addWidget(self.tun_switch)
-        switches_row.addSpacing(12)
-        proxy_label = CaptionLabel("Сист. прокси", self.connection_card)
-        self.proxy_switch = SwitchButton(self.connection_card)
-        self.proxy_switch.setOnText("Вкл")
-        self.proxy_switch.setOffText("Выкл")
-        switches_row.addWidget(proxy_label)
-        switches_row.addWidget(self.proxy_switch)
-        switches_row.addStretch(1)
-        connection_layout.addLayout(switches_row)
-
         # Toggle button inside connection card
         self.toggle_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Запустить прокси", self.connection_card)
         connection_layout.addWidget(self.toggle_btn)
+        self.startup_progress = IndeterminateProgressBar(self.connection_card)
+        self.startup_progress.hide()
+        connection_layout.addWidget(self.startup_progress)
+        self.logs_btn = PushButton(FIF.DOCUMENT, "Открыть логи", self.connection_card)
+        self.logs_btn.clicked.connect(self.logs_requested)
+        self.logs_btn.hide()
+        connection_layout.addWidget(self.logs_btn)
 
         connection_layout.addStretch(1)
         self.connection_status_label.setWordWrap(True)
@@ -192,33 +189,13 @@ class DashboardPage(StackedSection):
         self.traffic_graph = TrafficGraphWidget(self.traffic_card)
         self.traffic_graph.clicked.connect(self._show_traffic_page)
         self.traffic_peak_label = CaptionLabel("Пик: 0 B/s", self.traffic_card)
-        traffic_layout.addWidget(self.traffic_down_label)
-        traffic_layout.addWidget(self.traffic_up_label)
-        traffic_layout.addWidget(self.traffic_rtt_label)
+        metrics = QHBoxLayout()
+        for label in (self.traffic_down_label, self.traffic_up_label, self.traffic_rtt_label):
+            metrics.addWidget(label, 1)
+        traffic_layout.addLayout(metrics)
         traffic_layout.addWidget(self.traffic_graph, 1)
         traffic_layout.addWidget(self.traffic_peak_label)
 
-        # ── Process traffic table (TUN mode only) ────────────
-        self._proc_traffic_card = CardWidget(self)
-        proc_layout = QVBoxLayout(self._proc_traffic_card)
-        proc_layout.setContentsMargins(18, 16, 18, 16)
-        proc_layout.setSpacing(6)
-        proc_header = QHBoxLayout()
-        proc_header.addWidget(StrongBodyLabel("Трафик по процессам", self._proc_traffic_card))
-        proc_header.addStretch(1)
-        from qfluentwidgets import TransparentToolButton
-        self._proc_detail_btn = TransparentToolButton(FIF.CHEVRON_RIGHT_MED, self._proc_traffic_card)
-        self._proc_detail_btn.setFixedSize(32, 32)
-        self._proc_detail_btn.setToolTip("Развернуть на весь экран")
-        self._proc_detail_btn.clicked.connect(self._show_proc_page)
-        proc_header.addWidget(self._proc_detail_btn)
-        proc_layout.addLayout(proc_header)
-
-        self._proc_traffic_table = TableWidget(self._proc_traffic_card)
-        self._proc_traffic_table.setColumnCount(7)
-        self._proc_traffic_table.setHorizontalHeaderLabels(
-            ["Процесс", "Скорость", "VPN", "Прямой", "Соед.", "Хост", "Всего"]
-        )
         _col_tooltips = [
             "Имя исполняемого файла приложения",
             "Текущая скорость загрузки/выгрузки",
@@ -228,34 +205,28 @@ class DashboardPage(StackedSection):
             "Домен или IP с наибольшим трафиком",
             "Общий объём трафика за сессию",
         ]
-        for col, tip in enumerate(_col_tooltips):
-            item = self._proc_traffic_table.horizontalHeaderItem(col)
-            if item:
-                item.setToolTip(tip)
-        self._proc_traffic_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Interactive
-        )
-        self._proc_traffic_table.horizontalHeader().setSectionResizeMode(
-            5, QHeaderView.ResizeMode.Stretch
-        )
-        for col in (1, 2, 3, 4, 6):
-            self._proc_traffic_table.horizontalHeader().setSectionResizeMode(
-                col, QHeaderView.ResizeMode.ResizeToContents
-            )
-        self._proc_traffic_table.verticalHeader().setVisible(False)
-        self._proc_traffic_table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        self._proc_traffic_table.setSelectionMode(
-            QAbstractItemView.SelectionMode.NoSelection
-        )
-        self._proc_traffic_table.setMinimumHeight(150)
-        proc_layout.addWidget(self._proc_traffic_table, 1)
 
         # ── Routing card ──────────────────────────────────────
-        self.routing_card = CardWidget(self)
-        routing_layout = QVBoxLayout(self.routing_card)
+        self.routing_card = QWidget(self)
+        controls_layout = QVBoxLayout(self.routing_card)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(12)
+        self.tun_card = SwitchSettingCard(FIF.GLOBE, "VPN (TUN)", parent=self.routing_card)
+        self.proxy_card = SwitchSettingCard(FIF.LINK, "Системный прокси", parent=self.routing_card)
+        self.tun_switch = self.tun_card.switchButton
+        self.proxy_switch = self.proxy_card.switchButton
+        for switch in (self.tun_switch, self.proxy_switch):
+            switch.setOnText("Вкл")
+            switch.setOffText("Выкл")
+        controls_layout.addWidget(self.tun_card)
+        controls_layout.addWidget(self.proxy_card)
+        self.routing_expander = ExpandGroupSettingCard(FIF.SETTING, "Маршрутизация", "Подробности подключения", self.routing_card)
+        controls_layout.addWidget(self.routing_expander)
+        controls_layout.addStretch(1)
+        routing_details = QWidget(self.routing_expander)
+        routing_layout = QVBoxLayout(routing_details)
         routing_layout.setContentsMargins(18, 16, 18, 16)
+        self.routing_expander.addGroupWidget(routing_details)
         routing_layout.setSpacing(8)
         routing_layout.addWidget(StrongBodyLabel("Маршрутизация", self.routing_card))
         self.mode_combo = ComboBox(self.routing_card)
@@ -281,7 +252,6 @@ class DashboardPage(StackedSection):
             self.connection_card,
             self.routing_card,
             self.traffic_card,
-            self._proc_traffic_card,
         ):
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
@@ -289,7 +259,10 @@ class DashboardPage(StackedSection):
         grid.addWidget(self.routing_card, 0, 1)
         root.addLayout(grid)
         root.addWidget(self.traffic_card)
-        root.addWidget(self._proc_traffic_card)
+        self.process_link = PushSettingCard("Открыть", FIF.APPLICATION, "Трафик по процессам", "Статистика появится после подключения", parent=container)
+        self.process_link.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.process_link.clicked.connect(self._show_proc_page)
+        root.addWidget(self.process_link)
         root.addStretch(1)
 
         # ── Sub-page: traffic detail (scrollable, AC7) ──
@@ -362,6 +335,7 @@ class DashboardPage(StackedSection):
         self.toggle_btn.clicked.connect(self.toggle_connection_requested)
 
         self.show_root()
+        self._sync_switches()
         self._refresh_dashboard()
 
     # ── Adaptive card grid (AC10) ─────────────────────────────
@@ -380,19 +354,36 @@ class DashboardPage(StackedSection):
         """
         if self._in_grid_relayout:
             return
-        narrow = self.width() < 900
+        narrow = self._main_page.scroll_area.viewport().width() < 900
         if narrow == self._grid_narrow:
             return
         self._in_grid_relayout = True
         try:
             self._grid_narrow = narrow
             self._cards_grid.removeWidget(self.routing_card)
+            self._cards_grid.removeWidget(self.connection_card)
             if narrow:
+                self._cards_grid.addWidget(self.connection_card, 0, 0, 1, 2)
                 self._cards_grid.addWidget(self.routing_card, 1, 0, 1, 2)
             else:
+                self._cards_grid.addWidget(self.connection_card, 0, 0)
                 self._cards_grid.addWidget(self.routing_card, 0, 1)
         finally:
             self._in_grid_relayout = False
+
+    def eventFilter(self, obj, event):
+        if obj is self._main_page.scroll_area.viewport() and event.type() == QEvent.Type.Resize:
+            QTimer.singleShot(0, self._update_adaptive_grid)
+        return super().eventFilter(obj, event)
+
+    def set_initializing(self, initializing: bool):
+        self._initializing = initializing
+        self.startup_progress.setVisible(initializing)
+        if initializing:
+            self.startup_progress.start()
+        else:
+            self.startup_progress.stop()
+        self._refresh_dashboard()
 
     # ── Public API ────────────────────────────────────────────
 
@@ -420,6 +411,7 @@ class DashboardPage(StackedSection):
             self.traffic_graph.clear_data()
             self._clear_process_tables()
             self._last_process_stats = None
+            self.process_link.setContent("Статистика появится после подключения")
             if self._connection_phase == "running":
                 self._connection_phase = "idle"
                 self._connection_message = self._default_connection_message()
@@ -501,9 +493,10 @@ class DashboardPage(StackedSection):
         if stats is None:
             self._last_process_stats = None
             self._clear_process_tables()
+            self.process_link.setContent("Статистика недоступна для текущего подключения")
             return
         self._last_process_stats = list(stats)
-        self._apply_process_stats_to_table(self._proc_traffic_table, stats)
+        self.process_link.setContent(f"Процессов: {len(stats)}" if stats else "Активных соединений пока нет")
         if self._stack.currentWidget() is self._proc_detail_page:
             self._apply_process_stats_to_table(self._proc_detail_table, stats)
 
@@ -546,14 +539,17 @@ class DashboardPage(StackedSection):
         proxy_note = self._system_proxy_note()
         if proxy_note:
             status_text = f"{status_text} • {proxy_note}" if status_text else proxy_note
-        self.connection_state_label.setText(state_title)
-        self.connection_engine_label.setText(self._route_engine_label())
+        self.connection_state_label.setText("Подготовка" if self._initializing else state_title)
+        self.logs_btn.setVisible(self._connection_phase == "error")
+        core = self._settings.tun_engine if self._settings.tun_mode else self._settings.proxy_engine
+        self.connection_engine_label.setText(f"{'VPN' if self._settings.tun_mode else 'Прокси'} · {core}")
+        self.connection_engine_label.setToolTip(self._route_engine_label())
         ports_text = self._proxy_ports_text()
         self.connection_ports_label.setText(ports_text)
         self.connection_ports_label.setVisible(bool(ports_text))
-        self.connection_status_label.setText(status_text)
+        self.connection_status_label.setText("Загрузка данных…" if self._initializing else status_text)
         self.connection_target_label.setText(self._selected_node_summary())
-        self.toggle_btn.setText(self._toggle_action_text())
+        self.toggle_btn.setText("Подготовка…" if self._initializing else self._toggle_action_text())
         self.toggle_btn.setIcon(FIF.PAUSE_BOLD if self._connected else FIF.PLAY_SOLID)
         self.summary_label.setText(self._summary_text())
 
@@ -651,7 +647,6 @@ class DashboardPage(StackedSection):
         self._apply_process_stats_to_table(self._proc_detail_table, self._last_process_stats or [])
 
     def _clear_process_tables(self) -> None:
-        self._proc_traffic_table.setRowCount(0)
         self._proc_detail_table.setRowCount(0)
 
     def _apply_process_stats_to_table(self, table: TableWidget, stats: list) -> None:
@@ -780,7 +775,7 @@ class DashboardPage(StackedSection):
             return "Активный профиль не выбран"
         group = self._selected_node.group or "По умолчанию"
         scheme = self._selected_node.scheme.upper() if self._selected_node.scheme else "NODE"
-        return f"{group}  {scheme}  {masked_endpoint()}"
+        return f"{node_name_text(self._selected_node)} · {scheme} · {masked_endpoint()}"
 
     def _summary_text(self) -> str:
         if self._connection_phase in {"starting", "error"}:
@@ -844,8 +839,9 @@ class DashboardPage(StackedSection):
         has_profiles = self._node_count > 0 or not self._settings.tun_mode or (
             self._settings.tun_mode and self._settings.tun_engine in {"singbox", "xray"}
         )
-        busy = self._transition_busy or self._connection_phase == "starting"
+        busy = self._initializing or self._transition_busy or self._connection_phase == "starting"
         self.toggle_btn.setEnabled(has_profiles and not busy)
         self.tun_switch.setEnabled(not busy)
+        self.mode_combo.setVisible(self._is_tun2socks_mode())
         self.mode_combo.setEnabled(not busy and self._is_tun2socks_mode())
         self.proxy_switch.setEnabled(not busy and not self._settings.tun_mode)

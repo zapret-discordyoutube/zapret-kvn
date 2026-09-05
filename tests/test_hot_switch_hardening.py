@@ -30,7 +30,7 @@ from unittest.mock import Mock, call, patch
 
 from PyQt6.QtCore import QCoreApplication
 
-from xray_fluent.app_controller import AppController
+from xray_fluent.application.controller import AppController
 from xray_fluent.application import async_steps
 from xray_fluent.application.async_steps import RunInWorkerStep
 from xray_fluent.application.auto_switch_service import check_auto_switch
@@ -40,9 +40,9 @@ from xray_fluent.application.zapret_prewarm_service import (
     prewarm_proxy_resolutions,
     start_proxy_dns_prewarm,
 )
-from xray_fluent.link_parser import parse_single
-from xray_fluent.models import AppSettings, RoutingSettings
-from xray_fluent.zapret_manager import ZapretManager
+from xray_fluent.importer.link_parser import parse_single
+from xray_fluent.profiles.models import AppSettings, RoutingSettings
+from xray_fluent.engines.zapret.manager import ZapretManager
 
 _APP = QCoreApplication.instance() or QCoreApplication([])
 
@@ -297,7 +297,7 @@ class HotSwitchOffGuiThreadTests(unittest.TestCase):
             threads.append(threading.get_ident())
             return True, ""
 
-        with patch("xray_fluent.app_controller.select_singbox_outbound", fake_select):
+        with patch("xray_fluent.application.controller.select_singbox_outbound", fake_select):
             self.assertTrue(controller._try_hot_switch_selected_node())
             self.assertTrue(_drive_until(lambda: controller.captured))
 
@@ -327,7 +327,7 @@ class HotSwitchOffGuiThreadTests(unittest.TestCase):
             recorded.append(kwargs)
             return True, ""
 
-        with patch("xray_fluent.app_controller.apply_balancer_override", fake_override):
+        with patch("xray_fluent.application.controller.apply_balancer_override", fake_override):
             generator = controller._apply_core_outbound_tag_steps("xray", "tag-x")
             step = next(generator)
             self.assertIsInstance(step, RunInWorkerStep)
@@ -411,7 +411,7 @@ class HotSwitchSerializationTests(unittest.TestCase):
             return True, ""
 
         with patch.object(async_steps, "_SUBPROCESS_EXECUTOR", executor), patch(
-            "xray_fluent.app_controller.select_singbox_outbound", fake_select
+            "xray_fluent.application.controller.select_singbox_outbound", fake_select
         ):
             # Свитч №1: на вторую ноду; control-plane вызов ушёл в воркер.
             controller.state.selected_node_id = nodes[1].id
@@ -451,7 +451,7 @@ class HotSwitchSerializationTests(unittest.TestCase):
         executor = ManualExecutor()
 
         with patch.object(async_steps, "_SUBPROCESS_EXECUTOR", executor), patch(
-            "xray_fluent.app_controller.select_singbox_outbound",
+            "xray_fluent.application.controller.select_singbox_outbound",
             lambda *args: (True, ""),
         ):
             controller.state.selected_node_id = nodes[1].id
@@ -471,7 +471,7 @@ class OutboundPoolCacheTests(unittest.TestCase):
         nodes = xray_nodes()
         controller = SessionCaptureController(nodes)
         with patch(
-            "xray_fluent.app_controller.build_xray_outbound_pool",
+            "xray_fluent.application.controller.build_xray_outbound_pool",
             side_effect=build_xray_outbound_pool,
         ) as builder:
             first = controller.xray_outbound_pool()
@@ -484,7 +484,7 @@ class OutboundPoolCacheTests(unittest.TestCase):
         nodes = xray_nodes()
         controller = SessionCaptureController(nodes)
         with patch(
-            "xray_fluent.app_controller.build_xray_outbound_pool",
+            "xray_fluent.application.controller.build_xray_outbound_pool",
             side_effect=build_xray_outbound_pool,
         ) as builder:
             for _ in range(4):

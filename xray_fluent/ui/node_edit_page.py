@@ -9,6 +9,7 @@ from qfluentwidgets import (
     CardWidget,
     CaptionLabel,
     EditableComboBox,
+    ComboBox,
     FluentIcon as FIF,
     LineEdit,
     PrimaryPushButton,
@@ -16,7 +17,7 @@ from qfluentwidgets import (
     StrongBodyLabel,
 )
 
-from ..models import Node
+from ..profiles.models import Node
 from .detail_page import DetailPage
 from .nodes_table_model import node_type_text
 from .privacy import HoldToRevealButton, endpoint_text
@@ -68,6 +69,13 @@ class NodeEditPage(DetailPage):
         self.group_combo = EditableComboBox(card)
         form.addRow(BodyLabel("Группа", card), self.group_combo)
 
+        from ..profiles.country_flags import _VALID_CODES
+        self.country_combo = ComboBox(card)
+        self.country_combo.addItem("Автоматически — локальная GeoIP", userData="")
+        for code in sorted(_VALID_CODES):
+            self.country_combo.addItem(code, userData=code)
+        form.addRow(BodyLabel("Страна", card), self.country_combo)
+
         self.tags_edit = LineEdit(card)
         self.tags_edit.setPlaceholderText("tag1, tag2, tag3")
         form.addRow(BodyLabel("Теги", card), self.tags_edit)
@@ -91,6 +99,12 @@ class NodeEditPage(DetailPage):
         for group in existing_groups:
             self.group_combo.addItem(group)
 
+        for index in range(self.country_combo.count()):
+            if self.country_combo.itemData(index) == node.country_override:
+                self.country_combo.setCurrentIndex(index)
+                break
+        else:
+            self.country_combo.setCurrentIndex(0)
         self.name_edit.setText(node.name)
         self.group_combo.setText(node.group)
         self.tags_edit.setText(", ".join(node.tags))
@@ -103,6 +117,7 @@ class NodeEditPage(DetailPage):
         tags = [t.strip() for t in raw_tags.split(",") if t.strip()] if raw_tags else []
         return {
             "name": self.name_edit.text().strip(),
+            "country_override": self.country_combo.currentData() or "",
             "group": self.group_combo.text().strip() or "Default",
             "tags": tags,
         }

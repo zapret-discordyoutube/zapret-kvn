@@ -122,6 +122,13 @@ $stagingDirectory = Join-Path $temporaryRoot "core"
 $partialOutputArchive = "$OutputArchive.partial"
 New-Item -ItemType Directory -Force -Path $stagingDirectory | Out-Null
 $manifestFilesByName = [ordered]@{}
+$python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    & py -3 -m venv (Join-Path $repoRoot ".venv")
+    if ($LASTEXITCODE -ne 0) { throw "Cannot prepare project Python for source core build" }
+}
+$inputHash = (& $python (Join-Path $PSScriptRoot "core_bundle_fingerprint.py") --root $repoRoot --lock $LockFile | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $inputHash -notmatch '^[0-9a-f]{64}$') { throw "Cannot fingerprint core build inputs" }
 
 try {
     foreach ($source in $lock.sources) {
@@ -169,12 +176,90 @@ try {
         }
     }
 
+    # Build our thin relay against the exact official module. Neither the
+    # installed app nor a resumed release resolves moving upstream versions.
+    $amnezia = $lock.amnezia
+    $sdkSource = [pscustomobject]@{
+        id = "go-sdk"; version = $amnezia.toolchain.version
+        archive = $amnezia.toolchain.archive; sha256 = $amnezia.toolchain.sha256
+        url = $amnezia.toolchain.url
+    }
+    $sdkArchive = Get-VerifiedArchive $sdkSource $DownloadCache
+    $sdkDirectory = Join-Path $temporaryRoot "go-sdk"
+    Expand-Archive -LiteralPath $sdkArchive -DestinationPath $sdkDirectory -Force
+    $go = Join-Path $sdkDirectory "go\bin\go.exe"
+    $savedEnvironment = @{}
+    foreach ($key in @("GOTOOLCHAIN", "GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED", "GOCACHE", "GOMODCACHE", "AMNEZIA_TEST_SINGBOX")) {
+        $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+    }
+    Push-Location (Join-Path $repoRoot "runtime\amnezia")
+    try {
+        $env:GOTOOLCHAIN = "local"
+        $env:GOFLAGS = ""
+        $env:GOOS = "windows"
+        $env:GOARCH = "amd64"
+        $env:CGO_ENABLED = "0"
+        $env:GOCACHE = Join-Path $DownloadCache "go-build"
+        $env:GOMODCACHE = Join-Path $DownloadCache "go-modules"
+        $env:AMNEZIA_TEST_SINGBOX = Join-Path $stagingDirectory "sing-box.exe"
+        $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+            throw "Project Python is required to build the patched sing-box front"
+        }
+        & $python (Join-Path $PSScriptRoot "build_singbox_front.py") --lock $LockFile `
+            --output $env:AMNEZIA_TEST_SINGBOX --work (Join-Path $temporaryRoot "singbox-source") --go $go
+        if ($LASTEXITCODE -ne 0) { throw "Patched sing-box build/tests failed; no binary fallback allowed" }
+        $singboxBuild = Get-Content -Raw -LiteralPath (Join-Path $stagingDirectory "sing-box.build.json") | ConvertFrom-Json
+        foreach ($name in @("sing-box.exe", "sing-box.build.json")) {
+            $manifestFilesByName[$name] = [ordered]@{
+                name = $name; source = "sing-box-extended"; version = [string]$lock.singbox_build.version
+                sha256 = Get-Sha256 (Join-Path $stagingDirectory $name)
+            }
+        }
+        if (-not (Test-Path -LiteralPath $env:AMNEZIA_TEST_SINGBOX -PathType Leaf)) {
+            throw "Locked sing-box is required for the Amnezia transport integration gate"
+        }
+        $modulePin = "$($amnezia.module)@$($amnezia.version)"
+        $moduleText = (& $go mod download -json $modulePin | Out-String)
+        if ($LASTEXITCODE -ne 0) { throw "Official Amnezia module download failed" }
+        $module = $moduleText | ConvertFrom-Json
+        if ([string]$module.Origin.Hash -ne [string]$amnezia.commit -or
+            [string]$module.Sum -ne [string]$amnezia.module_sum -or
+            [string]$module.GoModSum -ne [string]$amnezia.module_go_mod_sum -or
+            (Get-Sha256 ([string]$module.Zip)) -ne [string]$amnezia.sha256) {
+            throw "Official Amnezia module provenance mismatch"
+        }
+        $selectedVersion = (& $go list -m -f '{{.Version}}' ([string]$amnezia.module) | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $selectedVersion -ne [string]$amnezia.version) {
+            throw "Amnezia go.mod and release lock differ"
+        }
+        & $go test -mod=readonly ./...
+        if ($LASTEXITCODE -ne 0) { throw "Amnezia Windows transport tests failed" }
+        $relayPath = Join-Path $stagingDirectory "zapret-amnezia.exe"
+        & $go build -mod=readonly -trimpath -buildvcs=false '-ldflags=-s -w' -o $relayPath .
+        if ($LASTEXITCODE -ne 0) { throw "Amnezia Windows transport build failed" }
+        Copy-Item -LiteralPath (Join-Path ([string]$module.Dir) "LICENSE") -Destination (Join-Path $stagingDirectory "LICENSE-Amnezia.txt")
+        foreach ($name in @("zapret-amnezia.exe", "LICENSE-Amnezia.txt")) {
+            $manifestFilesByName[$name] = [ordered]@{
+                name = $name; source = "amnezia"; version = [string]$amnezia.version
+                sha256 = Get-Sha256 (Join-Path $stagingDirectory $name)
+            }
+        }
+    }
+    finally {
+        Pop-Location
+        foreach ($key in $savedEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key], "Process")
+        }
+    }
     $manifest = [ordered]@{
         schema = 1
         platform = "windows-x64"
         generated_at_utc = [DateTime]::UtcNow.ToString("o")
         lock_sha256 = Get-Sha256 $LockFile
-        sources = $lock.sources | ForEach-Object {
+        inputs_sha256 = $inputHash
+        singbox_build = $singboxBuild
+        sources = (@($lock.sources) + @($amnezia)) | ForEach-Object {
             $repository = if ($_.PSObject.Properties.Name -contains "repository") { [string]$_.repository } else { "" }
             $channel = if ($_.PSObject.Properties.Name -contains "channel") { [string]$_.channel } else { "" }
             $releasePrerelease = if ($_.PSObject.Properties.Name -contains "release_prerelease") { [bool]$_.release_prerelease } else { $false }
@@ -216,6 +301,7 @@ try {
         "$lockHash`n",
         [System.Text.Encoding]::ASCII
     )
+    [System.IO.File]::WriteAllText("$OutputArchive.inputs.sha256", "$inputHash`n", [System.Text.Encoding]::ASCII)
     Write-Host "[core] bundle ready: $OutputArchive"
     Write-Host "[core] SHA-256: $(Get-Sha256 $OutputArchive)"
 }

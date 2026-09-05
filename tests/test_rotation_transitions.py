@@ -3,9 +3,9 @@ from __future__ import annotations
 import random
 import unittest
 
-from xray_fluent.app_controller import AppController
+from xray_fluent.application.controller import AppController
 from xray_fluent.application.outbound_pool_service import build_xray_outbound_pool
-from xray_fluent.models import AppSettings, AppState, RoutingSettings
+from xray_fluent.profiles.models import AppSettings, AppState, RoutingSettings
 
 from tests.test_rotation import make_node
 

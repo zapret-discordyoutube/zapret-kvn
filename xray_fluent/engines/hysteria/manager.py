@@ -14,14 +14,14 @@ from typing import Any
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import HYSTERIA_CONFIG_FILE, HYSTERIA_PATH_DEFAULT, PROXY_HOST, RUNTIME_DIR
-from ...diagnostics import capture_runtime_config
-from ...application.hysteria_runtime_contract import (
+from ...diagnostics.export import capture_runtime_config
+from .runtime_contract import (
     SECURITY_FAILURES,
     HysteriaFailureCode,
     classify_hysteria_failure,
 )
-from ...runtime_logging import RuntimeNodeIdentity, redact_runtime_log
-from ...subprocess_utils import (
+from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log
+from ...platform.windows.subprocess_utils import (
     decode_output,
     kill_processes_by_path,
     sleep_with_events,
@@ -584,7 +584,14 @@ class HysteriaManager(QObject):
             self._emit_process_line(item.rstrip("\r\n"))
 
     def _emit_process_line(self, line: str) -> None:
+        from ...diagnostics.runtime_errors import classify_core_error
         clean = redact_runtime_log(line, secrets=self._secret_values)
+        _, action = classify_core_error(clean)
+        if action == "record_only":
+            # A loopback SOCKS client/probe closing its socket is not a remote
+            # server failure. Preserve evidence without spending recovery.
+            self._emit_log(clean, stage="local_client")
+            return
         lowered = clean.lower()
         stage = (
             "remote_handshake"

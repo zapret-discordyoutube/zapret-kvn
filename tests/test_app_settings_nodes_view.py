@@ -1,6 +1,6 @@
 import unittest
 
-from xray_fluent.models import AppSettings
+from xray_fluent.profiles.models import AppSettings
 
 
 class AppSettingsNodesViewTests(unittest.TestCase):
@@ -14,7 +14,7 @@ class AppSettingsNodesViewTests(unittest.TestCase):
         self.assertEqual(settings.nodes_visible_columns, [])
         self.assertEqual(settings.nodes_column_widths, {})
         self.assertEqual(settings.nodes_column_order, [])
-        self.assertEqual(settings.nodes_column_layout_version, 1)
+        self.assertEqual(settings.nodes_column_layout_version, 2)
 
     def test_legacy_dict_without_view_keys_yields_defaults(self) -> None:
         legacy = AppSettings().to_dict()

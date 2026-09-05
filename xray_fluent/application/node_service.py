@@ -4,11 +4,11 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QTimer
 
-from ..country_flags import detect_country
-from ..link_parser import parse_links_text, validate_node_outbound
+from ..profiles.geoip import normalize_country
+from ..importer.link_parser import parse_links_text, validate_node_outbound
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
+    from .controller import AppController
 
 
 def import_nodes_from_text(controller: AppController, text: str) -> tuple[int, list[str]]:
@@ -27,8 +27,6 @@ def import_nodes_from_text(controller: AppController, text: str) -> tuple[int, l
             continue
         if node.link and node.link in existing_links:
             continue
-        if not node.country_code:
-            node.country_code = detect_country(node.name, node.server)
         max_order += 1
         node.sort_order = max_order
         controller.state.nodes.append(node)
@@ -84,6 +82,12 @@ def update_node(controller: AppController, node_id: str, updates: dict) -> bool:
     node = controller._get_node_by_id(node_id)
     if not node:
         return False
+    if "is_favorite" in updates:
+        node.is_favorite = bool(updates["is_favorite"])
+    if "country_override" in updates:
+        node.country_override = normalize_country(updates["country_override"])
+        node.country_code = node.country_override
+        controller._start_country_ip_resolution()
     if "name" in updates:
         node.name = updates["name"]
     if "group" in updates:
@@ -154,6 +158,20 @@ def reorder_nodes(controller: AppController, node_id: str, direction: str) -> No
 
 
 def set_selected_node(controller: AppController, node_id: str, *, reset_auto_switch: bool = True) -> None:
+    from .protocol_core import ProtocolCore, protocol_core
+    target = next((node for node in controller.state.nodes if node.id == node_id), None)
+    session = getattr(controller, "_active_session", None)
+    if controller.connected and target is not None and (
+        protocol_core(target) is ProtocolCore.AMNEZIA or
+        (session is not None and session.sidecar_kind == "amnezia")
+    ):
+        controller._pending_amnezia_node_id = node_id
+        if reset_auto_switch:
+            controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
+            controller._auto_switch_manual_hold = True
+        controller._desired_connected = True
+        controller._request_transition("transport node switched")
+        return
     if controller.state.selected_node_id == node_id:
         return
     controller.state.selected_node_id = node_id

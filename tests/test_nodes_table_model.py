@@ -2,7 +2,7 @@ import unittest
 
 from PyQt6.QtCore import Qt
 
-from xray_fluent.models import Node
+from xray_fluent.profiles.models import Node
 from xray_fluent.ui.theme import error_color, success_color, warning_color
 from xray_fluent.ui.nodes_table_model import (
     ACTIVE_ROLE,
@@ -89,7 +89,7 @@ class NodesTableModelTests(unittest.TestCase):
         )
         self.assertEqual(
             DEFAULT_VISIBLE_COLUMNS,
-            ["name", "type", "address", "ping", "speed"],
+            ["name", "type", "ping", "speed"],
         )
 
     def test_address_cell_masks_server_and_port(self) -> None:
@@ -355,11 +355,11 @@ class ColumnSpecsTests(unittest.TestCase):
     def test_maximum_widths_match_flex_layout_spec(self) -> None:
         expected = {
             "type": 200,
-            "address": 1000,
+            "address": 360,
             "group": 800,
             "tags": 1000,
-            "ping": 240,
-            "speed": 300,
+            "ping": 160,
+            "speed": 200,
             "last_used": 480,
             "source": 1000,
         }
@@ -370,7 +370,7 @@ class ColumnSpecsTests(unittest.TestCase):
 
     def test_name_is_the_single_flex_column(self) -> None:
         flex = [spec.key for spec in COLUMN_SPECS if spec.stretch]
-        self.assertEqual(flex, ["name"])
+        self.assertEqual(flex, [])
 
 
 if __name__ == "__main__":

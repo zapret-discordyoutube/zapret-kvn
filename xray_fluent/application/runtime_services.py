@@ -6,12 +6,12 @@ from ..constants import SINGBOX_CLASH_API_PORT
 from .auto_switch_service import transport_kind_for_node
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
+    from .controller import AppController
 
 
 def start_metrics_worker(controller: AppController) -> None:
     # Ленивая загрузка: live_metrics_worker тянет Windows-only win_proc_monitor.
-    from ..live_metrics_worker import LiveMetricsWorker
+    from ..diagnostics.live_metrics_worker import LiveMetricsWorker
 
     session = controller._active_session
     node = controller.selected_node
@@ -110,8 +110,8 @@ def cleanup_connection_runtime_state(
     )
     if end_traffic_session:
         controller._traffic_history.end_session()
-    from ..process_traffic_collector import reset_connection_tracking
-    from ..win_proc_monitor import clear_pid_cache
+    from ..platform.windows.process_traffic_collector import reset_connection_tracking
+    from ..platform.windows.win_proc_monitor import clear_pid_cache
     reset_connection_tracking()
     clear_pid_cache()
 
@@ -120,7 +120,9 @@ def stop_active_connection_processes(controller: AppController, *, disable_proxy
     stopped = True
 
     # Close traffic admission before stopping its transport.
-    for manager in (controller.singbox, controller.xray, controller.hysteria):
+    for manager in (controller.singbox, controller.xray, controller.hysteria, getattr(controller, "amnezia", None)):
+        if manager is None:
+            continue
         if manager.is_running:
             stopped = manager.stop() and stopped
 
@@ -242,8 +244,9 @@ def shutdown(controller: AppController) -> None:
     manual_zapret_worker = controller._manual_zapret_worker
     if manual_zapret_worker is not None and manual_zapret_worker.isRunning():
         manual_zapret_worker.wait(5000)
+    controller._country_shutdown = True
     if controller._country_resolver and controller._country_resolver.isRunning():
-        controller._country_resolver.quit()
+        controller._country_resolver.requestInterruption()
         controller._country_resolver.wait(2000)
     if controller._ping_worker and controller._ping_worker.isRunning():
         controller._ping_worker.cancel()
@@ -261,6 +264,8 @@ def shutdown(controller: AppController) -> None:
         controller._xray_update_worker.wait(1000)
 
     controller.disconnect_current()
+    if getattr(controller, "amnezia", None) is not None:
+        controller.amnezia.stop()
     if controller.hysteria.is_running:
         controller.hysteria.stop()
     if controller.singbox.is_running:

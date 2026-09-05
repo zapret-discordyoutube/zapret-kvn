@@ -1,0 +1,181 @@
+{
+  "schema": 1,
+  "provenance": "Synthetic keys and documentation-only IPs. No user credentials.",
+  "vectors": [
+    {
+      "id": "wireguard_ipv4_keepalive_off",
+      "valid": true,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n",
+      "endpoint": {
+        "type": "wireguard",
+        "address": [
+          "10.77.0.2/32"
+        ],
+        "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "mtu": 1280,
+        "peers": [
+          {
+            "address": "192.0.2.1",
+            "port": 51820,
+            "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            "allowed_ips": [
+              "0.0.0.0/0"
+            ],
+            "persistent_keepalive_interval": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "awg31_all_parameters",
+      "valid": true,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 7\nJmin = 64\nJmax = 232\nS1 = 27\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 100-110\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nDisableCookies = false\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n",
+      "endpoint": {
+        "type": "wireguard",
+        "address": [
+          "10.77.0.2/32"
+        ],
+        "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "mtu": 1280,
+        "peers": [
+          {
+            "address": "192.0.2.1",
+            "port": 51820,
+            "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            "allowed_ips": [
+              "0.0.0.0/0"
+            ],
+            "persistent_keepalive_interval": 0
+          }
+        ],
+        "amnezia": {
+          "jc": 7,
+          "jmin": 64,
+          "jmax": 232,
+          "s1": 27,
+          "s2": 21,
+          "s3": 27,
+          "s4": 15,
+          "h1": "100-110",
+          "h2": "200-210",
+          "h3": "300-310",
+          "h4": "400-410",
+          "i1": "<b 0x0102><r 4>",
+          "i2": "<r 5>",
+          "i3": "<r 6>",
+          "i4": "<r 7>",
+          "i5": "<r 8>",
+          "header_protection_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+          "content_padding_addition": "0-124",
+          "rekey_after_time": "120-180",
+          "rekey_timeout": 5,
+          "reject_after_time": 600,
+          "keepalive_timeout": 25,
+          "max_handshake_attempts": "20-30",
+          "random_trailers": true,
+          "disable_cookies": false
+        }
+      }
+    },
+    {
+      "id": "wireguard_dual_stack",
+      "valid": true,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32, fd77::2/128\nMTU = 1280\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = off\n",
+      "endpoint": {
+        "type": "wireguard",
+        "address": [
+          "10.77.0.2/32",
+          "fd77::2/128"
+        ],
+        "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "mtu": 1280,
+        "peers": [
+          {
+            "address": "192.0.2.1",
+            "port": 51820,
+            "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            "allowed_ips": [
+              "0.0.0.0/0",
+              "::/0"
+            ],
+            "persistent_keepalive_interval": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "wireguard_two_peers_listen_port",
+      "valid": true,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nListenPort = 51821\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n[Peer]\nPublicKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nEndpoint = [2001:db8::1]:51820\nAllowedIPs = 10.78.0.0/16\nPersistentKeepalive = 20-30\n",
+      "endpoint": {
+        "type": "wireguard",
+        "address": [
+          "10.77.0.2/32"
+        ],
+        "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "mtu": 1280,
+        "peers": [
+          {
+            "address": "192.0.2.1",
+            "port": 51820,
+            "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            "allowed_ips": [
+              "0.0.0.0/0"
+            ],
+            "persistent_keepalive_interval": 0
+          },
+          {
+            "address": "2001:db8::1",
+            "port": 51820,
+            "public_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+            "allowed_ips": [
+              "10.78.0.0/16"
+            ],
+            "persistent_keepalive_interval": "20-30"
+          }
+        ],
+        "listen_port": 51821
+      }
+    },
+    {
+      "id": "duplicate_flag",
+      "valid": false,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 7\nJmin = 64\nJmax = 232\nS1 = 27\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 100-110\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nrandom_trailers = false\nDisableCookies = false\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n"
+    },
+    {
+      "id": "reversed_range",
+      "valid": false,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 7\nJmin = 64\nJmax = 232\nS1 = 27\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 110-100\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nDisableCookies = false\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n"
+    },
+    {
+      "id": "range_overflow",
+      "valid": false,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 7\nJmin = 64\nJmax = 232\nS1 = 27\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 0-4294967296\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nDisableCookies = false\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n"
+    },
+    {
+      "id": "s_overflow",
+      "valid": false,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 7\nJmin = 64\nJmax = 232\nS1 = 65536\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 100-110\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nDisableCookies = false\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n"
+    },
+    {
+      "id": "invalid_flag",
+      "valid": false,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 7\nJmin = 64\nJmax = 232\nS1 = 27\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 100-110\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nDisableCookies = maybe\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n"
+    },
+    {
+      "id": "unsupported_hook",
+      "valid": false,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 7\nJmin = 64\nJmax = 232\nS1 = 27\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 100-110\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nDisableCookies = false\nPostUp = do-not-execute\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n"
+    },
+    {
+      "id": "unknown_parameter",
+      "valid": false,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 7\nJmin = 64\nJmax = 232\nS1 = 27\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 100-110\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nDisableCookies = false\nUnknownTransportField = 1\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n"
+    },
+    {
+      "id": "uint32_overflow",
+      "valid": false,
+      "conf": "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.77.0.2/32\nMTU = 1280\nJc = 4294967296\nJmin = 64\nJmax = 232\nS1 = 27\nS2 = 21\nS3 = 27\nS4 = 15\nH1 = 100-110\nH2 = 200-210\nH3 = 300-310\nH4 = 400-410\nI1 = <b 0x0102><r 4>\nI2 = <r 5>\nI3 = <r 6>\nI4 = <r 7>\nI5 = <r 8>\nHeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\nContentPaddingAddition = 0-124\nRekeyAfterTime = 120-180\nRekeyTimeout = 5\nRejectAfterTime = 600\nKeepaliveTimeout = 25\nMaxHandshakeAttempts = 20-30\nRandomTrailers = true\nDisableCookies = false\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = off\n"
+    }
+  ]
+}

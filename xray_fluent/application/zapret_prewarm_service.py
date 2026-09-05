@@ -17,10 +17,10 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Callable, Iterable
 
-from ..subprocess_utils import _SUBPROCESS_EXECUTOR
+from ..platform.windows.subprocess_utils import _SUBPROCESS_EXECUTOR
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
+    from .controller import AppController
 
 
 #: Троттлинг батча: пауза между резолвами, чтобы не монополизировать воркер и DNS.

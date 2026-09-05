@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from .config_documents import RawConfigTextCache
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
+    from .controller import AppController
 
 # Raw config text is read 3-4 times during a single connect/hot-swap
 # transition; the (mtime_ns, size) check keeps the cache correct when the

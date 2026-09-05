@@ -24,7 +24,7 @@ Prepared on `2026-03-27` and updated on `2026-08-04` against these sources:
 - local app code:
   - `xray_fluent/singbox_config_builder.py`
   - `xray_fluent/singbox_manager.py`
-  - `xray_fluent/app_controller.py`
+  - `xray_fluent/application/controller.py`
 
 Important version note:
 

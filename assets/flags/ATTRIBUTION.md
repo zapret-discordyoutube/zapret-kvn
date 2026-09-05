@@ -16,8 +16,9 @@ purpose, commercial or non-commercial, without attribution being required
 
 ## Snapshot
 
-- Downloaded: 2026-08-11
-- Coverage: all country codes used by `xray_fluent/country_flags.py`
-  (`_VALID_CODES`), 90 flags total.
+- Initial snapshot: 2026-08-11; extended 2026-09-05 for DB-IP Country Lite coverage.
+- Coverage: all country codes used by `xray_fluent/profiles/country_flags.py`
+  (`_VALID_CODES`), including all 250 known country/territory codes in the pinned DB-IP database.
+- Unknown country code `ZZ` has no flag; missing images are never approximated.
 - The application never downloads flags at runtime; these files are committed
   to the repository and shipped with the build (`assets/` merge in `build.py`).

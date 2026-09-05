@@ -7,7 +7,7 @@ from xray_fluent.application.worker_service import (
     on_speed_complete,
     on_speed_result,
 )
-from xray_fluent.models import Node
+from xray_fluent.profiles.models import Node
 
 
 class _Signal:

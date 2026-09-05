@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...constants import PROXY_HOST
-from ...subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text, run_text_pumped
+from ...platform.windows.subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text, run_text_pumped
 
 
 #: Команда короткая и локальная; ждать дольше смысла нет.

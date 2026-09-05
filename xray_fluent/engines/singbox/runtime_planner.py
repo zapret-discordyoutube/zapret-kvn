@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from enum import Enum
 import hashlib
 import ipaddress
 from ipaddress import ip_address
@@ -12,7 +11,7 @@ import socket
 from pathlib import Path
 from typing import Any
 
-from ...runtime_security import generate_local_proxy_credentials, strip_singbox_proxy_inbounds
+from ..runtime_security import generate_local_proxy_credentials, strip_singbox_proxy_inbounds
 from ...constants import (
     DEFAULT_HTTP_PORT,
     DEFAULT_SOCKS_PORT,
@@ -31,10 +30,10 @@ from ...application.outbound_pool_service import (
     ensure_xray_pool_control_plane,
     singbox_outbound_tag,
 )
-from ...application.hysteria_runtime_contract import classify_hysteria_uri
+from ..hysteria.runtime_contract import classify_hysteria_uri
 from ...application.protocol_core import ProtocolCore, protocol_core
-from ...models import Node
-from ...runtime_logging import RuntimeNodeIdentity
+from ...profiles.models import Node
+from ...diagnostics.runtime_logging import RuntimeNodeIdentity
 from ..hysteria.config_adapter import build_uri_client_config
 from .config_builder import build_singbox_outbound, is_singbox_endpoint_node
 
@@ -48,13 +47,6 @@ _APP_SINGBOX_HYBRID_RELAY_OUTBOUND_TAGS = (
     "__app_hybrid_relay_b",
 )
 _PUBLIC_PROXY_LISTEN = "0.0.0.0"
-
-
-class EndpointProxyDnsPolicy(str, Enum):
-    """Политика DNS для нативного endpoint WireGuard в sing-box."""
-
-    CONFIGURED = "configured"
-    AMNEZIA_GATEWAY = "amnezia_gateway"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +98,15 @@ class SingboxHysteriaSidecarPlan:
 
 
 @dataclass(slots=True)
+class SingboxAmneziaSidecarPlan:
+    relay_port: int
+    relay_username: str
+    relay_password: str
+    config: dict[str, Any]
+    context: RuntimeNodeIdentity
+
+
+@dataclass(slots=True)
 class SingboxRuntimePlan:
     outcome: str  # native_singbox | hybrid_xray_sidecar | hysteria_sidecar
     source_path: Path
@@ -115,6 +116,7 @@ class SingboxRuntimePlan:
     used_selected_node: bool
     xray_sidecar: SingboxXraySidecarPlan | None
     hysteria_sidecar: SingboxHysteriaSidecarPlan | None = None
+    amnezia_sidecar: SingboxAmneziaSidecarPlan | None = None
     requested_socks_port: int = 0
     requested_http_port: int = 0
     socks_port: int = 0
@@ -136,6 +138,8 @@ class SingboxRuntimePlan:
 
     @property
     def sidecar_kind(self) -> str:
+        if self.amnezia_sidecar is not None:
+            return "amnezia"
         if self.is_hybrid:
             return "xray"
         if self.is_hysteria_sidecar:
@@ -220,7 +224,7 @@ def classify_node_for_singbox(node: Node | None) -> str:
     if node is None:
         return "native_singbox"
     if is_singbox_endpoint_node(node):
-        return "native_singbox_endpoint"
+        return "amnezia_sidecar"
     if protocol_core(node) is ProtocolCore.HYSTERIA:
         return "hysteria_sidecar"
     if protocol_core(node) is ProtocolCore.XRAY:
@@ -307,7 +311,41 @@ def _plan_runtime_outbound(
 ) -> SingboxRuntimePlan:
 
     outbounds = runtime_config.get("outbounds")
+    if any(isinstance(item, dict) and item.get("type") == "wireguard" for item in (outbounds or [])):
+        raise ValueError("WireGuard в outbounds устарел; используйте клиентский endpoint в endpoints. Возврат к native WG отключён.")
     proxy_index = _find_proxy_outbound_index(outbounds)
+    wireguard_endpoints = [
+        item for item in runtime_config.get("endpoints", [])
+        if isinstance(item, dict) and item.get("type") == "wireguard"
+    ]
+    if wireguard_endpoints:
+        if len(wireguard_endpoints) != 1 or proxy_index is not None:
+            raise ValueError("Официальный WG/AWG runtime поддерживает один клиентский endpoint без второго selected-node proxy. Разделите endpoints на профили.")
+        raw = wireguard_endpoints[0]
+        tag = raw.get("tag")
+        if not isinstance(tag, str) or not tag:
+            raise ValueError("WG/AWG endpoint требует непустой tag.")
+        if any(isinstance(item, dict) and item.get("tag") == tag for item in (outbounds or [])):
+            raise ValueError("WG/AWG endpoint tag конфликтует с outbound.")
+        peers = raw.get("peers") or []
+        peer = peers[0] if peers and isinstance(peers[0], dict) else {}
+        raw_node = Node(
+            id="raw-wg-" + hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+            name=tag, scheme="awg" if raw.get("amnezia") else "wireguard",
+            server=str(peer.get("address") or ""), port=int(peer.get("port") or 0), outbound=raw,
+        )
+        runtime_config["endpoints"] = [item for item in runtime_config["endpoints"] if item is not raw]
+        if not runtime_config["endpoints"]:
+            runtime_config.pop("endpoints")
+        outbounds = runtime_config.setdefault("outbounds", [])
+        outbounds.append({"type": "direct", "tag": tag})
+        return _plan_amnezia_sidecar_runtime(
+            document, runtime_config=runtime_config, proxy_index=len(outbounds)-1,
+            node=raw_node, preferred_relay_port=preferred_relay_port,
+            requested_socks_port=requested_socks_port, requested_http_port=requested_http_port,
+            socks_port=socks_port, http_port=http_port, clash_api_port=clash_api_port,
+            transport_tag=tag, used_selected_node=False,
+        )
     if proxy_index is None:
         _validate_runtime_dns_contract(runtime_config)
         return SingboxRuntimePlan(
@@ -328,40 +366,13 @@ def _plan_runtime_outbound(
     if node is None:
         raise ValueError("В конфиге есть outbound tag `proxy`. Выберите сервер для запуска sing-box.")
 
-    if is_singbox_endpoint_node(node):
-        # WireGuard/AWG живут в top-level `endpoints[]`; плейсхолдер `proxy`
-        # из outbounds обязан удаляться, иначе sing-box падает на дубликате тега.
-        proxy_endpoint = build_singbox_outbound(node, tag="proxy")
-        assert isinstance(outbounds, list)
-        del outbounds[proxy_index]
-        ensure_awg3_windows_bind_workaround(runtime_config, proxy_endpoint)
-        _replace_or_append_tagged(_ensure_list(runtime_config, "endpoints"), "proxy", proxy_endpoint)
-        _ensure_proxy_server_bootstrap_contract(runtime_config, proxy_endpoint, node.server)
-        # Обычный WireGuard обязан уважать первый DNS из .conf. Только AWG
-        # разрешено подменять публичный DNS шлюзом туннеля: Amnezia-серверы
-        # могут перехватывать порт 53 и отвечать именно с адреса шлюза.
-        node_outbound = node.outbound if isinstance(node.outbound, dict) else {}
-        dns_override = select_endpoint_proxy_dns(
-            node_outbound.get("_dns"),
-            proxy_endpoint.get("address"),
-            policy=endpoint_proxy_dns_policy(node_outbound),
-        )
-        if dns_override:
-            _override_proxy_dns_server(runtime_config, dns_override)
-        _validate_runtime_dns_contract(runtime_config)
-        return SingboxRuntimePlan(
-            outcome="native_singbox",
-            source_path=document.source_path,
-            text_hash=document.text_hash,
-            singbox_config=runtime_config,
-            has_proxy_outbound=True,
-            used_selected_node=True,
-            xray_sidecar=None,
+    if protocol_core(node) is ProtocolCore.AMNEZIA:
+        return _plan_amnezia_sidecar_runtime(
+            document, runtime_config=runtime_config, proxy_index=proxy_index,
+            node=node, preferred_relay_port=preferred_relay_port,
             requested_socks_port=requested_socks_port,
-            requested_http_port=requested_http_port,
-            socks_port=socks_port,
-            http_port=http_port,
-            clash_api_port=clash_api_port,
+            requested_http_port=requested_http_port, socks_port=socks_port,
+            http_port=http_port, clash_api_port=clash_api_port,
         )
 
     if protocol_core(node) is ProtocolCore.HYSTERIA:
@@ -472,6 +483,63 @@ def _plan_runtime_outbound(
         socks_port=socks_port,
         http_port=http_port,
         clash_api_port=clash_api_port,
+    )
+
+
+def _plan_amnezia_sidecar_runtime(
+    document: ParsedSingboxDocument, *, runtime_config: dict[str, Any],
+    proxy_index: int, node: Node, preferred_relay_port: int,
+    requested_socks_port: int, requested_http_port: int,
+    socks_port: int, http_port: int, clash_api_port: int,
+    transport_tag: str = "proxy", used_selected_node: bool = True,
+) -> SingboxRuntimePlan:
+    raw = deepcopy(node.outbound or {})
+    if raw.get("system") is False:
+        raw.pop("system")
+    fields = {"address", "private_key", "mtu", "listen_port", "peers", "amnezia"}
+    metadata = {"type", "tag", "_dns"}
+    # Never silently turn an OS-interface/server/detoured raw endpoint into a
+    # client relay with different semantics.
+    unsupported = set(raw) - fields - metadata
+    if unsupported:
+        raise ValueError("Amnezia client relay does not support endpoint fields: " + ", ".join(sorted(unsupported)))
+    endpoint = {key: value for key, value in raw.items() if key in fields}
+    endpoint.setdefault("mtu", 1280)
+    relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(
+        preferred=11819, allow_ephemeral_fallback=True,
+    )
+    dns_port = _find_free_port(preferred=11829, allow_ephemeral_fallback=True)
+    if dns_port == relay_port:
+        dns_port = _find_free_port(preferred=dns_port + 1, allow_ephemeral_fallback=True)
+    username, password = generate_local_proxy_credentials(prefix="amnezia-relay", password_length=32)
+    dns_tag = "__app_amnezia_dns"
+    if any(isinstance(item, dict) and item.get("tag") == dns_tag for item in runtime_config.get("inbounds", [])):
+        raise ValueError("Reserved Amnezia DNS inbound tag is already in use")
+    runtime_config.setdefault("inbounds", []).append({
+        "type": "direct", "tag": dns_tag, "listen": PROXY_HOST, "listen_port": dns_port,
+        "network": "tcp",
+    })
+    runtime_config["outbounds"][proxy_index] = {
+        "type": "socks", "tag": transport_tag, "server": PROXY_HOST, "server_port": relay_port,
+        "version": "5", "username": username, "password": password, "inet4_bind_address": PROXY_HOST,
+    }
+    rules = runtime_config.setdefault("route", {}).setdefault("rules", [])
+    # Physical binding belongs to the relay's mandatory socket contract.
+    # No second direct-routing rule or assumption about a user's direct tag.
+    rules.insert(0, {"inbound": [dns_tag], "action": "hijack-dns"})
+    _validate_runtime_dns_contract(runtime_config)
+    return SingboxRuntimePlan(
+        outcome="amnezia_sidecar", source_path=document.source_path, text_hash=document.text_hash,
+        singbox_config=runtime_config, has_proxy_outbound=transport_tag == "proxy", used_selected_node=used_selected_node, xray_sidecar=None,
+        amnezia_sidecar=SingboxAmneziaSidecarPlan(
+            relay_port=relay_port, relay_username=username, relay_password=password,
+            context=RuntimeNodeIdentity.from_node(node), config={
+                "endpoint": endpoint, "listen": f"{PROXY_HOST}:{relay_port}",
+                "dns_address": f"{PROXY_HOST}:{dns_port}", "username": username, "password": password,
+            },
+        ),
+        requested_socks_port=requested_socks_port, requested_http_port=requested_http_port,
+        socks_port=socks_port, http_port=http_port, clash_api_port=clash_api_port,
     )
 
 
@@ -984,131 +1052,6 @@ def _ensure_singbox_proxy_runtime_contract(
         ]
     )
     return selection
-
-
-#: Тег служебного direct-outbound, через который AWG 3.0 обходит дефолтный
-#: Windows-bind ядра (см. ensure_awg3_windows_bind_workaround).
-AWG3_DIRECT_DETOUR_TAG = "awg3-direct"
-
-
-def endpoint_needs_windows_bind_workaround(endpoint: dict[str, Any]) -> bool:
-    """AWG 3.0 (защита заголовков) на Windows требует обхода дефолтного bind.
-
-    В sing-box extended 2.6.5 дефолтный Windows-bind (WinRingBind) обнуляет
-    байты 1-3 каждого принятого UDP-пакета: у обычного WireGuard там всегда
-    нули (старшие байты типа сообщения), у AWG 2.0 это безобидный мусорный
-    паддинг, а у AWG 3.0 ровно эти байты входят в 12-байтовую соль шифра
-    защиты заголовка. Соль расходится с отправителем, заголовок
-    расшифровывается в мусор, и ядро молча отбрасывает ответ сервера
-    ("received message with unknown type") — туннель не поднимается никогда.
-
-    Ядро выбирает дефолтный bind только когда диалер endpoint'а является
-    системным WireGuardListener; с любым detour используется ClientBind,
-    свободный от этого дефекта.
-    """
-    amnezia = endpoint.get("amnezia")
-    if not isinstance(amnezia, dict):
-        return False
-    return bool(str(amnezia.get("header_protection_key") or "").strip())
-
-
-def ensure_awg3_windows_bind_workaround(
-    runtime_config: dict[str, Any], endpoint: dict[str, Any]
-) -> bool:
-    """Направить AWG 3.0-endpoint через direct-detour. Возвращает True, если применено."""
-
-    if not endpoint_needs_windows_bind_workaround(endpoint):
-        return False
-    if str(endpoint.get("detour") or "").strip():
-        # Пользовательский detour уже уводит endpoint с дефолтного bind.
-        return False
-    outbounds = _ensure_list(runtime_config, "outbounds")
-    if not any(
-        isinstance(item, dict) and item.get("tag") == AWG3_DIRECT_DETOUR_TAG
-        for item in outbounds
-    ):
-        outbounds.append({"type": "direct", "tag": AWG3_DIRECT_DETOUR_TAG})
-    endpoint["detour"] = AWG3_DIRECT_DETOUR_TAG
-    return True
-
-
-def endpoint_proxy_dns_policy(endpoint: dict[str, Any]) -> EndpointProxyDnsPolicy:
-    """Определить DNS-политику по возможностям endpoint, а не имени схемы.
-
-    JSON-импорт может представить AWG как endpoint типа ``wireguard``. Поэтому
-    надёжный признак AmneziaWG — непустой объект ``amnezia`` в самом outbound.
-    """
-    amnezia = endpoint.get("amnezia")
-    if isinstance(amnezia, dict) and amnezia:
-        return EndpointProxyDnsPolicy.AMNEZIA_GATEWAY
-    return EndpointProxyDnsPolicy.CONFIGURED
-
-
-def select_endpoint_proxy_dns(
-    dns_values: list[str] | None,
-    endpoint_addresses: list[str] | None,
-    *,
-    policy: EndpointProxyDnsPolicy,
-) -> str | None:
-    """Выбрать DNS endpoint-туннеля согласно явной политике протокола.
-
-    Для обычного WireGuard возвращается первый адрес из ``DNS =`` без
-    эвристик. Если DNS не задан, шаблонный ``proxy-dns`` остаётся без изменений.
-
-    Для AWG сначала используется явно заданный приватный DNS. Если его нет,
-    вычисляется шлюз первого IPv4-адреса интерфейса: Amnezia-сервер может
-    перехватывать DNS на порту 53 именно там. Публичный DNS из конфига остаётся
-    запасным вариантом, когда IPv4-адреса интерфейса нет.
-    """
-    cleaned = [str(item).strip() for item in (dns_values or []) if str(item).strip()]
-
-    if policy is EndpointProxyDnsPolicy.CONFIGURED:
-        return cleaned[0] if cleaned else None
-
-    for item in cleaned:
-        try:
-            candidate = ipaddress.ip_address(item)
-        except ValueError:
-            continue
-        if candidate.is_private:
-            return item
-
-    for item in endpoint_addresses or []:
-        try:
-            interface = ipaddress.ip_interface(str(item).strip())
-        except ValueError:
-            continue
-        if interface.version != 4:
-            continue
-        network = interface.network
-        if network.prefixlen >= 31:
-            network = ipaddress.ip_network(f"{interface.ip}/24", strict=False)
-        try:
-            return str(next(network.hosts()))
-        except StopIteration:
-            continue
-
-    if cleaned:
-        return cleaned[0]
-    return None
-
-
-def _override_proxy_dns_server(payload: dict[str, Any], server: str) -> None:
-    dns = payload.get("dns")
-    if not isinstance(dns, dict):
-        return
-    servers = dns.get("servers")
-    if not isinstance(servers, list):
-        return
-    for index, item in enumerate(servers):
-        if isinstance(item, dict) and str(item.get("tag") or "") == "proxy-dns":
-            servers[index] = {
-                "tag": "proxy-dns",
-                "type": "udp",
-                "server": server,
-                "detour": "proxy",
-            }
-            return
 
 
 def _validate_runtime_dns_contract(payload: dict[str, Any]) -> None:

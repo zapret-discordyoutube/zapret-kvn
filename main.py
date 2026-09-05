@@ -10,7 +10,7 @@ import sys
 import threading
 
 from xray_fluent.constants import APP_VERSION
-from xray_fluent.subprocess_utils import result_output_text, run_text
+from xray_fluent.platform.windows.subprocess_utils import result_output_text, run_text
 
 
 STARTUP_LOG_NAME = "startup.log"
@@ -166,7 +166,7 @@ def _disable_system_proxy_on_exit() -> None:
         return
     # Disable system proxy only when it is ours (or a backup exists to restore).
     try:
-        from xray_fluent.proxy_manager import ProxyManager
+        from xray_fluent.platform.windows.proxy_manager import ProxyManager
 
         if ProxyManager().release_if_owned(restore_previous=True):
             _bootstrap_logger.info("System proxy restored on exit (safety)")
@@ -189,7 +189,7 @@ def _log_process_exit() -> None:
 
 def _can_start_in_tray() -> bool:
     try:
-        from xray_fluent.storage import StateStorage
+        from xray_fluent.profiles.storage import StateStorage
 
         storage = StateStorage()
         if storage.is_encrypted():
@@ -225,7 +225,7 @@ def _recover_system_proxy_from_previous_run() -> None:
     if sys.platform != "win32":
         return
     try:
-        from xray_fluent.proxy_manager import ProxyManager
+        from xray_fluent.platform.windows.proxy_manager import ProxyManager
 
         if ProxyManager().release_if_owned(restore_previous=True):
             _bootstrap_logger.info("Recovered leaked system proxy from previous run")
@@ -244,7 +244,7 @@ def _enforce_frozen() -> None:
 
 def _sync_packaged_templates() -> None:
     try:
-        from xray_fluent.template_sync import sync_packaged_templates
+        from xray_fluent.application.template_sync import sync_packaged_templates
 
         result = sync_packaged_templates()
         if result.changed:
@@ -267,9 +267,7 @@ def _sync_packaged_templates() -> None:
 def main() -> int:
     _setup_bootstrap_logging()
     _install_exception_hooks()
-    _recover_system_proxy_from_previous_run()
     _enforce_frozen()
-    _sync_packaged_templates()
     _hide_console_if_needed()
 
     parser = argparse.ArgumentParser(description="zapret kvn")
@@ -279,79 +277,64 @@ def main() -> int:
     _bootstrap_logger.info("parsed arguments: tray=%s", args.tray)
     _bootstrap_logger.info("Importing Qt and application modules")
 
-    import qfluentwidgets  # noqa: F401
-    from PyQt6.QtCore import QSize
+    from PyQt6.QtCore import QTimer
     from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
-    from qfluentwidgets import SplashScreen
-
     from xray_fluent.constants import APP_ICON_PATH, APP_NAME
     from xray_fluent.ui.main_window import MainWindow
-    from xray_fluent.ui.theme import apply_initial_theme
+    from xray_fluent.ui.theme import apply_theme
+    from xray_fluent.application.startup_service import StartupLoader
 
-    _bootstrap_logger.info("Creating QApplication")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app_icon = QIcon(str(APP_ICON_PATH))
-    app.setWindowIcon(app_icon)
-
-    # Apply the persisted theme BEFORE constructing MainWindow (and before
-    # any PasswordDialog for encrypted state): no light-theme flash and no
-    # dialogs created outside the theme mechanism.  With an encrypted state
-    # file the settings are unreadable here, so defaults apply now and the
-    # real values are re-applied (deduplicated) after unlock/load.
-    initial_theme, initial_accent = apply_initial_theme()
-    _bootstrap_logger.info(
-        "Applied initial theme before window construction: theme=%s accent=%s",
-        initial_theme,
-        initial_accent,
-    )
+    app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     tray_available = QSystemTrayIcon.isSystemTrayAvailable()
     app.setQuitOnLastWindowClosed(not tray_available)
 
-    start_hidden = args.tray
-    if start_hidden and not tray_available:
-        _bootstrap_logger.warning("System tray unavailable; disabling tray startup")
-        start_hidden = False
-    if start_hidden and not _can_start_in_tray():
-        _bootstrap_logger.warning("Tray startup requires interactive unlock; showing window instead")
-        start_hidden = False
-    _bootstrap_logger.info("system tray available=%s start_hidden=%s", tray_available, start_hidden)
+    def prepare_runtime():
+        _recover_system_proxy_from_previous_run()
+        _sync_packaged_templates()
 
-    _bootstrap_logger.info("Creating main window shell")
-    window = MainWindow(defer_init=not start_hidden)
+    loader = StartupLoader(app, prepare=prepare_runtime)
+    windows = []
 
-    splash = None
-    if not start_hidden:
-        _bootstrap_logger.info("Showing stock splash screen")
-        splash = SplashScreen(window.windowIcon() or app_icon, window)
-        sz = splash.iconSize()
-        scale = max(1, window.logicalDpiX() // 96)
-        splash.setIconSize(QSize(sz.width() * scale, sz.height() * scale))
-        window.show()
-        splash.resize(window.size())
-        splash.raise_()
-        app.processEvents()
-        _bootstrap_logger.info("Initializing main window behind splash")
-        window.initialize()
-        app.processEvents()
-        splash.finish()
-    else:
-        _bootstrap_logger.info("Creating main window")
-        window.initialize()
+    def show_shell(settings, locked):
+        if windows:
+            return
+        apply_theme(settings.theme, settings.accent_color, force=True)
+        window = MainWindow(defer_init=True)
+        windows.append(window)
+        window.initialize(load_state=False)
+        window._startup_loader = loader
+        window._apply_window_geometry(settings)
+        if not (args.tray and tray_available and not locked):
+            window.show()
+        _bootstrap_logger.info("main shell ready; tray=%s", args.tray and tray_available and not locked)
 
-    mica_enabled = getattr(window, "isMicaEffectEnabled", lambda: False)()
-    _bootstrap_logger.info("main window created: mica_enabled=%s", mica_enabled)
+    def loaded(state, history):
+        if windows:
+            windows[0].complete_initialization(state, history)
 
-    if start_hidden:
-        _bootstrap_logger.info("Starting in tray")
-        window.hide()
-    elif splash is None:
-        _bootstrap_logger.info("Showing main window")
-        window.show()
+    def need_password():
+        if windows:
+            windows[0]._ask_startup_password()
 
+    def failed(message):
+        if not windows:
+            from xray_fluent.profiles.models import AppSettings
+            show_shell(AppSettings(), True)
+        windows[0]._startup_failed(message)
+
+    loader.early.connect(show_shell)
+    loader.loaded.connect(loaded)
+    loader.password_needed.connect(need_password)
+    loader.failed.connect(failed)
+    QTimer.singleShot(0, loader.start)
     _bootstrap_logger.info("Entering Qt event loop")
     exit_code = app.exec()
+    loader.finish_shutdown()
+    for window in windows:
+        window.finish_background_shutdown()
     _bootstrap_logger.info("Qt event loop exited with code %s", exit_code)
     return exit_code
 

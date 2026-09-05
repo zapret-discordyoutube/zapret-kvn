@@ -324,6 +324,8 @@ class LockUpdateTests(unittest.TestCase):
         )
 
         with (
+            patch.object(resolver, "resolve_amnezia_source", return_value=current["amnezia"]),
+            patch.object(resolver, "resolve_singbox_build", return_value=current["singbox_build"]),
             patch.object(resolver, "github_latest_release", side_effect=[
                 xray_release,
                 singbox_release,

@@ -131,11 +131,11 @@ Do not build advanced schema UI.
 
 - `xray_fluent/ui/main_window.py`
 - `xray_fluent/ui/routing_page.py`
-- `xray_fluent/app_controller.py`
+- `xray_fluent/application/controller.py`
 - `xray_fluent/singbox_config_builder.py`
 - `xray_fluent/singbox_manager.py`
-- `xray_fluent/models.py`
-- `xray_fluent/storage.py`
+- `xray_fluent/profiles/models.py`
+- `xray_fluent/profiles/storage.py`
 - `xray_fluent/constants.py`
 - `docs/sing-box/runtime-config.md`
 

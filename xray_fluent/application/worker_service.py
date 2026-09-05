@@ -3,15 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..connectivity_test import ConnectivityTestWorker
+from ..network.connectivity_test import ConnectivityTestWorker
 from ..constants import DEFAULT_HTTP_PORT, XRAY_PATH_DEFAULT
-from ..path_utils import resolve_configured_path
-from ..ping_worker import PingWorker, apply_ping_measurement
-from ..speed_test_worker import SpeedTestWorker
+from ..profiles.path_utils import resolve_configured_path
+from ..network.ping_worker import PingWorker, apply_ping_measurement
+from ..network.speed_test_worker import SpeedTestWorker
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
-    from ..models import Node
+    from .controller import AppController
+    from ..profiles.models import Node
 
 
 def ping_nodes(controller: AppController, node_ids: set[str] | None = None) -> None:

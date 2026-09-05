@@ -24,7 +24,7 @@ if _existing is not None and not isinstance(_existing, QApplication):
     )
 app = _existing or QApplication([])
 
-from xray_fluent.models import AppSettings, Node
+from xray_fluent.profiles.models import AppSettings, Node
 from xray_fluent.ui.dashboard_page import DashboardPage
 from xray_fluent.ui.main_window import MainWindow
 
@@ -79,6 +79,14 @@ class DashboardWordWrapTest(unittest.TestCase):
         self.assertIn("********", page.connection_target_label.text())
         self.assertNotIn("secret.example", page.profile_endpoint_label.text())
         self.assertNotIn("secret.example", page.connection_target_label.text())
+        page.deleteLater()
+        QApplication.processEvents()
+
+    def test_generated_awg_name_does_not_reveal_endpoint_on_dashboard(self):
+        page = DashboardPage()
+        page.set_selected_node(Node(name="awg-203.0.113.8:443", scheme="awg", server="203.0.113.8", port=443))
+        page._do_refresh_dashboard()
+        self.assertNotIn("203.0.113.8", page.connection_target_label.text())
         page.deleteLater()
         QApplication.processEvents()
 

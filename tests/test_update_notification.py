@@ -29,7 +29,7 @@ class _FakeWindll:
 
 
 if sys.platform == "win32":
-    from xray_fluent.app_updater import AppUpdate
+    from xray_fluent.updates.app_updater import AppUpdate
     from xray_fluent.ui.main_window import (
         APP_UPDATE_INITIAL_DELAY_MS,
         APP_UPDATE_INTERVAL_MS,
@@ -40,7 +40,7 @@ else:
     _original_windll = getattr(ctypes, "windll", None)
     ctypes.windll = _FakeWindll()  # type: ignore[attr-defined]
     try:
-        from xray_fluent.app_updater import AppUpdate
+        from xray_fluent.updates.app_updater import AppUpdate
         from xray_fluent.ui.main_window import (
             APP_UPDATE_INITIAL_DELAY_MS,
             APP_UPDATE_INTERVAL_MS,

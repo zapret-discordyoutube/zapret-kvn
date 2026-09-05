@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING
 
 from ..constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT, HYSTERIA_PATH_DEFAULT
 from ..engines.singbox import classify_node_for_singbox
-from ..link_parser import hysteria2_uri_fingerprint
+from ..importer.link_parser import hysteria2_uri_fingerprint
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
-    from ..models import AppSettings, Node, RoutingSettings
+    from .controller import AppController
+    from ..profiles.models import AppSettings, Node, RoutingSettings
 
 
 def signature(payload: object) -> str:

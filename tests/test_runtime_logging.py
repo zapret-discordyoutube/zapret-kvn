@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 from PyQt6.QtCore import QProcess
 
-from xray_fluent.application.hysteria_runtime_contract import HysteriaFailureCode
+from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
 from xray_fluent.engines.hysteria.manager import HysteriaManager
-from xray_fluent.models import Node
-from xray_fluent.runtime_logging import (
+from xray_fluent.profiles.models import Node
+from xray_fluent.diagnostics.runtime_logging import (
     RuntimeLogContext,
     RuntimeNodeIdentity,
     contextualize_runtime_log,

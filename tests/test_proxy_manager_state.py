@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from xray_fluent import proxy_manager
+from xray_fluent.platform.windows import proxy_manager
 from xray_fluent.constants import PROXY_HOST
-from xray_fluent.proxy_manager import (
+from xray_fluent.platform.windows.proxy_manager import (
     INTERNET_POLICY_KEY,
     INTERNET_SETTINGS_KEY,
     ProxyManager,

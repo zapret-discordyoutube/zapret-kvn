@@ -6,7 +6,7 @@ import re
 import unittest
 from pathlib import Path
 
-from xray_fluent.zapret_blobs import (
+from xray_fluent.engines.zapret.blobs import (
     BLOB_REGISTRY,
     BUILTIN_BLOBS,
     LUA_EXTENSION_FUNCS,
@@ -16,8 +16,8 @@ from xray_fluent.zapret_blobs import (
     missing_blob_files,
     unresolved_blob_names,
 )
-from xray_fluent.zapret_manager import DEFAULT_PRESET_NAME, ZapretManager
-from xray_fluent.zapret_target import load_strategy_catalog
+from xray_fluent.engines.zapret.manager import DEFAULT_PRESET_NAME, ZapretManager
+from xray_fluent.engines.zapret.target import load_strategy_catalog
 
 _ROOT = Path(__file__).resolve().parents[1]
 _LUA_DIR = _ROOT / "zapret" / "lua"
@@ -50,7 +50,7 @@ class CatalogVolumeTests(unittest.TestCase):
     def test_cache_is_invalidated_when_a_catalog_file_changes(self) -> None:
         """A shared cache that never expires would freeze edited catalogs."""
 
-        from xray_fluent import zapret_target
+        from xray_fluent.engines.zapret import target as zapret_target
 
         path = zapret_target._CATALOG_ROOT / "tcp.local.txt"
         before = load_strategy_catalog("tcp")
@@ -70,13 +70,13 @@ class CatalogVolumeTests(unittest.TestCase):
     def test_rejected_entries_are_reported_not_swallowed(self) -> None:
         """A silently vanishing strategy is the failure mode this replaced."""
 
-        from xray_fluent import zapret_target
+        from xray_fluent.engines.zapret import target as zapret_target
 
         path = zapret_target._CATALOG_ROOT / "tcp.local.txt"
         original = path.read_bytes()
         try:
             path.write_bytes(original + b"\n[reject_probe]\nname = reject probe\n--wf-tcp-out=443\n")
-            with self.assertLogs("xray_fluent.zapret_target", level="WARNING") as captured:
+            with self.assertLogs("xray_fluent.engines.zapret.target", level="WARNING") as captured:
                 catalog = load_strategy_catalog("tcp")
             self.assertNotIn("reject_probe", catalog)
             self.assertTrue(any("reject_probe" in line for line in captured.output))
@@ -183,7 +183,7 @@ class DefaultPresetTests(unittest.TestCase):
     def test_preset_listing_survives_unreadable_files(self) -> None:
         from unittest import mock
 
-        from xray_fluent import zapret_manager
+        from xray_fluent.engines.zapret import manager as zapret_manager
 
         broken = zapret_manager.PRESETS_DIR / "zz-unreadable-probe.txt"
         broken.write_text("# Preset: probe\n--new\n", encoding="utf-8")

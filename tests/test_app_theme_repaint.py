@@ -25,7 +25,7 @@ app = _existing or QApplication([])
 
 from qfluentwidgets import Theme, qconfig, setTheme
 
-from xray_fluent.models import Node
+from xray_fluent.profiles.models import Node
 from xray_fluent.ui.nodes_table_model import COL_PING, NodesTableModel
 
 

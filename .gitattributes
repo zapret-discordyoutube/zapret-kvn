@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Source-built core cache keys and shared patch digests must survive a Windows checkout.
+scripts/*.py text eol=lf
+scripts/*.ps1 text eol=lf
+*.go text eol=lf
+*.json text eol=lf
+core-patches/*.patch text eol=lf -whitespace
+runtime/amnezia/go.mod text eol=lf
+runtime/amnezia/go.sum text eol=lf

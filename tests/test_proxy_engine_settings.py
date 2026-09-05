@@ -1,6 +1,6 @@
 import unittest
 
-from xray_fluent.models import AppSettings
+from xray_fluent.profiles.models import AppSettings
 
 
 class ProxyEngineSettingsTests(unittest.TestCase):

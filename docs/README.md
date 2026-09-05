@@ -163,6 +163,8 @@ outbound JSON остаются в нативном пути sing-box.
 
 ## Сборка Windows x64
 
+Карта пакетов и границы ответственности: [структура исходников Windows и Android](SOURCE_LAYOUT.md).
+
 Ядра закреплены вместе с SHA-256 в
 `scripts/core-lock.windows-x64.json`. Локальный core bundle собирается один раз,
 после чего повторные запуски используют download-cache:

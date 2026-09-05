@@ -24,10 +24,10 @@ from qfluentwidgets import (
 from qfluentwidgets.components.settings.setting_card import ColorPickerButton
 
 from ..constants import SINGBOX_PATH_DEFAULT, XRAY_PATH_DEFAULT
-from ..models import AppSettings, SecuritySettings, clamp_subscriptions_check_interval
+from ..profiles.models import AppSettings, SecuritySettings, clamp_subscriptions_check_interval
 from .base_page import ScrollablePage
 from .theme import ACCENT_PRESETS, DEFAULT_ACCENT, normalize_accent, text_color
-from ..path_utils import normalize_configured_path, resolve_configured_path
+from ..profiles.path_utils import normalize_configured_path, resolve_configured_path
 
 
 def _expand_horizontally(widget) -> None:

@@ -5,11 +5,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .runtime_planner import SingboxRuntimePlan
-from ...application.hysteria_runtime_contract import SECURITY_FAILURES, HysteriaFailureCode, HysteriaRuntimeState
+from ..hysteria.runtime_contract import SECURITY_FAILURES, HysteriaFailureCode, HysteriaRuntimeState
 
 if TYPE_CHECKING:
-    from ...app_controller import AppController
-    from ...models import Node
+    from ...application.controller import AppController
+    from ...profiles.models import Node
 
 
 @dataclass(slots=True)
@@ -29,6 +29,8 @@ def _runtime_suffix(plan: SingboxRuntimePlan) -> str:
         return " (sing-box + Xray sidecar)"
     if plan.is_hysteria_sidecar:
         return " (sing-box + Hysteria2)"
+    if getattr(plan, "amnezia_sidecar", None) is not None:
+        return " (sing-box + Amnezia WG/AWG)"
     return " (sing-box extended)"
 
 
@@ -97,6 +99,8 @@ def start_proxy(
 
     if not _apply_system_proxy(controller, plan):
         controller.singbox.stop()
+        if getattr(controller, "amnezia", None) is not None:
+            controller.amnezia.stop()
         if controller.xray.is_running:
             controller.xray.stop()
         if controller.hysteria.is_running:
@@ -171,9 +175,28 @@ def _abort_security_recovery(controller: AppController, recovery: bool, replacem
     return True
 
 
+def _abort_superseded_transition(
+    controller: AppController, generation: int, replacement=None, *, old_plan=None, front_changed=False,
+) -> bool:
+    if controller._transition_generation == generation and controller._desired_connected:
+        return False
+    # Readiness and process stop pump Qt events. A newer selection/disconnect
+    # invalidates this candidate before it can publish or persist a session.
+    if replacement is not None:
+        replacement.stop(expected=True)
+    if front_changed:
+        if not controller._desired_connected or not controller._rollback_singbox_front(old_plan):
+            controller._handle_unexpected_disconnect()
+    controller._log("[transport-transition] superseded candidate discarded")
+    return True
+
+
 def restart_runtime(controller: AppController, reason: str) -> bool:
     node = controller._runtime_selected_node()
+    requested_generation = controller._transition_generation
     hysteria_recovery = bool(controller._hysteria_recovery_active)
+    replacement_amnezia = None
+    amnezia_committed = False
     controller._switching = True
     try:
         if _abort_security_recovery(controller, hysteria_recovery):
@@ -197,6 +220,12 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
 
         old_plan = getattr(controller, "_active_singbox_plan", None)
         old_hysteria = controller.hysteria
+        old_amnezia = getattr(controller, "amnezia", None)
+        if getattr(plan, "amnezia_sidecar", None) is not None:
+            replacement_amnezia = controller._prepare_amnezia_replacement(plan)
+            if replacement_amnezia is None:
+                controller._set_connection_status("error", "Новый WG/AWG не прошёл проверку; прежний runtime сохранён.", level="error")
+                return False
         replacement_hysteria = None
         if plan.hysteria_sidecar is not None:
             controller._hysteria_contract.advance(
@@ -216,6 +245,8 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
                     controller._handle_unexpected_disconnect()
                 return False
 
+        if _abort_superseded_transition(controller, requested_generation, replacement_hysteria):
+            return False
         if controller.singbox.is_running and not controller.singbox.stop():
             if replacement_hysteria is not None:
                 replacement_hysteria.stop(expected=True)
@@ -231,6 +262,8 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         controller._protect_ss_password = ""
         if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
             return False
+        if _abort_superseded_transition(controller, requested_generation, replacement_hysteria, old_plan=old_plan, front_changed=True):
+            return False
         controller._hysteria_contract.advance(
             HysteriaRuntimeState.COMMITTING_SWITCH,
             generation=controller._hysteria_contract.session.session_generation,
@@ -238,8 +271,11 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         front_ready = controller._start_singbox_runtime_plan(
             plan,
             prepared_hysteria=replacement_hysteria,
+            **({"prepared_amnezia": replacement_amnezia} if replacement_amnezia is not None else {}),
         )
         if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
+            return False
+        if _abort_superseded_transition(controller, requested_generation, replacement_hysteria, old_plan=old_plan, front_changed=True):
             return False
         if not front_ready:
             rolled_back = controller._rollback_singbox_front(old_plan)
@@ -295,6 +331,8 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
                 if plan.xray_sidecar
                 else plan.hysteria_sidecar.relay_port
                 if plan.hysteria_sidecar
+                else plan.amnezia_sidecar.relay_port
+                if getattr(plan, "amnezia_sidecar", None)
                 else 0
             ),
             protect_ss_port=controller._protect_ss_port,
@@ -305,6 +343,21 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
             hybrid_relay_selector_tags=plan.hybrid_relay_selector_tags,
             hybrid_relay_selected_tag=plan.hybrid_relay_selected_tag,
         )
+        pending = getattr(controller, "_pending_amnezia_node_id", None)
+        if replacement_amnezia is not None:
+            controller.amnezia = replacement_amnezia
+        amnezia_committed = True
+        if isinstance(pending, str) and pending:
+            if session_node is None or session_node.id != pending:
+                controller._handle_unexpected_disconnect()
+                return False
+            controller.state.selected_node_id = pending
+            controller._pending_amnezia_node_id = None
+            controller.selection_changed.emit(session_node)
+        if old_amnezia is not None and (old_amnezia is not controller.amnezia or getattr(plan, "amnezia_sidecar", None) is None):
+            old_amnezia.stop()
+            if old_amnezia is not controller.amnezia:
+                old_amnezia.deleteLater()
         if hysteria_recovery and not controller._commit_pending_hysteria_selection(session_node):
             controller._set_connection_status(
                 "error",
@@ -325,6 +378,11 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
         controller.schedule_save()
         return True
     finally:
+        if replacement_amnezia is not None and not amnezia_committed:
+            replacement_amnezia.stop()
+            replacement_amnezia.deleteLater()
+        if controller._transition_generation == requested_generation and node is not None and getattr(controller, "_pending_amnezia_node_id", None) == node.id:
+            controller._pending_amnezia_node_id = None
         if hysteria_recovery and controller._pending_hysteria_replacement_node_id:
             controller._clear_pending_hysteria_selection()
         controller._switching = False
@@ -340,7 +398,10 @@ def restart_runtime(controller: AppController, reason: str) -> bool:
 
 def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
     node = controller._runtime_selected_node()
+    requested_generation = controller._transition_generation
     hysteria_recovery = bool(controller._hysteria_recovery_active)
+    replacement_amnezia = None
+    amnezia_committed = False
     controller._switching = True
     try:
         if _abort_security_recovery(controller, hysteria_recovery):
@@ -358,6 +419,12 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
 
         old_plan = getattr(controller, "_active_singbox_plan", None)
         old_hysteria = controller.hysteria
+        old_amnezia = getattr(controller, "amnezia", None)
+        if getattr(plan, "amnezia_sidecar", None) is not None:
+            replacement_amnezia = controller._prepare_amnezia_replacement(plan)
+            if replacement_amnezia is None:
+                controller._set_connection_status("error", "Новый WG/AWG не прошёл проверку; прежний runtime сохранён.", level="error")
+                return False
         replacement_hysteria = None
         if plan.hysteria_sidecar is not None:
             controller._hysteria_contract.advance(
@@ -377,6 +444,8 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
                     controller._handle_unexpected_disconnect()
                 return False
 
+        if _abort_superseded_transition(controller, requested_generation, replacement_hysteria):
+            return False
         if controller.singbox.is_running and not controller.singbox.stop():
             if replacement_hysteria is not None:
                 replacement_hysteria.stop(expected=True)
@@ -392,6 +461,8 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         controller._protect_ss_password = ""
         if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
             return False
+        if _abort_superseded_transition(controller, requested_generation, replacement_hysteria, old_plan=old_plan, front_changed=True):
+            return False
         controller._hysteria_contract.advance(
             HysteriaRuntimeState.COMMITTING_SWITCH,
             generation=controller._hysteria_contract.session.session_generation,
@@ -399,8 +470,11 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         front_ready = controller._start_singbox_runtime_plan(
             plan,
             prepared_hysteria=replacement_hysteria,
+            **({"prepared_amnezia": replacement_amnezia} if replacement_amnezia is not None else {}),
         )
         if _abort_security_recovery(controller, hysteria_recovery, replacement_hysteria):
+            return False
+        if _abort_superseded_transition(controller, requested_generation, replacement_hysteria, old_plan=old_plan, front_changed=True):
             return False
         if not front_ready:
             rolled_back = controller._rollback_singbox_front(old_plan)
@@ -439,6 +513,8 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         if not _apply_system_proxy(controller, plan):
             controller._handle_unexpected_disconnect()
             return False
+        if _abort_superseded_transition(controller, requested_generation, replacement_hysteria, old_plan=old_plan, front_changed=True):
+            return False
 
         session_node = node if plan.used_selected_node else None
         if session_node is not None:
@@ -459,6 +535,8 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
                 if plan.xray_sidecar
                 else plan.hysteria_sidecar.relay_port
                 if plan.hysteria_sidecar
+                else plan.amnezia_sidecar.relay_port
+                if getattr(plan, "amnezia_sidecar", None)
                 else 0
             ),
             protect_ss_port=controller._protect_ss_port,
@@ -469,6 +547,21 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
             hybrid_relay_selector_tags=plan.hybrid_relay_selector_tags,
             hybrid_relay_selected_tag=plan.hybrid_relay_selected_tag,
         )
+        pending = getattr(controller, "_pending_amnezia_node_id", None)
+        if replacement_amnezia is not None:
+            controller.amnezia = replacement_amnezia
+        amnezia_committed = True
+        if isinstance(pending, str) and pending:
+            if session_node is None or session_node.id != pending:
+                controller._handle_unexpected_disconnect()
+                return False
+            controller.state.selected_node_id = pending
+            controller._pending_amnezia_node_id = None
+            controller.selection_changed.emit(session_node)
+        if old_amnezia is not None and (old_amnezia is not controller.amnezia or getattr(plan, "amnezia_sidecar", None) is None):
+            old_amnezia.stop()
+            if old_amnezia is not controller.amnezia:
+                old_amnezia.deleteLater()
         if hysteria_recovery and not controller._commit_pending_hysteria_selection(session_node):
             controller._set_connection_status(
                 "error",
@@ -484,6 +577,11 @@ def restart_proxy_runtime(controller: AppController, reason: str) -> bool:
         controller.schedule_save()
         return True
     finally:
+        if replacement_amnezia is not None and not amnezia_committed:
+            replacement_amnezia.stop()
+            replacement_amnezia.deleteLater()
+        if controller._transition_generation == requested_generation and node is not None and getattr(controller, "_pending_amnezia_node_id", None) == node.id:
+            controller._pending_amnezia_node_id = None
         if hysteria_recovery and controller._pending_hysteria_replacement_node_id:
             controller._clear_pending_hysteria_selection()
         controller._switching = False

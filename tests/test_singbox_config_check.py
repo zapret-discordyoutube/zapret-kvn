@@ -15,7 +15,7 @@ class SingboxConfigCheckTests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
 
         with patch(
-            "xray_fluent.subprocess_utils.run_text_pumped",
+            "xray_fluent.platform.windows.subprocess_utils.run_text_pumped",
             return_value=completed,
         ) as run_mock:
             self.assertEqual(check_config(exe, config), (True, ""))

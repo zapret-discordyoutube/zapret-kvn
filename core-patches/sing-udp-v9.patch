@@ -1,0 +1,92 @@
+--- a/common/buf/buffer_standard.go
++++ b/common/buf/buffer_standard.go
+@@ -3,6 +3,7 @@
+ package buf
+ 
+ const (
+ 	BufferSize    = 32 * 1024
+-	UDPBufferSize = 16 * 1024
++	// Receive a complete reassembled UDP datagram, independently of link MTU.
++	UDPBufferSize = 65535
+ )
+--- a/common/buf/buffer_low_memory.go
++++ b/common/buf/buffer_low_memory.go
+@@ -3,6 +3,7 @@
+ package buf
+ 
+ const (
+ 	BufferSize    = 16 * 1024
+-	UDPBufferSize = 8 * 1024
++	// Low-memory mode must not silently truncate valid UDP datagrams.
++	UDPBufferSize = 65535
+ )
+--- a/common/network/direct.go
++++ b/common/network/direct.go
+@@ -13,8 +13,10 @@
+ 	InitializeReadWaiter(options ReadWaitOptions) (needCopy bool)
+ }
+ 
+ type ReadWaitOptions struct {
++	// Packet marks a connected datagram exposed through a stream read waiter.
++	Packet         bool
+ 	FrontHeadroom  int
+ 	RearHeadroom   int
+ 	MTU            int
+ 	ReadOverhead   int
+@@ -50,8 +52,11 @@
+ 	}
+ }
+ 
+ func (o ReadWaitOptions) NewBuffer() *buf.Buffer {
++	if o.Packet {
++		return o.NewPacketBuffer()
++	}
+ 	bufferSize := buf.BufferSize
+ 	if o.IncreaseBuffer {
+ 		if o.MTU > 0 {
+ 			bufferSize = o.MTU + o.ReadOverhead + o.FrontHeadroom + o.RearHeadroom
+@@ -81,17 +86,11 @@
+ 	return buffer
+ }
+ 
+ func (o ReadWaitOptions) NewPacketBuffer() *buf.Buffer {
+-	bufferSize := buf.UDPBufferSize
+-	if o.MTU > 0 {
+-		bufferSize = o.MTU + o.ReadOverhead + o.FrontHeadroom + o.RearHeadroom
+-	}
+-	minimumBufferSize := o.FrontHeadroom + o.RearHeadroom + 1
+-	if bufferSize < minimumBufferSize {
+-		bufferSize = minimumBufferSize
+-	}
+-	buffer := buf.NewSize(bufferSize)
++	// MTU limits IP fragments, not a reassembled datagram. Reserve transport
++	// headroom in addition to the payload, never by subtracting from it.
++	buffer := buf.NewSize(buf.UDPBufferSize + o.ReadOverhead + o.FrontHeadroom + o.RearHeadroom)
+ 	if o.FrontHeadroom > 0 {
+ 		buffer.Resize(o.FrontHeadroom, 0)
+ 	}
+ 	if o.RearHeadroom > 0 {
+--- a/common/bufio/bind_wait.go
++++ b/common/bufio/bind_wait.go
+@@ -28,8 +28,9 @@
+ 	addr       M.Socksaddr
+ }
+ 
+ func (w *unbindPacketReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
++	options.Packet = true
+ 	return w.readWaiter.InitializeReadWaiter(options)
+ }
+ 
+ func (w *unbindPacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destination M.Socksaddr, err error) {
+--- a/protocol/socks/packet_wait.go
++++ b/protocol/socks/packet_wait.go
+@@ -24,8 +24,9 @@
+ 	readWaiter N.ReadWaiter
+ }
+ 
+ func (w *AssociatePacketReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
++	options.Packet = true
+ 	return w.readWaiter.InitializeReadWaiter(options)
+ }
+ 
+ func (w *AssociatePacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destination M.Socksaddr, err error) {

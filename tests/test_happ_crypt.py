@@ -8,13 +8,13 @@ import unittest
 
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
-from xray_fluent.happ_crypt import (
+from xray_fluent.importer.happ_crypt import (
     HappCryptError,
     decrypt_happ_link,
     is_happ_crypt_link,
 )
-from xray_fluent.happ_keys import CRYPT1_4_KEYS, CRYPT5_KEYS
-from xray_fluent.subscription_http import SubscriptionFetchError, resolve_subscription_source
+from xray_fluent.importer.happ_keys import CRYPT1_4_KEYS, CRYPT5_KEYS
+from xray_fluent.importer.subscription_http import SubscriptionFetchError, resolve_subscription_source
 
 
 VECTORS = json.loads((Path(__file__).parent / "data" / "happ_vectors.json").read_text("utf-8"))

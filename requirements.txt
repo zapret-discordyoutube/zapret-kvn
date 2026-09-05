@@ -4,3 +4,4 @@ cryptography>=43.0.0
 truststore>=0.10.4,<0.11
 pyinstaller>=6.12.0
 zxing-cpp>=3.1.0,<4
+maxminddb>=3.0,<4

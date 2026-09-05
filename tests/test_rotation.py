@@ -13,7 +13,7 @@ from xray_fluent.application.rotation_service import (
 )
 from xray_fluent.engines.xray.balancer_api import build_balancer_override_command
 from xray_fluent.engines.xray.config_builder import build_xray_config
-from xray_fluent.models import AppSettings, Node, RoutingSettings
+from xray_fluent.profiles.models import AppSettings, Node, RoutingSettings
 
 
 def make_node(index: int, **kwargs) -> Node:

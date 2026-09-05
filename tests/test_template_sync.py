@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from build import stage_template_update_bundle
-from xray_fluent.template_sync import sync_packaged_templates
+from xray_fluent.application.template_sync import sync_packaged_templates
 
 
 def _write_json(path: Path, payload: object, *, compact: bool = False) -> None:

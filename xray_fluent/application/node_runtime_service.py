@@ -2,43 +2,81 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..country_flags import CountryResolver, detect_country
-from ..link_parser import is_native_singbox_outbound, repair_node_outbound_from_link, validate_node_outbound
+from ..network.country_resolver import CountryResolver
+from ..profiles.geoip import endpoint_hosts, normalize_country
+from ..importer.link_parser import is_native_singbox_outbound, repair_node_outbound_from_link, validate_node_outbound
 
 if TYPE_CHECKING:
-    from ..app_controller import AppController
-    from ..models import Node
+    from .controller import AppController
+    from ..profiles.models import Node
 
 
 def detect_countries_sync(controller: AppController) -> None:
-    changed = False
+    # Old persisted guesses are discarded by Node.from_dict. No I/O here.
     for node in controller.state.nodes:
-        if not node.country_code:
-            code = detect_country(node.name, node.server)
-            if code:
-                node.country_code = code
-                changed = True
-    if changed:
-        controller.save()
+        if node.country_override:
+            node.country_code = normalize_country(node.country_override)
+
+
+def remember_country_addresses(controller, node, addresses) -> None:
+    """Passively consume an existing runtime resolution; never initiate one."""
+    if node is None:
+        return
+    known = getattr(controller, "_country_known_addresses", {})
+    known[node.id] = (endpoint_hosts(node), tuple(addresses))
+    controller._country_generation = getattr(controller, "_country_generation", 0) + 1
+    controller._country_known_addresses = known
+    start_country_ip_resolution(controller)
 
 
 def start_country_ip_resolution(controller: AppController) -> None:
-    needs = [(node.id, node.server) for node in controller.state.nodes if not node.country_code]
+    if getattr(controller, "_country_shutdown", False):
+        return
+    worker = getattr(controller, "_country_resolver", None)
+    if worker is not None and worker.isRunning():
+        controller._country_refresh_pending = True
+        return
+    known = getattr(controller, "_country_known_addresses", {})
+    needs = []
+    for node in controller.state.nodes:
+        if node.country_override:
+            node.country_code = normalize_country(node.country_override)
+            continue
+        fingerprint = endpoint_hosts(node)
+        cached = known.get(node.id)
+        addresses = cached[1] if cached and cached[0] == fingerprint else fingerprint
+        needs.append((node.id, fingerprint, addresses))
     if not needs:
         return
-    controller._country_resolver = CountryResolver(needs, parent=controller)
-    controller._country_resolver.resolved.connect(controller._on_countries_resolved)
-    controller._country_resolver.start()
+    worker = CountryResolver(needs, parent=controller)
+    controller._country_resolver = worker
+    generation = getattr(controller, "_country_generation", 0)
+    worker.resolved.connect(lambda results: controller._on_countries_resolved(results) if generation == getattr(controller, "_country_generation", 0) and not getattr(controller, "_country_shutdown", False) else None)
+    def finished():
+        if controller._country_resolver is worker:
+            controller._country_resolver = None
+        worker.deleteLater()
+        if getattr(controller, "_country_refresh_pending", False):
+            controller._country_refresh_pending = False
+            start_country_ip_resolution(controller)
+    worker.finished.connect(finished)
+    worker.start()
 
 
-def on_countries_resolved(controller: AppController, results: dict[str, str]) -> None:
-    if not results:
+def on_countries_resolved(controller: AppController, results: dict) -> None:
+    if getattr(controller, "_country_shutdown", False):
         return
+    changed = False
     for node in controller.state.nodes:
-        if node.id in results:
-            node.country_code = results[node.id]
-    controller.save()
-    controller.nodes_changed.emit(controller.state.nodes)
+        result = results.get(node.id)
+        if result is None or node.country_override or result[0] != endpoint_hosts(node):
+            continue
+        code = result[1]
+        if node.country_code != code:
+            node.country_code = code
+            changed = True
+    if changed:
+        controller.nodes_changed.emit(controller.state.nodes)
 
 
 def get_node_by_id(controller: AppController, node_id: str | None) -> Node | None:

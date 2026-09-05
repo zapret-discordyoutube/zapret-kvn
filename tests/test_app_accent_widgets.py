@@ -31,14 +31,14 @@ app = _existing or QApplication([])
 
 from qfluentwidgets import qconfig, setTheme, setThemeColor, themeColor
 
-from xray_fluent.models import AppSettings, Node, SecuritySettings
+from xray_fluent.profiles.models import AppSettings, Node, SecuritySettings
 from xray_fluent.ui import theme
 from xray_fluent.ui.nodes_table_delegate import NodesActivityDelegate
 from xray_fluent.ui.nodes_table_model import COL_NAME, NodesTableModel
 from xray_fluent.ui.settings_page import SettingsPage
 from xray_fluent.ui.traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 from xray_fluent.ui.zapret_page import ZapretPage
-from xray_fluent.zapret_manager import PresetInfo
+from xray_fluent.engines.zapret.manager import PresetInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UI_DIR = REPO_ROOT / "xray_fluent" / "ui"

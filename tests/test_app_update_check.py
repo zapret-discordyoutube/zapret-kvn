@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 
-from xray_fluent import app_updater
-from xray_fluent.http_utils import HttpFetchError, HttpResponseData
+from xray_fluent.updates import app_updater
+from xray_fluent.network.http_utils import HttpFetchError, HttpResponseData
 
 
 def _response(payload: bytes, url: str) -> HttpResponseData:

@@ -45,9 +45,9 @@ app = _existing or QApplication([])
 
 from qfluentwidgets import SettingCardGroup, SwitchSettingCard
 
-from xray_fluent.app_controller import AppController, STARTUP_CONNECT_FALLBACK_MS
+from xray_fluent.application.controller import AppController, STARTUP_CONNECT_FALLBACK_MS
 from xray_fluent.constants import STATE_SCHEMA_VERSION
-from xray_fluent.models import (
+from xray_fluent.profiles.models import (
     AppSettings,
     AppState,
     Node,
