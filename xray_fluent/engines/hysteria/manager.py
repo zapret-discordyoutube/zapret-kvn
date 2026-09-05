@@ -14,7 +14,11 @@ from typing import Any
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import HYSTERIA_CONFIG_FILE, HYSTERIA_PATH_DEFAULT, PROXY_HOST, RUNTIME_DIR
-from ...application.hysteria_runtime_contract import HysteriaFailureCode, classify_hysteria_failure
+from ...application.hysteria_runtime_contract import (
+    SECURITY_FAILURES,
+    HysteriaFailureCode,
+    classify_hysteria_failure,
+)
 from ...runtime_logging import RuntimeNodeIdentity, redact_runtime_log
 from ...subprocess_utils import (
     decode_output,
@@ -299,7 +303,10 @@ class HysteriaManager(QObject):
         deadline = time.monotonic() + timeout
         failures: dict[str, str] = {}
         while time.monotonic() < deadline:
-            if self._process.state() == QProcess.ProcessState.NotRunning:
+            if (
+                self._process.state() == QProcess.ProcessState.NotRunning
+                or self._last_failure_code in SECURITY_FAILURES
+            ):
                 return False
             probe_timeout = min(4.0, max(0.2, deadline - time.monotonic()))
             executor = ThreadPoolExecutor(
@@ -319,7 +326,10 @@ class HysteriaManager(QObject):
             }
             succeeded: tuple[str, str, str] | None = None
             while futures and time.monotonic() < deadline:
-                if self._process.state() == QProcess.ProcessState.NotRunning:
+                if (
+                    self._process.state() == QProcess.ProcessState.NotRunning
+                    or self._last_failure_code in SECURITY_FAILURES
+                ):
                     executor.shutdown(wait=False, cancel_futures=True)
                     return False
                 completed = [future for future in futures if future.done()]
@@ -334,6 +344,8 @@ class HysteriaManager(QObject):
                     break
                 sleep_with_events(0.05)
             executor.shutdown(wait=False, cancel_futures=True)
+            if self._last_failure_code in SECURITY_FAILURES:
+                return False
             if succeeded is not None:
                 self._emit_log(
                     f"functional HTTPS probe succeeded via {succeeded[1]}",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from concurrent.futures import Future
 from unittest.mock import patch
 
 from PyQt6.QtCore import QProcess
@@ -280,6 +281,61 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
                     timeout=1.0,
                 )
             )
+
+    def test_readiness_does_not_probe_after_reported_pin_failure(self) -> None:
+        manager = HysteriaManager()
+        manager._emit_process_line(
+            "connect error: INTERNAL_ERROR (local): no certificate matches the pinned hash"
+        )
+        with (
+            patch.object(manager._process, "state", return_value=QProcess.ProcessState.Running),
+            patch.object(manager, "_probe_remote_endpoint") as probe,
+        ):
+            self.assertFalse(manager._wait_until_remote_ready(11809, username="", password=""))
+        probe.assert_not_called()
+        self.assertEqual(manager.last_failure_code, HysteriaFailureCode.TARGET_PIN_MISMATCH)
+
+    def test_process_log_security_failure_stops_readiness_retry_wave(self) -> None:
+        manager = HysteriaManager()
+        original = "connect error: INTERNAL_ERROR (local): no certificate matches the pinned hash"
+        failures = []
+        manager.failure.connect(lambda *event: failures.append(event))
+        clock = [0.0]
+
+        class CompletedProbes:
+            def __init__(self, **_kwargs):
+                pass
+
+            def submit(self, function, *args, **kwargs):
+                future = Future()
+                try:
+                    future.set_result(function(*args, **kwargs))
+                except OSError as error:
+                    future.set_exception(error)
+                return future
+
+            def shutdown(self, **_kwargs):
+                pass
+
+        def process_events(delay):
+            clock[0] += delay
+            if not failures:
+                manager._emit_process_line(original)
+
+        with (
+            patch.object(manager._process, "state", return_value=QProcess.ProcessState.Running),
+            patch.object(manager, "_probe_remote_endpoint", side_effect=OSError("SOCKS CONNECT rejected")) as probe,
+            patch("xray_fluent.engines.hysteria.manager.ThreadPoolExecutor", CompletedProbes),
+            patch("xray_fluent.engines.hysteria.manager.sleep_with_events", side_effect=process_events),
+            patch("xray_fluent.engines.hysteria.manager.time.monotonic", side_effect=lambda: clock[0]),
+        ):
+            self.assertFalse(manager._wait_until_remote_ready(11809, username="", password="", timeout=0.5))
+        self.assertEqual(probe.call_count, 3)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0], HysteriaFailureCode.TARGET_PIN_MISMATCH.value)
+        self.assertIn(original, failures[0][1])
+        self.assertLess(clock[0], 0.5)
+        self.assertFalse(any("functional HTTPS probes failed" in line for line in manager._last_output_lines))
 
 
 if __name__ == "__main__":
