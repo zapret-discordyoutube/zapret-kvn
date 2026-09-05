@@ -50,7 +50,10 @@ class SingPacketPatchTests(unittest.TestCase):
                     preparation.prepare(Path(directory), Path(directory) / "out", ROOT / "core-patches/sing-udp.json")
 
     def test_module_extraction_rejects_escaping_paths(self):
-        for name in ("../escape", "/absolute", "bad\\path", "C:drive"):
+        # ZipInfo normalizes Windows separators on Windows itself. Include a
+        # traversal component so this remains unsafe after that normalization,
+        # rather than accidentally testing an ordinary nested file there.
+        for name in ("../escape", "/absolute", "bad\\..\\escape", "C:drive"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 archive = root / "module.zip"
