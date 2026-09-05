@@ -44,6 +44,7 @@ ASSETS_DIR = ROOT / "assets"
 APP_ICON = ASSETS_DIR / "app_icon.ico"
 TEMPLATE_UPDATE_BUNDLE_NAME = "template-update"
 CORE_LOCK_PATH = ROOT / "scripts" / "core-lock.windows-x64.json"
+DOWNLOAD_CACHE = ROOT / ".cache" / "core-downloads"
 ROUTING_SOURCE_ID = "runetfreedom-routing-data"
 ROUTING_ARCHIVE_LIMIT_BYTES = 128 * 1024 * 1024
 SINGBOX_RULE_SET_RELATIVE_PATHS = (
@@ -188,6 +189,48 @@ def _routing_source(lock_path: Path) -> dict:
 
 
 def _download_locked_archive(source: dict, destination: Path) -> None:
+    """Share the core-bundle cache; never trust a cached name without its hash."""
+    name = str(source.get("archive") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.zip", name):
+        raise RuntimeError("Routing archive must have a plain ZIP filename")
+    expected = str(source.get("sha256") or "").lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise RuntimeError("Routing source has no valid SHA-256")
+    url = str(source.get("url") or "")
+    if not url.startswith("https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/"):
+        raise RuntimeError("Routing source URL is outside the approved repository")
+
+    DOWNLOAD_CACHE.mkdir(parents=True, exist_ok=True)
+    cached = DOWNLOAD_CACHE / name
+    valid = False
+    if cached.is_file() and 0 < cached.stat().st_size <= ROUTING_ARCHIVE_LIMIT_BYTES:
+        with cached.open("rb") as handle:
+            valid = hashlib.file_digest(handle, "sha256").hexdigest() == expected
+    if valid:
+        _print(f"Routing cache hit: {name}")
+    else:
+        # Each writer owns its temporary file. Only a complete, verified archive
+        # becomes visible to subsequent dev/stable builds.
+        with tempfile.NamedTemporaryFile(
+            dir=DOWNLOAD_CACHE, prefix=f"{name}.", suffix=".partial", delete=False
+        ) as handle:
+            partial = Path(handle.name)
+        try:
+            _fetch_locked_archive(source, partial)
+            partial.replace(cached)
+        finally:
+            partial.unlink(missing_ok=True)
+    shutil.copyfile(cached, destination)
+    # Also protect against another writer replacing this filename between the
+    # cache check and the copy (for example after a lock update).
+    with destination.open("rb") as handle:
+        actual = hashlib.file_digest(handle, "sha256").hexdigest()
+    if actual != expected:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError("Routing archive SHA-256 changed while copying from cache")
+
+
+def _fetch_locked_archive(source: dict, destination: Path) -> None:
     url = str(source.get("url") or "")
     expected_sha256 = str(source.get("sha256") or "").lower()
     if not url.startswith("https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/"):
@@ -225,7 +268,7 @@ def stage_singbox_rule_sets(
     lock_path: Path = CORE_LOCK_PATH,
     core_dir: Path | None = None,
 ) -> Path:
-    """Download the locked routing snapshot, stage four SRS files, and clean temp data."""
+    """Cache the locked snapshot, stage four SRS files, and clean extraction data."""
 
     source = _routing_source(lock_path)
     destination_root = (core_dir or (APP_DIR / "core")) / "rule-set"
@@ -243,7 +286,7 @@ def stage_singbox_rule_sets(
         archive_path = temp_root / "routing.zip"
         staged_root = temp_root / "rule-set"
         staged_root.mkdir()
-        _print(f"Downloading locked routing data {source.get('version', '')}")
+        _print(f"Preparing locked routing data {source.get('version', '')}")
         _download_locked_archive(source, archive_path)
         try:
             with zipfile.ZipFile(archive_path, "r") as archive:

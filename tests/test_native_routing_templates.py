@@ -175,8 +175,10 @@ class RoutingAssetOwnershipTests(unittest.TestCase):
         script = (ROOT / "scripts" / "build_core_bundle.ps1").read_text(encoding="utf-8")
         self.assertIn("$targetParent = Split-Path -Parent $targetPath", script)
         self.assertIn("Remove-Item -LiteralPath $temporaryRoot -Recurse -Force", script)
-        self.assertIn('$source.id -eq "runetfreedom-routing-data"', script)
-        self.assertIn("foreach ($archivePath in $ephemeralArchives)", script)
+        self.assertIn('Join-Path $repoRoot ".cache/core-downloads"', script)
+        self.assertIn("$archivePath = Get-VerifiedArchive $source $DownloadCache", script)
+        self.assertNotIn("$ephemeralArchives", script)
+        self.assertNotIn("$archivePath", script.rsplit("finally {", 1)[1])
         protected = {
             item["id"]: item
             for item in sources

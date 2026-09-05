@@ -270,8 +270,14 @@ class BuildPayloadTests(unittest.TestCase):
             stale.parent.mkdir(parents=True)
             stale.write_bytes(b"stale")
 
-            with patch.object(build, "urlopen", return_value=Response()):
+            with (
+                patch.object(build, "urlopen", return_value=Response()) as request,
+                patch.object(build, "DOWNLOAD_CACHE", root / "cache"),
+            ):
                 destination = build.stage_singbox_rule_sets(lock_path, core_dir)
+                build.stage_singbox_rule_sets(lock_path, core_dir)
+                request.assert_called_once()
+                self.assertTrue((root / "cache" / source["archive"]).is_file())
 
             self.assertEqual(destination, core_dir / "rule-set")
             self.assertFalse(stale.exists())
