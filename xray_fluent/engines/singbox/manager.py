@@ -12,6 +12,7 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
 from ... import win_netinfo
+from ...diagnostics import capture_runtime_config
 from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from ...path_utils import resolve_configured_path
 from ...proxy_readiness import probe_listener_role
@@ -52,6 +53,7 @@ class SingBoxManager(QObject):
         self._last_exit_status = QProcess.ExitStatus.NormalExit
         self._uses_tun = False
         self._last_start_failure_retryable = False
+        self.diagnostic_config: dict[str, Any] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -83,6 +85,7 @@ class SingBoxManager(QObject):
         SINGBOX_CONFIG_FILE.write_text(
             json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8"
         )
+        self.diagnostic_config = capture_runtime_config(exe, config)
 
         # Ядро отвергает негодную конфигурацию уже после старта процесса, печатая
         # её причину в свой лог вперемешку с ANSI-кодами. Спросим его заранее,

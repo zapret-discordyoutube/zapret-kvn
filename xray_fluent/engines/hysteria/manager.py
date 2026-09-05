@@ -14,6 +14,7 @@ from typing import Any
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import HYSTERIA_CONFIG_FILE, HYSTERIA_PATH_DEFAULT, PROXY_HOST, RUNTIME_DIR
+from ...diagnostics import capture_runtime_config
 from ...application.hysteria_runtime_contract import (
     SECURITY_FAILURES,
     HysteriaFailureCode,
@@ -74,6 +75,7 @@ class HysteriaManager(QObject):
         self._process_generation = 0
         self._config_path = HYSTERIA_CONFIG_FILE
         self._last_failure_code: HysteriaFailureCode | None = None
+        self.diagnostic_config: dict[str, Any] | None = None
         self._compatibility_allow_parallel = False
         self._compatibility_verify_remote = True
         self._attempt_started_at = 0.0
@@ -165,6 +167,7 @@ class HysteriaManager(QObject):
             temporary.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
             temporary.chmod(0o600)
             temporary.replace(self._config_path)
+            self.diagnostic_config = capture_runtime_config(exe, config)
         except OSError as exc:
             self._cleanup_config()
             self._emit_error(f"Не удалось записать временный конфиг: {exc}", stage="write_config")

@@ -23,6 +23,7 @@ from ...application.async_steps import (
 )
 from ...application.port_allocator import is_tcp_port_bindable
 from ...constants import PROXY_HOST, RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
+from ...diagnostics import capture_runtime_config
 from ...path_utils import resolve_configured_path
 from ...proxy_readiness import probe_listener_role
 from ...subprocess_utils import (
@@ -59,6 +60,7 @@ class XrayManager(QObject):
         self._last_exit_status = QProcess.ExitStatus.NormalExit
         self._last_exit_expected = False
         self._exe_path: Path | None = None
+        self.diagnostic_config: dict[str, Any] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -111,6 +113,7 @@ class XrayManager(QObject):
 
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         XRAY_CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
+        self.diagnostic_config = capture_runtime_config(exe, config)
 
         self._starting = True
         self._startup_failure_reported = False

@@ -203,7 +203,7 @@ from .constants import (
     XRAY_TEMPLATES_DIR,
     STATE_SCHEMA_VERSION,
 )
-from .diagnostics import export_diagnostics
+from .diagnostics import collect_runtime_diagnostics, export_diagnostics
 from .models import (
     AppSettings,
     AppState,
@@ -3514,7 +3514,8 @@ class AppController(QObject):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = LOG_DIR / f"diagnostics_{stamp}.zip"
         return export_diagnostics(output, self.state, self.recent_logs,
-                                  runtime_errors=self.runtime_errors.snapshot())
+                                  runtime_errors=self.runtime_errors.snapshot(),
+                                  runtime=collect_runtime_diagnostics(self))
 
     def auto_connect_if_needed(self) -> None:
         if not self.state.settings.auto_connect_last or self.locked:
