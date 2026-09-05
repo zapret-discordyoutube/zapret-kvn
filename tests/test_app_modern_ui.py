@@ -87,7 +87,7 @@ class OfflineCountryTests(unittest.TestCase):
         reader._reader.get.return_value={'country':{'iso_code':'US'}}
         factory.return_value.__enter__.return_value=reader
         results=[]
-        worker=CountryResolver([('a',('vpn.example',),('vpn.example',)),('b',('8.8.8.8',),('8.8.8.8',)),('c',('v6',),('2606:4700:4700::1111',))],database_factory=factory)
+        worker=CountryResolver([('a',('vpn.example',),('vpn.example',)),('b',('8.8.8.8',),('8.8.8.8',)),('c',('v6',),('2606:4700:4700::1111',))],database_factory=factory,cache_provider=lambda: {})
         worker.resolved.connect(results.append)
         with patch('socket.getaddrinfo',side_effect=AssertionError('DNS forbidden')), patch('socket.socket',side_effect=AssertionError('socket forbidden')), patch('urllib.request.urlopen',side_effect=AssertionError('HTTP forbidden')):
             worker.run()

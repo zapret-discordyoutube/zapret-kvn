@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from PyQt6.QtCore import QAbstractProxyModel, QModelIndex, Qt, QSize
 from PyQt6.QtGui import QFont
-from .nodes_table_model import NODE_ID_ROLE, ACTIVE_ROLE, node_type_text
+from .nodes_table_model import NODE_ID_ROLE, ACTIVE_ROLE, NODE_ROW_HEIGHT, node_type_text
 
 GROUP_KEY_ROLE = int(Qt.ItemDataRole.UserRole) + 20
 GROUP_MODES = {"source": "Подписки", "group": "Группы", "country": "Страны", "type": "Протоколы", "none": "Без группировки"}
@@ -160,7 +160,7 @@ class NodesGroupModel(QAbstractProxyModel):
             return None
         item = index.internalPointer()
         if role == Qt.ItemDataRole.SizeHintRole:
-            return QSize(0, 36)
+            return QSize(0, NODE_ROW_HEIGHT)
         if item.node_id:
             source = self.mapToSource(index)
             if role == Qt.ItemDataRole.FontRole and source.data(ACTIVE_ROLE):

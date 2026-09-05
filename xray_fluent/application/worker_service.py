@@ -29,6 +29,7 @@ def ping_nodes(controller: AppController, node_ids: set[str] | None = None) -> N
     controller._ping_completed = 0
     controller.bulk_task_progress.emit("ping", 0, controller._ping_total, False)
     controller._ping_worker = PingWorker(nodes)
+    controller._ping_worker.peer_observed.connect(controller._on_ping_peer_observed)
     controller._ping_worker.result.connect(controller._on_ping_result)
     controller._ping_worker.progress.connect(controller._on_ping_progress)
     controller._ping_worker.completed.connect(controller._on_ping_complete)
@@ -98,6 +99,18 @@ def test_connectivity(controller: AppController, url: str | None = None) -> None
     controller._connectivity_worker.start()
 
 
+def on_ping_peer_observed(controller, node_id, fingerprint, addresses):
+    if controller.sender() is not controller._ping_worker:
+        return
+    from ..profiles.geoip import endpoint_hosts
+    from .node_runtime_service import remember_country_addresses
+    node = controller._get_node_by_id(node_id)
+    if node is None or endpoint_hosts(node) != fingerprint:
+        return
+    remember_country_addresses(controller, node, addresses, refresh=False)
+    controller._country_ping_pending = True
+
+
 def on_ping_result(controller: AppController, node_id: str, ping_ms: int | None) -> None:
     if controller.sender() is not controller._ping_worker:
         return
@@ -123,6 +136,9 @@ def on_ping_complete(controller: AppController) -> None:
         return
     controller.bulk_task_progress.emit("ping", controller._ping_completed, controller._ping_total, True)
     controller._ping_worker = None
+    if getattr(controller, "_country_ping_pending", False):
+        controller._country_ping_pending = False
+        controller._start_country_ip_resolution()
     controller.schedule_save()
 
 

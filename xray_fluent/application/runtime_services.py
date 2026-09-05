@@ -247,7 +247,7 @@ def shutdown(controller: AppController) -> None:
     controller._country_shutdown = True
     if controller._country_resolver and controller._country_resolver.isRunning():
         controller._country_resolver.requestInterruption()
-        controller._country_resolver.wait(2000)
+        controller._country_resolver.wait(6000)
     if controller._ping_worker and controller._ping_worker.isRunning():
         controller._ping_worker.cancel()
         controller._ping_worker.wait(500)

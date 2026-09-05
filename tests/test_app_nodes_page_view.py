@@ -61,13 +61,13 @@ class NodesPageViewTestCase(unittest.TestCase):
 class NodesPageCompactLayoutTests(NodesPageViewTestCase):
     """AC8: compact table — 30px rows, ~18x13 flag icon, default visible columns."""
 
-    def test_row_height_constant_is_30(self) -> None:
-        self.assertEqual(_ROW_HEIGHT, 36)
+    def test_row_height_constant_is_28(self) -> None:
+        self.assertEqual(_ROW_HEIGHT, 28)
 
-    def test_table_rows_are_30px(self) -> None:
+    def test_table_rows_are_28px(self) -> None:
         self.page.set_nodes([Node(name="A")])
         index = self.page._group_model.index(0, 0)
-        self.assertEqual(index.data(Qt.ItemDataRole.SizeHintRole).height(), 36)
+        self.assertEqual(index.data(Qt.ItemDataRole.SizeHintRole).height(), 28)
 
     def test_flag_icon_size_is_18x13(self) -> None:
         self.assertEqual((_FLAG_ICON_SIZE.width(), _FLAG_ICON_SIZE.height()), (18, 13))
@@ -228,6 +228,31 @@ class NodesPageColumnLayoutTests(NodesPageViewTestCase):
         _APP.processEvents()
         self.assertEqual(before, self.page.column_widths())
         self.assertEqual(self.page.table.header().sectionSize(COL_NAME), 360)
+        header = self.page.table.header()
+        used = sum(header.sectionSize(i) for i in range(header.count()) if not header.isSectionHidden(i))
+        self.assertEqual(used, self.page.table.viewport().width())
+
+    def test_refresh_does_not_request_a_server_switch(self):
+        requests = []
+        self.page.selected_node_changed.connect(requests.append)
+        for _ in range(3):
+            self.page.set_nodes([Node(id='one'), Node(id='two')], 'one')
+        self.assertEqual(requests, [])
+        self.page._select_node('two')
+        self.assertEqual(requests, ['two'])
+
+    def test_find_shortcut_shows_search_and_escape_clears_it(self):
+        self.page.show()
+        self.page.activateWindow()
+        self.page.table.setFocus()
+        _APP.processEvents()
+        self.assertTrue(self.page.search_edit.isHidden())
+        QTest.keyClick(self.page.table, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        self.assertFalse(self.page.search_edit.isHidden())
+        self.page.search_edit.setText('missing')
+        QTest.keyClick(self.page.search_edit, Qt.Key.Key_Escape)
+        self.assertTrue(self.page.search_edit.isHidden())
+        self.assertEqual(self.page.search_edit.text(), '')
 
     def test_name_drag_does_not_resize_neighbors_and_is_persisted(self):
         header = self.page.table.header()

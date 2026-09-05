@@ -12,6 +12,8 @@ from ..profiles.models import Node
 from .privacy import endpoint_text
 from .theme import error_color, success_color, warning_color
 
+NODE_ROW_HEIGHT = 28
+
 PING_BUSY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 SPEED_PROGRESS_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 ACTIVE_ROLE = int(Qt.ItemDataRole.UserRole) + 3

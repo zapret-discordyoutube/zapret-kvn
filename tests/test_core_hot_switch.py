@@ -591,7 +591,7 @@ class HybridRuntimeStartupTests(unittest.TestCase):
             nodes=[current, first, second],
             selected_node_id=current.id,
         )
-        controller._pending_hysteria_replacement_node_id = None
+        controller._pending_transport_node_id = None
         controller.singbox.is_running = True
 
         for _ in range(2):
@@ -604,7 +604,7 @@ class HybridRuntimeStartupTests(unittest.TestCase):
             )
 
         self.assertEqual(controller.state.selected_node_id, current.id)
-        self.assertEqual(controller._pending_hysteria_replacement_node_id, first.id)
+        self.assertEqual(controller._pending_transport_node_id, first.id)
         controller._request_transition.assert_called_once_with("node switched")
         controller._try_hot_switch_selected_node.assert_not_called()
         controller.auto_switch_triggered.emit.assert_called_once_with(first.name)

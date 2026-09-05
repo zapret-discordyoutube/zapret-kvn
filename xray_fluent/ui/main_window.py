@@ -1169,6 +1169,11 @@ class MainWindow(FluentWindow):
     def _export_diagnostics(self) -> None:
         path = self.controller.build_diagnostics()
         self._show_status("success", f"Диагностика экспортирована: {path}")
+        from .file_manager import reveal_file
+        try:
+            reveal_file(path)
+        except OSError:
+            self._show_status("warning", f"Архив сохранён, но папку открыть не удалось: {path}")
 
     # ── Zapret ───────────────────────────────────────────────
 

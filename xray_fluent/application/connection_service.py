@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import ctypes
 import socket
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..constants import DEFAULT_XRAY_STATS_API_PORT
+from ..engines.singbox.operations import capture_runtime_session
 from ..engines.singbox import (
     SingboxRuntimePlan,
     start_proxy as start_singbox_proxy,
@@ -35,6 +35,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
     if controller._connecting:
         return False
     controller._connecting = True
+    generation = controller._transition_generation
     try:
         if controller._reconnecting and not allow_during_reconnect:
             controller._set_connection_status("starting", "Переподключение...", level="info")
@@ -48,7 +49,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             )
             return False
 
-        node = controller.selected_node
+        node = controller._runtime_selected_node()
         if node is None and not controller._can_connect_without_selected_node():
             message = "В конфиге есть outbound tag `proxy`. Сначала выберите сервер."
             controller._set_connection_status("error", message, level="warning")
@@ -87,15 +88,16 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             result = start_singbox_proxy(controller, node, prev_active_core=prev_active_core)
         if result is None:
             return False
+        if generation != controller._transition_generation:
+            controller._stop_active_connection_processes(disable_proxy=not controller._desired_connected)
+            controller._refresh_connected_state()
+            return False
         singbox_plan: SingboxRuntimePlan = result.plan
         session_label = result.session_label
 
         session_node = node
         if not singbox_plan.used_selected_node:
             session_node = None
-
-        if session_node is not None:
-            session_node.last_used_at = datetime.now(timezone.utc).isoformat()
 
         outbound_pool_tags = singbox_plan.selector_tags
         control_core = "xray" if singbox_plan.is_hybrid else "singbox"
@@ -106,6 +108,11 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
                 level="error",
             )
             controller._stop_active_connection_processes(disable_proxy=True)
+            return False
+
+        if generation != controller._transition_generation or not controller._desired_connected:
+            controller._stop_active_connection_processes(disable_proxy=not controller._desired_connected)
+            controller._refresh_connected_state()
             return False
 
         controller._set_connection_status(
@@ -126,46 +133,10 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
             ),
             level="success",
         )
-        controller._capture_active_session(
-            session_node,
-            tun=tun,
-            core=controller._active_core,
-            api_port=controller._xray_api_port,
-            hybrid=bool(singbox_plan is not None and singbox_plan.is_hybrid),
-            sidecar_kind=singbox_plan.sidecar_kind if singbox_plan is not None else "",
-            socks_port=singbox_plan.socks_port or None,
-            http_port=singbox_plan.http_port or None,
-            sidecar_relay_port=(
-                singbox_plan.xray_sidecar.relay_port
-                if singbox_plan and singbox_plan.xray_sidecar
-                else singbox_plan.hysteria_sidecar.relay_port
-                if singbox_plan and singbox_plan.hysteria_sidecar
-                else singbox_plan.amnezia_sidecar.relay_port
-                if singbox_plan and singbox_plan.amnezia_sidecar
-                else 0
-            ),
-            protect_ss_port=controller._protect_ss_port,
-            protect_ss_password=controller._protect_ss_password,
-            ping_host=(
-                controller._infer_singbox_ping_target(
-                    singbox_plan.singbox_config,
-                    session_node,
-                )[0]
-            ),
-            ping_port=(
-                controller._infer_singbox_ping_target(
-                    singbox_plan.singbox_config,
-                    session_node,
-                )[1]
-            ),
-            outbound_pool_tags=outbound_pool_tags,
-            hybrid_relay_selector_tags=(
-                singbox_plan.hybrid_relay_selector_tags if singbox_plan is not None else ()
-            ),
-            hybrid_relay_selected_tag=(
-                singbox_plan.hybrid_relay_selected_tag if singbox_plan is not None else ""
-            ),
-        )
+        capture_runtime_session(controller, singbox_plan, node, tun=tun)
+        if not controller._commit_pending_transport_selection(session_node):
+            controller._handle_unexpected_disconnect()
+            return False
         controller.schedule_save()
         controller._traffic_history.start_session(session_label, "singbox")
         # П5 (AC13): подключение состоялось (сессия зафиксирована, статус
@@ -178,6 +149,11 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
 
 def disconnect_current(controller: AppController, disable_proxy: bool = True, emit_status: bool = True) -> bool:
     controller._disconnecting = True
+    # A pending recovery may have set switching before a runner was started.
+    # A user disconnect owns that state too; otherwise callbacks stay muted.
+    if not controller._reconnecting:
+        controller._switching = False
+        controller._hysteria_recovery_active = False
     try:
         controller._cleanup_connection_runtime_state(
             end_traffic_session=True,
@@ -191,6 +167,9 @@ def disconnect_current(controller: AppController, disable_proxy: bool = True, em
         if stopped:
             controller._active_core = "singbox"
             controller._clear_active_session()
+        was_connected, connected = controller._refresh_connected_state()
+        if was_connected != connected and not controller._switching:
+            controller.connection_changed.emit(connected)
         if emit_status:
             if stopped:
                 controller._set_connection_status("idle", "Отключено", level="info")

@@ -161,11 +161,15 @@ def set_selected_node(controller: AppController, node_id: str, *, reset_auto_swi
     from .protocol_core import ProtocolCore, protocol_core
     target = next((node for node in controller.state.nodes if node.id == node_id), None)
     session = getattr(controller, "_active_session", None)
+    # Re-selecting the current or already requested row is idempotent.
+    pending = getattr(controller, "_pending_transport_node_id", None)
+    if node_id == (pending or controller.state.selected_node_id):
+        return
     if controller.connected and target is not None and (
         protocol_core(target) is ProtocolCore.AMNEZIA or
         (session is not None and session.sidecar_kind == "amnezia")
     ):
-        controller._pending_amnezia_node_id = node_id
+        controller._pending_transport_node_id = node_id
         if reset_auto_switch:
             controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
             controller._auto_switch_manual_hold = True

@@ -40,6 +40,8 @@ def needs_transition(context: TransitionContext) -> bool:
 def compute_transition_action(context: TransitionContext) -> str | None:
     if not context.desired_connected:
         return "disconnect" if context.connected else None
+    if context.current_transition_signature == context.blocked_transition_signature:
+        return None
     if context.locked:
         return None
     if not context.has_selected_node and not context.can_connect_without_selected_node:

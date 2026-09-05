@@ -65,13 +65,13 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         controller.connected = True
         controller._desired_connected = True
         controller._transition_generation = 1
-        controller._pending_amnezia_node_id = None
+        controller._pending_transport_node_id = None
         controller._hysteria_recovery_active = False
-        controller._pending_hysteria_replacement_node_id = None
-        controller._commit_pending_hysteria_selection.return_value = True
-        controller._clear_pending_hysteria_selection.side_effect = lambda: setattr(
+        from xray_fluent.application.controller import AppController
+        controller._commit_pending_transport_selection.side_effect = lambda node: AppController._commit_pending_transport_selection(controller, node)
+        controller._clear_pending_transport_selection.side_effect = lambda: setattr(
             controller,
-            "_pending_hysteria_replacement_node_id",
+            "_pending_transport_node_id",
             None,
         )
         controller.state.selected_node_id = node.id
@@ -106,7 +106,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                         controller, _ = self._restart_controller(tun=tun)
                         candidate_node = controller._runtime_selected_node.return_value
                         controller.state.selected_node_id = "old-committed"
-                        controller._pending_amnezia_node_id = candidate_node.id
+                        controller._pending_transport_node_id = candidate_node.id
                         plan = (controller._plan_runtime_singbox.return_value if tun else controller._plan_proxy_runtime_singbox.return_value)
                         plan.amnezia_sidecar = SimpleNamespace(relay_port=11819)
                         plan.sidecar_kind = "amnezia"
@@ -119,7 +119,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                         def supersede(result):
                             controller._transition_generation += 1
                             controller._desired_connected = not disconnect
-                            controller._pending_amnezia_node_id = "newer-candidate"
+                            controller._pending_transport_node_id = "newer-candidate"
                             return result
 
                         if stage == "sidecar":
@@ -132,7 +132,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                         restart = restart_runtime if tun else restart_proxy_runtime
                         self.assertFalse(restart(controller, "test supersession"))
                         self.assertEqual(controller.state.selected_node_id, "old-committed")
-                        self.assertEqual(controller._pending_amnezia_node_id, "newer-candidate")
+                        self.assertEqual(controller._pending_transport_node_id, "newer-candidate")
                         self.assertIs(controller.amnezia, old_manager)
                         controller._capture_active_session.assert_not_called()
                         controller.selection_changed.assert_not_called()
@@ -154,7 +154,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     controller, _ = self._restart_controller(tun=tun)
                     node = controller._runtime_selected_node.return_value
                     controller.state.selected_node_id = "old-committed"
-                    controller._pending_amnezia_node_id = node.id
+                    controller._pending_transport_node_id = node.id
                     plan = (controller._plan_runtime_singbox.return_value if tun else controller._plan_proxy_runtime_singbox.return_value)
                     plan.amnezia_sidecar = SimpleNamespace(relay_port=11819)
                     plan.sidecar_kind = "amnezia"
@@ -179,7 +179,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     controller._rollback_singbox_front.return_value = True
                     restart = restart_runtime if tun else restart_proxy_runtime
                     self.assertEqual(restart(controller, "test replacement"), failure is None)
-                    self.assertIsNone(controller._pending_amnezia_node_id)
+                    self.assertIsNone(controller._pending_transport_node_id)
                     if failure is None:
                         self.assertEqual(controller.state.selected_node_id, node.id)
                         self.assertIs(controller.amnezia, replacement)
@@ -201,7 +201,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     original_id = controller.state.selected_node_id
                     controller._hysteria_recovery_active = True
                     controller._hysteria_last_failure_code = HysteriaFailureCode.TARGET_NETWORK_TIMEOUT
-                    controller._pending_hysteria_replacement_node_id = 'candidate'
+                    controller._pending_transport_node_id = 'candidate'
                     controller._desired_connected = True
                     controller._refresh_connected_state.return_value = (True, False)
                     plan = (controller._plan_runtime_singbox.return_value if tun
@@ -226,12 +226,12 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     restart = restart_runtime if tun else restart_proxy_runtime
                     self.assertFalse(restart(controller, 'automatic recovery'))
                     controller._commit_hysteria_replacement.assert_not_called()
-                    controller._commit_pending_hysteria_selection.assert_not_called()
+                    controller._commit_pending_transport_selection.assert_not_called()
                     controller._rollback_singbox_front.assert_not_called()
                     controller.schedule_save.assert_not_called()
                     controller._handle_unexpected_disconnect.assert_called_once()
                     self.assertEqual(controller.state.selected_node_id, original_id)
-                    self.assertIsNone(controller._pending_hysteria_replacement_node_id)
+                    self.assertIsNone(controller._pending_transport_node_id)
                     self.assertFalse(controller._desired_connected)
                     if stage != 'pending':
                         replacement.stop.assert_called_once_with(expected=True)
@@ -305,7 +305,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             "hy2://replacement@replacement.example:443/#replacement"
         )
         controller._runtime_selected_node.return_value = replacement_node
-        controller._pending_hysteria_replacement_node_id = replacement_node.id
+        controller._pending_transport_node_id = replacement_node.id
         plan = controller._plan_proxy_runtime_singbox.return_value
         plan.hysteria_sidecar = SimpleNamespace(relay_port=12001)
         plan.is_hysteria_sidecar = True
@@ -322,8 +322,8 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         controller._start_singbox_runtime_plan.assert_not_called()
         controller._handle_unexpected_disconnect.assert_called_once_with()
         self.assertEqual(controller.state.selected_node_id, old_node.id)
-        self.assertIsNone(controller._pending_hysteria_replacement_node_id)
-        controller._commit_pending_hysteria_selection.assert_not_called()
+        self.assertIsNone(controller._pending_transport_node_id)
+        controller._commit_pending_transport_selection.assert_not_called()
 
     def test_default_proxy_runtime_replaces_tun_with_public_proxy_inbounds(self) -> None:
         plan = self._build_plan(

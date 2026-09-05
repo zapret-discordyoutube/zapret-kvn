@@ -31,10 +31,10 @@ def _classify_singbox(payload: dict, domain: str) -> str:
 
 
 class ZapretMoeProxyTemplateTests(unittest.TestCase):
-    def test_all_native_templates_match_the_unified_vpnbot_route_table(self) -> None:
+    def test_all_native_templates_match_the_project_route_table(self) -> None:
         expectations = json.loads(EXPECTATIONS_PATH.read_text(encoding="utf-8"))
         self.assertEqual(1, expectations["schema_version"])
-        self.assertEqual("vpnbot-network-policy-v2", expectations["policy_id"])
+        self.assertEqual("zapret-kvn-native-routing-v3", expectations["policy_id"])
         self.assertRegex(expectations["source_policy_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             12,

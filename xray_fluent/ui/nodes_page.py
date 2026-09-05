@@ -12,9 +12,7 @@ from qfluentwidgets import (
     ComboBox,
     BodyLabel,
     PushButton,
-    PrimaryPushButton,
-    ToggleButton,
-    FlowLayout,
+    TransparentToggleToolButton,
     FluentIcon as FIF,
     PrimaryToolButton,
     SearchLineEdit,
@@ -49,12 +47,13 @@ from .nodes_table_model import (
     COLUMN_SPECS,
     DEFAULT_VISIBLE_COLUMNS,
     NODE_ID_ROLE,
+    NODE_ROW_HEIGHT,
     NodesTableModel,
 )
 from .privacy import HoldToRevealButton
 from .theme import on_accent_changed
 
-_ROW_HEIGHT = 36
+_ROW_HEIGHT = NODE_ROW_HEIGHT
 _FLAG_ICON_SIZE = QSize(18, 13)
 
 # Kept as a compatibility export; values come from the column contract above.
@@ -112,6 +111,7 @@ class NodesPage(StackedSection):
 
         self._collapsed_groups: set[str] = set()
         self._restoring_groups = False
+        self._restoring_nodes = False
         self._nodes: list[Node] = []
         self._id_to_node: dict[str, Node] = {}
         self._sort_ascending = True
@@ -141,58 +141,55 @@ class NodesPage(StackedSection):
         list_page = QWidget()
         root = QVBoxLayout(list_page)
         root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        root.setSpacing(8)
 
         title = SubtitleLabel("Серверы", self)
-        root.addWidget(title)
+        title_row = QHBoxLayout()
+        title_row.addWidget(title)
+        title_row.addStretch()
+        root.addLayout(title_row)
 
         # --- Filter row ---
-        filter_row = FlowLayout()
-        filter_row.setSpacing(8)
 
         self.search_edit = SearchLineEdit(self)
         self.search_edit.setPlaceholderText("Поиск серверов")
         root.addWidget(self.search_edit)
+        self.search_edit.hide()
+        self.search_edit.installEventFilter(self)
 
         self.group_filter = ComboBox(self)
         self.group_filter.setMinimumWidth(120)
         self.group_filter.addItem(_ALL_GROUPS_LABEL)
-        filter_row.addWidget(self.group_filter)
 
         self.tag_filter = ComboBox(self)
         self.tag_filter.setMinimumWidth(120)
         self.tag_filter.addItem(_ALL_TAGS_LABEL)
-        filter_row.addWidget(self.tag_filter)
 
         self.source_filter = ComboBox(self)
         self.source_filter.setMinimumWidth(130)
         self.source_filter.addItem(_ALL_SOURCES_LABEL)
-        filter_row.addWidget(self.source_filter)
 
-        filter_row.addWidget(VerticalSeparator(self))
 
         self.sort_combo = ComboBox(self)
         self.sort_combo.setMinimumWidth(110)
         for key in _SORT_KEYS:
             self.sort_combo.addItem(_SORT_KEY_LABELS[key])
-        filter_row.addWidget(self.sort_combo)
 
         self.sort_order_btn = TransparentToolButton(FIF.UP, self)
         self.sort_order_btn.setToolTip("Порядок сортировки")
-        filter_row.addWidget(self.sort_order_btn)
 
-        root.addLayout(filter_row)
+
 
         # --- Action toolbar ---
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
 
-        self.import_btn = PrimaryPushButton(FIF.ADD, "Добавить", self)
+        self.import_btn = PrimaryToolButton(FIF.ADD, self)
         self.import_btn.setToolTip("Импорт из буфера (Ctrl+V)")
         toolbar.addWidget(self.import_btn)
 
 
-        self.edit_btn = PushButton(FIF.EDIT, "Изменить", self)
+        self.edit_btn = TransparentToolButton(FIF.EDIT, self)
         self.edit_btn.setToolTip("Редактировать")
         toolbar.addWidget(self.edit_btn)
 
@@ -206,7 +203,7 @@ class NodesPage(StackedSection):
         toolbar.addWidget(self.reveal_addresses_btn)
 
 
-        self.ping_btn = PushButton(FIF.SEND, "Пинг", self)
+        self.ping_btn = TransparentToolButton(FIF.SEND, self)
         self.ping_btn.setToolTip("Пинг выбранных")
         toolbar.addWidget(self.ping_btn)
 
@@ -215,7 +212,7 @@ class NodesPage(StackedSection):
         toolbar.addWidget(self.ping_all_btn)
 
 
-        self.speed_test_btn = PushButton(FIF.SPEED_HIGH, "Скорость", self)
+        self.speed_test_btn = TransparentToolButton(FIF.SPEED_HIGH, self)
         self.speed_test_btn.setToolTip("Тест скорости выбранных")
         toolbar.addWidget(self.speed_test_btn)
 
@@ -253,6 +250,15 @@ class NodesPage(StackedSection):
         self.move_down_btn.setEnabled(False)
         toolbar.addWidget(self.move_down_btn)
 
+        self.search_btn = TransparentToolButton(FIF.SEARCH, self)
+        self.search_btn.setToolTip("Поиск (Ctrl+F)")
+        self.search_btn.clicked.connect(self._show_search)
+        toolbar.addWidget(self.search_btn)
+        self.filter_btn = TransparentToolButton(FIF.FILTER, self)
+        self.filter_btn.setToolTip("Фильтры, группировка и сортировка")
+        self.filter_btn.clicked.connect(self._show_filter_menu)
+        toolbar.addWidget(self.filter_btn)
+        toolbar.addWidget(self.sort_order_btn)
         toolbar.addStretch()
 
         root.addLayout(toolbar)
@@ -328,18 +334,19 @@ class NodesPage(StackedSection):
         self.group_by_combo = ComboBox(self)
         for mode, title in GROUP_MODES.items():
             self.group_by_combo.addItem(title, userData=mode)
-        filter_row.addWidget(self.group_by_combo)
         self.group_by_combo.currentIndexChanged.connect(self._change_grouping)
-        self.favorites_filter = ToggleButton("★ Избранное", self)
-        filter_row.addWidget(self.favorites_filter)
+        self.favorites_filter = TransparentToggleToolButton(FIF.HEART, self)
+        self.favorites_filter.setToolTip("Только избранные")
+        toolbar.insertWidget(8, self.favorites_filter)
         self.favorites_filter.toggled.connect(self._change_favorites_filter)
         self.clear_filters_btn = PushButton("Сбросить фильтры", self)
-        filter_row.addWidget(self.clear_filters_btn)
         self.clear_filters_btn.clicked.connect(self._clear_filters)
-        self.view_btn = PushButton("Вид", self)
+        self.view_btn = TransparentToolButton(FIF.VIEW, self)
+        self.view_btn.setToolTip("Столбцы и вид таблицы")
         toolbar.addWidget(self.view_btn)
         self.view_btn.clicked.connect(lambda: self._on_header_context_menu(self.table.header().rect().bottomLeft()))
-        self.more_btn = PushButton("Ещё", self)
+        self.more_btn = TransparentToolButton(FIF.MORE, self)
+        self.more_btn.setToolTip("Ещё действия")
         toolbar.addWidget(self.more_btn)
         self.more_btn.clicked.connect(self._show_more_menu)
         for button in (self.ping_all_btn, self.speed_test_all_btn, self.export_outbound_btn,
@@ -347,7 +354,11 @@ class NodesPage(StackedSection):
             toolbar.removeWidget(button)
             button.hide()
         self.counter_label = BodyLabel("Серверов: 0", self)
-        root.addWidget(self.counter_label)
+        title_row.addWidget(self.counter_label)
+        # Menu-backed controls retain the existing persisted filter contract.
+        for control in (self.group_filter, self.tag_filter, self.source_filter,
+                        self.sort_combo, self.group_by_combo, self.clear_filters_btn):
+            control.hide()
         root.addWidget(self.table, 1)
         self._group_model.layoutChanged.connect(self._restore_groups)
         self.table.collapsed.connect(lambda index: self._group_expanded(index, False))
@@ -422,21 +433,30 @@ class NodesPage(StackedSection):
 
         # --- Keyboard shortcuts ---
         paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self)
+        paste_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         paste_shortcut.activated.connect(self.import_clipboard_requested)
+        find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_shortcut.activated.connect(self._show_search)
 
     # ── Public API ──
 
     def set_nodes(self, nodes: list[Node], selected_id: str | None = None) -> None:
-        self._nodes = list(nodes)
-        self._id_to_node = {node.id: node for node in self._nodes}
-        self._rebuild_filter_combos()
-        self._proxy.invalidate_haystacks()
-        self.table.setUpdatesEnabled(False)
-        self._table_model.update_nodes(self._nodes)
-        self.table.setUpdatesEnabled(True)
-        if selected_id and selected_id not in self._selected_ids():
-            self._select_node(selected_id)
-        self._emit_selection()
+        self._restoring_nodes = True
+        try:
+            self._nodes = list(nodes)
+            self._id_to_node = {node.id: node for node in self._nodes}
+            self._rebuild_filter_combos()
+            self._proxy.invalidate_haystacks()
+            self.table.setUpdatesEnabled(False)
+            self._table_model.update_nodes(self._nodes)
+            self.table.setUpdatesEnabled(True)
+            if selected_id and selected_id not in self._selected_ids():
+                self._select_node(selected_id)
+            self._emit_selection()
+        finally:
+            self._restoring_nodes = False
+
 
     def set_subscriptions(self, subscriptions: list[Subscription]) -> None:
         self._source_names = {item.id: item.name or "Подписка" for item in subscriptions}
@@ -746,10 +766,31 @@ class NodesPage(StackedSection):
         return columns
 
     def _relayout_flex_column(self) -> None:
-        # Kept for callers that also change visibility. No automatic stretching.
-        return
+        if self._adjusting_column_width:
+            return
+        columns = [i for i in range(len(COLUMN_SPECS)) if not self.table.isColumnHidden(i)]
+        widths = {i: self._column_widths[COLUMN_KEYS[i]] for i in columns}
+        spare = self.table.viewport().width() - sum(widths.values())
+        # Keep the name at its preferred width; share open space across the
+        # remaining fields instead of creating one enormous first column.
+        receivers = [i for i in columns if i != COL_NAME]
+        if spare > 0 and receivers:
+            extra, remainder = divmod(spare, len(receivers))
+            for offset, col in enumerate(receivers):
+                widths[col] += extra + (offset < remainder)
+        elif spare > 0:
+            widths[COL_NAME] += spare
+        for col, width in widths.items():
+            self._resize_section_quietly(col, width)
 
     def eventFilter(self, obj, event) -> bool:
+        if obj is self.search_edit and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            self.search_edit.clear()
+            self._search_timer.stop()
+            self._apply_search()
+            self.search_edit.hide()
+            self.table.setFocus()
+            return True
         if obj is self.table.viewport() and event.type() == QEvent.Type.Resize:
             self._relayout_flex_column()
         return super().eventFilter(obj, event)
@@ -809,6 +850,7 @@ class NodesPage(StackedSection):
         width = self._clamp_column_width(spec.key, new_size)
         self._resize_section_quietly(logical_index, width)
         self._column_widths[spec.key] = width
+        self._relayout_flex_column()
         self._queue_column_layout_save()
 
     def _on_column_moved(
@@ -958,6 +1000,30 @@ class NodesPage(StackedSection):
             width = max(width, metrics.horizontalAdvance(str(self._proxy.index(row, column).data() or "")) + 64)
         self.table.header().resizeSection(column, self._clamp_column_width(spec.key, width))
 
+    def _show_search(self):
+        self.search_edit.show()
+        self.search_edit.setFocus()
+        self.search_edit.selectAll()
+
+    def _show_filter_menu(self):
+        menu = RoundMenu(parent=self)
+        for title, combo in (("Группа", self.group_filter), ("Тег", self.tag_filter),
+                             ("Источник", self.source_filter), ("Группировка", self.group_by_combo),
+                             ("Сортировка", self.sort_combo)):
+            submenu = RoundMenu(title, self)
+            for index in range(combo.count()):
+                action = Action(combo.itemText(index), submenu)
+                action.setCheckable(True)
+                action.setChecked(index == combo.currentIndex())
+                action.triggered.connect(lambda checked=False, c=combo, i=index: c.setCurrentIndex(i))
+                submenu.addAction(action)
+            menu.addMenu(submenu)
+        menu.addSeparator()
+        action = Action("Сбросить фильтры", menu)
+        action.triggered.connect(self._clear_filters)
+        menu.addAction(action)
+        menu.exec(self.filter_btn.mapToGlobal(self.filter_btn.rect().bottomLeft()))
+
     def _show_more_menu(self):
         menu = RoundMenu(parent=self)
         ids = self._selected_ids()
@@ -1002,7 +1068,7 @@ class NodesPage(StackedSection):
         is_manual = self._manual_moves_allowed()
         self.move_up_btn.setEnabled(is_manual and len(ids) == 1)
         self.move_down_btn.setEnabled(is_manual and len(ids) == 1)
-        if len(ids) == 1:
+        if len(ids) == 1 and not self._restoring_nodes:
             self.selected_node_changed.emit(next(iter(ids)))
 
     # ── Button handlers ──

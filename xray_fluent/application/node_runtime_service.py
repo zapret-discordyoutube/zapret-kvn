@@ -18,7 +18,7 @@ def detect_countries_sync(controller: AppController) -> None:
             node.country_code = normalize_country(node.country_override)
 
 
-def remember_country_addresses(controller, node, addresses) -> None:
+def remember_country_addresses(controller, node, addresses, *, refresh=True) -> None:
     """Passively consume an existing runtime resolution; never initiate one."""
     if node is None:
         return
@@ -26,7 +26,8 @@ def remember_country_addresses(controller, node, addresses) -> None:
     known[node.id] = (endpoint_hosts(node), tuple(addresses))
     controller._country_generation = getattr(controller, "_country_generation", 0) + 1
     controller._country_known_addresses = known
-    start_country_ip_resolution(controller)
+    if refresh:
+        start_country_ip_resolution(controller)
 
 
 def start_country_ip_resolution(controller: AppController) -> None:

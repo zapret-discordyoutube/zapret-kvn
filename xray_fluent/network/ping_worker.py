@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+from copy import deepcopy
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
@@ -8,21 +9,36 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..engines.singbox.config_builder import is_singbox_endpoint_node
 from ..profiles.models import Node
+from ..profiles.geoip import endpoint_hosts
 
 
 _MAX_PING_WORKERS = 16
 
 
-def tcp_ping(host: str, port: int, timeout: float = 2.0) -> int | None:
+def _tcp_observation(host: str, port: int, timeout: float = 2.0) -> tuple[int | None, tuple[str, ...]]:
     if not host or not port:
-        return None
+        return None, ()
     start = time.perf_counter()
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            elapsed = (time.perf_counter() - start) * 1000.0
-            return int(elapsed)
+        with socket.create_connection((host, port), timeout=timeout) as connection:
+            elapsed = int((time.perf_counter() - start) * 1000.0)
+            try:
+                peer = (str(connection.getpeername()[0]),)
+            except OSError:
+                peer = ()
+            return elapsed, peer
     except OSError:
-        return None
+        return None, ()
+
+
+def tcp_ping(host: str, port: int, timeout: float = 2.0) -> int | None:
+    return _tcp_observation(host, port, timeout)[0]
+
+
+def _observe_node(node, timeout):
+    if is_singbox_endpoint_node(node):
+        return None, ()
+    return _tcp_observation(node.server, node.port, timeout)
 
 
 def ping_node(node: Node, timeout: float = 2.0) -> int | None:
@@ -47,13 +63,14 @@ def apply_ping_measurement(node: Node, ping_ms: int | None) -> None:
 
 
 class PingWorker(QThread):
+    peer_observed = pyqtSignal(str, object, object)
     result = pyqtSignal(str, object)
     progress = pyqtSignal(int, int)  # current, total
     completed = pyqtSignal()
 
     def __init__(self, nodes: list[Node], timeout: float = 2.0):
         super().__init__()
-        self._nodes = nodes
+        self._nodes = deepcopy(nodes)
         self._timeout = timeout
         self._cancelled = False
 
@@ -68,7 +85,7 @@ class PingWorker(QThread):
 
         max_workers = min(_MAX_PING_WORKERS, total)
         executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ping")
-        pending: dict[Future[int | None], str] = {}
+        pending: dict[Future, tuple[str, tuple[str, ...]]] = {}
         iterator = iter(self._nodes)
         completed = 0
 
@@ -77,8 +94,8 @@ class PingWorker(QThread):
                 node = next(iterator, None)
                 if node is None:
                     break
-                future = executor.submit(ping_node, node, self._timeout)
-                pending[future] = node.id
+                future = executor.submit(_observe_node, node, self._timeout)
+                pending[future] = (node.id, endpoint_hosts(node))
 
             while pending and not self._cancelled:
                 done, _ = wait(tuple(pending), timeout=0.1, return_when=FIRST_COMPLETED)
@@ -86,13 +103,15 @@ class PingWorker(QThread):
                     continue
 
                 for future in done:
-                    node_id = pending.pop(future)
+                    node_id, fingerprint = pending.pop(future)
                     try:
-                        ms = future.result()
+                        ms, addresses = future.result()
                     except Exception:
-                        ms = None
+                        ms, addresses = None, ()
 
                     completed += 1
+                    if addresses:
+                        self.peer_observed.emit(node_id, fingerprint, addresses)
                     self.result.emit(node_id, ms)
                     self.progress.emit(completed, total)
 
@@ -101,8 +120,8 @@ class PingWorker(QThread):
 
                     next_node = next(iterator, None)
                     if next_node is not None:
-                        next_future = executor.submit(ping_node, next_node, self._timeout)
-                        pending[next_future] = next_node.id
+                        next_future = executor.submit(_observe_node, next_node, self._timeout)
+                        pending[next_future] = (next_node.id, endpoint_hosts(next_node))
 
             if self._cancelled:
                 for future in pending:

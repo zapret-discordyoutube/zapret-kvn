@@ -332,7 +332,6 @@ class AppController(QObject):
         self.hysteria = HysteriaManager(self)
         self.amnezia = self._new_amnezia_manager()
         self._amnezia_target_generation = 0
-        self._pending_amnezia_node_id = None
         self._xray_tun_routes = XrayTunRouteManager(self)
         self.zapret = ZapretManager(self)
         self.proxy = ProxyManager()
@@ -443,7 +442,7 @@ class AppController(QObject):
         self._hysteria_last_failure_code: HysteriaFailureCode | None = None
         self._hysteria_automatic_switch_attempted = False
         self._hysteria_recovery_active = False
-        self._pending_hysteria_replacement_node_id: str | None = None
+        self._pending_transport_node_id: str | None = None
         self._hysteria_cooldown_until: dict[str, float] = {}
         self._hysteria_failure_started_at = 0.0
         self._hysteria_contract = HysteriaTransitionContract()
@@ -1123,16 +1122,16 @@ class AppController(QObject):
         prepared_hysteria: HysteriaManager | None = None,
         prepared_amnezia: AmneziaManager | None = None,
     ) -> bool:
-        amnezia_request_generation = getattr(self, "_transition_generation", None)
+        request_generation = getattr(self, "_transition_generation", None)
         owned_amnezia = prepared_amnezia or getattr(self, "amnezia", None)
 
-        def amnezia_request_cancelled() -> bool:
-            return getattr(plan, "amnezia_sidecar", None) is not None and (
+        def request_cancelled() -> bool:
+            return (
                 getattr(self, "_desired_connected", True) is False or
-                getattr(self, "_transition_generation", None) != amnezia_request_generation
+                getattr(self, "_transition_generation", None) != request_generation
             )
 
-        if amnezia_request_cancelled():
+        if request_cancelled():
             return False
         runtime_node = self._runtime_selected_node()
         gate = getattr(self, "target_profile_allows_core_start", None)
@@ -1157,7 +1156,7 @@ class AppController(QObject):
                     return False
             elif not self._start_amnezia_manager(target_amnezia, plan):
                 return False
-            if amnezia_request_cancelled():
+            if request_cancelled():
                 target_amnezia.stop()
                 return False
         if plan.hysteria_sidecar is not None:
@@ -1236,10 +1235,10 @@ class AppController(QObject):
                 f"[sing-box] clash_api порт изменён: {SINGBOX_CLASH_API_PORT} -> {plan.clash_api_port} "
                 "(исходный зарезервирован Windows)"
             )
-        if gate is not None and not gate(
+        if request_cancelled() or (gate is not None and not gate(
             runtime_node,
             used_selected_node=bool(getattr(plan, "used_selected_node", True)),
-        ):
+        )):
             if plan.xray_sidecar is not None and self.xray.is_running:
                 self.xray.stop()
             if plan.hysteria_sidecar is not None:
@@ -1260,11 +1259,11 @@ class AppController(QObject):
                     generation=contract.session.session_generation,
                 )
         for start_attempt in range(2):
-            if amnezia_request_cancelled():
+            if request_cancelled():
                 break
             sb_ok = self.singbox.start(self.state.settings.singbox_path, plan.singbox_config)
             self._log(f"[sing-box] start result: {sb_ok}")
-            if amnezia_request_cancelled():
+            if request_cancelled():
                 self.singbox.stop()
                 break
             if not sb_ok:
@@ -1286,9 +1285,12 @@ class AppController(QObject):
                 "singbox", singbox_start_tag, startup=True
             ):
                 if getattr(plan, "amnezia_sidecar", None) is not None:
-                    if not owned_amnezia.verify_front_dns(plan.amnezia_sidecar.config) or amnezia_request_cancelled():
+                    if not owned_amnezia.verify_front_dns(plan.amnezia_sidecar.config) or request_cancelled():
                         self.singbox.stop()
                         break
+                if request_cancelled():
+                    self.singbox.stop()
+                    break
                 self._front_process_generation = _increment_int(
                     getattr(self, "_front_process_generation", 0)
                 )
@@ -1521,6 +1523,7 @@ class AppController(QObject):
             or not self.connected
             or self._hysteria_recovery_active
             or self._disconnecting
+            or not self._desired_connected
         ):
             return
 
@@ -1576,7 +1579,7 @@ class AppController(QObject):
             return
 
         self._hysteria_recovery_active = True
-        self._pending_hysteria_replacement_node_id = replacement.id
+        self._pending_transport_node_id = replacement.id
         self._auto_switch_transitioning = True
         self._switching = True
         self._desired_connected = True
@@ -2030,7 +2033,7 @@ class AppController(QObject):
         self._proxy_protection_wait_token = 0
         self._transition_pending = False
         if self._hysteria_recovery_active:
-            self._clear_pending_hysteria_selection()
+            self._clear_pending_transport_selection()
             self._hysteria_recovery_active = False
             self._desired_connected = False
             self._handle_unexpected_disconnect()
@@ -2184,7 +2187,7 @@ class AppController(QObject):
             self._runtime_selected_node()
         )
         if self._hysteria_recovery_active:
-            self._clear_pending_hysteria_selection()
+            self._clear_pending_transport_selection()
             self._hysteria_recovery_active = False
         legacy_contract = not isinstance(self.zapret, ZapretManager)
         self._desired_connected = self.connected if legacy_contract else False
@@ -2370,8 +2373,8 @@ class AppController(QObject):
                 self._reconcile_cancelled_transition()
         finally:
             self._transition_active = False
-            if self._pending_hysteria_replacement_node_id:
-                self._clear_pending_hysteria_selection()
+            if not runner.cancelled and self._pending_transport_node_id:
+                self._clear_pending_transport_selection()
                 self._hysteria_recovery_active = False
             if self._transition_pending or self._needs_transition():
                 self._schedule_transition_drain(0)
@@ -2394,6 +2397,7 @@ class AppController(QObject):
             self.xray.is_running
             or self.singbox.is_running
             or self.hysteria.is_running
+            or self.amnezia.is_running
         )
         if any_running:
             self._log("[transition] cancelled mid-swap — stopping partial connection processes")
@@ -2474,33 +2478,26 @@ class AppController(QObject):
         return self._get_node_by_id(self.state.selected_node_id)
 
     def _runtime_selected_node(self) -> Node | None:
-        amnezia_pending = getattr(self, "_pending_amnezia_node_id", None)
-        if isinstance(amnezia_pending, str) and amnezia_pending:
-            return self._get_node_by_id(amnezia_pending)
-        pending_id = getattr(self, "_pending_hysteria_replacement_node_id", None)
-        if getattr(self, "_hysteria_recovery_active", False) and pending_id:
-            pending = self._get_node_by_id(pending_id)
-            if pending is not None:
-                return pending
+        pending = getattr(self, "_pending_transport_node_id", None)
+        if isinstance(pending, str) and pending:
+            return self._get_node_by_id(pending)
         return self.selected_node
 
-    def _commit_pending_hysteria_selection(self, node: Node | None) -> bool:
-        pending_id = getattr(self, "_pending_hysteria_replacement_node_id", None)
-        if not pending_id:
+    def _commit_pending_transport_selection(self, node: Node | None) -> bool:
+        """Commit a ready runtime's selection through one path for all transports."""
+        pending = getattr(self, "_pending_transport_node_id", None)
+        if not isinstance(pending, str) or not pending:
             return True
-        if node is None or node.id != pending_id:
-            self._log(
-                "[hysteria-transition] refused selection commit: active session "
-                f"node={node.id if node else ''} pending={pending_id}"
-            )
+        if node is None or node.id != pending:
+            self._log("[transport-transition] ready runtime does not match pending selection")
             return False
-        self.state.selected_node_id = pending_id
-        self._pending_hysteria_replacement_node_id = None
+        self.state.selected_node_id = node.id
+        self._clear_pending_transport_selection()
         self.selection_changed.emit(node)
         return True
 
-    def _clear_pending_hysteria_selection(self) -> None:
-        self._pending_hysteria_replacement_node_id = None
+    def _clear_pending_transport_selection(self) -> None:
+        self._pending_transport_node_id = None
 
     def _get_node_by_id(self, node_id: str | None) -> Node | None:
         return get_node_by_id_operation(self, node_id)
@@ -3454,6 +3451,9 @@ class AppController(QObject):
     def toggle_connection(self) -> None:
         current_target = self._desired_connected if (self._transition_active or self._transition_pending) else self.connected
         self._desired_connected = not current_target
+        if not self._desired_connected:
+            self._clear_pending_transport_selection()
+            self._hysteria_recovery_active = False
         self._request_transition("toggle connection")
 
     def switch_next_node(self) -> None:
@@ -3736,6 +3736,10 @@ class AppController(QObject):
     def _on_core_state_changed(self, _running: bool) -> None:
         on_core_state_changed_operation(self, _running)
 
+    def _on_ping_peer_observed(self, node_id, fingerprint, addresses):
+        from .worker_service import on_ping_peer_observed
+        on_ping_peer_observed(self, node_id, fingerprint, addresses)
+
     def _on_ping_result(self, node_id: str, ping_ms: int | None) -> None:
         on_ping_result_operation(self, node_id, ping_ms)
 
@@ -3795,7 +3799,9 @@ class AppController(QObject):
         if self.state.settings.tun_mode:
             self._log("[network] ignoring change in TUN mode")
             return
-        if self.connected and self.state.settings.reconnect_on_network_change:
+        if (self.connected and self._desired_connected
+                and not self._transition_active and not self._disconnecting
+                and self.state.settings.reconnect_on_network_change):
             self._desired_connected = True
             self._request_transition("network changed")
 

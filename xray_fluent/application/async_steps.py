@@ -307,7 +307,9 @@ class TransitionRunner(QObject):
             else:
                 step = self._gen.send(value)
         except StopIteration as stop:
-            self._finish(result=stop.value)
+            # Synchronous steps can pump Qt events internally, including Stop
+            # or a newer selection, without yielding back to this runner.
+            self._finish(result=stop.value, cancelled=not self._is_current())
             return
         except BaseException as exc:  # noqa: BLE001 — transition errors surface via .error
             self._finish(error=exc)
