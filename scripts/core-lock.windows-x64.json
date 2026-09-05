@@ -4,10 +4,10 @@
   "sources": [
     {
       "id": "sing-box-extended",
-      "version": "v1.13.18-extended-2.6.5",
-      "archive": "sing-box-1.13.18-extended-2.6.5-windows-amd64-purego.zip",
-      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.13.18-extended-2.6.5/sing-box-1.13.18-extended-2.6.5-windows-amd64-purego.zip",
-      "sha256": "572b464fedfff5b5da8836baf53b071ffcad2de929176ae6eb1352846da283a3",
+      "version": "v1.14.0-extended-2.7.1",
+      "archive": "sing-box-1.14.0-extended-2.7.1-windows-amd64-purego.zip",
+      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.14.0-extended-2.7.1/sing-box-1.14.0-extended-2.7.1-windows-amd64-purego.zip",
+      "sha256": "7cca3ceadf0a697af6648a3f1234e5783b8be509fdd3017b9872b9f0b52bbc15",
       "files": [
         { "match": "(^|/)sing-box\\.exe$", "target": "sing-box.exe" },
         { "match": "(^|/)libcronet\\.dll$", "target": "libcronet.dll" },
@@ -15,10 +15,10 @@
       ],
       "repository": "shtorm-7/sing-box-extended",
       "channel": "stable",
-      "release_tag": "v1.13.18-extended-2.6.5",
+      "release_tag": "v1.14.0-extended-2.7.1",
       "release_prerelease": false,
-      "asset_name": "sing-box-1.13.18-extended-2.6.5-windows-amd64-purego.zip",
-      "asset_size": 33905599
+      "asset_name": "sing-box-1.14.0-extended-2.7.1-windows-amd64-purego.zip",
+      "asset_size": 36729020
     },
     {
       "id": "xray-core",
@@ -68,10 +68,10 @@
     },
     {
       "id": "runetfreedom-routing-data",
-      "version": "5cc3d3eedc0e1207abce0e23e45b43f03c34a4a7",
-      "archive": "russia-v2ray-rules-dat-5cc3d3eedc0e1207abce0e23e45b43f03c34a4a7.zip",
-      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/5cc3d3eedc0e1207abce0e23e45b43f03c34a4a7.zip",
-      "sha256": "5c36818dc8a019c2f8806e8c04b6ee8da9c65e31674366433161bdb1007fd618",
+      "version": "0fdb873717870e025eb903d152173ac60f350930",
+      "archive": "russia-v2ray-rules-dat-0fdb873717870e025eb903d152173ac60f350930.zip",
+      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/0fdb873717870e025eb903d152173ac60f350930.zip",
+      "sha256": "fb6b7bfe2721dde97ae863e1d4c0adc97203ebb73274e892bbe73737b9831588",
       "files": [
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
         { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
@@ -83,7 +83,7 @@
       "repository": "runetfreedom/russia-v2ray-rules-dat",
       "channel": "release",
       "branch": "release",
-      "asset_size": 49938169
+      "asset_size": 49927650
     },
     {
       "id": "tun2socks",
