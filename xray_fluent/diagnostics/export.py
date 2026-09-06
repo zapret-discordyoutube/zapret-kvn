@@ -102,7 +102,7 @@ def collect_runtime_diagnostics(controller) -> dict:
             "running": bool(manager and manager.is_running),
             "log_context": asdict(context) if context is not None else None,
             "last_written_config": getattr(manager, "diagnostic_config", None),
-            "transport_stats": getattr(manager, "stats", None) if component == "amnezia" else None,
+            "transport_stats": getattr(manager, "stats", None) if component in {"amnezia", "hysteria"} else None,
         }
     return _redact({
         "schema": 1,

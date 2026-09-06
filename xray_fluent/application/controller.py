@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import logging
 import random
+import re
 import socket
 import time
 from datetime import datetime, timezone
@@ -1445,6 +1446,7 @@ class AppController(QObject):
         return True
 
     def _bind_hysteria_manager(self, manager: HysteriaManager) -> None:
+        manager.warning.connect(lambda message, current=manager: self._on_hysteria_warning(current, message))
         manager.log_received.connect(lambda line: self._on_core_log("hysteria", line))
         manager.error.connect(lambda message: self._on_core_error("hysteria", message))
         manager.failure.connect(
@@ -1461,6 +1463,10 @@ class AppController(QObject):
         manager.stopped.connect(
             lambda code, current=manager: self._on_hysteria_stopped(current, code)
         )
+
+    def _on_hysteria_warning(self, manager: HysteriaManager, message: str) -> None:
+        if manager is self.hysteria and manager.process_generation == self._hysteria_active_generation:
+            self.status.emit("warning", message)
 
     def _on_hysteria_state_changed(self, manager: HysteriaManager, running: bool) -> None:
         if manager is not self.hysteria or manager.process_generation != self._hysteria_active_generation:
@@ -3678,7 +3684,11 @@ class AppController(QObject):
     def _on_core_log(self, engine: str, line: str) -> None:
         if "DNS_FALLBACK server=" in line:
             self._report_dns_fallback(line)
-        if is_core_error_line(line):
+        health_log = engine == "hysteria" and re.match(
+            r"^\[hysteria\]\[attempt=\d+ stage=health_check(?: |\])", line
+        )
+        # Optional endpoint health is a warning, not a transport failure episode.
+        if is_core_error_line(line) and not health_log:
             self._record_core_failure(engine, "runtime", line)
         context = self._core_log_contexts.get(engine)
         if context is None:

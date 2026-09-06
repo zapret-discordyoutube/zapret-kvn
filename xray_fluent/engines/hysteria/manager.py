@@ -20,7 +20,7 @@ from .runtime_contract import (
     HysteriaFailureCode,
     classify_hysteria_failure,
 )
-from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log
+from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log, strip_terminal_controls
 from ...platform.windows.subprocess_utils import (
     decode_output,
     kill_processes_by_path,
@@ -40,6 +40,7 @@ class HysteriaManager(QObject):
     stopped = pyqtSignal(int)
     log_received = pyqtSignal(str)
     error = pyqtSignal(str)
+    warning = pyqtSignal(str)
     failure = pyqtSignal(str, str, int)
     state_changed = pyqtSignal(bool)
 
@@ -75,6 +76,15 @@ class HysteriaManager(QObject):
         self._compatibility_allow_parallel = False
         self._compatibility_verify_remote = True
         self._attempt_started_at = 0.0
+        self._remote_authenticated = False
+        self.stats: dict[str, Any] = {}
+        self._health_executor = None
+        self._health_futures = {}
+        self._health_failures = {}
+        self._health_generation = 0
+        self._health_timer = QTimer(self)
+        self._health_timer.setInterval(100)
+        self._health_timer.timeout.connect(self._poll_health)
         # A crash can leave a short-lived config behind. It is never reusable:
         # every start writes a fresh one, so remove stale secrets immediately.
         self._cleanup_config()
@@ -254,6 +264,9 @@ class HysteriaManager(QObject):
         context: RuntimeNodeIdentity | None,
         config: dict[str, Any],
     ) -> None:
+        self._cancel_health()
+        self._remote_authenticated = False
+        self.stats = {"remote_authenticated": False, "https_check": "pending"}
         self._attempt += 1
         self._attempt_started_at = time.monotonic()
         self._context = context
@@ -262,6 +275,7 @@ class HysteriaManager(QObject):
         self._secret_values = self._collect_secret_values(config)
 
     def stop(self, expected: bool = True, *, _preserve_compatibility: bool = False) -> bool:
+        self._cancel_health()
         if not _preserve_compatibility:
             self._clear_compatibility_state()
         self._cleanup_config()
@@ -343,6 +357,9 @@ class HysteriaManager(QObject):
                 ):
                     executor.shutdown(wait=False, cancel_futures=True)
                     return False
+                if self._remote_authenticated:
+                    self._monitor_health(executor, futures, failures, generation)
+                    return True
                 completed = [future for future in futures if future.done()]
                 for future in completed:
                     endpoint = futures.pop(future)
@@ -354,10 +371,17 @@ class HysteriaManager(QObject):
                 if succeeded is not None:
                     break
                 sleep_with_events(0.05)
+            if (succeeded is None and self._remote_authenticated and generation == self._compatibility_generation
+                    and self._last_failure_code not in SECURITY_FAILURES
+                    and self._process.state() != QProcess.ProcessState.NotRunning
+                    and not self._stop_requested):
+                self._monitor_health(executor, futures, failures, generation)
+                return True
             executor.shutdown(wait=False, cancel_futures=True)
             if self._last_failure_code in SECURITY_FAILURES:
                 return False
             if succeeded is not None:
+                self.stats["https_check"] = "passed"
                 self._emit_log(
                     f"functional HTTPS probe succeeded via {succeeded[1]}",
                     stage="functional_ready",
@@ -370,6 +394,88 @@ class HysteriaManager(QObject):
             )
             self._emit_log(f"functional HTTPS probes failed: {summary}", stage="functional_ready")
         return False
+
+    def _monitor_health(self, executor, futures, failures, generation):
+        """Finish the existing probe wave off the startup path, without new traffic."""
+        self._cancel_health()
+        self._health_executor = executor
+        self._health_futures = dict(futures)
+        self._health_failures = dict(failures)
+        self._health_generation = generation
+        self.stats["https_check"] = "pending"
+        self._health_timer.start()
+
+    def _cancel_health(self):
+        self._health_timer.stop()
+        if self._health_executor is not None:
+            self._health_executor.shutdown(wait=False, cancel_futures=True)
+            self._health_executor = None
+        self._health_futures.clear()
+        self._health_failures.clear()
+        if self.stats.get("https_check") == "pending":
+            self.stats["https_check"] = "cancelled"
+
+    def _poll_health(self):
+        if self._health_executor is None:
+            return
+        if (self._health_generation != self._compatibility_generation
+                or not self._running or self._stop_requested
+                or self._process.state() == QProcess.ProcessState.NotRunning
+                or self._last_failure_code in SECURITY_FAILURES):
+            self._cancel_health()
+            return
+        for future in list(self._health_futures):
+            if not future.done():
+                continue
+            endpoint = self._health_futures.pop(future)
+            if future.cancelled():
+                continue
+            error = future.exception()
+            if error is None:
+                self.stats["https_check"] = "passed"
+                self._emit_log(f"HTTPS check succeeded via {endpoint[1]}", stage="health_check")
+                self._cancel_health()
+                return
+            self._health_failures[endpoint[1]] = f"{type(error).__name__}: {error}"
+        if self._health_futures:
+            return
+        self.stats["https_check"] = "warning"
+        summary = "; ".join(f"{host}={error}" for host, error in sorted(self._health_failures.items()))
+        self._emit_log("WARNING: authenticated server retained; HTTPS check endpoints did not respond: " + summary,
+                       stage="health_check")
+        self._cancel_health()
+        self.warning.emit("Hysteria подключена к серверу, но проверочные HTTPS-адреса не ответили. "
+                          "Соединение сохранено; доступность сайтов пока не подтверждена.")
+
+    def _is_health_probe_error(self, line):
+        if not self._remote_authenticated or not (self._starting or self._health_executor is not None):
+            return False
+        parts = strip_terminal_controls(line).split("\t")
+        if len(parts) < 4 or parts[-2] != "SOCKS5 TCP error":
+            return False
+        try:
+            fields = json.loads(parts[-1])
+        except (ValueError, TypeError):
+            return False
+        targets = {f"{address}:443" for address, _, _ in _FUNCTIONAL_HTTPS_ENDPOINTS}
+        return isinstance(fields, dict) and fields.get("reqAddr") in targets
+
+    def _observe_authenticated_server(self, line):
+        # Parse the official CLI event before log redaction replaces JSON fields.
+        # A listener message or a quoted error cannot establish remote readiness.
+        parts = strip_terminal_controls(line).split("\t")
+        if (len(parts) < 4 or parts[-3:-1] != ["INFO", "connected to server"]
+                or not self._starting or self._stop_requested):
+            return
+        try:
+            fields = json.loads(parts[-1])
+        except (ValueError, TypeError):
+            return
+        if (not isinstance(fields, dict) or not isinstance(fields.get("addr"), str)
+                or not fields["addr"] or type(fields.get("count")) is not int or fields["count"] < 1):
+            return
+        self._remote_authenticated = True
+        self.stats["remote_authenticated"] = True
 
     def _probe_remote_endpoint(
         self,
@@ -507,9 +613,13 @@ class HysteriaManager(QObject):
             self._emit_process_line(item.rstrip("\r\n"))
 
     def _emit_process_line(self, line: str) -> None:
+        self._observe_authenticated_server(line)
         from ...diagnostics.runtime_errors import classify_core_error
         clean = redact_runtime_log(line, secrets=self._secret_values)
         _, action = classify_core_error(clean)
+        if self._is_health_probe_error(line) and classify_hysteria_failure(clean) not in SECURITY_FAILURES:
+            self._emit_log(clean, stage="health_check")
+            return
         if action == "record_only":
             # A loopback SOCKS client/probe closing its socket is not a remote
             # server failure. Preserve evidence without spending recovery.
@@ -657,8 +767,9 @@ class HysteriaManager(QObject):
         self._last_failure_code = None
         self._failure_reported = False
         self._emit_log(
-            "local SOCKS relay and functional HTTPS handshake are ready",
-            stage="functional_ready",
+            ("local SOCKS relay and authenticated Hysteria server are ready"
+             if self._remote_authenticated else "local SOCKS relay and functional HTTPS handshake are ready"),
+            stage="remote_ready" if self._remote_authenticated else "functional_ready",
         )
         if not self._suppress_state_change:
             self.state_changed.emit(True)
@@ -672,6 +783,7 @@ class HysteriaManager(QObject):
         )
 
     def _on_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self._cancel_health()
         was_running = self._running
         was_starting = self._starting
         expected = self._stop_requested

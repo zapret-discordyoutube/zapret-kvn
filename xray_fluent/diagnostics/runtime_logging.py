@@ -22,11 +22,15 @@ _OUTBOUND_RE = re.compile(r"outbound/[^\[]+\[([^\]]+)\]")
 _UUID_RE = re.compile(r"(?i)\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b")
 
 
+def strip_terminal_controls(text: str) -> str:
+    """Keep structured log fields intact while removing terminal decoration."""
+    return _CONTROL_RE.sub("", _ANSI_RE.sub("", str(text or "")))
+
+
 def redact_runtime_log(text: str, *, secrets: Iterable[str] = ()) -> str:
     """Remove transport credentials while keeping the useful error reason."""
 
-    clean = _ANSI_RE.sub("", str(text or ""))
-    clean = _CONTROL_RE.sub("", clean)
+    clean = strip_terminal_controls(text)
     clean = _SHARE_URI_RE.sub("<ссылка скрыта>", clean)
     clean = _SECRET_PAIR_RE.sub(lambda match: f"{match.group(1)}<скрыто>", clean)
     clean = _UUID_RE.sub("<скрыто>", clean)
