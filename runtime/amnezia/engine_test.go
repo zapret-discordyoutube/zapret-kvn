@@ -142,6 +142,13 @@ func TestOfficialEngineEncryptedTCPUDP(t *testing.T) {
 			if err := <-writeDone; err != nil || !bytes.Equal(body, response) {
 				t.Fatal("TCP mismatch", err)
 			}
+			halfCloseDst := netip.MustParseAddrPort("10.77.0.1:8444")
+			halfCloseServer, err := server.ListenTCPAddrPort(halfCloseDst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer halfCloseServer.Close()
+			assertHalfCloseResponse(t, l.Addr().String(), c, halfCloseServer, halfCloseDst)
 			control := login(t, l.Addr().String(), c)
 			defer control.Close()
 			local, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

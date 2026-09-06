@@ -49,6 +49,50 @@ func connectDomain(client net.Conn, host string, port uint16) error {
 	return err
 }
 
+func startTestSingbox(t *testing.T, corePath string, configuration map[string]any, frontPort int) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "front.json")
+	encoded, err := json.Marshal(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "front.log")
+	log, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+	process := exec.Command(corePath, "run", "-c", configPath)
+	process.Stdout, process.Stderr = log, log
+	if err := process.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		process.Process.Kill()
+		process.Wait()
+		if t.Failed() {
+			raw, _ := os.ReadFile(logPath)
+			t.Log(string(raw))
+		}
+	})
+	frontAddress := fmt.Sprintf("127.0.0.1:%d", frontPort)
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		probe, err := net.DialTimeout("tcp", frontAddress, 100*time.Millisecond)
+		if err == nil {
+			probe.Close()
+			return frontAddress
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sing-box did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // Required by the Windows bundle gate, optional for a standalone Go checkout.
 // Uses the exact sing-box executable supplied by that gate, never an OS TUN or
 // a public server. TCP, UDP, TLS and domain policy cross the real front/core.
@@ -134,43 +178,7 @@ func TestSingboxFrontOfficialTransportAndRouting(t *testing.T) {
 			map[string]any{"domain": []string{"blocked.test"}, "action": "reject"},
 		}, "final": "proxy"},
 	}
-	configPath := filepath.Join(t.TempDir(), "front.json")
-	encoded, _ := json.Marshal(configuration)
-	if err := os.WriteFile(configPath, encoded, 0600); err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(t.TempDir(), "front.log")
-	log, err := os.Create(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer log.Close()
-	process := exec.Command(corePath, "run", "-c", configPath)
-	process.Stdout, process.Stderr = log, log
-	if err := process.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		process.Process.Kill()
-		process.Wait()
-		if t.Failed() {
-			raw, _ := os.ReadFile(logPath)
-			t.Log(string(raw))
-		}
-	}()
-	frontAddress := fmt.Sprintf("127.0.0.1:%d", frontPort)
-	deadline := time.Now().Add(8 * time.Second)
-	for {
-		probe, err := net.DialTimeout("tcp", frontAddress, 100*time.Millisecond)
-		if err == nil {
-			probe.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("sing-box did not start")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	frontAddress := startTestSingbox(t, corePath, configuration, frontPort)
 	for _, probe := range []struct {
 		host string
 		port uint16

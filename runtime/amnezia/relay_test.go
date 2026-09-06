@@ -109,6 +109,99 @@ func TestRelayTCPAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestRelayTCPHalfCloseKeepsDownload(t *testing.T) {
+	c, address := startTestRelay(t)
+	server, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	assertHalfCloseResponse(t, address, c, server, server.Addr().(*net.TCPAddr).AddrPort())
+}
+
+func assertHalfCloseResponse(t *testing.T, address string, c config, server net.Listener, dst netip.AddrPort) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		remote, err := server.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer remote.Close()
+		remote.SetDeadline(time.Now().Add(3 * time.Second))
+		body, err := io.ReadAll(remote)
+		if err == nil {
+			_, err = remote.Write(append([]byte("response:"), body...))
+		}
+		done <- err
+	}()
+	client := login(t, address, c)
+	request(t, client, 1, dst)
+	if _, err := client.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := io.ReadAll(client)
+	if err != nil || string(response) != "response:request" {
+		t.Fatalf("upload EOF discarded the response: %q (%v)", response, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRelayTCPCancellationUnblocksBothDirections(t *testing.T) {
+	client, application := net.Pipe()
+	remote, server := net.Pipe()
+	defer application.Close()
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- relayTCP(ctx, client, remote) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled relay retained a blocked stream")
+	}
+}
+
+// More completed sessions than the relay's concurrency limit must not exhaust
+// admission slots. A leak here would look like an alive core with no traffic.
+func TestRelayCompletedConnectionsReleaseAdmission(t *testing.T) {
+	c, address := startTestRelay(t)
+	server, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go func() {
+		for {
+			remote, err := server.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer remote.Close(); io.Copy(remote, remote) }()
+		}
+	}()
+	for i := 0; i < 384; i++ {
+		client := login(t, address, c)
+		request(t, client, 1, server.Addr().(*net.TCPAddr).AddrPort())
+		if _, err := client.Write([]byte("round-trip")); err != nil {
+			t.Fatal(i, err)
+		}
+		b := make([]byte, len("round-trip"))
+		if _, err := io.ReadFull(client, b); err != nil || string(b) != "round-trip" {
+			t.Fatal(i, "reply", err)
+		}
+		client.Close()
+	}
+}
+
 func TestRelayUDPAssociationLifetimeAndSource(t *testing.T) {
 	c, address := startTestRelay(t)
 	echo, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

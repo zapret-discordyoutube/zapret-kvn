@@ -206,13 +206,7 @@ func (s *relay) handle(ctx context.Context, client net.Conn) error {
 			return err
 		}
 		_ = client.SetDeadline(time.Time{})
-		done := make(chan struct{})
-		go func() { _, _ = io.Copy(remote, client); remote.Close(); close(done) }()
-		_, err = io.Copy(client, remote)
-		client.Close()
-		remote.Close()
-		<-done
-		return err
+		return relayTCP(ctx, client, remote)
 	case 3:
 		_ = client.SetDeadline(time.Time{})
 		return s.associate(ctx, client)
@@ -220,6 +214,33 @@ func (s *relay) handle(ctx context.Context, client net.Conn) error {
 		_ = reply(client, 7, emptyAddress)
 		return fmt.Errorf("unsupported SOCKS command %d", request[1])
 	}
+}
+
+// TCP EOF closes one direction only. In particular, an upload finishing must
+// not discard a response still being downloaded through the encrypted stack.
+func relayTCP(ctx context.Context, client, remote net.Conn) error {
+	closeBoth := func() { client.Close(); remote.Close() }
+	defer closeBoth()
+	stop := context.AfterFunc(ctx, closeBoth)
+	defer stop()
+	done := make(chan error, 2)
+	copyTo := func(dst, src net.Conn) {
+		_, err := io.Copy(dst, src)
+		if err == nil {
+			if half, ok := dst.(interface{ CloseWrite() error }); ok {
+				err = half.CloseWrite()
+			} else {
+				err = dst.Close()
+			}
+		}
+		if err != nil {
+			closeBoth()
+		}
+		done <- err
+	}
+	go copyTo(remote, client)
+	go copyTo(client, remote)
+	return errors.Join(<-done, <-done)
 }
 
 func (s *relay) associate(ctx context.Context, control net.Conn) error {
