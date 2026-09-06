@@ -61,9 +61,19 @@ class NativeSingboxRoutingTemplateTests(unittest.TestCase):
                 rules = route["rules"]
                 self.assertEqual(rules[0], {"action": "sniff"})
                 self.assertEqual(rules[1], {"protocol": "dns", "action": "hijack-dns"})
-                self.assertEqual(rules[2]["domain_suffix"], BLOCKED_CHECK_DOMAINS)
+                # DoT приложения ушёл бы мимо hijack-dns и мимо resolver'а узла.
                 self.assertEqual(
-                    (rules[2]["action"], rules[2]["outbound"]),
+                    rules[2],
+                    {
+                        "network": "tcp",
+                        "port": 853,
+                        "action": "reject",
+                        "method": "default",
+                    },
+                )
+                self.assertEqual(rules[3]["domain_suffix"], BLOCKED_CHECK_DOMAINS)
+                self.assertEqual(
+                    (rules[3]["action"], rules[3]["outbound"]),
                     ("route", "block"),
                 )
 

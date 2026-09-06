@@ -173,6 +173,46 @@ Runtime shape:
 }
 ```
 
+### DNS-контракт: имена внутри туннеля резолвит узел
+
+Шаблон `data/templates/sing-box/*.json` держит два независимых DNS-пути.
+
+| tag | транспорт | путь | для чего |
+|---|---|---|---|
+| `bootstrap-dns` | `direct-doh` (DoH к 8.8.8.8 / 1.1.1.1 / 9.9.9.9 по литеральному IP) → `local-system-dns` | **мимо туннеля** | разрешить адрес самого VPN-сервера до подключения |
+| `proxy-dns` | `vpn-node-dns-udp` → `vpn-node-dns-tcp` (обычный DNS на 53, `detour: "proxy"`) | **внутри туннеля** | все остальные имена |
+
+`dns.final` и `route.default_domain_resolver` указывают на `proxy-dns`;
+`outbounds[direct].domain_resolver` — на `bootstrap-dns`.
+
+**Почему внутри туннеля именно plaintext 53, а не DoH.** Узел перенаправляет
+любой DNS-запрос туннеля на порт 53 в собственный resolver и подменяет там
+адреса управляемых имён — так работает наш доступ к ИИ-сервисам. Зашифрованный
+запрос (DoH/443, DoT/853) этого перенаправления не видит: узел просто открывает
+TLS-соединение к 8.8.8.8:443, и клиент получает настоящий origin. Дальше клиент
+идёт к нему через тот же узел и получает региональный отказ. Именно так
+`claude.ai` не работал на RU-узле при верной подмене на узле.
+
+Внутри туннеля plaintext 53 не даёт провайдеру ничего: канал до узла уже
+зашифрован протоколом, а участок «узел → его upstream» принадлежит узлу.
+
+**Почему `8.8.8.8`.** Это адрес-указатель, а не резолвер, которому доверяют:
+пакет до него не доходит. Канонические upstream самого узла (`1.1.1.1`,
+`1.0.0.1`) из перенаправления исключены, поэтому ставить их сюда нельзя —
+запрос ушёл бы к настоящему Cloudflare.
+
+**Почему `proxy-dns` больше не падает на `bootstrap-dns`.** Прежняя цепочка
+`vpn-doh → bootstrap-dns` после шестисекундного таймаута молча уводила резолв
+наружу из туннеля: имя утекало провайдеру и разрешалось в настоящий origin.
+Сейчас `proxy-dns` перебирает только два транспорта до узла — UDP, затем TCP на
+случай сетей, где UDP через прокси не проходит.
+
+**Что не закрыто.** Собственные DoH приложений (Chrome, Firefox) уходят на 443 и
+перехвату не поддаются. Точечный отказ `{"network":"tcp","port":853,"action":
+"reject"}` закрывает только DoT и возвращает такие приложения на 53. Отдельно
+остаётся proxy-режим без TUN: перехвата DNS у ОС там нет в принципе, но
+приложение отдаёт прокси доменное имя, и его разрешает узел.
+
 ### Hybrid mode
 
 Used when the selected node cannot be mapped directly by our current conversion
@@ -260,29 +300,31 @@ Native mode:
 
 1. `{"action": "sniff"}`
 2. `{"protocol": "dns", "action": "hijack-dns"}`
-3. protected-process bypass rule
-4. proxy-server-endpoint bypass rule
-5. optional LAN bypass rule
-6. grouped process rules
-7. service preset rules
-8. direct domain/IP rules
-9. block domain/IP rules
-10. proxy domain/IP rules
-11. `route.final` handles the unmatched remainder
+3. `{"network": "tcp", "port": 853, "action": "reject"}` (DoT)
+4. protected-process bypass rule
+5. proxy-server-endpoint bypass rule
+6. optional LAN bypass rule
+7. grouped process rules
+8. service preset rules
+9. direct domain/IP rules
+10. block domain/IP rules
+11. proxy domain/IP rules
+12. `route.final` handles the unmatched remainder
 
 Hybrid mode:
 
 1. `{"action": "sniff"}`
 2. `{"protocol": "dns", "action": "hijack-dns"}`
-3. protected-process bypass rule
-4. `{"inbound": ["tun-protect"], "outbound": "direct"}`
-5. optional LAN bypass rule
-6. grouped process rules
-7. service preset rules
-8. direct domain/IP rules
-9. block domain/IP rules
-10. proxy domain/IP rules
-11. `route.final` handles the unmatched remainder
+3. `{"network": "tcp", "port": 853, "action": "reject"}` (DoT)
+4. protected-process bypass rule
+5. `{"inbound": ["tun-protect"], "outbound": "direct"}`
+6. optional LAN bypass rule
+7. grouped process rules
+8. service preset rules
+9. direct domain/IP rules
+10. block domain/IP rules
+11. proxy domain/IP rules
+12. `route.final` handles the unmatched remainder
 
 ## Rule Fields We Already Use
 

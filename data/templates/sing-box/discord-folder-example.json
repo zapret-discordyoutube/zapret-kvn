@@ -69,6 +69,12 @@
         "action": "hijack-dns"
       },
       {
+        "network": "tcp",
+        "port": 853,
+        "action": "reject",
+        "method": "default"
+      },
+      {
         "domain_suffix": [
           "mobileproxy.passport.yandex.net",
           "relay-api.eu.2gis.com",
@@ -246,48 +252,18 @@
   "dns": {
     "servers": [
       {
-        "type": "https",
-        "tag": "vpn-doh-google",
+        "type": "udp",
+        "tag": "vpn-node-dns-udp",
         "server": "8.8.8.8",
-        "path": "/dns-query",
-        "tls": {
-          "enabled": true,
-          "server_name": "dns.google"
-        },
+        "server_port": 53,
         "detour": "proxy"
       },
       {
-        "type": "https",
-        "tag": "vpn-doh-cloudflare",
-        "server": "1.1.1.1",
-        "path": "/dns-query",
-        "tls": {
-          "enabled": true,
-          "server_name": "cloudflare-dns.com"
-        },
+        "type": "tcp",
+        "tag": "vpn-node-dns-tcp",
+        "server": "8.8.8.8",
+        "server_port": 53,
         "detour": "proxy"
-      },
-      {
-        "type": "https",
-        "tag": "vpn-doh-quad9",
-        "server": "9.9.9.9",
-        "path": "/dns-query",
-        "tls": {
-          "enabled": true,
-          "server_name": "dns.quad9.net"
-        },
-        "detour": "proxy"
-      },
-      {
-        "type": "fallback",
-        "tag": "vpn-doh",
-        "servers": [
-          "vpn-doh-google",
-          "vpn-doh-cloudflare",
-          "vpn-doh-quad9"
-        ],
-        "strategy": "parallel",
-        "timeout": "3s"
       },
       {
         "type": "https",
@@ -349,8 +325,8 @@
         "type": "fallback",
         "tag": "proxy-dns",
         "servers": [
-          "vpn-doh",
-          "bootstrap-dns"
+          "vpn-node-dns-udp",
+          "vpn-node-dns-tcp"
         ],
         "strategy": "sequential",
         "timeout": "6s"

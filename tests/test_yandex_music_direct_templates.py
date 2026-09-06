@@ -30,6 +30,10 @@ class YandexMusicDirectTemplateTests(unittest.TestCase):
                     all(
                         rule.get("action") in {"sniff", "hijack-dns"}
                         or rule.get("outbound") == "block"
+                        # Точечный отказ DoT — тоже обработка протокола: он
+                        # возвращает приложение на 53, который перехватывает
+                        # hijack-dns.
+                        or (rule.get("action") == "reject" and rule.get("port") == 853)
                         for rule in rules[:direct_index]
                     ),
                     "Only protocol handling and narrow block rules may precede Yandex Music direct",
