@@ -126,6 +126,26 @@ class NodesInteractionTests(unittest.TestCase):
             sorts.assert_not_called()
             rebuild.assert_not_called()
 
+    def test_collapsed_group_metrics_do_not_notify_or_sort_until_expansion(self):
+        self.page._proxy.set_sort_key('ping')
+        self.click('2')
+        self.table.collapseAll()
+        _APP.processEvents()
+        changes, layouts = [], []
+        self.model.dataChanged.connect(lambda *args: changes.append(args))
+        self.model.layoutChanged.connect(lambda *args: layouts.append(args))
+        self.nodes[2].ping_ms = 999
+        self.page._table_model.finish_ping_batch({'2'})
+        _APP.processEvents()
+        self.assertEqual(changes, [])
+        self.assertEqual(layouts, [])
+        self.assertEqual(self.page._selected_ids(), {'2'})
+        self.table.expandAll()
+        _APP.processEvents()
+        self.assertEqual(self.page._proxy.index(7, 0).data(NODE_ID_ROLE), '2')
+        self.assertEqual(self.page._selected_ids(), {'2'})
+        self.assertEqual(len(layouts), 1)
+
     def test_provider_flag_is_graphical_only_and_does_not_modify_profile(self):
         node = self.nodes[0]
         node.country_code = 'US'

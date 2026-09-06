@@ -442,7 +442,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             sidecar.config["transport"],
             {"type": "udp", "udp": {"hopInterval": "20s"}},
         )
-        self.assertEqual(sidecar.config["quic"], {"disableChromeParrot": False})
+        self.assertEqual(sidecar.config["quic"], {"disableChromeParrot": True})
 
     def test_hysteria2_canonical_and_alias_sni_are_rejected_as_ambiguous(self) -> None:
         link = "hy2://secret@example.com:443/?sni=canonical.example&peer=alias.example"

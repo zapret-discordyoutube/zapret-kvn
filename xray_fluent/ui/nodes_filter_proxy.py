@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
+from PyQt6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, QTimer
 
 from ..profiles.models import Node
 from .nodes_table_model import NodesTableModel, node_type_text, COLUMN_SPECS, FILTER_FIELDS_ROLE
@@ -32,6 +32,12 @@ class NodesFilterProxy(QSortFilterProxyModel):
         self._haystacks: dict[str, str] = {}
         self._sort_values = []
         self._descending = False
+        self._deferred_node_ids = set()
+        self._pending_sort_ids = set()
+        self._sort_changed_ids = set()
+        self._sort_flush = QTimer(self)
+        self._sort_flush.setSingleShot(True)
+        self._sort_flush.timeout.connect(self.flush_deferred_sort)
         self.setDynamicSortFilter(False)
         self.setFilterRole(FILTER_FIELDS_ROLE)
 
@@ -149,12 +155,23 @@ class NodesFilterProxy(QSortFilterProxyModel):
         super().setSourceModel(model)
         model.dataChanged.connect(self._source_data_changed)
 
+    def set_deferred_nodes(self, node_ids):
+        self._deferred_node_ids = set(node_ids)
+        if self._pending_sort_ids - self._deferred_node_ids:
+            self._sort_flush.start(0)
+
+    def flush_deferred_sort(self):
+        if self._pending_sort_ids - self._deferred_node_ids:
+            self._pending_sort_ids.clear()
+            self.invalidate()
+
     def _source_data_changed(self, top, bottom, roles):
         if not roles or FILTER_FIELDS_ROLE in roles:
             self.invalidate_haystacks()
             self.invalidate()
         elif self._sort_values_changed and Qt.ItemDataRole.DisplayRole in roles and top.column() <= self.sortColumn() <= bottom.column():
-            self.invalidate()
+            self._pending_sort_ids.update(self._sort_changed_ids)
+            self.flush_deferred_sort()
 
     def _refresh_sort_values(self, *args):
         self._sort_values_changed = False
@@ -179,6 +196,10 @@ class NodesFilterProxy(QSortFilterProxyModel):
             self._sort_values = [(value or '').casefold() for value in values] if key in {'name','group','last_used'} else values
 
         self._sort_values_changed = self._sort_values != previous
+        self._sort_changed_ids = {
+            node.id for row, node in enumerate(model._nodes)
+            if row >= len(previous) or self._sort_values[row] != previous[row]
+        } if self._sort_values_changed else set()
 
     def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
         a, b = self._sort_values[left.row()], self._sort_values[right.row()]

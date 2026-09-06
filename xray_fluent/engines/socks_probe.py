@@ -5,6 +5,12 @@ import ipaddress
 import socket
 import ssl
 
+# Literal destinations let transport readiness run before the front DNS exists.
+# SNI and certificate verification still use the matching hostname.
+HTTPS_ENDPOINTS = (("1.1.1.1", "cloudflare-dns.com", "/"),
+                   ("8.8.8.8", "dns.google", "/"),
+                   ("9.9.9.9", "dns.quad9.net", "/"))
+
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     data = bytearray()

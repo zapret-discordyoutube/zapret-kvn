@@ -31,7 +31,9 @@ def build_uri_client_config(
     config: dict[str, Any] = {
         "server": server_uri,
         "lazy": True,
-        "quic": {"disableChromeParrot": False},
+        # Match the official-core configuration used by the Android client.
+        # TLS verification, pinning and the profile obfuscation remain intact.
+        "quic": {"disableChromeParrot": True},
         "socks5": {
             "listen": f"{relay_host}:{relay_port}",
             "username": relay_username,

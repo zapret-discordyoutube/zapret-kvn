@@ -18,6 +18,7 @@ from qfluentwidgets import (
     NavigationItemPosition,
 )
 
+from ..diagnostics.connection_message import connection_message
 from ..application.controller import AppController
 from ..profiles.storage import PassphraseRequired
 from ..constants import APP_ICON_PATH, APP_NAME, APP_VERSION, BASE_DIR, LOG_DIR
@@ -771,6 +772,7 @@ class MainWindow(FluentWindow):
         tip.close()
 
     def _show_status(self, level: str, message: str) -> None:
+        message = connection_message(message)
         level = level.lower().strip()
         long_duration = level.endswith("-long")
         if long_duration:

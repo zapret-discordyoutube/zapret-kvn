@@ -32,6 +32,7 @@ class NodesGroupModel(QAbstractProxyModel):
         self._source_entries = []
         self._nodes = {}
         self._rebuilding = False
+        self.collapsed_groups = set()
 
     def setSourceModel(self, source):
         super().setSourceModel(source)
@@ -143,6 +144,8 @@ class NodesGroupModel(QAbstractProxyModel):
                 if self._group(node)[0] != item.parent.key:
                     self.rebuild()
                     return
+            if item.parent is not None and item.parent.key in self.collapsed_groups:
+                continue
             bounds = changed.setdefault(item.parent, [item, item])
             if item.row < bounds[0].row:
                 bounds[0] = item

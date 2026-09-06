@@ -12,12 +12,10 @@ from ...constants import AMNEZIA_PATH_DEFAULT
 from ...diagnostics.export import capture_runtime_config
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log
 from ...platform.windows.subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text_pumped, sleep_with_events, wait_for_qprocess_finished, wait_for_qprocess_started
-from ..socks_probe import probe_https
+from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 
 
-PROBES = (("1.1.1.1", "cloudflare-dns.com", "/"),
-          ("8.8.8.8", "dns.google", "/"),
-          ("9.9.9.9", "dns.quad9.net", "/"))
+PROBES = HTTPS_ENDPOINTS
 
 
 def physical_network() -> dict:

@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import socket
-import ssl
 import time
 from typing import Any
 
@@ -15,6 +14,7 @@ from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import HYSTERIA_CONFIG_FILE, HYSTERIA_PATH_DEFAULT, PROXY_HOST, RUNTIME_DIR
 from ...diagnostics.export import capture_runtime_config
+from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 from .runtime_contract import (
     SECURITY_FAILURES,
     HysteriaFailureCode,
@@ -30,11 +30,7 @@ from ...platform.windows.subprocess_utils import (
 )
 
 
-_FUNCTIONAL_HTTPS_ENDPOINTS: tuple[tuple[str, str, str], ...] = (
-    ("cloudflare-dns.com", "cloudflare-dns.com", "/"),
-    ("dns.google", "dns.google", "/"),
-    ("dns.quad9.net", "dns.quad9.net", "/"),
-)
+_FUNCTIONAL_HTTPS_ENDPOINTS = HTTPS_ENDPOINTS
 
 
 class HysteriaManager(QObject):
@@ -189,7 +185,7 @@ class HysteriaManager(QObject):
                 str(self._config_path),
                 "--disable-update-check",
                 "--log-level",
-                "warn",
+                "info",
                 "client",
             ]
         )
@@ -218,17 +214,22 @@ class HysteriaManager(QObject):
 
         socks = config.get("socks5")
         socks = socks if isinstance(socks, dict) else {}
+        readiness_generation = self._compatibility_generation
         if verify_remote and not self._wait_until_remote_ready(
             relay_port,
             username=str(socks.get("username") or ""),
             password=str(socks.get("password") or ""),
         ):
+            if readiness_generation != self._compatibility_generation:
+                return False
             details = self._last_output_lines[-1] if self._last_output_lines else "HTTPS probe через relay не завершился"
+            remote_failure = self._last_failure_code is not None
             self.stop(expected=True)
             self._starting = False
             self._emit_error(
-                f"Hysteria relay локально открыт, но удалённый handshake не готов: {details}",
-                stage="remote_handshake",
+                ("Соединение Hysteria с сервером не установлено: " if remote_failure
+                 else "Проверка HTTPS через Hysteria не завершилась: ") + details,
+                stage="remote_handshake" if remote_failure else "functional_ready",
                 code=self._last_failure_code
                 or classify_hysteria_failure(details)
                 or HysteriaFailureCode.TARGET_NETWORK_TIMEOUT,
@@ -304,10 +305,15 @@ class HysteriaManager(QObject):
         """Prove HTTPS egress without making one external provider authoritative."""
 
         deadline = time.monotonic() + timeout
+        generation = self._compatibility_generation
         failures: dict[str, str] = {}
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline and attempts < 3:
+            attempts += 1
             if (
-                self._process.state() == QProcess.ProcessState.NotRunning
+                self._stop_requested
+                or generation != self._compatibility_generation
+                or self._process.state() == QProcess.ProcessState.NotRunning
                 or self._last_failure_code in SECURITY_FAILURES
             ):
                 return False
@@ -330,7 +336,9 @@ class HysteriaManager(QObject):
             succeeded: tuple[str, str, str] | None = None
             while futures and time.monotonic() < deadline:
                 if (
-                    self._process.state() == QProcess.ProcessState.NotRunning
+                    self._stop_requested
+                    or generation != self._compatibility_generation
+                    or self._process.state() == QProcess.ProcessState.NotRunning
                     or self._last_failure_code in SECURITY_FAILURES
                 ):
                     executor.shutdown(wait=False, cancel_futures=True)
@@ -372,93 +380,8 @@ class HysteriaManager(QObject):
         endpoint: tuple[str, str, str],
         timeout: float,
     ) -> None:
-        connect_host, server_name, path = endpoint
-        raw = self._open_socks_connection(
-            relay_port,
-            username=username,
-            password=password,
-            timeout=timeout,
-            target_host=connect_host,
-        )
-        context = ssl.create_default_context()
-        try:
-            with context.wrap_socket(raw, server_hostname=server_name) as secure:
-                secure.settimeout(timeout)
-                request = (
-                    f"HEAD {path} HTTP/1.1\r\n"
-                    f"Host: {server_name}\r\n"
-                    "Connection: close\r\n\r\n"
-                ).encode("ascii")
-                secure.sendall(request)
-                if not secure.recv(16).startswith(b"HTTP/"):
-                    raise OSError("HTTPS endpoint returned no HTTP response")
-        except BaseException:
-            raw.close()
-            raise
-
-    @staticmethod
-    def _open_socks_connection(
-        relay_port: int,
-        *,
-        username: str,
-        password: str,
-        timeout: float,
-        target_host: str = "cloudflare-dns.com",
-    ) -> socket.socket:
-        sock = socket.create_connection((PROXY_HOST, relay_port), timeout=timeout)
-        try:
-            sock.settimeout(timeout)
-            methods = b"\x02" if username or password else b"\x00"
-            sock.sendall(b"\x05\x01" + methods)
-            response = HysteriaManager._recv_exact(sock, 2)
-            if response != b"\x05" + methods:
-                raise OSError("SOCKS authentication method rejected")
-            if methods == b"\x02":
-                encoded_user = username.encode("utf-8")
-                encoded_password = password.encode("utf-8")
-                if len(encoded_user) > 255 or len(encoded_password) > 255:
-                    raise OSError("SOCKS credentials are too long")
-                sock.sendall(
-                    b"\x01"
-                    + bytes((len(encoded_user),))
-                    + encoded_user
-                    + bytes((len(encoded_password),))
-                    + encoded_password
-                )
-                if HysteriaManager._recv_exact(sock, 2) != b"\x01\x00":
-                    raise OSError("SOCKS authentication rejected")
-            encoded_target = target_host.encode("idna")
-            if not encoded_target or len(encoded_target) > 255:
-                raise OSError("SOCKS target host is invalid")
-            sock.sendall(
-                b"\x05\x01\x00\x03"
-                + bytes((len(encoded_target),))
-                + encoded_target
-                + b"\x01\xbb"
-            )
-            header = HysteriaManager._recv_exact(sock, 4)
-            if len(header) != 4 or header[0] != 5 or header[1] != 0:
-                raise OSError("SOCKS CONNECT rejected")
-            address_length = {1: 4, 4: 16}.get(header[3])
-            if header[3] == 3:
-                address_length = HysteriaManager._recv_exact(sock, 1)[0]
-            if address_length is None:
-                raise OSError("SOCKS returned an invalid address type")
-            HysteriaManager._recv_exact(sock, address_length + 2)
-            return sock
-        except Exception:
-            sock.close()
-            raise
-
-    @staticmethod
-    def _recv_exact(sock: socket.socket, size: int) -> bytes:
-        chunks = bytearray()
-        while len(chunks) < size:
-            chunk = sock.recv(size - len(chunks))
-            if not chunk:
-                raise OSError("SOCKS connection closed")
-            chunks.extend(chunk)
-        return bytes(chunks)
+        probe_https(relay_port, username=username, password=password,
+                    endpoint=endpoint, timeout=timeout)
 
     @staticmethod
     def _kill_orphaned(exe: Path) -> None:
@@ -618,7 +541,10 @@ class HysteriaManager(QObject):
         if clean:
             self._emit_log(clean, stage=stage)
         if self._is_chrome_parrot_compatibility_error(clean):
-            if not self._chrome_fallback_used and not self._chrome_fallback_pending:
+            quic = (self._compatibility_config or {}).get("quic", {})
+            if quic.get("disableChromeParrot"):
+                self._emit_error(clean, stage="remote_handshake")
+            elif not self._chrome_fallback_used and not self._chrome_fallback_pending:
                 self._schedule_chrome_parrot_fallback()
             elif (
                 self._chrome_fallback_used
@@ -629,7 +555,13 @@ class HysteriaManager(QObject):
         else:
             failure = classify_hysteria_failure(clean)
             if failure is not None:
-                self._emit_error(clean, stage=stage, code=failure)
+                if self._starting and failure not in SECURITY_FAILURES:
+                    # One failed probe is not the verdict of the whole start.
+                    # Keep the cause and raw log until the readiness gate ends.
+                    if self._last_failure_code not in SECURITY_FAILURES:
+                        self._last_failure_code = failure
+                else:
+                    self._emit_error(clean, stage=stage, code=failure)
 
     @staticmethod
     def _is_chrome_parrot_compatibility_error(line: str) -> bool:
@@ -722,6 +654,8 @@ class HysteriaManager(QObject):
         if self._running:
             return
         self._running = True
+        self._last_failure_code = None
+        self._failure_reported = False
         self._emit_log(
             "local SOCKS relay and functional HTTPS handshake are ready",
             stage="functional_ready",

@@ -92,14 +92,18 @@ class NodesView(TableView):
     def apply_collapsed_groups(self, keys):
         self._collapsed_groups = set(keys)
         hidden = set()
+        hidden_ids = set()
+        self.model().collapsed_groups = self._collapsed_groups
         for index in self.model().group_indexes():
             if index.data(GROUP_KEY_ROLE) in self._collapsed_groups:
                 hidden.update(child.row for child in index.internalPointer().children)
+                hidden_ids.update(child.node_id for child in index.internalPointer().children)
         for row in self._hidden_rows - hidden:
             self.setRowHidden(row, False)
         for row in hidden - self._hidden_rows:
             self.setRowHidden(row, True)
         self._hidden_rows = hidden
+        self.model().sourceModel().set_deferred_nodes(hidden_ids)
         self.viewport().update()
 
     def isExpanded(self, index):

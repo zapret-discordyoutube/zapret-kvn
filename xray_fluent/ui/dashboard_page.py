@@ -34,6 +34,7 @@ from qfluentwidgets import (
     TableWidget,
 )
 
+from ..diagnostics.connection_message import connection_message
 from ..profiles.models import AppSettings, Node, RoutingSettings
 from ..platform.windows.proxy_manager import SystemProxyState
 from .base_page import ScrollablePage
@@ -425,7 +426,7 @@ class DashboardPage(StackedSection):
         if normalized not in {"idle", "starting", "running", "error"}:
             normalized = "idle"
         self._connection_phase = normalized
-        self._connection_message = (message or "").strip() or self._default_connection_message()
+        self._connection_message = connection_message(message) or self._default_connection_message()
         self._refresh_dashboard()
 
     def set_mode(self, mode: str) -> None:
