@@ -136,6 +136,10 @@ class NodesPage(StackedSection):
         self._column_layout_timer.setSingleShot(True)
         self._column_layout_timer.setInterval(200)
         self._column_layout_timer.timeout.connect(self._emit_view_prefs)
+        self._viewport_layout_timer = QTimer(self)
+        self._viewport_layout_timer.setSingleShot(True)
+        self._viewport_layout_timer.setInterval(16)
+        self._viewport_layout_timer.timeout.connect(lambda: self._relayout_flex_column())
 
         # Root view = server list; sub-pages = detail / edit / bulk edit.
         list_page = QWidget()
@@ -753,10 +757,13 @@ class NodesPage(StackedSection):
 
     def _resize_section_quietly(self, col: int, width: int) -> None:
         """Programmatic resizeSection guarded against the sectionResized handler."""
+        header = cast(QHeaderView, self.table.horizontalHeader())
+        if header.sectionSize(col) == width:
+            return
         previous = self._adjusting_column_width
         self._adjusting_column_width = True
         try:
-            cast(QHeaderView, self.table.horizontalHeader()).resizeSection(col, width)
+            header.resizeSection(col, width)
         finally:
             self._adjusting_column_width = previous
 
@@ -771,6 +778,7 @@ class NodesPage(StackedSection):
         return columns
 
     def _relayout_flex_column(self) -> None:
+        self._viewport_layout_timer.stop()
         if self._adjusting_column_width:
             return
         columns = [i for i in range(len(COLUMN_SPECS)) if not self.table.isColumnHidden(i)]
@@ -788,6 +796,10 @@ class NodesPage(StackedSection):
         for col, width in widths.items():
             self._resize_section_quietly(col, width)
 
+    def _queue_viewport_layout(self):
+        if not self._viewport_layout_timer.isActive():
+            self._viewport_layout_timer.start()
+
     def eventFilter(self, obj, event) -> bool:
         if obj is self.search_edit and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
             self.search_edit.clear()
@@ -797,7 +809,8 @@ class NodesPage(StackedSection):
             self.table.setFocus()
             return True
         if obj is self.table.viewport() and event.type() == QEvent.Type.Resize:
-            self._relayout_flex_column()
+            if event.size().width() != event.oldSize().width():
+                self._queue_viewport_layout()
         return super().eventFilter(obj, event)
 
     def _on_accent_changed(self, *args) -> None:

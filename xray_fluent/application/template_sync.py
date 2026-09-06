@@ -43,6 +43,10 @@ def _same_bytes(left: Path, right: Path) -> bool:
 
 def _atomic_copy(source: Path, target: Path) -> bool:
     payload = source.read_bytes()
+    return _atomic_write(payload, target)
+
+
+def _atomic_write(payload: bytes, target: Path) -> bool:
     if target.is_file() and target.read_bytes() == payload:
         return False
 
@@ -56,23 +60,42 @@ def _atomic_copy(source: Path, target: Path) -> bool:
     return True
 
 
+def sync_config_dns(active_config: Path, template: Path) -> bool:
+    """Persist the shipped native DNS section; preserve all other JSON fields.
+
+    DNS is intentionally app-maintained, including in custom active configs.
+    Invalid editor documents remain available for normal validation/repair.
+    Engines/templates without a DNS section do not impose a new DNS policy.
+    """
+    try:
+        active = json.loads(active_config.read_text(encoding="utf-8-sig"))
+        source = json.loads(template.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(active, dict) or not isinstance(source, dict):
+        return False
+    dns = source.get("dns")
+    if not isinstance(dns, dict) or not dns or active.get("dns") == dns:
+        return False
+    active["dns"] = dns
+    return _atomic_write((json.dumps(active, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), active_config)
+
+
 def sync_packaged_templates(
     *,
     bundle_dir: Path = TEMPLATE_UPDATE_BUNDLE_DIR,
     templates_dir: Path = TEMPLATES_DIR,
     configs_dir: Path = CONFIGS_DIR,
 ) -> TemplateSyncResult:
-    """Install shipped templates and refresh only untouched active copies.
+    """Install native templates; refresh stock configs and every DNS section.
 
     The self-updater deliberately preserves ``data/``. Release builds therefore
     carry the current native JSON templates under ``assets/template-update``.
     Before replacing a built-in template, compare its previous installed text
     with the same-path active config. An equivalent active copy is still stock
-    and follows the new template; a different user-edited config is preserved.
+    and follows the new template. Custom routing is preserved, while DNS always
+    follows the engine's current default template, including without an update.
     """
-
-    if not bundle_dir.is_dir():
-        return TemplateSyncResult()
 
     templates_updated: list[str] = []
     configs_updated: list[str] = []
@@ -113,6 +136,14 @@ def sync_packaged_templates(
 
             if _atomic_copy(bundled_path, installed_template):
                 templates_updated.append(key)
+
+    for engine in SUPPORTED_ENGINES:
+        template = templates_dir / engine / "default.json"
+        for active_config in sorted((configs_dir / engine).rglob("*.json")):
+            if sync_config_dns(active_config, template):
+                key = f"{engine}/{active_config.relative_to(configs_dir / engine).as_posix()}"
+                if key not in configs_updated:
+                    configs_updated.append(key)
 
     return TemplateSyncResult(
         templates_updated=tuple(templates_updated),

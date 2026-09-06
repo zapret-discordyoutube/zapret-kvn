@@ -11,7 +11,7 @@
 
 `application/profile_service.py` copies a selected or imported template into the corresponding active config. Reset performs the same copy. Saving in the raw editor writes the active config.
 
-The self-updater preserves the installed `data/` directory. To deliver template updates through that boundary, `build.py` generates `assets/template-update` from the versioned `data/templates` tree. Before the UI starts, `template_sync.py` compares each same-path active config with the previously installed template, refreshes the active config only when their parsed JSON is equivalent, and then installs the new shipped template. A user-edited active config remains unchanged. The generated asset is transport, not a second authoring source.
+The self-updater preserves the installed `data/` directory. To deliver template updates through that boundary, `build.py` generates `assets/template-update` from the versioned `data/templates` tree. Before the UI starts, `template_sync.py` compares each same-path active config with the previously installed template, refreshes the active config only when their parsed JSON is equivalent, and then installs the new shipped template. User-edited routing and other fields remain unchanged. The top-level `dns` section is explicitly app-maintained and always follows the engine default native template, on startup and before use. This is persisted in the active raw JSON, not injected into runtime copies. The generated asset is transport, not a second authoring source.
 
 ## Mode map
 

@@ -33,6 +33,21 @@ class NodesGroupModel(QAbstractProxyModel):
         self._nodes = {}
         self._rebuilding = False
         self.collapsed_groups = set()
+        self._display_cache = {}
+        self.modelAboutToBeReset.connect(self.clear_display_cache)
+        self.layoutAboutToBeChanged.connect(self.clear_display_cache)
+        self.dataChanged.connect(self._invalidate_display_range)
+
+    def clear_display_cache(self, *_args):
+        self._display_cache.clear()
+
+    def _invalidate_display_range(self, top, bottom, _roles):
+        self._invalidate_display_rows(set(range(top.row(), bottom.row()+1)))
+
+    def _invalidate_display_rows(self, rows):
+        for key in list(self._display_cache):
+            if key[0] in rows:
+                del self._display_cache[key]
 
     def setSourceModel(self, source):
         super().setSourceModel(source)
@@ -130,6 +145,9 @@ class NodesGroupModel(QAbstractProxyModel):
             self._rebuilding = False
 
     def _data_changed(self, top, bottom, roles):
+        # Invalidate changed nodes even while collapsed, but retain cached
+        # values for every other row across metric updates and tab switches.
+        self._invalidate_display_rows({entry.row for entry in self._source_entries[top.row():bottom.row()+1]})
         changed = {}
         grouping_may_change = not roles or (self.mode == 'country' and Qt.ItemDataRole.DecorationRole in roles)
         for row in range(top.row(), bottom.row() + 1):
@@ -188,6 +206,17 @@ class NodesGroupModel(QAbstractProxyModel):
         return self._index_for(item, index.column()) if item else QModelIndex()
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        key = (index.row(), index.column(), int(role))
+        if key not in self._display_cache:
+            # Cache only cells requested by the view, never all server rows.
+            if len(self._display_cache) >= 8192:
+                self._display_cache.clear()
+            self._display_cache[key] = self._cell_data(index, role)
+        return self._display_cache[key]
+
+    def _cell_data(self, index, role):
         if not index.isValid():
             return None
         item = index.internalPointer()

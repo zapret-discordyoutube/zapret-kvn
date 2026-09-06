@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from build import stage_template_update_bundle
-from xray_fluent.application.template_sync import sync_packaged_templates
+from xray_fluent.application.template_sync import sync_packaged_templates, sync_config_dns
 
 
 def _write_json(path: Path, payload: object, *, compact: bool = False) -> None:
@@ -111,6 +111,32 @@ class TemplateSyncTests(unittest.TestCase):
         self.assertEqual(destination, app_dir / "assets" / "template-update")
         self.assertFalse(stale.exists())
         self.assertTrue((destination / "sing-box" / "default.json").is_file())
+
+    def test_custom_routing_survives_automatic_dns_replacement_on_every_start(self):
+        dns = {"servers": [{"type": "local", "tag": "proxy-dns"}], "final": "proxy-dns"}
+        template = self.templates / "sing-box/default.json"
+        active = self.configs / "sing-box/custom.json"
+        _write_json(template, {"dns": dns})
+        custom = {"dns": {"servers": [{"type": "tcp", "server": "8.8.8.8"}]},
+                  "route": {"rules": [{"domain_suffix": ["example.org"], "outbound": "direct"}]},
+                  "outbounds": [{"type": "direct", "tag": "proxy"}], "log": {"level": "debug"}}
+        _write_json(active, custom)
+        self.assertEqual(self._sync().configs_updated, ("sing-box/custom.json",))
+        self.assertEqual(json.loads(active.read_text()), {**custom, "dns": dns})
+        stamp = active.stat().st_mtime_ns
+        self.assertFalse(self._sync().changed)
+        self.assertEqual(stamp, active.stat().st_mtime_ns)
+        _write_json(active, custom)
+        self.assertTrue(self._sync().changed)
+        self.assertEqual(json.loads(active.read_text())["dns"], dns)
+
+    def test_dns_sync_does_not_destroy_invalid_editor_text(self):
+        active = self.root / "invalid.json"
+        template = self.root / "template.json"
+        active.write_text('{"dns": unfinished')
+        _write_json(template, {"dns": {"servers": ["localhost"]}})
+        self.assertFalse(sync_config_dns(active, template))
+        self.assertEqual(active.read_text(), '{"dns": unfinished')
 
 
 if __name__ == "__main__":

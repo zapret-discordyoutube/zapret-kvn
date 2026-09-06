@@ -172,7 +172,13 @@ func (s *relay) handle(ctx context.Context, client net.Conn) error {
 	}
 	switch request[1] {
 	case 1:
-		addresses, err := s.resolveDestination(ctx, target)
+		// Authentication has its own short deadline. Resolution may traverse
+		// the front's DNS fallback, then TCP needs a separate bounded budget.
+		connectCtx, connectCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer connectCancel()
+		deadline, _ := connectCtx.Deadline()
+		_ = client.SetDeadline(deadline)
+		addresses, err := s.resolveDestination(connectCtx, target)
 		if err != nil {
 			_ = reply(client, 4, emptyAddress)
 			return err
@@ -182,7 +188,7 @@ func (s *relay) handle(ctx context.Context, client net.Conn) error {
 			_ = reply(client, 8, emptyAddress)
 			return fmt.Errorf("invalid TCP destination")
 		}
-		dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		dialCtx, cancel := context.WithTimeout(connectCtx, 15*time.Second)
 		defer cancel()
 		var remote net.Conn
 		for _, address := range addresses {

@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config_documents import RawConfigTextCache
+from .template_sync import sync_config_dns
+from ..constants import TEMPLATES_DIR
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -12,6 +14,12 @@ if TYPE_CHECKING:
 # transition; the (mtime_ns, size) check keeps the cache correct when the
 # file is edited or rewritten between reads.
 _raw_config_text_cache = RawConfigTextCache()
+
+
+def _sync_active_dns(controller, engine, path):
+    template = TEMPLATES_DIR / ("sing-box" if engine == "singbox" else "xray") / "default.json"
+    if sync_config_dns(path, template):
+        controller._log(f"[config] DNS synchronized from {engine} template: {path.name}")
 
 
 def get_active_config_path(controller: AppController, engine: str) -> Path:
@@ -70,6 +78,7 @@ def ensure_active_config(controller: AppController, engine: str, path: str | Pat
         else:
             resolved.write_text(default_text, encoding="utf-8")
             _raw_config_text_cache.store(resolved, default_text)
+    _sync_active_dns(controller, engine, resolved)
     setter(resolved)
     return resolved
 
@@ -95,6 +104,7 @@ def load_config_text(controller: AppController, engine: str, path: str | Path) -
         setter = controller._set_active_xray_config_path
     if not resolved.exists():
         raise FileNotFoundError(f"Файл не найден: {resolved.name}")
+    _sync_active_dns(controller, engine, resolved)
     setter(resolved)
     text = resolved.read_text(encoding="utf-8")
     if engine == "singbox":
@@ -126,6 +136,8 @@ def import_template(controller: AppController, engine: str, path: str | Path) ->
     # the UI can appear to switch templates while launch still uses an older
     # config file from data/configs/.
     active_path.write_text(template_text, encoding="utf-8")
+    _sync_active_dns(controller, engine, active_path)
+    template_text = active_path.read_text(encoding="utf-8")
     _raw_config_text_cache.store(active_path, template_text)
     set_template(template_path)
     set_config(active_path)
@@ -142,6 +154,8 @@ def reset_active_config_to_template(controller: AppController, engine: str) -> t
     active_path = ensure_active_config(controller, engine)
     text = template_path.read_text(encoding="utf-8")
     active_path.write_text(text, encoding="utf-8")
+    _sync_active_dns(controller, engine, active_path)
+    text = active_path.read_text(encoding="utf-8")
     _raw_config_text_cache.store(active_path, text)
     if engine == "singbox":
         controller._cache_singbox_document_state(active_path, text)
@@ -151,6 +165,8 @@ def reset_active_config_to_template(controller: AppController, engine: str) -> t
 def save_config_text(controller: AppController, engine: str, text: str, path: str | Path | None = None) -> Path:
     resolved = ensure_active_config(controller, engine, path)
     resolved.write_text(text, encoding="utf-8")
+    _sync_active_dns(controller, engine, resolved)
+    text = resolved.read_text(encoding="utf-8")
     _raw_config_text_cache.store(resolved, text)
     if engine == "singbox":
         controller._set_active_singbox_config_path(resolved)

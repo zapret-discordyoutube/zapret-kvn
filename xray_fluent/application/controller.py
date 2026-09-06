@@ -1328,8 +1328,13 @@ class AppController(QObject):
     def _new_amnezia_manager(self) -> AmneziaManager:
         manager = AmneziaManager(self)
         manager.log_received.connect(self._log)
+        manager.warning.connect(lambda message, owned=manager: self._on_amnezia_warning(owned, message))
         manager.failure.connect(lambda event, owned=manager: self._on_amnezia_failure(owned, event))
         return manager
+
+    def _on_amnezia_warning(self, manager, message) -> None:
+        if manager is self.amnezia and manager.is_running:
+            self.status.emit("warning", message)
 
     def _on_amnezia_failure(self, manager, event) -> None:
         self.runtime_errors.record(event)
@@ -1338,6 +1343,10 @@ class AppController(QObject):
         # admission. Never let a retired process close the replacement.
         session = self._active_session
         if manager is not self.amnezia or session is None or session.sidecar_kind != "amnezia":
+            return
+        if event.stage in {"destination_dns", "relay_connection", "udp", "handshake_retry"}:
+            # A failed destination is evidence, not a failure of the whole VPN.
+            # The bounded health check reports its aggregate warning separately.
             return
         self._set_connection_status("error", event.message, level="error")
         if event.stage in {"core_error", "process", "observer", "handshake_failed"}:

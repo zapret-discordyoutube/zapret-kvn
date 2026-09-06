@@ -225,6 +225,8 @@ class NodesPageColumnLayoutTests(NodesPageViewTestCase):
         _APP.processEvents()
         before = self.page.column_widths()
         self.page.resize(1800, 800)
+        # Width redistribution is coalesced into the next frame.
+        QTest.qWait(50)
         _APP.processEvents()
         self.assertEqual(before, self.page.column_widths())
         self.assertEqual(self.page.table.header().sectionSize(COL_NAME), 360)

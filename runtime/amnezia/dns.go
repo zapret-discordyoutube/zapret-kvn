@@ -67,7 +67,9 @@ func delegatedDNS(address string, locals []netip.Addr) func(context.Context, str
 		if address == "" {
 			return nil, fmt.Errorf("sing-box DNS delegation is unavailable")
 		}
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		// The native front owns DNS fallback. Its VPN DoH -> direct DoH ->
+		// system sequence can exceed five seconds; do not cut it off early.
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		// net.Resolver still consults the OS hosts file even with a custom Dial.
 		// Exchange DNS directly with sing-box so its policy owns *every* name.

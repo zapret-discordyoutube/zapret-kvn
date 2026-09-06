@@ -35,11 +35,11 @@ class ReadinessTests(unittest.TestCase):
         with patch('xray_fluent.engines.amnezia.manager.ThreadPoolExecutor', return_value=executor), \
              patch('xray_fluent.engines.amnezia.manager.time.monotonic', side_effect=lambda: elapsed[0]), \
              patch('xray_fluent.engines.amnezia.manager.sleep_with_events', side_effect=sleep):
-            result = AmneziaManager._ready(manager, 1234, {'username': 'test', 'password': 'test'}, via_dns=True)
+            result = AmneziaManager._ready(manager, 1234, {'username': 'test', 'password': 'test'})
         executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
         return result, manager, executor
 
-    def test_refused_dns_has_three_bounded_waves_and_one_failure(self):
+    def test_refused_transport_has_three_bounded_waves_and_one_failure(self):
         result, manager, executor = self.run_probe(refused=True)
         self.assertFalse(result)
         self.assertEqual(executor.submit.call_count, 9)

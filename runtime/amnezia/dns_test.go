@@ -122,3 +122,58 @@ func TestRelayListenerFailureCancelsActiveClients(t *testing.T) {
 		t.Fatal("listener failure left active clients running")
 	}
 }
+
+// The native DNS chain can spend six seconds on VPN DoH before trying direct
+// DoH. The sidecar must not impose the former five-second cutoff on that chain.
+func TestDNSWaitsForFrontFallback(t *testing.T) {
+	server, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client, err := server.Accept()
+		if err != nil {
+			return
+		}
+		defer client.Close()
+		client.SetDeadline(time.Now().Add(10 * time.Second))
+		var length [2]byte
+		if _, err = io.ReadFull(client, length[:]); err != nil {
+			return
+		}
+		data := make([]byte, binary.BigEndian.Uint16(length[:]))
+		if _, err = io.ReadFull(client, data); err != nil {
+			return
+		}
+		var query dnsmessage.Message
+		if query.Unpack(data) != nil {
+			return
+		}
+		time.Sleep(5200 * time.Millisecond)
+		response := dnsmessage.Message{
+			Header:    dnsmessage.Header{ID: query.ID, Response: true, RecursionAvailable: true},
+			Questions: query.Questions,
+			Answers: []dnsmessage.Resource{{
+				Header: dnsmessage.ResourceHeader{Name: query.Questions[0].Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 1},
+				Body:   &dnsmessage.AResource{A: [4]byte{192, 0, 2, 42}},
+			}},
+		}
+		encoded, err := response.Pack()
+		if err != nil {
+			return
+		}
+		binary.BigEndian.PutUint16(length[:], uint16(len(encoded)))
+		client.Write(append(length[:], encoded...))
+	}()
+	lookup := delegatedDNS(server.Addr().String(), []netip.Addr{netip.MustParseAddr("10.0.0.2")})
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	ips, err := lookup(ctx, "fallback.test")
+	<-done
+	if err != nil || len(ips) != 1 || ips[0] != netip.MustParseAddr("192.0.2.42") {
+		t.Fatalf("front fallback cut off: %v %v", ips, err)
+	}
+}

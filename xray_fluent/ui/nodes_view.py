@@ -10,6 +10,18 @@ from .nodes_group_model import GROUP_KEY_ROLE
 
 
 class NodesDelegate(NodesActivityDelegate):
+    def _paint_active_row_fill(self, painter, option, index, color):
+        first, last = self._row_fill_span(index)
+        rect = option.rect.adjusted(4 if first else 0, self.margin, -4 if last else 0, -self.margin)
+        painter.fillRect(rect, color)
+
+    def _drawBackground(self, painter, option, index):
+        color = painter.brush().color()
+        if color.alpha():
+            first, last = self._row_fill_span(index)
+            rect = option.rect.adjusted(4 if first else 0, 0, -4 if last else 0, 0)
+            painter.fillRect(rect, color)
+
     def _row_fill_span(self, index):
         edges = getattr(self.parent(), "_row_edges", None)
         if edges is not None:
@@ -174,6 +186,11 @@ class NodesView(TableView):
         self.updateSelectedRows()
 
     def paintEvent(self, event):
+        theme = (isDarkTheme(), themeColor().rgba(), self.font().toString())
+        if theme != getattr(self, "_paint_theme", None):
+            self._paint_theme = theme
+            if self.model() is not None:
+                self.model().clear_display_cache()
         header = self.header()
         columns = [header.logicalIndex(i) for i in range(header.count()) if not header.isSectionHidden(header.logicalIndex(i))]
         self._row_edges = (columns[0], columns[-1]) if columns else None
@@ -192,6 +209,11 @@ class NodesView(TableView):
                 break
             top, height = self.rowViewportPosition(row), self.rowHeight(row)
             if self.model().index(row, 0).data(NODE_ID_ROLE):
-                painter.drawRoundedRect(QRect(3, top+1, self.viewport().width()-7, height-2), 3, 3)
+                border = QColor(base, base, base, 20)
+                width = self.viewport().width()-7
+                painter.fillRect(QRect(3, top+1, width, 1), border)
+                painter.fillRect(QRect(3, top+height-2, width, 1), border)
+                painter.fillRect(QRect(3, top+2, 1, height-4), border)
+                painter.fillRect(QRect(3+width-1, top+2, 1, height-4), border)
             y = max(y+1, top+height)
         painter.end()

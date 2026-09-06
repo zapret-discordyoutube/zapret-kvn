@@ -41,6 +41,50 @@ class NodesInteractionTests(unittest.TestCase):
         QTest.mouseClick(self.table.viewport(), Qt.MouseButton.LeftButton, modifiers,
                          self.table.visualRect(self.index(node_id)).center())
 
+    def test_display_cache_reuses_other_rows_after_one_node_changes(self):
+        first, other = self.index('1'), self.index('2')
+        self.model.clear_display_cache()
+        with patch.object(self.model, '_cell_data', wraps=self.model._cell_data) as read:
+            for _ in range(100):
+                self.assertEqual(first.data(), 'Server 1')
+                self.assertEqual(other.data(), 'Server 2')
+            self.assertEqual(read.call_count, 2)
+            self.nodes[1].name = '🇩🇪 Changed'
+            self.page._table_model.refresh_countries({'1'})
+            self.assertEqual(first.data(), 'Changed')
+            reads_after_update = read.call_count
+            self.assertEqual(other.data(), 'Server 2')
+            self.assertEqual(read.call_count, reads_after_update)
+            self.assertEqual(sum(call.args[0] == other and call.args[1] == Qt.ItemDataRole.DisplayRole
+                                 for call in read.call_args_list), 1)
+
+    def test_collapsed_node_cache_updates_before_expansion(self):
+        index = self.index('1')
+        self.assertEqual(index.data(), 'Server 1')
+        group = self.model.group_indexes()[0]
+        self.table.collapse(group)
+        self.nodes[1].name = '🇫🇮 New name'
+        self.page._table_model.refresh_countries({'1'})
+        self.table.expand(group)
+        self.assertEqual(index.data(), 'New name')
+
+    def test_resize_events_share_one_layout_and_keep_final_widths(self):
+        self.page._viewport_layout_timer.stop()
+        with patch.object(self.page, '_relayout_flex_column') as layout:
+            for _ in range(50):
+                self.page._queue_viewport_layout()
+            self.assertEqual(layout.call_count, 0)
+            for _ in range(50):
+                QTest.qWait(10)
+                if layout.call_count:
+                    break
+            self.assertEqual(layout.call_count, 1)
+        self.page.resize(1500, 550)
+        QTest.qWait(50)
+        header = self.table.horizontalHeader()
+        width = sum(header.sectionSize(i) for i in range(header.count()) if not header.isSectionHidden(i))
+        self.assertEqual(width, self.table.viewport().width())
+
     def test_mouse_multiselection_keyboard_navigation_and_copy_links(self):
         self.click('1')
         self.click('3', Qt.KeyboardModifier.ControlModifier)
