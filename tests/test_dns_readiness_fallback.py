@@ -12,10 +12,10 @@ from xray_fluent.profiles.models import Node
 
 
 class ReadinessTests(unittest.TestCase):
-    def run_probe(self, *, refused=False, cancel_at=None, handshake_at=0):
+    def run_probe(self, *, refused=False, cancel_at=None, handshake_at=float("inf")):
         elapsed = [0.0]
         manager = SimpleNamespace(_failed=False, _expected=False, stats={'peers': []},
-                                  _process=Mock(), _report=Mock())
+                                  _process=Mock(), _report=Mock(), _monitor_transport_health=Mock())
         manager._process.state.return_value = QProcess.ProcessState.Running
         manager._is_current = lambda: cancel_at is None or elapsed[0] < cancel_at
         manager._cancelled = lambda: AmneziaManager._cancelled(manager)
@@ -36,13 +36,17 @@ class ReadinessTests(unittest.TestCase):
              patch('xray_fluent.engines.amnezia.manager.time.monotonic', side_effect=lambda: elapsed[0]), \
              patch('xray_fluent.engines.amnezia.manager.sleep_with_events', side_effect=sleep):
             result = AmneziaManager._ready(manager, 1234, {'username': 'test', 'password': 'test'})
-        executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+        if result:
+            executor.shutdown.assert_not_called()
+            manager._monitor_transport_health.assert_called_once()
+        else:
+            executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
         return result, manager, executor
 
-    def test_refused_transport_has_three_bounded_waves_and_one_failure(self):
+    def test_missing_handshake_has_one_bounded_wave_and_one_failure(self):
         result, manager, executor = self.run_probe(refused=True)
         self.assertFalse(result)
-        self.assertEqual(executor.submit.call_count, 9)
+        self.assertEqual(executor.submit.call_count, 3)
         manager._report.assert_called_once()
 
     def test_success_waits_for_handshake_observation_without_more_probes(self):

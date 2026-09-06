@@ -67,6 +67,7 @@ class AmneziaManager(QObject):
         self.diagnostic_config = None
         self._is_current = None
         self._health = BackgroundHealthCheck(self)
+        self._pending_front_config = None
 
     @property
     def is_running(self) -> bool:
@@ -132,11 +133,19 @@ class AmneziaManager(QObject):
         return True
 
     def verify_front_dns(self, config: dict) -> bool:
-        # The transport already passed authenticated handshake AND literal-IP
-        # HTTPS readiness. A second, domain-based probe is diagnostic, and must
-        # not tear down that proven path when the front DNS policy fails.
+        # The authenticated tunnel is already running. Domain checks follow
+        # the original IP probe wave, without delaying admission or doubling
+        # the number of simultaneous probe sockets.
         if not self.is_running or self._cancelled():
             return False
+        if self._health.active and self.stats.get("https_check") == "pending":
+            self._pending_front_config = deepcopy(config)
+            self.stats["front_dns_check"] = "queued"
+            return True
+        self._start_front_health(config)
+        return True
+
+    def _start_front_health(self, config):
         self._health.cancel()
         port = int(config["listen"].rsplit(":", 1)[1])
         executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="amnezia-health")
@@ -160,45 +169,58 @@ class AmneziaManager(QObject):
     def _cancelled(self) -> bool:
         return self._expected or (self._is_current is not None and not self._is_current())
 
+    def _monitor_transport_health(self, executor, futures):
+        self.stats["remote_authenticated"] = True
+        self.stats["https_check"] = "pending"
+        self._health.adopt(executor, futures, {},
+            current=lambda: self.is_running and not self._cancelled(),
+            complete=self._transport_health_complete)
+
+    def _transport_health_complete(self, winner, failures):
+        self.stats["https_check"] = "passed" if winner else "warning"
+        if winner:
+            self.log_received.emit(f"[amnezia][stage=health_check] HTTPS check succeeded via {winner}")
+        else:
+            detail = "; ".join(f"{host}: {message}" for host, message in sorted(failures.items()))
+            self.log_received.emit("[amnezia][stage=health_check] WARNING: authenticated tunnel retained; " + redact_runtime_log(detail))
+            self.warning.emit("AWG/WireGuard: handshake подтверждён, но проверочные HTTPS-адреса не ответили. "
+                              "Соединение сохранено; передача обычного трафика пока не подтверждена.")
+        config, self._pending_front_config = self._pending_front_config, None
+        if config is not None and self.is_running and not self._cancelled():
+            self._start_front_health(config)
+
     def _ready(self, port: int, config: dict) -> bool:
+        if self._failed or self._cancelled() or self._process.state() == QProcess.ProcessState.NotRunning:
+            return False
         deadline = time.monotonic() + 20
-        failures: dict[str, str] = {}
         executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="amnezia-ready")
+        transferred = False
         try:
-            attempts = 0
-            while time.monotonic() < deadline and not self._failed and not self._cancelled() and attempts < 3:
-                attempts += 1
-                futures = {executor.submit(probe_https, port, username=config["username"], password=config["password"],
-                                            endpoint=e, timeout=min(4, max(0.2, deadline-time.monotonic()))): e[1] for e in PROBES}
-                success = False
-                while (futures or success) and time.monotonic() < deadline and not self._failed and not self._cancelled():
-                    if self._process.state() == QProcess.ProcessState.NotRunning:
-                        return False
-                    for future in list(futures):
-                        if future.done():
-                            host = futures.pop(future)
-                            error = future.exception()
-                            if error is None:
-                                success = True
-                            else:
-                                failures[host] = f"{type(error).__name__}: {error}"
-                    # Do not accumulate unbounded probe waves; each wave drains.
-                    if success and any(p.get("last_handshake_time_sec", 0) for p in self.stats.get("peers", [])):
-                        self.stats["https_check"] = "passed"
-                        return True
-                    sleep_with_events(0.025)
-                for future in futures:
-                    future.cancel()
-                if not success and not self._cancelled():
-                    sleep_with_events(0.25 * attempts)
+            # One bounded wave triggers the lazy handshake and subsequently
+            # becomes background diagnostics. Its destinations are not a gate
+            # for a successful Noise handshake reported by the owned core.
+            futures = {executor.submit(probe_https, port, username=config["username"], password=config["password"],
+                                       endpoint=e, timeout=4): e[1] for e in PROBES}
+            while time.monotonic() < deadline and not self._failed and not self._cancelled():
+                if self._process.state() == QProcess.ProcessState.NotRunning:
+                    return False
+                if any(p.get("last_handshake_time_sec", 0) for p in self.stats.get("peers", [])):
+                    self._monitor_transport_health(executor, futures)
+                    transferred = True
+                    return True
+                sleep_with_events(0.025)
             if not self._failed and not self._cancelled():
-                handshake = any(p.get("last_handshake_time_sec", 0) for p in self.stats.get("peers", []))
-                self._report("https_readiness" if handshake else "handshake_readiness",
-                             ("HTTPS probes failed: " if handshake else "No authenticated handshake observed; ") +
-                             "; ".join(f"{host}: {message}" for host, message in sorted(failures.items())))
+                failures = []
+                for future, host in futures.items():
+                    if future.done() and not future.cancelled():
+                        error = future.exception()
+                        if error is not None:
+                            failures.append(f"{host}: {type(error).__name__}: {error}")
+                self._report("handshake_readiness", "No authenticated handshake observed; " + "; ".join(failures))
             return False
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            if not transferred:
+                executor.shutdown(wait=False, cancel_futures=True)
 
     def _read(self) -> None:
         self._buffer += bytes(self._process.readAllStandardOutput())
@@ -226,7 +248,7 @@ class AmneziaManager(QObject):
                     continue
                 stage, raw = event["stage"], event.get("raw", "")
                 if stage == "stats":
-                    self.stats = {**{key: self.stats[key] for key in ("https_check", "front_dns_check") if key in self.stats}, **event}
+                    self.stats = {**{key: self.stats[key] for key in ("remote_authenticated", "https_check", "front_dns_check") if key in self.stats}, **event}
                 elif stage == "relay_ready":
                     self._relay_ready = True
                 elif stage in {"core_error", "configure", "netstack", "start", "relay", "process", "bootstrap_dns", "observer"}:
@@ -277,5 +299,7 @@ class AmneziaManager(QObject):
 
     def _cancel_health(self):
         self._health.cancel()
-        if self.stats.get("front_dns_check") == "pending":
-            self.stats["front_dns_check"] = "cancelled"
+        self._pending_front_config = None
+        for key in ("https_check", "front_dns_check"):
+            if self.stats.get(key) in {"pending", "queued"}:
+                self.stats[key] = "cancelled"
