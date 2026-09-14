@@ -1054,7 +1054,48 @@ def _ensure_singbox_proxy_runtime_contract(
     return selection
 
 
+def _ensure_default_domain_resolver(payload: dict[str, Any]) -> None:
+    """Guarantee a route-level default DNS resolver for sing-box >= 1.14.
+
+    sing-box 1.12 deprecated and 1.14 removed the implicit resolution of domains
+    in dial fields, so a config that dials any domain must name
+    ``route.default_domain_resolver`` (or a per-outbound ``domain_resolver``).
+    Managed templates already set it, but imported configs / raw keys often omit
+    it — those run on Android (pinned to 1.13, which only warns) yet the core
+    rejects them on Windows (1.14+). Point the route default at a real DNS server
+    tag so such configs start everywhere; per-outbound resolvers still win.
+    """
+
+    dns = payload.get("dns")
+    available_tags: list[str] = []
+    if isinstance(dns, dict):
+        for server in dns.get("servers") or []:
+            if isinstance(server, dict):
+                tag = str(server.get("tag") or "").strip()
+                if tag and tag not in available_tags:
+                    available_tags.append(tag)
+    if not available_tags:
+        # No DNS server to point at; leave the config untouched for the
+        # validator/core to surface a clearer error.
+        return
+
+    route = payload.get("route")
+    if not isinstance(route, dict):
+        route = {}
+        payload["route"] = route
+
+    current = _extract_dns_server_tag(route.get("default_domain_resolver"))
+    if current and current in available_tags:
+        return
+
+    route["default_domain_resolver"] = next(
+        (tag for tag in ("proxy-dns", "bootstrap-dns") if tag in available_tags),
+        available_tags[0],
+    )
+
+
 def _validate_runtime_dns_contract(payload: dict[str, Any]) -> None:
+    _ensure_default_domain_resolver(payload)
     dns = payload.get("dns")
     server_tags: set[str] = set()
     if isinstance(dns, dict):
