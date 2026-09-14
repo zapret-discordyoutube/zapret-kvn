@@ -720,7 +720,18 @@ def publish_telegram(version: str, changes: list[str]) -> None:
     ]
     for item in changes:
         arguments.extend(("--change", item))
-    run(arguments, timeout=1800)
+    # Large installers over DPI-throttled MTProto can take well over the old
+    # 1800 s cap; align with the publisher's own timeout and, if the client still
+    # times out, trust the bot's publish ledger (the upload often completes after
+    # the client gives up) before failing.
+    publish_timeout = int(os.getenv("ZAPRET_PUBLISH_TIMEOUT", "7200"))
+    try:
+        run(arguments, timeout=publish_timeout)
+    except subprocess.TimeoutExpired:
+        if telegram_has_version(version):
+            log(f"Telegram publisher timed out but the ledger records v{version}; treating as published")
+            return
+        raise
     if not telegram_has_version(version):
         raise ReleaseError("Telegram publisher did not record the stable installer")
 
