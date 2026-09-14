@@ -15,8 +15,8 @@ from __future__ import annotations
 import ctypes
 import os
 import socket
-from ctypes import POINTER, Structure, c_char_p, c_int, c_ubyte, c_ulong, c_ushort, c_void_p, c_wchar_p
-from dataclasses import dataclass
+from ctypes import POINTER, Structure, c_char_p, c_int, c_ubyte, c_ulong, c_ulonglong, c_ushort, c_void_p, c_wchar_p
+from dataclasses import dataclass, field
 
 __all__ = [
     "AdapterInfo",
@@ -27,6 +27,8 @@ __all__ = [
     "find_adapter",
     "is_available",
     "list_adapters",
+    "resolve_physical_uplink",
+    "select_physical_uplink",
 ]
 
 
@@ -47,6 +49,11 @@ _GAA_FLAG_INCLUDE_ALL_INTERFACES = 0x0100
 _ERROR_SUCCESS = 0
 _ERROR_BUFFER_OVERFLOW = 111
 _ERROR_NO_DATA = 232
+
+# IF_OPER_STATUS: only IfOperStatusUp (1) carries traffic.
+_IF_OPER_STATUS_UP = 1
+# MAX_ADAPTER_ADDRESS_LENGTH from iptypes.h.
+_MAX_ADAPTER_ADDRESS_LENGTH = 8
 
 
 class _SOCKADDR(Structure):
@@ -78,7 +85,15 @@ class _IP_ADAPTER_ADDRESSES(Structure):
     pass
 
 
-# Truncated after FriendlyName for the same reason as above.
+# The DNS-server and gateway lists share the {Length, Flags/Reserved, Next,
+# Address} prologue with the unicast node, so the same truncated structure
+# walks all three chains through API-allocated Next pointers.
+#
+# Fields through Ipv4Metric mirror IP_ADAPTER_ADDRESSES_LH exactly (iptypes.h);
+# the layout is only extended, never reordered, so existing readers that stop
+# at FriendlyName keep their offsets. Everything after Ipv4Metric is omitted
+# because nothing here reads it. Entries are always API-allocated, so the
+# omission is safe: we never allocate or index by our own sizeof.
 _IP_ADAPTER_ADDRESSES._fields_ = [
     ("Length", c_ulong),
     ("IfIndex", c_ulong),
@@ -87,10 +102,25 @@ _IP_ADAPTER_ADDRESSES._fields_ = [
     ("FirstUnicastAddress", POINTER(_IP_ADAPTER_UNICAST_ADDRESS)),
     ("FirstAnycastAddress", c_void_p),
     ("FirstMulticastAddress", c_void_p),
-    ("FirstDnsServerAddress", c_void_p),
+    ("FirstDnsServerAddress", POINTER(_IP_ADAPTER_UNICAST_ADDRESS)),
     ("DnsSuffix", c_wchar_p),
     ("Description", c_wchar_p),
     ("FriendlyName", c_wchar_p),
+    ("PhysicalAddress", c_ubyte * _MAX_ADAPTER_ADDRESS_LENGTH),
+    ("PhysicalAddressLength", c_ulong),
+    ("Flags", c_ulong),
+    ("Mtu", c_ulong),
+    ("IfType", c_ulong),
+    ("OperStatus", c_int),
+    ("Ipv6IfIndex", c_ulong),
+    ("ZoneIndices", c_ulong * 16),
+    ("FirstPrefix", c_void_p),
+    ("TransmitLinkSpeed", c_ulonglong),
+    ("ReceiveLinkSpeed", c_ulonglong),
+    ("FirstWinsServerAddress", c_void_p),
+    ("FirstGatewayAddress", POINTER(_IP_ADAPTER_UNICAST_ADDRESS)),
+    ("Ipv4Metric", c_ulong),
+    ("Ipv6Metric", c_ulong),
 ]
 
 
@@ -102,6 +132,11 @@ class AdapterInfo:
     if_index: int
     ipv4_addresses: list[str]
     ipv6_addresses: list[str]  # link-local (fe80::/10) excluded
+    if_type: int = 0
+    oper_status: int = 0
+    ipv4_metric: int = 0
+    ipv4_gateways: list[str] = field(default_factory=list)
+    dns_servers: list[str] = field(default_factory=list)  # IPv4 then IPv6
 
 
 def _sockaddr_to_ip(sockaddr_ptr) -> tuple[int, str] | None:
@@ -122,6 +157,19 @@ def _sockaddr_to_ip(sockaddr_ptr) -> tuple[int, str] | None:
     return None
 
 
+def _walk_address_nodes(first) -> list[tuple[int, str]]:
+    """Collect (family, ip) from a {Length, Flags, Next, Address} node chain."""
+    collected: list[tuple[int, str]] = []
+    node = first
+    while node:
+        item = node.contents
+        parsed = _sockaddr_to_ip(item.Address.lpSockaddr)
+        if parsed is not None:
+            collected.append(parsed)
+        node = item.Next
+    return collected
+
+
 def _parse_adapter_chain(first) -> list[AdapterInfo]:
     adapters: list[AdapterInfo] = []
     current = first
@@ -129,18 +177,21 @@ def _parse_adapter_chain(first) -> list[AdapterInfo]:
         entry = current.contents
         ipv4_addresses: list[str] = []
         ipv6_addresses: list[str] = []
-        unicast = entry.FirstUnicastAddress
-        while unicast:
-            item = unicast.contents
-            parsed = _sockaddr_to_ip(item.Address.lpSockaddr)
-            if parsed is not None:
-                family, text = parsed
-                if family == _AF_INET:
-                    if text != "0.0.0.0":
-                        ipv4_addresses.append(text)
-                elif not text.lower().startswith("fe80"):
-                    ipv6_addresses.append(text)
-            unicast = item.Next
+        for family, text in _walk_address_nodes(entry.FirstUnicastAddress):
+            if family == _AF_INET:
+                if text != "0.0.0.0":
+                    ipv4_addresses.append(text)
+            elif not text.lower().startswith("fe80"):
+                ipv6_addresses.append(text)
+
+        ipv4_gateways = [text for family, text in _walk_address_nodes(entry.FirstGatewayAddress)
+                         if family == _AF_INET and text != "0.0.0.0"]
+        # DNS servers: IPv4 first, then non-link-local IPv6, matching how the
+        # bootstrap resolver prefers reachable servers.
+        dns_v4 = [text for family, text in _walk_address_nodes(entry.FirstDnsServerAddress) if family == _AF_INET]
+        dns_v6 = [text for family, text in _walk_address_nodes(entry.FirstDnsServerAddress)
+                  if family == _AF_INET6 and not text.lower().startswith("fe80")]
+
         raw_name = entry.AdapterName
         adapters.append(
             AdapterInfo(
@@ -150,6 +201,11 @@ def _parse_adapter_chain(first) -> list[AdapterInfo]:
                 if_index=int(entry.IfIndex),
                 ipv4_addresses=ipv4_addresses,
                 ipv6_addresses=ipv6_addresses,
+                if_type=int(entry.IfType),
+                oper_status=int(entry.OperStatus),
+                ipv4_metric=int(entry.Ipv4Metric),
+                ipv4_gateways=ipv4_gateways,
+                dns_servers=dns_v4 + dns_v6,
             )
         )
         current = entry.Next
@@ -181,10 +237,11 @@ def list_adapters() -> list[AdapterInfo]:
     # Wintun can briefly exist without being bound to either address family
     # while sing-box configures it.  Ask for every NDIS interface so a poll
     # started during that window does not keep overlooking the same adapter.
+    # DNS servers are kept (no SKIP_DNS_SERVER): the physical-uplink resolver
+    # needs them for bootstrap resolution, and the extra parsing is cheap.
     flags = (
         _GAA_FLAG_SKIP_ANYCAST
         | _GAA_FLAG_SKIP_MULTICAST
-        | _GAA_FLAG_SKIP_DNS_SERVER
         | _GAA_FLAG_INCLUDE_ALL_INTERFACES
     )
     size = c_ulong(16 * 1024)
@@ -216,6 +273,47 @@ def find_adapter(name: str) -> AdapterInfo | None:
 
 def adapter_exists(name: str) -> bool:
     return find_adapter(name) is not None
+
+
+def _has_routable_ipv4(adapter: AdapterInfo) -> bool:
+    return any(not addr.startswith("169.254.") for addr in adapter.ipv4_addresses)
+
+
+def select_physical_uplink(adapters: list[AdapterInfo]) -> AdapterInfo | None:
+    """Pick the physical uplink that carries the default IPv4 route.
+
+    Selection mirrors the OS default-route decision without PowerShell and
+    without the too-strict ``HardwareInterface`` filter (which drops Hyper-V /
+    WSL / Docker ``vEthernet`` uplinks). A candidate must be operationally up,
+    own a routable (non-APIPA) IPv4 address, and advertise an IPv4 gateway.
+    Requiring a gateway naturally excludes WireGuard/AmneziaWG TUN adapters
+    (they have none), so the AWG relay never binds back onto its own tunnel.
+    Ties break on the lowest ``Ipv4Metric`` (the OS route preference), then the
+    lowest interface index for determinism.
+    """
+    candidates = [
+        adapter
+        for adapter in adapters
+        if adapter.if_index > 0
+        and adapter.oper_status == _IF_OPER_STATUS_UP
+        and adapter.ipv4_gateways
+        and _has_routable_ipv4(adapter)
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda a: (a.ipv4_metric, a.if_index))
+
+
+def resolve_physical_uplink() -> tuple[int, list[str]] | None:
+    """Return ``(interface_index, bootstrap_dns)`` for the physical uplink.
+
+    Returns ``None`` when no uplink currently qualifies. Raises
+    :class:`WinNetInfoError` when the ctypes fast path itself is unavailable.
+    """
+    uplink = select_physical_uplink(list_adapters())
+    if uplink is None:
+        return None
+    return uplink.if_index, list(uplink.dns_servers)
 
 
 def adapter_has_ipv4(name: str) -> bool:

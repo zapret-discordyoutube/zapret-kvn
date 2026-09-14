@@ -123,5 +123,20 @@ class RuntimeStopTests(TestCase):
         controller.state.settings.tun_mode = False
         controller.connected = True
         controller._desired_connected = False
+        controller._active_tunnel_addresses.return_value = set()
         AppController._on_network_changed(controller, 'old', 'new')
+        controller._request_transition.assert_not_called()
+
+    def test_tunnel_self_address_change_does_not_reconnect(self):
+        controller = Mock()
+        controller.state.settings.tun_mode = False
+        controller.connected = True
+        controller._desired_connected = True
+        controller._transition_active = False
+        controller._disconnecting = False
+        controller.state.settings.reconnect_on_network_change = True
+        # The tunnel's own address surfacing as the outbound IP is not a real
+        # network change and must not trigger a reconnect.
+        controller._active_tunnel_addresses.return_value = {'10.9.0.49'}
+        AppController._on_network_changed(controller, '192.168.1.8', '10.9.0.49')
         controller._request_transition.assert_not_called()

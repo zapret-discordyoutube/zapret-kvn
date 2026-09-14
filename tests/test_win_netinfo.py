@@ -34,6 +34,22 @@ def _ipv6_sockaddr(address: str) -> win_netinfo._SOCKADDR:
     return _make_sockaddr(win_netinfo._AF_INET6, socket.inet_pton(socket.AF_INET6, address), 6)
 
 
+def _build_address_chain(sockaddrs, keep_alive):
+    """Build a {Length, Flags, Next, Address} node chain (unicast/DNS/gateway)."""
+    first = None
+    previous = None
+    for sockaddr in sockaddrs:
+        node = win_netinfo._IP_ADAPTER_UNICAST_ADDRESS()
+        node.Address.lpSockaddr = ctypes.pointer(sockaddr)
+        keep_alive.extend([sockaddr, node])
+        if previous is None:
+            first = node
+        else:
+            previous.Next = ctypes.pointer(node)
+        previous = node
+    return ctypes.pointer(first) if first is not None else None
+
+
 def _make_adapter_chain(specs, keep_alive):
     """Build a linked _IP_ADAPTER_ADDRESSES chain from python specs."""
     adapters = []
@@ -43,21 +59,32 @@ def _make_adapter_chain(specs, keep_alive):
         adapter.AdapterName = spec.get("adapter_name", b"{00000000-0000-0000-0000-000000000000}")
         adapter.FriendlyName = spec.get("friendly_name", "")
         adapter.Description = spec.get("description", "")
-        previous = None
-        for sockaddr in spec.get("sockaddrs", []):
-            unicast = win_netinfo._IP_ADAPTER_UNICAST_ADDRESS()
-            unicast.Address.lpSockaddr = ctypes.pointer(sockaddr)
-            keep_alive.extend([sockaddr, unicast])
-            if previous is None:
-                adapter.FirstUnicastAddress = ctypes.pointer(unicast)
-            else:
-                previous.Next = ctypes.pointer(unicast)
-            previous = unicast
+        adapter.IfType = spec.get("if_type", 0)
+        adapter.OperStatus = spec.get("oper_status", 0)
+        adapter.Ipv4Metric = spec.get("ipv4_metric", 0)
+        unicast = _build_address_chain(spec.get("sockaddrs", []), keep_alive)
+        if unicast is not None:
+            adapter.FirstUnicastAddress = unicast
+        gateways = _build_address_chain(spec.get("gateways", []), keep_alive)
+        if gateways is not None:
+            adapter.FirstGatewayAddress = gateways
+        dns = _build_address_chain(spec.get("dns", []), keep_alive)
+        if dns is not None:
+            adapter.FirstDnsServerAddress = dns
         keep_alive.append(adapter)
         adapters.append(adapter)
     for left, right in zip(adapters, adapters[1:]):
         left.Next = ctypes.pointer(right)
     return ctypes.pointer(adapters[0]) if adapters else None
+
+
+def _uplink(name, *, if_index, metric, oper_status=win_netinfo._IF_OPER_STATUS_UP,
+            ipv4=("192.168.1.8",), gateways=("192.168.1.1",), dns=("192.168.1.1",)) -> win_netinfo.AdapterInfo:
+    return win_netinfo.AdapterInfo(
+        adapter_name="{guid}", friendly_name=name, description="", if_index=if_index,
+        ipv4_addresses=list(ipv4), ipv6_addresses=[], oper_status=oper_status,
+        ipv4_metric=metric, ipv4_gateways=list(gateways), dns_servers=list(dns),
+    )
 
 
 def _adapter(name: str, description: str = "", if_index: int = 1, ipv4=(), ipv6=()) -> win_netinfo.AdapterInfo:
@@ -317,6 +344,68 @@ class XrayTunRouteProbeTests(unittest.TestCase):
         self.assertIs(interface, sentinel)
         self.assertFalse(fast_probe)
         powershell_mock.assert_called_once_with("xftun0")
+
+
+class ParseGatewayDnsTests(unittest.TestCase):
+    def test_parses_gateways_dns_and_scalars(self) -> None:
+        keep_alive: list = []
+        first = _make_adapter_chain(
+            [
+                {
+                    "friendly_name": "Ethernet",
+                    "if_index": 7,
+                    "if_type": 6,
+                    "oper_status": win_netinfo._IF_OPER_STATUS_UP,
+                    "ipv4_metric": 25,
+                    "sockaddrs": [_ipv4_sockaddr("192.168.1.8")],
+                    "gateways": [_ipv4_sockaddr("192.168.1.1")],
+                    "dns": [_ipv4_sockaddr("192.168.1.1"), _ipv6_sockaddr("2001:4860:4860::8888"),
+                            _ipv6_sockaddr("fe80::1")],
+                }
+            ],
+            keep_alive,
+        )
+
+        [adapter] = win_netinfo._parse_adapter_chain(first)
+        self.assertEqual(adapter.if_type, 6)
+        self.assertEqual(adapter.oper_status, win_netinfo._IF_OPER_STATUS_UP)
+        self.assertEqual(adapter.ipv4_metric, 25)
+        self.assertEqual(adapter.ipv4_gateways, ["192.168.1.1"])
+        # IPv4 first, link-local IPv6 dropped.
+        self.assertEqual(adapter.dns_servers, ["192.168.1.1", "2001:4860:4860::8888"])
+
+
+class PhysicalUplinkTests(unittest.TestCase):
+    def test_prefers_lowest_metric_uplink_with_gateway(self) -> None:
+        wifi = _uplink("Wi-Fi", if_index=12, metric=50)
+        ethernet = _uplink("Ethernet", if_index=7, metric=25)
+        self.assertIs(win_netinfo.select_physical_uplink([wifi, ethernet]), ethernet)
+
+    def test_wireguard_tun_without_gateway_is_excluded(self) -> None:
+        # WireGuard/AmneziaWG TUN: up, has address, but no gateway -> not chosen.
+        tun = _uplink("xftun0", if_index=33, metric=0, ipv4=("10.9.0.49",), gateways=())
+        ethernet = _uplink("Ethernet", if_index=7, metric=25)
+        self.assertIs(win_netinfo.select_physical_uplink([tun, ethernet]), ethernet)
+
+    def test_hyper_v_vethernet_uplink_is_accepted(self) -> None:
+        # The PowerShell HardwareInterface filter dropped this; the gateway rule
+        # keeps it.
+        vethernet = _uplink("vEthernet (WSL)", if_index=40, metric=15)
+        self.assertIs(win_netinfo.select_physical_uplink([vethernet]), vethernet)
+
+    def test_down_or_apipa_only_adapters_are_ignored(self) -> None:
+        down = _uplink("Ethernet", if_index=7, metric=10, oper_status=2)
+        apipa = _uplink("Wi-Fi", if_index=12, metric=20, ipv4=("169.254.5.5",))
+        self.assertIsNone(win_netinfo.select_physical_uplink([down, apipa]))
+
+    def test_resolve_returns_index_and_bootstrap_dns(self) -> None:
+        ethernet = _uplink("Ethernet", if_index=7, metric=25, dns=("192.168.1.1", "1.1.1.1"))
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[ethernet]):
+            self.assertEqual(win_netinfo.resolve_physical_uplink(), (7, ["192.168.1.1", "1.1.1.1"]))
+
+    def test_resolve_returns_none_when_no_uplink(self) -> None:
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[]):
+            self.assertIsNone(win_netinfo.resolve_physical_uplink())
 
 
 if __name__ == "__main__":

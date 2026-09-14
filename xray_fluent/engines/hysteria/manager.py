@@ -6,7 +6,6 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
-import socket
 import time
 from typing import Any
 
@@ -16,6 +15,7 @@ from ...constants import HYSTERIA_CONFIG_FILE, HYSTERIA_PATH_DEFAULT, PROXY_HOST
 from ...diagnostics.export import capture_runtime_config
 from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 from ..health_check import BackgroundHealthCheck
+from ..sidecar import wait_for_loopback_relay
 from .runtime_contract import (
     SECURITY_FAILURES,
     HysteriaFailureCode,
@@ -292,16 +292,13 @@ class HysteriaManager(QObject):
         return True
 
     def _wait_until_relay_ready(self, relay_port: int, timeout: float = 10.0) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self._process.state() == QProcess.ProcessState.NotRunning:
-                return False
-            try:
-                with socket.create_connection((PROXY_HOST, relay_port), timeout=0.15):
-                    return True
-            except OSError:
-                sleep_with_events(0.05)
-        return False
+        # Shared sidecar seam: the loopback SOCKS listener must accept a TCP
+        # connection before the sing-box front can dial it.
+        return wait_for_loopback_relay(
+            relay_port,
+            timeout=timeout,
+            should_continue=lambda: self._process.state() != QProcess.ProcessState.NotRunning,
+        )
 
     def _wait_until_remote_ready(
         self,

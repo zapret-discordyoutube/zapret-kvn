@@ -11,34 +11,43 @@ from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 from ...constants import AMNEZIA_PATH_DEFAULT
 from ...diagnostics.export import capture_runtime_config
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log
-from ...platform.windows.subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text_pumped, sleep_with_events, wait_for_qprocess_finished, wait_for_qprocess_started
+from ...platform.windows.subprocess_utils import sleep_with_events, wait_for_qprocess_finished, wait_for_qprocess_started
+from ...platform.windows import win_netinfo
 from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 from ..health_check import BackgroundHealthCheck
+from ..sidecar import wait_for_loopback_relay
 
 
 PROBES = HTTPS_ENDPOINTS
 
 
-def physical_network() -> dict:
+def physical_network(*, attempts: int = 5, retry_delay: float = 0.3) -> dict:
+    """Resolve the physical uplink the AWG UDP socket must bind to.
+
+    The owned Go core binds via ``IP_UNICAST_IF`` and hard-requires a valid,
+    non-zero interface index (there is no default-bind fallback), so this must
+    return a real physical interface. Resolution uses a single ctypes
+    ``GetAdaptersAddresses`` call (~1 ms) instead of spawning PowerShell
+    (~500 ms, and its ``HardwareInterface`` filter wrongly excluded Hyper-V /
+    WSL / Docker ``vEthernet`` uplinks). The uplink can be briefly unavailable
+    during a network transition, so a transient miss is retried instead of
+    aborting the whole startup.
+    """
     if os.name != "nt":
         return {"interface_index": 0, "bootstrap_dns": []}
-    # Resolve before installing the new TUN; exclude tunnel/software adapters.
-    script = ("$r = Get-NetRoute | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0','::/0') } "
-              "| Sort-Object RouteMetric,InterfaceMetric; "
-              "foreach ($i in $r) { $a = Get-NetAdapter -InterfaceIndex $i.InterfaceIndex -ErrorAction SilentlyContinue; "
-              "if ($a.Status -eq 'Up' -and $a.HardwareInterface) { "
-              "$dns = @(Get-DnsClientServerAddress -InterfaceIndex $i.InterfaceIndex | ForEach-Object { $_.ServerAddresses }); "
-              "@{ interface_index = [int]$i.InterfaceIndex; bootstrap_dns = $dns } | ConvertTo-Json -Compress; exit 0 } }; exit 1")
-    result = run_text_pumped(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                             timeout=6, creationflags=CREATE_NO_WINDOW)
-    if result.returncode:
-        raise OSError("Physical interface for Amnezia UDP transport not found")
-    network = json.loads(result_output_text(result).strip())
-    if not isinstance(network, dict) or not isinstance(network.get("interface_index"), int) or network["interface_index"] <= 0:
-        raise OSError("Invalid physical interface index")
-    if not isinstance(network.get("bootstrap_dns"), list):
-        raise OSError("Invalid physical DNS server list")
-    return network
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            resolved = win_netinfo.resolve_physical_uplink()
+        except win_netinfo.WinNetInfoError as exc:
+            last_error, resolved = exc, None
+        if resolved is not None:
+            index, bootstrap_dns = resolved
+            return {"interface_index": index, "bootstrap_dns": bootstrap_dns}
+        if attempt + 1 < max(1, attempts):
+            sleep_with_events(retry_delay)
+    detail = f" ({last_error})" if last_error is not None else ""
+    raise OSError("Physical interface for Amnezia UDP transport not found" + detail)
 
 
 class AmneziaManager(QObject):
@@ -120,6 +129,19 @@ class AmneziaManager(QObject):
                 return False
             if not self._relay_ready or self._failed:
                 raise OSError("Amnezia local relay did not become ready")
+            # Shared sidecar seam: confirm the loopback SOCKS listener actually
+            # accepts a connection before firing the handshake probe, matching
+            # the Hysteria contract. relay_ready already fired, so this is an
+            # immediate confirmation that tolerates a brief bind delay.
+            if not wait_for_loopback_relay(
+                relay_port,
+                should_continue=lambda: not self._failed and not self._cancelled()
+                and self._process.state() != QProcess.ProcessState.NotRunning,
+            ):
+                if self._cancelled():
+                    self.stop()
+                    return False
+                raise OSError("Amnezia local relay is not accepting loopback connections")
             if not self._ready(relay_port, payload):
                 self.stop()
                 return False

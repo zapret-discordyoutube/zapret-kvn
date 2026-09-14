@@ -3831,12 +3831,33 @@ class AppController(QObject):
     def _on_xray_update_worker_done(self, result: XrayCoreUpdateResult) -> None:
         on_xray_update_worker_done_operation(self, result)
 
+    def _active_tunnel_addresses(self) -> set[str]:
+        """IPs assigned to the active AWG/WireGuard sidecar's own tunnel.
+
+        These become the outbound IP once the handshake completes, which the
+        network monitor otherwise misreads as a real network change.
+        """
+        plan = getattr(self, "_active_singbox_plan", None)
+        sidecar = getattr(plan, "amnezia_sidecar", None) if plan is not None else None
+        if sidecar is None:
+            return set()
+        addresses = ((sidecar.config or {}).get("endpoint") or {}).get("address") or []
+        return {str(item).split("/", 1)[0].strip() for item in addresses if str(item).strip()}
+
     def _on_network_changed(self, old: str, new: str) -> None:
         self._log(f"[network] changed: {old} -> {new}")
         # TUN mode creates a virtual adapter which triggers network change —
         # reconnecting would kill the TUN and cause an infinite loop
         if self.state.settings.tun_mode:
             self._log("[network] ignoring change in TUN mode")
+            return
+        # A proxy-mode AWG/WireGuard sidecar owns a virtual tunnel whose address
+        # becomes the outbound IP after a successful handshake. Reconnecting on
+        # that self-induced change re-runs the physical-interface resolve while
+        # the tunnel holds the default route, which fails and flaps the tunnel.
+        tunnel_addresses = self._active_tunnel_addresses()
+        if tunnel_addresses and (new in tunnel_addresses or old in tunnel_addresses):
+            self._log("[network] ignoring change caused by the tunnel's own address")
             return
         if (self.connected and self._desired_connected
                 and not self._transition_active and not self._disconnecting
