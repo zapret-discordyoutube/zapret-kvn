@@ -10,6 +10,7 @@ import http.client
 import json
 import mimetypes
 import os
+import time
 import re
 import stat
 import subprocess
@@ -720,7 +721,20 @@ def publish_telegram(version: str, changes: list[str]) -> None:
     ]
     for item in changes:
         arguments.extend(("--change", item))
-    run(arguments, timeout=1800)
+    # MTProto egress is intermittent (DPI flaps), so the publisher client can
+    # read-time-out while the bot still finishes the upload in a later good
+    # window. A client timeout is therefore not a failure on its own: poll the
+    # publisher state before giving up. The generous default aligns with the
+    # client's own ZAPRET_PUBLISH_TIMEOUT so the client normally returns first.
+    publish_timeout = float(os.getenv("ZAPRET_PUBLISH_TIMEOUT", "7200"))
+    try:
+        run(arguments, timeout=publish_timeout)
+    except subprocess.TimeoutExpired:
+        log("Telegram publisher client timed out; polling publisher state for delivery")
+    if not telegram_has_version(version):
+        deadline = time.monotonic() + float(os.getenv("ZAPRET_PUBLISH_POLL", "1800"))
+        while time.monotonic() < deadline and not telegram_has_version(version):
+            time.sleep(30)
     if not telegram_has_version(version):
         raise ReleaseError("Telegram publisher did not record the stable installer")
 

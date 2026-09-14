@@ -363,3 +363,52 @@ class BuildPayloadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublishTelegramTimeoutTests(unittest.TestCase):
+    """A publisher client timeout is not a failure: the bot may still deliver."""
+
+    def _run(self, *, publish_raises, has_version_sequence, poll_env="0"):
+        import subprocess
+        from unittest.mock import MagicMock
+
+        calls = iter(has_version_sequence)
+        last = {"v": has_version_sequence[-1]}
+
+        def has_version(_version):
+            try:
+                last["v"] = next(calls)
+            except StopIteration:
+                pass
+            return last["v"]
+
+        publish_effect = (
+            subprocess.TimeoutExpired(cmd="publish", timeout=1) if publish_raises else MagicMock()
+        )
+        run_mock = MagicMock(side_effect=[MagicMock(), publish_effect])
+        with patch.object(release_windows, "run", run_mock), \
+             patch.object(release_windows, "telegram_has_version", side_effect=has_version), \
+             patch.object(release_windows, "PUBLISHER_COMMAND", MagicMock(is_file=lambda: True)), \
+             patch.object(release_windows.time, "sleep", lambda _s: None), \
+             patch.dict("os.environ", {"ZAPRET_PUBLISH_POLL": poll_env}, clear=False):
+            release_windows.publish_telegram("0.6.7", ["a change"])
+
+    def test_client_timeout_but_bot_delivered_is_success(self) -> None:
+        # top=False, pre-poll=False, poll sees delivery, final=True -> no raise.
+        self._run(publish_raises=True, has_version_sequence=[False, False, True, True])
+
+    def test_client_timeout_and_never_delivered_raises(self) -> None:
+        with self.assertRaises(release_windows.ReleaseError):
+            self._run(publish_raises=True, has_version_sequence=[False, False, False, False])
+
+    def test_normal_delivery_does_not_raise(self) -> None:
+        self._run(publish_raises=False, has_version_sequence=[False, True, True])
+
+    def test_already_published_skips_publisher(self) -> None:
+        from unittest.mock import MagicMock
+
+        run_mock = MagicMock()
+        with patch.object(release_windows, "run", run_mock), \
+             patch.object(release_windows, "telegram_has_version", return_value=True):
+            release_windows.publish_telegram("0.6.7", ["a change"])
+        run_mock.assert_not_called()
