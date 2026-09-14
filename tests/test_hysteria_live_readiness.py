@@ -113,11 +113,13 @@ class LiveHysteriaReadinessTests(unittest.TestCase):
                             self.assertTrue(manager.start(client_config, relay_port, process_generation=17, allow_parallel=True),
                                             "\n".join(manager._last_output_lines))
                             deadline = time.monotonic() + 5
-                            while not warnings and time.monotonic() < deadline:
+                            while manager.stats.get('https_check') != 'warning' and time.monotonic() < deadline:
                                 _APP.processEvents(); time.sleep(0.01)
                         self.assertTrue(accepted, 'the probe must actually traverse the real Hysteria server')
                         self.assertEqual(errors, [])
-                        self.assertEqual(len(warnings), 1)
+                        # Authenticated server + censored DoH probes: the connection
+                        # is retained without a user-facing warning (false alarm).
+                        self.assertEqual(len(warnings), 0)
                         self.assertTrue(manager.is_running)
                         self.assertEqual(manager._process.state(), QProcess.ProcessState.Running)
                         self.assertEqual(manager.stats, {'remote_authenticated': True, 'https_check': 'warning'})
