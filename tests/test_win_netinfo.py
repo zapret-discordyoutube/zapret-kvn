@@ -79,10 +79,11 @@ def _make_adapter_chain(specs, keep_alive):
 
 
 def _uplink(name, *, if_index, metric, oper_status=win_netinfo._IF_OPER_STATUS_UP,
-            ipv4=("192.168.1.8",), gateways=("192.168.1.1",), dns=("192.168.1.1",)) -> win_netinfo.AdapterInfo:
+            if_type=6, ipv4=("192.168.1.8",), gateways=("192.168.1.1",),
+            dns=("192.168.1.1",)) -> win_netinfo.AdapterInfo:
     return win_netinfo.AdapterInfo(
         adapter_name="{guid}", friendly_name=name, description="", if_index=if_index,
-        ipv4_addresses=list(ipv4), ipv6_addresses=[], oper_status=oper_status,
+        ipv4_addresses=list(ipv4), ipv6_addresses=[], if_type=if_type, oper_status=oper_status,
         ipv4_metric=metric, ipv4_gateways=list(gateways), dns_servers=list(dns),
     )
 
@@ -376,21 +377,23 @@ class ParseGatewayDnsTests(unittest.TestCase):
 
 
 class PhysicalUplinkTests(unittest.TestCase):
-    def test_prefers_lowest_metric_uplink_with_gateway(self) -> None:
+    def test_prefers_lowest_metric_uplink(self) -> None:
         wifi = _uplink("Wi-Fi", if_index=12, metric=50)
         ethernet = _uplink("Ethernet", if_index=7, metric=25)
         self.assertIs(win_netinfo.select_physical_uplink([wifi, ethernet]), ethernet)
 
-    def test_wireguard_tun_without_gateway_is_excluded(self) -> None:
-        # WireGuard/AmneziaWG TUN: up, has address, but no gateway -> not chosen.
-        tun = _uplink("xftun0", if_index=33, metric=0, ipv4=("10.9.0.49",), gateways=())
+    def test_tunnel_and_loopback_are_excluded(self) -> None:
+        # WireGuard/AmneziaWG TUN (tunnel type) and loopback must never be picked,
+        # even at a lower metric, so the AWG relay never binds onto its own tunnel.
+        tun = _uplink("xftun0", if_index=33, metric=0, if_type=win_netinfo._IF_TYPE_TUNNEL, ipv4=("10.9.0.49",))
+        loop = _uplink("Loopback", if_index=1, metric=0, if_type=win_netinfo._IF_TYPE_SOFTWARE_LOOPBACK, ipv4=("127.0.0.1",))
         ethernet = _uplink("Ethernet", if_index=7, metric=25)
-        self.assertIs(win_netinfo.select_physical_uplink([tun, ethernet]), ethernet)
+        self.assertIs(win_netinfo.select_physical_uplink([tun, loop, ethernet]), ethernet)
 
-    def test_hyper_v_vethernet_uplink_is_accepted(self) -> None:
-        # The PowerShell HardwareInterface filter dropped this; the gateway rule
-        # keeps it.
-        vethernet = _uplink("vEthernet (WSL)", if_index=40, metric=15)
+    def test_hyper_v_vethernet_without_gateway_is_accepted(self) -> None:
+        # Hyper-V vEthernet reports no gateway, which the old rule rejected; it is
+        # a normal type-6 uplink and must be selectable.
+        vethernet = _uplink("vEthernet (WSL)", if_index=40, metric=15, gateways=())
         self.assertIs(win_netinfo.select_physical_uplink([vethernet]), vethernet)
 
     def test_down_or_apipa_only_adapters_are_ignored(self) -> None:
@@ -398,13 +401,29 @@ class PhysicalUplinkTests(unittest.TestCase):
         apipa = _uplink("Wi-Fi", if_index=12, metric=20, ipv4=("169.254.5.5",))
         self.assertIsNone(win_netinfo.select_physical_uplink([down, apipa]))
 
-    def test_resolve_returns_index_and_bootstrap_dns(self) -> None:
-        ethernet = _uplink("Ethernet", if_index=7, metric=25, dns=("192.168.1.1", "1.1.1.1"))
-        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[ethernet]):
-            self.assertEqual(win_netinfo.resolve_physical_uplink(), (7, ["192.168.1.1", "1.1.1.1"]))
+    def test_resolve_prefers_get_best_interface(self) -> None:
+        # GetBestInterfaceEx is authoritative: its index wins over metric order.
+        wifi = _uplink("Wi-Fi", if_index=12, metric=5, dns=("9.9.9.9",))
+        ethernet = _uplink("Ethernet", if_index=7, metric=25, dns=("1.1.1.1",))
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[wifi, ethernet]), \
+             patch("xray_fluent.platform.windows.win_netinfo.best_interface_for", return_value=7):
+            self.assertEqual(win_netinfo.resolve_physical_uplink("8.8.8.8"), (7, ["1.1.1.1"]))
 
-    def test_resolve_returns_none_when_no_uplink(self) -> None:
-        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[]):
+    def test_resolve_falls_back_to_metric_when_best_is_tunnel(self) -> None:
+        tun = _uplink("xftun0", if_index=33, metric=0, if_type=win_netinfo._IF_TYPE_TUNNEL, ipv4=("10.9.0.49",))
+        ethernet = _uplink("Ethernet", if_index=7, metric=25, dns=("1.1.1.1",))
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[tun, ethernet]), \
+             patch("xray_fluent.platform.windows.win_netinfo.best_interface_for", return_value=33):
+            self.assertEqual(win_netinfo.resolve_physical_uplink(), (7, ["1.1.1.1"]))
+
+    def test_resolve_trusts_best_index_even_when_adapter_row_unknown(self) -> None:
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[]), \
+             patch("xray_fluent.platform.windows.win_netinfo.best_interface_for", return_value=14):
+            self.assertEqual(win_netinfo.resolve_physical_uplink(), (14, []))
+
+    def test_resolve_returns_none_when_nothing_usable(self) -> None:
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[]), \
+             patch("xray_fluent.platform.windows.win_netinfo.best_interface_for", return_value=0):
             self.assertIsNone(win_netinfo.resolve_physical_uplink())
 
 

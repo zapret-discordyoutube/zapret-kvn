@@ -55,12 +55,14 @@ class AuthenticatedReadinessTests(unittest.TestCase):
         self.manager._poll_health()
         self.assertTrue(self.manager.is_running)
         self.assertEqual(self.errors, [])
-        self.assertEqual(len(self.warnings), 1)
+        # The server handshake is authenticated, so censored DoH probe timeouts
+        # must not raise a user-facing warning (only the diagnostic log below).
+        self.assertEqual(len(self.warnings), 0)
         self.assertEqual(self.manager.stats, {'remote_authenticated': True, 'https_check': 'warning'})
         self.assertTrue(any('stage=health_check' in line and 'TimeoutError' in line for line in self.logs))
         executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
         self.manager._poll_health()
-        self.assertEqual(len(self.warnings), 1)
+        self.assertEqual(len(self.warnings), 0)
 
     def test_one_success_completes_health_without_warning(self):
         pending, executor = self.start_with_pending_checks()

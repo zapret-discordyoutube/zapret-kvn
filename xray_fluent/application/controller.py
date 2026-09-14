@@ -1339,6 +1339,15 @@ class AppController(QObject):
     def _on_amnezia_failure(self, manager, event) -> None:
         self.runtime_errors.record(event)
         self.runtime_errors_changed.emit(self.runtime_errors.snapshot())
+        # A startup failure of the live manager means the AWG sidecar we just
+        # tried to bring up never started. Surface it even when no amnezia
+        # session is committed yet (fresh connect, or a switch from another
+        # protocol) — otherwise AWG "just exits" with nothing in the info bar.
+        # Retired replacement candidates are not self.amnezia, so their noise
+        # is still filtered.
+        if manager is self.amnezia and event.stage == "startup":
+            self._set_connection_status("error", event.message, level="error")
+            return
         # Retain old/candidate evidence, but only the committed manager owns
         # admission. Never let a retired process close the replacement.
         session = self._active_session

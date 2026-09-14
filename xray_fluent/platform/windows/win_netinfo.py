@@ -24,6 +24,7 @@ __all__ = [
     "adapter_exists",
     "adapter_has_ipv4",
     "any_adapter_name_contains",
+    "best_interface_for",
     "find_adapter",
     "is_available",
     "list_adapters",
@@ -54,6 +55,11 @@ _ERROR_NO_DATA = 232
 _IF_OPER_STATUS_UP = 1
 # MAX_ADAPTER_ADDRESS_LENGTH from iptypes.h.
 _MAX_ADAPTER_ADDRESS_LENGTH = 8
+# IfType values (ipifcons.h) that can never be a physical uplink.
+_IF_TYPE_SOFTWARE_LOOPBACK = 24
+_IF_TYPE_TUNNEL = 131
+# A public IPv4 used only to ask the OS which interface reaches the internet.
+_DEFAULT_PROBE_DESTINATION = "8.8.8.8"
 
 
 class _SOCKADDR(Structure):
@@ -226,6 +232,56 @@ def _resolve_get_adapters_addresses():
     return _get_adapters_addresses
 
 
+class _SOCKADDR_IN(Structure):
+    _fields_ = [
+        ("sin_family", c_ushort),
+        ("sin_port", c_ushort),
+        ("sin_addr", c_ubyte * 4),
+        ("sin_zero", c_ubyte * 8),
+    ]
+
+
+_get_best_interface_ex = None
+
+
+def _resolve_get_best_interface_ex():
+    global _get_best_interface_ex
+    if _get_best_interface_ex is None:
+        iphlpapi = ctypes.WinDLL("iphlpapi")
+        func = iphlpapi.GetBestInterfaceEx
+        func.argtypes = [c_void_p, POINTER(c_ulong)]
+        func.restype = c_ulong
+        _get_best_interface_ex = func
+    return _get_best_interface_ex
+
+
+def best_interface_for(dest_ipv4: str) -> int:
+    """Interface index the OS would use to reach ``dest_ipv4`` (0 on failure).
+
+    This is the authoritative default-route decision (the same one sing-box
+    logs as the ``default interface``). It does not depend on the unreliable
+    per-adapter gateway list. Passing the AWG server's own IP returns the
+    physical uplink even while a tunnel holds the default route, because
+    WireGuard keeps a host route to the server endpoint off the tunnel.
+    """
+    if os.name != "nt":
+        return 0
+    try:
+        func = _resolve_get_best_interface_ex()
+    except Exception:  # missing DLL/symbol (Wine, stripped systems)
+        return 0
+    sockaddr = _SOCKADDR_IN()
+    sockaddr.sin_family = _AF_INET
+    try:
+        sockaddr.sin_addr = (c_ubyte * 4)(*socket.inet_aton(dest_ipv4))
+    except OSError:
+        return 0
+    index = c_ulong(0)
+    if func(ctypes.byref(sockaddr), ctypes.byref(index)) != _ERROR_SUCCESS:
+        return 0
+    return int(index.value)
+
+
 def list_adapters() -> list[AdapterInfo]:
     """Return all network adapters. Raises WinNetInfoError on any failure."""
     if os.name != "nt":
@@ -280,23 +336,22 @@ def _has_routable_ipv4(adapter: AdapterInfo) -> bool:
 
 
 def select_physical_uplink(adapters: list[AdapterInfo]) -> AdapterInfo | None:
-    """Pick the physical uplink that carries the default IPv4 route.
+    """Fallback uplink pick when GetBestInterfaceEx is unavailable.
 
-    Selection mirrors the OS default-route decision without PowerShell and
-    without the too-strict ``HardwareInterface`` filter (which drops Hyper-V /
-    WSL / Docker ``vEthernet`` uplinks). A candidate must be operationally up,
-    own a routable (non-APIPA) IPv4 address, and advertise an IPv4 gateway.
-    Requiring a gateway naturally excludes WireGuard/AmneziaWG TUN adapters
-    (they have none), so the AWG relay never binds back onto its own tunnel.
-    Ties break on the lowest ``Ipv4Metric`` (the OS route preference), then the
-    lowest interface index for determinism.
+    A candidate must be operationally up, carry a routable (non-APIPA) IPv4
+    address, and not be a loopback or tunnel interface (so the AWG relay never
+    binds onto its own tunnel). Ties break on the lowest ``Ipv4Metric`` (the OS
+    route preference), then the lowest interface index for determinism. The
+    per-adapter gateway list is deliberately NOT used: Windows leaves
+    ``FirstGatewayAddress`` empty on many working uplinks (Hyper-V vEthernet,
+    some DHCP setups), which previously rejected every adapter.
     """
     candidates = [
         adapter
         for adapter in adapters
         if adapter.if_index > 0
         and adapter.oper_status == _IF_OPER_STATUS_UP
-        and adapter.ipv4_gateways
+        and adapter.if_type not in (_IF_TYPE_SOFTWARE_LOOPBACK, _IF_TYPE_TUNNEL)
         and _has_routable_ipv4(adapter)
     ]
     if not candidates:
@@ -304,16 +359,31 @@ def select_physical_uplink(adapters: list[AdapterInfo]) -> AdapterInfo | None:
     return min(candidates, key=lambda a: (a.ipv4_metric, a.if_index))
 
 
-def resolve_physical_uplink() -> tuple[int, list[str]] | None:
+def resolve_physical_uplink(dest_ipv4: str = _DEFAULT_PROBE_DESTINATION) -> tuple[int, list[str]] | None:
     """Return ``(interface_index, bootstrap_dns)`` for the physical uplink.
 
-    Returns ``None`` when no uplink currently qualifies. Raises
-    :class:`WinNetInfoError` when the ctypes fast path itself is unavailable.
+    Primary path: ask the OS which interface reaches ``dest_ipv4``
+    (``GetBestInterfaceEx``) — the authoritative default-route decision, which
+    does not depend on the unreliable per-adapter gateway list. Pass the AWG
+    server's IP to get the physical uplink even while a tunnel holds the
+    default route. Fallback: pick by route metric from the adapter list.
+
+    Returns ``None`` only when neither path yields a usable index. Raises
+    :class:`WinNetInfoError` when adapter enumeration itself is unavailable.
     """
-    uplink = select_physical_uplink(list_adapters())
-    if uplink is None:
-        return None
-    return uplink.if_index, list(uplink.dns_servers)
+    adapters = list_adapters()
+    by_index = {adapter.if_index: adapter for adapter in adapters}
+    index = best_interface_for(dest_ipv4)
+    adapter = by_index.get(index) if index > 0 else None
+    if index > 0 and (
+        adapter is None
+        or adapter.if_type not in (_IF_TYPE_SOFTWARE_LOOPBACK, _IF_TYPE_TUNNEL)
+    ):
+        return index, list(adapter.dns_servers) if adapter is not None else []
+    uplink = select_physical_uplink(adapters)
+    if uplink is not None:
+        return uplink.if_index, list(uplink.dns_servers)
+    return None
 
 
 def adapter_has_ipv4(name: str) -> bool:

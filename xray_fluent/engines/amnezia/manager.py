@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+import ipaddress
 import json
 import os
 import time
@@ -21,24 +22,43 @@ from ..sidecar import wait_for_loopback_relay
 PROBES = HTTPS_ENDPOINTS
 
 
-def physical_network(*, attempts: int = 5, retry_delay: float = 0.3) -> dict:
+def _first_peer_ipv4(config: dict) -> str | None:
+    """The AWG server's IPv4 literal, if the config already carries one.
+
+    Used to ask the OS which interface reaches the server (GetBestInterfaceEx),
+    which returns the physical uplink even while a tunnel holds the default
+    route. Peer addresses are resolved to IPs before the core sees them.
+    """
+    try:
+        for peer in ((config or {}).get("endpoint") or {}).get("peers") or []:
+            address = str((peer or {}).get("address") or "").strip()
+            if address:
+                ipaddress.IPv4Address(address)  # raises on hostname / IPv6
+                return address
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
+def physical_network(dest_ipv4: str | None = None, *, attempts: int = 5, retry_delay: float = 0.3) -> dict:
     """Resolve the physical uplink the AWG UDP socket must bind to.
 
     The owned Go core binds via ``IP_UNICAST_IF`` and hard-requires a valid,
     non-zero interface index (there is no default-bind fallback), so this must
-    return a real physical interface. Resolution uses a single ctypes
-    ``GetAdaptersAddresses`` call (~1 ms) instead of spawning PowerShell
-    (~500 ms, and its ``HardwareInterface`` filter wrongly excluded Hyper-V /
-    WSL / Docker ``vEthernet`` uplinks). The uplink can be briefly unavailable
-    during a network transition, so a transient miss is retried instead of
-    aborting the whole startup.
+    return a real physical interface. Resolution asks the OS which interface
+    reaches ``dest_ipv4`` (``GetBestInterfaceEx``) — the authoritative
+    default-route decision — instead of spawning PowerShell (~500 ms, and its
+    ``HardwareInterface`` filter wrongly excluded Hyper-V / WSL / Docker
+    ``vEthernet`` uplinks). The uplink can be briefly unavailable during a
+    network transition, so a transient miss is retried instead of aborting.
     """
     if os.name != "nt":
         return {"interface_index": 0, "bootstrap_dns": []}
+    target = dest_ipv4 or win_netinfo._DEFAULT_PROBE_DESTINATION
     last_error: Exception | None = None
     for attempt in range(max(1, attempts)):
         try:
-            resolved = win_netinfo.resolve_physical_uplink()
+            resolved = win_netinfo.resolve_physical_uplink(target)
         except win_netinfo.WinNetInfoError as exc:
             last_error, resolved = exc, None
         if resolved is not None:
@@ -103,7 +123,7 @@ class AmneziaManager(QObject):
                               target_id=context.ref if context else "")
         payload = deepcopy(config)
         try:
-            payload.update(physical_network())
+            payload.update(physical_network(_first_peer_ipv4(payload)))
             if self._cancelled():
                 return False
             payload.update(session_generation=session_generation, target_generation=target_generation,
@@ -204,9 +224,11 @@ class AmneziaManager(QObject):
             self.log_received.emit(f"[amnezia][stage=health_check] HTTPS check succeeded via {winner}")
         else:
             detail = "; ".join(f"{host}: {message}" for host, message in sorted(failures.items()))
-            self.log_received.emit("[amnezia][stage=health_check] WARNING: authenticated tunnel retained; " + redact_runtime_log(detail))
-            self.warning.emit("AWG/WireGuard: handshake подтверждён, но проверочные HTTPS-адреса не ответили. "
-                              "Соединение сохранено; передача обычного трафика пока не подтверждена.")
+            self.log_received.emit("[amnezia][stage=health_check] authenticated tunnel retained; " + redact_runtime_log(detail))
+            # The AWG Noise handshake is already confirmed (peers reported a
+            # handshake time), so the tunnel works. The public DoH probe
+            # endpoints are commonly blocked on censored exits, so their
+            # failure is not a user-facing problem — do not raise a warning.
         config, self._pending_front_config = self._pending_front_config, None
         if config is not None and self.is_running and not self._cancelled():
             self._start_front_health(config)

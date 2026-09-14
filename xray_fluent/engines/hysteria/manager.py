@@ -415,10 +415,16 @@ class HysteriaManager(QObject):
             return
         self.stats["https_check"] = "warning"
         summary = "; ".join(f"{host}={error}" for host, error in sorted(failures.items()))
-        self._emit_log("WARNING: authenticated server retained; HTTPS check endpoints did not respond: " + summary,
+        self._emit_log("authenticated server retained; HTTPS check endpoints did not respond: " + summary,
                        stage="health_check")
-        self.warning.emit("Hysteria подключена к серверу, но проверочные HTTPS-адреса не ответили. "
-                          "Соединение сохранено; доступность сайтов пока не подтверждена.")
+        # The server handshake is already authenticated (the official client
+        # reported "connected to server"), so the connection is proven. The
+        # public DoH probe endpoints (1.1.1.1/8.8.8.8/9.9.9.9) are commonly
+        # blocked on censored exits, so their failure is not a user-facing
+        # problem. Only warn if the handshake itself was never confirmed.
+        if not self._remote_authenticated:
+            self.warning.emit("Hysteria подключена к серверу, но проверочные HTTPS-адреса не ответили. "
+                              "Соединение сохранено; доступность сайтов пока не подтверждена.")
 
     def _is_health_probe_error(self, line):
         if not self._remote_authenticated or not (self._starting or self._health.active):

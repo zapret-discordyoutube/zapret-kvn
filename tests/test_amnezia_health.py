@@ -56,7 +56,9 @@ class AmneziaHealthTests(unittest.TestCase):
         self.assertTrue(self.manager.stats['remote_authenticated'])
         self.assertEqual(self.manager.stats['https_check'], 'warning')
         self.assertEqual(self.errors, [])
-        self.assertEqual(len(self.warnings), 1)
+        # An authenticated tunnel whose DoH probes are censored must not raise a
+        # user-facing warning (the handshake already proves the connection).
+        self.assertEqual(len(self.warnings), 0)
         executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
 
     def test_front_check_is_queued_without_parallel_duplicate_wave(self):
