@@ -37,6 +37,18 @@ class SubscriptionFetchError(RuntimeError):
     pass
 
 
+class SubscriptionServerResponseError(SubscriptionFetchError):
+    """The subscription server answered, but the answer is not a usable body.
+
+    A real HTTP response (any status, an oversized body, an unsafe redirect,
+    a bare 304) is authoritative for this URL and identical on every network
+    path.  It must be terminal: never fall back to the VPN proxy after the
+    server has already answered directly, otherwise a definitive 404 is masked
+    by the proxy attempt's transport error.  Only a transport failure — no
+    response reached us — is worth retrying through the proxy.
+    """
+
+
 @dataclass(slots=True)
 class SubscriptionFetchResult:
     data: bytes = b""
@@ -339,7 +351,17 @@ def fetch_subscription(
                 max_bytes=max_bytes,
                 force_refresh=unconditional,
             )
+        except SubscriptionServerResponseError as exc:
+            # The server answered on this path.  Its answer is the same on the
+            # VPN proxy, so surface it now instead of masking it behind the
+            # proxy attempt's transport error.  This is the direct 404 the user
+            # must see, not a "loading failed via VPN".
+            raise SubscriptionFetchError(
+                f"Не удалось загрузить подписку: {exc}"
+            ) from exc
         except Exception as exc:
+            # No response reached us on this path (DNS, connect, TLS handshake,
+            # timeout).  Only this case is worth retrying through the proxy.
             errors.append(sanitize_fetch_error(exc))
     detail = "; ".join(dict.fromkeys(errors)) or "неизвестная ошибка"
     raise SubscriptionFetchError(f"Не удалось загрузить подписку: {detail}")
@@ -379,7 +401,7 @@ def _fetch_once(
             if force_refresh or not (
                 headers.get("If-None-Match") or headers.get("If-Modified-Since")
             ):
-                raise SubscriptionFetchError(
+                raise SubscriptionServerResponseError(
                     "Сервер вернул 304 без условного запроса; полное тело подписки не получено"
                 ) from exc
             return SubscriptionFetchResult(
@@ -388,16 +410,18 @@ def _fetch_once(
                 not_modified=True,
                 via_proxy=via_proxy,
             )
-        raise SubscriptionFetchError(
+        raise SubscriptionServerResponseError(
             describe_http_failure(exc.code, _response_headers(exc.headers))
         ) from exc
     with response:
         final_url = response.geturl()
         if urlsplit(final_url).scheme.lower() not in {"http", "https"}:
-            raise SubscriptionFetchError("Ответ подписки пришёл по небезопасной схеме")
+            raise SubscriptionServerResponseError("Ответ подписки пришёл по небезопасной схеме")
         data = response.read(max_bytes + 1)
         if len(data) > max_bytes:
-            raise SubscriptionFetchError(f"Ответ подписки превышает {max_bytes // (1024 * 1024)} МиБ")
+            raise SubscriptionServerResponseError(
+                f"Ответ подписки превышает {max_bytes // (1024 * 1024)} МиБ"
+            )
         return SubscriptionFetchResult(
             data=data,
             headers=_response_headers(response.headers),
