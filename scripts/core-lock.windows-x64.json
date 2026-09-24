@@ -3,11 +3,11 @@
   "platform": "windows-x64",
   "singbox_build": {
     "module": "github.com/shtorm-7/sing-box-extended",
-    "version": "v1.14.0-extended-2.7.1",
-    "commit": "217f77643f19e915ea38ba2a9ac7e28e22a0cec5",
-    "module_sum": "h1:Vo9pizZCXxXJ7HJPigDlycKRoURkK3UO3aEvJ40Q/KA=",
-    "module_go_mod_sum": "h1:swn2KVgWm8pdYh9UG2fxDi0t21bkFIRFVzdx2zn2Zpw=",
-    "zip_sha256": "4ce848f696975e9462820b192a4ac4e802065ef12350d2bac9728e4bba88ec9d",
+    "version": "v1.14.1-extended-2.7.2",
+    "commit": "55faa763f986f4ca8a492d9b2719bc6330d2bef5",
+    "module_sum": "h1:5V/G3rTIev4Jbj/thQmgmsPvvvZwfAjFnX6gt7ZiHes=",
+    "module_go_mod_sum": "h1:IFB1guh0KgWUV0GZhJaPr/Zd+bkZT+1qOl+l+eE6Acs=",
+    "zip_sha256": "58b6c47d2bd8343655b9b795ba54d3d2a8c615f4b25808c300900895cf55356e",
     "udp_manifest_sha256": "c0e4587420ce9952586a6ba4ca08cb3c85be52ed30a217957aa0199df7acb37f"
   },
   "amnezia": {
@@ -33,20 +33,20 @@
   "sources": [
     {
       "id": "sing-box-extended",
-      "version": "v1.14.0-extended-2.7.1",
-      "archive": "sing-box-1.14.0-extended-2.7.1-windows-amd64-purego.zip",
-      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.14.0-extended-2.7.1/sing-box-1.14.0-extended-2.7.1-windows-amd64-purego.zip",
-      "sha256": "7cca3ceadf0a697af6648a3f1234e5783b8be509fdd3017b9872b9f0b52bbc15",
+      "version": "v1.14.1-extended-2.7.2",
+      "archive": "sing-box-1.14.1-extended-2.7.2-windows-amd64-purego.zip",
+      "url": "https://github.com/shtorm-7/sing-box-extended/releases/download/v1.14.1-extended-2.7.2/sing-box-1.14.1-extended-2.7.2-windows-amd64-purego.zip",
+      "sha256": "3eed8f043e3045b9709dae5e90e26b6b4ca0c52d3c13342b2e0adfa03620e91a",
       "files": [
         { "match": "(^|/)libcronet\\.dll$", "target": "libcronet.dll" },
         { "match": "(^|/)LICENSE$", "target": "LICENSE-sing-box-extended.txt" }
       ],
       "repository": "shtorm-7/sing-box-extended",
       "channel": "stable",
-      "release_tag": "v1.14.0-extended-2.7.1",
+      "release_tag": "v1.14.1-extended-2.7.2",
       "release_prerelease": false,
-      "asset_name": "sing-box-1.14.0-extended-2.7.1-windows-amd64-purego.zip",
-      "asset_size": 36729020
+      "asset_name": "sing-box-1.14.1-extended-2.7.2-windows-amd64-purego.zip",
+      "asset_size": 42752146
     },
     {
       "id": "xray-core",
@@ -96,10 +96,10 @@
     },
     {
       "id": "runetfreedom-routing-data",
-      "version": "f86384f81c339ce9b5ab12b698c15ea6be626a0b",
-      "archive": "russia-v2ray-rules-dat-f86384f81c339ce9b5ab12b698c15ea6be626a0b.zip",
-      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/f86384f81c339ce9b5ab12b698c15ea6be626a0b.zip",
-      "sha256": "9848942ffc5dcdd02121be77a60bc8d0a8dcde4c1223407a4e06c39512c86c63",
+      "version": "21ad8cfe1cd719810a5fcb2db7f306ae912f22e8",
+      "archive": "russia-v2ray-rules-dat-21ad8cfe1cd719810a5fcb2db7f306ae912f22e8.zip",
+      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/21ad8cfe1cd719810a5fcb2db7f306ae912f22e8.zip",
+      "sha256": "fb9db37998fa98d7d4d448544f6c3ca857035a706754e4fd7982d296565f4af1",
       "files": [
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
         { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
@@ -111,7 +111,7 @@
       "repository": "runetfreedom/russia-v2ray-rules-dat",
       "channel": "release",
       "branch": "release",
-      "asset_size": 49924755
+      "asset_size": 49827025
     },
     {
       "id": "tun2socks",
