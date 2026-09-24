@@ -8,7 +8,7 @@ import platform
 import re
 import urllib.error
 import urllib.request
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 
 from ..constants import APP_VERSION, PROXY_HOST, SUBSCRIPTION_PARSER_REVISION
 from .happ_crypt import HappCryptError, decrypt_happ_link, is_happ_crypt_link
@@ -31,6 +31,15 @@ _WRAPPED_SOURCE_PREFIXES = {
     "incy://import/": "incy",
     "v2raytun://import/": "v2raytun",
 }
+# Веб-страница провайдера, которая лишь открывает клиент диплинком:
+# ``https://host/incy/https://sub.host/token`` → ``incy://import/<base64>``.
+# Сам адрес подписки лежит в пути открытым текстом.
+_LAUNCHER_PAGE_PATH = re.compile(
+    r"/(happ|incy|v2raytun)(?:\.html)?/+(https?(?::|%3a).+)", re.IGNORECASE
+)
+
+
+_HWID_REFUSAL_HEADERS = frozenset({"x-hwid-not-supported", "x-hwid-max-devices-reached"})
 
 
 class SubscriptionFetchError(RuntimeError):
@@ -85,7 +94,8 @@ def resolve_subscription_source(value: str) -> tuple[str, str | None]:
     lowered = text.lower()
     parsed = urlsplit(text)
     if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
-        return text, None
+        launcher = _resolve_launcher_page(parsed)
+        return launcher if launcher is not None else (text, None)
 
     if is_happ_crypt_link(text):
         return _resolve_happ_crypt_source(text)
@@ -116,6 +126,32 @@ def resolve_subscription_source(value: str) -> tuple[str, str | None]:
     raise SubscriptionFetchError(
         "URL подписки должен использовать HTTP/HTTPS или открытую add/import-ссылку Happ, INCY, v2RayTun"
     )
+
+
+def _resolve_launcher_page(parsed: SplitResult) -> tuple[str, str] | None:
+    """Достать подписку из страницы-запускалки клиента.
+
+    Такая страница отвечает HTML с редиректом на диплинк, а не подпиской, и
+    правила панели настроены под тот клиент, чьё имя стоит в пути, — поэтому
+    возвращается и подсказка профиля.
+    """
+
+    match = _LAUNCHER_PAGE_PATH.fullmatch(parsed.path)
+    if match is None:
+        return None
+    tail = match.group(2)
+    if not tail.lower().startswith(("http:/", "https:/")):
+        tail = unquote(tail)
+    # Прокси и мессенджеры склеивают «//» в пути: ``https:/sub.host``.
+    tail = re.sub(r"^(https?):/+", r"\1://", tail, flags=re.IGNORECASE)
+    if parsed.query:
+        tail += f"?{parsed.query}"
+    if parsed.fragment:
+        tail += f"#{parsed.fragment}"
+    inner = urlsplit(tail)
+    if inner.scheme.lower() in {"http", "https"} and inner.hostname:
+        return tail, match.group(1).lower()
+    return None
 
 
 def _resolve_happ_crypt_source(link: str) -> tuple[str, str]:
@@ -284,15 +320,17 @@ def describe_http_failure(status: int, headers: dict[str, str]) -> str:
     """
 
     normalized = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
-    if "x-hwid-max-devices-reached" in normalized or "x-hwid-limit" in normalized:
-        return (
-            "Достигнут лимит устройств подписки. Отвяжите лишнее устройство "
-            "в личном кабинете или у провайдера"
-        )
+    # Remnawave шлёт ``x-hwid-limit`` вместе с обеими причинами, поэтому
+    # отсутствие HWID проверяется первым: иначе оно выдаётся за лимит.
     if "x-hwid-not-supported" in normalized:
         return (
             "Провайдер требует идентификатор устройства (HWID). "
             "Включите отправку HWID в настройках подписки"
+        )
+    if "x-hwid-max-devices-reached" in normalized or "x-hwid-limit" in normalized:
+        return (
+            "Достигнут лимит устройств подписки. Отвяжите лишнее устройство "
+            "в личном кабинете или у провайдера"
         )
     if status == 403:
         # Панели сопоставляют запрос правилами по заголовкам и отвечают 403, когда
@@ -417,6 +455,14 @@ def _fetch_once(
         final_url = response.geturl()
         if urlsplit(final_url).scheme.lower() not in {"http", "https"}:
             raise SubscriptionServerResponseError("Ответ подписки пришёл по небезопасной схеме")
+        response_headers = _response_headers(response.headers)
+        if _HWID_REFUSAL_HEADERS.intersection(response_headers):
+            # Отказ по HWID часто приходит как HTTP 200 с узлами-заглушками
+            # ``0.0.0.0:1``, где текст ошибки спрятан в именах. Импортировать их
+            # нельзя: они затрут рабочий список серверов подписки.
+            raise SubscriptionServerResponseError(
+                describe_http_failure(int(getattr(response, "status", 200) or 200), response_headers)
+            )
         data = response.read(max_bytes + 1)
         if len(data) > max_bytes:
             raise SubscriptionServerResponseError(
@@ -424,7 +470,7 @@ def _fetch_once(
             )
         return SubscriptionFetchResult(
             data=data,
-            headers=_response_headers(response.headers),
+            headers=response_headers,
             status=int(getattr(response, "status", 200) or 200),
             via_proxy=via_proxy,
         )

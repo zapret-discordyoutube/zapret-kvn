@@ -491,6 +491,24 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         for source, expected in cases:
             with self.subTest(source=source):
                 self.assertEqual(resolve_subscription_source(source), expected)
+        launcher_cases = (
+            (f"https://nn.example/incy/{target}", (target, "incy")),
+            (f"https://nn.example/incy.html/{target}#x", (f"{target}#x", "incy")),
+            ("https://nn.example/happ/https:/sub.example/t", ("https://sub.example/t", "happ")),
+            (
+                "https://nn.example/v2raytun/https%3A%2F%2Fsub.example%2Ft",
+                ("https://sub.example/t", "v2raytun"),
+            ),
+            # Не запускалка: обычный путь и прокси-обёртки чужих сервисов не трогаем.
+            ("https://nn.example/incy/list", ("https://nn.example/incy/list", None)),
+            (
+                f"https://proxy.example/fetch/{target}",
+                (f"https://proxy.example/fetch/{target}", None),
+            ),
+        )
+        for source, expected in launcher_cases:
+            with self.subTest(source=source):
+                self.assertEqual(resolve_subscription_source(source), expected)
         # happ://crypt* теперь расшифровывается (см. tests/test_happ_crypt.py);
         # непригодная нагрузка обязана давать доменную ошибку, а не трассировку.
         with self.assertRaises(SubscriptionFetchError):
@@ -745,6 +763,21 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         with patch("xray_fluent.importer.subscription_http.build_opener", return_value=opener):
             with self.assertRaisesRegex(SubscriptionFetchError, "304 без условного"):
                 fetch_subscription(stale, mode="direct")
+
+        # Отказ по HWID под видом HTTP 200 с узлами-заглушками не импортируется.
+        for header, text in (
+            ("x-hwid-not-supported", "HWID"),
+            ("x-hwid-max-devices-reached", "лимит устройств"),
+        ):
+            class RefusalResponse(Response):
+                headers = {header: "true", "x-hwid-limit": "true"}
+
+            opener.open = lambda _request, timeout: RefusalResponse()
+            with self.subTest(header=header), patch(
+                "xray_fluent.importer.subscription_http.build_opener", return_value=opener
+            ):
+                with self.assertRaisesRegex(SubscriptionFetchError, text):
+                    fetch_subscription(subscription, mode="auto", proxy_port=10808)
 
         handler = _SafeRedirectHandler()
         with self.assertRaises(SubscriptionFetchError):

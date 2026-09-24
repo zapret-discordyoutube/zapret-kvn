@@ -19,6 +19,13 @@ class HwidFailureTests(unittest.TestCase):
         message = describe_http_failure(404, {"x-hwid-not-supported": "true"})
         self.assertIn("HWID", message)
 
+    def test_missing_hwid_wins_over_the_generic_limit_flag(self) -> None:
+        message = describe_http_failure(
+            200, {"x-hwid-not-supported": "true", "x-hwid-limit": "true"}
+        )
+        self.assertIn("HWID", message)
+        self.assertNotIn("лимит устройств", message.lower())
+
     def test_header_case_is_ignored(self) -> None:
         message = describe_http_failure(404, {"X-Hwid-Max-Devices-Reached": "true"})
         self.assertIn("лимит устройств", message.lower())
