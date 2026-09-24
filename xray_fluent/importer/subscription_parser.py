@@ -89,6 +89,9 @@ class ParsedSubscription:
     skipped: int = 0
 
 
+_UNROUTABLE_SERVER = "0.0.0.0"
+
+
 def validate_filter_patterns(include_pattern: str, exclude_pattern: str) -> None:
     for label, pattern in (("include", include_pattern), ("exclude", exclude_pattern)):
         if not pattern:
@@ -145,6 +148,9 @@ def parse_subscription_payload(
     if not nodes:
         detail = warnings[0] if warnings else "поддерживаемые серверы не найдены"
         raise SubscriptionParseError(f"Подписка не содержит валидных серверов: {detail}")
+    provider_notice = _provider_notice(nodes)
+    if provider_notice is not None:
+        raise SubscriptionParseError(provider_notice)
 
     include_re = re.compile(include_pattern, re.IGNORECASE) if include_pattern else None
     exclude_re = re.compile(exclude_pattern, re.IGNORECASE) if exclude_pattern else None
@@ -187,6 +193,25 @@ def parse_subscription_payload(
     if not filtered:
         raise SubscriptionParseError("После применения фильтров в подписке не осталось серверов")
     return ParsedSubscription(filtered, metadata, warnings, skipped)
+
+
+def _provider_notice(nodes: list[Node]) -> str | None:
+    """Распознать ответ-заглушку вместо списка серверов.
+
+    Панели (Remnawave и совместимые) сообщают об отозванной подписке, лимите
+    устройств или неподдерживаемом клиенте обычным HTTP 200: узлы указывают на
+    ``0.0.0.0``, а текст для пользователя разбит по их именам. Такой ответ не
+    должен затирать рабочий список серверов, поэтому он становится ошибкой.
+    Одиночный информационный узел рядом с настоящими серверами не мешает.
+    """
+
+    if not all(node.server.strip() == _UNROUTABLE_SERVER for node in nodes):
+        return None
+    lines = [" ".join(node.name.split()) for node in nodes]
+    text = " ".join(line for line in lines if line)[:300].strip()
+    if not text:
+        return "Провайдер вернул только серверы-заглушки 0.0.0.0 вместо подписки"
+    return f"Провайдер сообщает: {text}"
 
 
 def _decode_utf8(payload: bytes | str) -> str:

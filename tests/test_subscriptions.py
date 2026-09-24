@@ -8,6 +8,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from urllib.parse import quote
 from unittest.mock import patch
 import urllib.error
 import urllib.request
@@ -153,6 +154,23 @@ AllowedIPs = 0.0.0.0/0
         self.assertEqual(parsed.metadata.info.total, 100)
         self.assertEqual(parsed.skipped, 1)
         self.assertTrue(parsed.warnings)
+
+    def test_provider_stub_nodes_become_the_provider_message(self) -> None:
+        stub = "vless://00000000-0000-0000-0000-000000000000@0.0.0.0:1?encryption=none&type=tcp&security=none#"
+        body = "\n".join(
+            stub + quote(name)
+            for name in ("❌ Подписка сломана", "получите новую", "Добавить устройство")
+        )
+        encoded = base64.b64encode(body.encode()).decode()
+        with self.assertRaisesRegex(
+            SubscriptionParseError,
+            "Провайдер сообщает: ❌ Подписка сломана получите новую Добавить устройство",
+        ):
+            parse_subscription_payload(encoded)
+
+        # Информационный узел рядом с настоящими серверами — не заглушка.
+        mixed = parse_subscription_payload(f"{VLESS_A}\n{stub}{quote('Трафик: 10 ГБ')}")
+        self.assertEqual(len(mixed.nodes), 2)
 
     def test_once_encoded_urlsafe_base64_and_header_priority(self) -> None:
         encoded = base64.urlsafe_b64encode(VLESS_A.encode()).decode().rstrip("=")
