@@ -76,7 +76,10 @@ function Stop-ReleaseProcesses([string]$Root) {
         [IO.Path]::GetFullPath((Join-Path $Root "dist\ZapretKVN")),
         [IO.Path]::GetFullPath((Join-Path $Root "core"))
     )
-    $names = @("ZapretKVN", "sing-box", "xray", "hysteria", "zapret-amnezia", "tun2socks")
+    # winws2 is zapret's DPI bypass shipped in dist\ZapretKVN\zapret\exe. An
+    # orphan left by a manual start locks cygwin1.dll (breaking the clean step)
+    # and rewrites the host's HTTP traffic, so CRL fetches for downloads fail.
+    $names = @("ZapretKVN", "sing-box", "xray", "hysteria", "zapret-amnezia", "tun2socks", "winws2")
     foreach ($process in Get-Process -Name $names -ErrorAction SilentlyContinue) {
         $path = $null
         try { $path = $process.Path } catch { $path = $null }

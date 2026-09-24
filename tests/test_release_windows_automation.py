@@ -360,6 +360,18 @@ class BuildPayloadTests(unittest.TestCase):
         self.assertIn("function Assert-StableCoreLock", source)
         self.assertIn("release_prerelease", source)
 
+    def test_release_gate_stops_every_shipped_process(self) -> None:
+        source = (Path(__file__).parents[1] / "scripts" / "release_windows_gate.ps1").read_text(
+            encoding="utf-8"
+        )
+        names_line = next(line for line in source.splitlines() if "$names = @(" in line)
+        # Every executable the payload ships must be stopped before the clean
+        # step, otherwise an orphan locks files inside dist\ZapretKVN.
+        shipped = {path.stem for path in (Path(__file__).parents[1] / "zapret").rglob("*.exe")}
+        for name in {"ZapretKVN", "sing-box", "xray", *shipped}:
+            with self.subTest(name=name):
+                self.assertIn(f'"{name}"', names_line)
+
 
 if __name__ == "__main__":
     unittest.main()
