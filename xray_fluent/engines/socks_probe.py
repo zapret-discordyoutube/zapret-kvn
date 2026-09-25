@@ -5,11 +5,18 @@ import ipaddress
 import socket
 import ssl
 
-# Literal destinations let transport readiness run before the front DNS exists.
-# SNI and certificate verification still use the matching hostname.
-HTTPS_ENDPOINTS = (("1.1.1.1", "cloudflare-dns.com", "/"),
-                   ("8.8.8.8", "dns.google", "/"),
-                   ("9.9.9.9", "dns.quad9.net", "/"))
+# Egress probes: (SOCKS destination, TLS name, path).
+#
+# Destinations are hostnames sent as SOCKS5 domain requests, so the remote
+# side resolves them. The probe therefore needs no local/front DNS and proves
+# real egress, including the node resolver. Connectivity-check URLs are used
+# on purpose: node network policy (VPnBot network-policy-v3) rejects public
+# DoH resolvers (blocked_doh_domain_suffixes) and IP-discovery services
+# (public-ip-discovery), so probing those measures the policy, not the path.
+# tests/test_destination_scope.py keeps this list outside those classes.
+HTTPS_ENDPOINTS = (("www.google.com", "www.google.com", "/generate_204"),
+                   ("connectivitycheck.gstatic.com", "connectivitycheck.gstatic.com", "/generate_204"),
+                   ("cp.cloudflare.com", "cp.cloudflare.com", "/generate_204"))
 
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:

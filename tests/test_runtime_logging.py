@@ -8,6 +8,7 @@ from PyQt6.QtCore import QProcess
 
 from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
 from xray_fluent.engines.hysteria.manager import HysteriaManager
+from xray_fluent.engines.socks_probe import HTTPS_ENDPOINTS
 from xray_fluent.profiles.models import Node
 from xray_fluent.diagnostics.runtime_logging import (
     RuntimeLogContext,
@@ -265,7 +266,7 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
         manager = HysteriaManager()
 
         def probe(_relay_port, *, endpoint, **_kwargs):
-            if endpoint[1] == "cloudflare-dns.com":
+            if endpoint[1] == HTTPS_ENDPOINTS[0][1]:
                 raise OSError("provider unavailable")
 
         with patch.object(

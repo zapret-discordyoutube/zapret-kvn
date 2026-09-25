@@ -43,13 +43,13 @@ from xray_fluent.engines.singbox.runtime_planner import (
     plan_singbox_runtime,
 )
 from xray_fluent.engines.singbox.manager import SingBoxManager
+from xray_fluent.engines.socks_probe import HTTPS_ENDPOINTS
 from xray_fluent.importer.link_parser import parse_single
 
 
-_HTTPS_ENDPOINTS: tuple[tuple[str, str], ...] = (
-    ("cloudflare-dns.com", "/"),
-    ("dns.google", "/"),
-    ("dns.quad9.net", "/"),
+# Same policy-allowed egress checks as the app (never public DoH/IP-discovery).
+_HTTPS_ENDPOINTS: tuple[tuple[str, str], ...] = tuple(
+    (name, path) for _, name, path in HTTPS_ENDPOINTS
 )
 _TEMPLATE = _ROOT / "data" / "templates" / "sing-box" / "default.json"
 

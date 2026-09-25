@@ -11,9 +11,11 @@ from xray_fluent.diagnostics.connection_message import connection_message
 
 
 class HysteriaStartupRegressions(unittest.TestCase):
-    def test_bootstrap_probes_use_literal_addresses_but_keep_tls_names(self):
-        for address, name, path in _FUNCTIONAL_HTTPS_ENDPOINTS:
-            ipaddress.ip_address(address)
+    def test_probes_send_domain_connect_resolved_remotely_with_matching_tls_name(self):
+        # Remote resolution needs no local/front DNS and proves node egress.
+        for host, name, path in _FUNCTIONAL_HTTPS_ENDPOINTS:
+            with self.assertRaises(ValueError):
+                ipaddress.ip_address(host)
             raw = Mock()
             raw.recv.side_effect = [b'\x05\x02', b'\x01\x00', b'\x05\x00\x00\x01', b'\0' * 6]
             tls = Mock()
@@ -23,11 +25,14 @@ class HysteriaStartupRegressions(unittest.TestCase):
             context.wrap_socket.return_value.__exit__ = Mock(return_value=False)
             with patch('xray_fluent.engines.socks_probe.socket.create_connection', return_value=raw), \
                  patch('xray_fluent.engines.socks_probe.ssl.create_default_context', return_value=context):
-                probe_https(11809, username='user', password='secret', endpoint=(address,name,path), timeout=4)
+                probe_https(11809, username='user', password='secret', endpoint=(host, name, path), timeout=4)
             request = raw.sendall.call_args_list[-1].args[0]
-            self.assertEqual(request[:4], b'\x05\x01\x00\x01')
-            self.assertEqual(request[4:8], ipaddress.ip_address(address).packed)
+            encoded = host.encode('idna')
+            self.assertEqual(request[:5], b'\x05\x01\x00\x03' + bytes([len(encoded)]))
+            self.assertEqual(request[5:5 + len(encoded)], encoded)
+            self.assertEqual(request[-2:], (443).to_bytes(2, 'big'))
             context.wrap_socket.assert_called_once_with(raw, server_hostname=name)
+            self.assertIn(f'HEAD {path} HTTP/1.1'.encode(), tls.sendall.call_args.args[0])
             self.assertIn(('Host: '+name).encode(), tls.sendall.call_args.args[0])
             raw.close.assert_called_once()
 

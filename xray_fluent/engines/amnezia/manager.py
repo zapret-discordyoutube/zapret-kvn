@@ -226,9 +226,9 @@ class AmneziaManager(QObject):
             detail = "; ".join(f"{host}: {message}" for host, message in sorted(failures.items()))
             self.log_received.emit("[amnezia][stage=health_check] authenticated tunnel retained; " + redact_runtime_log(detail))
             # The AWG Noise handshake is already confirmed (peers reported a
-            # handshake time), so the tunnel works. The public DoH probe
-            # endpoints are commonly blocked on censored exits, so their
-            # failure is not a user-facing problem — do not raise a warning.
+            # handshake time), so the tunnel works. Probe destinations can be
+            # filtered by an exit's policy, so their failure is not a
+            # user-facing problem — do not raise a warning.
         config, self._pending_front_config = self._pending_front_config, None
         if config is not None and self.is_running and not self._cancelled():
             self._start_front_health(config)

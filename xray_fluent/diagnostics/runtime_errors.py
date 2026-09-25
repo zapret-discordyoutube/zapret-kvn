@@ -17,6 +17,12 @@ from .runtime_logging import redact_runtime_log
 
 
 _CATALOG = json.loads(Path(__file__).with_name("runtime-errors.json").read_text(encoding="utf-8"))
+
+# One relayed connection failed because the authenticated server could not
+# reach its destination (node network policy, dead site). The catalog marks it
+# record_only for every engine on both platforms: it proves the tunnel is
+# alive, so it must never start a transport failure episode or a failover.
+DESTINATION_UNREACHABLE_CODE = "TARGET_DESTINATION_UNREACHABLE"
 _RULES = tuple(
     (rule["code"], rule["action"], re.compile(rule["pattern"], re.IGNORECASE))
     for rule in _CATALOG["rules"]

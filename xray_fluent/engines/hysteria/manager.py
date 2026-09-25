@@ -418,10 +418,10 @@ class HysteriaManager(QObject):
         self._emit_log("authenticated server retained; HTTPS check endpoints did not respond: " + summary,
                        stage="health_check")
         # The server handshake is already authenticated (the official client
-        # reported "connected to server"), so the connection is proven. The
-        # public DoH probe endpoints (1.1.1.1/8.8.8.8/9.9.9.9) are commonly
-        # blocked on censored exits, so their failure is not a user-facing
-        # problem. Only warn if the handshake itself was never confirmed.
+        # reported "connected to server"), so the connection is proven. Probe
+        # destinations can still be filtered by an exit's policy, so their
+        # failure is not a user-facing problem and never a teardown reason.
+        # Only warn if the handshake itself was never confirmed.
         if not self._remote_authenticated:
             self.warning.emit("Hysteria подключена к серверу, но проверочные HTTPS-адреса не ответили. "
                               "Соединение сохранено; доступность сайтов пока не подтверждена.")
@@ -593,16 +593,19 @@ class HysteriaManager(QObject):
 
     def _emit_process_line(self, line: str) -> None:
         self._observe_authenticated_server(line)
-        from ...diagnostics.runtime_errors import classify_core_error
+        from ...diagnostics.runtime_errors import DESTINATION_UNREACHABLE_CODE, classify_core_error
         clean = redact_runtime_log(line, secrets=self._secret_values)
-        _, action = classify_core_error(clean)
+        code, action = classify_core_error(clean)
         if self._is_health_probe_error(line) and classify_hysteria_failure(clean) not in SECURITY_FAILURES:
             self._emit_log(clean, stage="health_check")
             return
         if action == "record_only":
-            # A loopback SOCKS client/probe closing its socket is not a remote
-            # server failure. Preserve evidence without spending recovery.
-            self._emit_log(clean, stage="local_client")
+            # Evidence only, never a transport failure or recovery: either a
+            # loopback SOCKS client closed its socket, or the authenticated
+            # server reported that it could not reach one destination (node
+            # policy, dead site) while the tunnel itself stays intact.
+            stage = "destination" if code == DESTINATION_UNREACHABLE_CODE else "local_client"
+            self._emit_log(clean, stage=stage)
             return
         lowered = clean.lower()
         stage = (

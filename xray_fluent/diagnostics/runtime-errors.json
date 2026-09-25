@@ -3,6 +3,11 @@
   "unknown_code": "CORE_UNCLASSIFIED",
   "rules": [
     {
+      "code": "TARGET_DESTINATION_UNREACHABLE",
+      "action": "record_only",
+      "pattern": "(?:\"error\":\\s*\"dial error: |remote error: (?!tls: ))"
+    },
+    {
       "code": "LOCAL_RELAY_AUTH_REJECTED",
       "action": "stop",
       "pattern": "(?:no matching auth method|no acceptable authentication methods|SOCKS authentication (?:method )?rejected|SOCKS credentials.*rejected)"

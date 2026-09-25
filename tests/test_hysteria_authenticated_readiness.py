@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from PyQt6.QtCore import QCoreApplication, QProcess
 from xray_fluent.application.controller import AppController
 from xray_fluent.engines.hysteria.manager import HysteriaManager
+from xray_fluent.engines.socks_probe import HTTPS_ENDPOINTS
 from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
 from xray_fluent.diagnostics.export import collect_runtime_diagnostics
 
@@ -106,12 +107,12 @@ class AuthenticatedReadinessTests(unittest.TestCase):
     def test_probe_destination_refusal_is_not_a_transport_failure(self):
         self.start_with_pending_checks()
         self.manager._emit_process_line('2026-09-06T14:07:48+03:00\tWARN\tSOCKS5 TCP error\t'
-            '{"reqAddr":"1.1.1.1:443","error":"connection refused"}')
+            '{"reqAddr":"%s:443","error":"connection refused"}' % HTTPS_ENDPOINTS[0][0])
         self.assertEqual(self.errors, [])
         self.assertTrue(self.manager.is_running)
         self.assertIn('stage=health_check', self.logs[-1])
         self.manager._emit_process_line('2026-09-06T14:07:48+03:00\tWARN\tSOCKS5 TCP error\t'
-            '{"reqAddr":"1.1.1.1:443","error":"no certificate matches the pinned hash"}')
+            '{"reqAddr":"%s:443","error":"no certificate matches the pinned hash"}' % HTTPS_ENDPOINTS[0][0])
         self.assertEqual(self.manager.last_failure_code, HysteriaFailureCode.TARGET_PIN_MISMATCH)
         self.assertEqual(len(self.errors), 1)
 

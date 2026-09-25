@@ -3092,10 +3092,17 @@ class AppController(QObject):
         tags = session.outbound_pool_tags or {}
         tag = tags.get(node.id, "")
         if not tag:
-            self._log(
-                f"[core-switch] fallback: node {node.id} is not loaded in "
-                f"{session.active_core} pool ({len(tags)} tags)"
-            )
+            # Not a failure: a hot switch only re-points the running core at a
+            # member it already loaded.  A sidecar session (Hysteria, AWG) runs
+            # exactly one server and has no pool, and a node outside the
+            # running pool needs different processes.  Changing servers then
+            # requires the planned full transition, which replaces the
+            # processes and therefore ends in-flight connections.
+            if session.sidecar_kind and not tags:
+                reason = f"{session.sidecar_kind} sidecar session serves one server and has no switchable pool"
+            else:
+                reason = f"node is outside the running {session.active_core} pool ({len(tags)} tags)"
+            self._log(f"[core-switch] full transition to node {node.id}: {reason}")
             return None
         control_core = "xray" if session.hybrid else session.active_core
         if control_core != "singbox" and not session.hybrid:
@@ -3703,9 +3710,10 @@ class AppController(QObject):
         if "DNS_FALLBACK server=" in line:
             self._report_dns_fallback(line)
         health_log = engine == "hysteria" and re.match(
-            r"^\[hysteria\]\[attempt=\d+ stage=health_check(?: |\])", line
+            r"^\[hysteria\]\[attempt=\d+ stage=(?:health_check|destination)(?: |\])", line
         )
-        # Optional endpoint health is a warning, not a transport failure episode.
+        # Optional endpoint health and per-destination refusals by an
+        # authenticated server are evidence, not a transport failure episode.
         if is_core_error_line(line) and not health_log:
             self._record_core_failure(engine, "runtime", line)
         context = self._core_log_contexts.get(engine)
