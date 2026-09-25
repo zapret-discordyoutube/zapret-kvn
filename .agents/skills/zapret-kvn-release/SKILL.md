@@ -43,7 +43,10 @@ The runner owns the full release transaction:
   download and hash them again, publish and verify Latest;
 - sync the verified installer and invoke the already-running ZapretGPT through
   its owner-only Unix socket, then confirm publisher state;
-- fetch final Git state and require a clean worktree.
+- fetch final Git state and require a clean worktree;
+- after completion, keep only the newest 3 versions (`ZAPRETKVN_RELEASE_KEEP`)
+  in `~/releases/zapret-kvn`, the ZapretGPT Windows cache and win10 `dist`;
+  pruning is best-effort and never fails a finished release.
 
 Do not manually repeat successful runner checks. Report the runner's final JSON,
 test totals, exact SHA, Release URL, asset count, and Telegram result.
