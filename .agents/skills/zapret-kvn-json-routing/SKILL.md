@@ -1,6 +1,6 @@
 ---
 name: zapret-kvn-json-routing
-description: Preserve and edit Zapret KVN native raw JSON routing for sing-box and Xray. Use when working in /mnt/g/Privacy/Xray-windows-64 on data/templates or data/configs JSON; adding direct, proxy, or block rules; matching processes, paths, domains, IPs, or rule sets; changing system-proxy or sing-box/Xray TUN behavior; synchronizing templates with active configs; or deciding whether routing belongs in JSON versus Python runtime code. Treat the original core JSON formats as the source of truth and prevent custom routing DSLs, overlays, generated policy layers, or hidden route injection.
+description: Preserve and edit Zapret KVN native raw JSON routing for sing-box and Xray. Use when working in /home/codex-pve/zapret-kvn/windows on data/templates or data/configs JSON; adding direct, proxy, or block rules; matching processes, paths, domains, IPs, or rule sets; changing system-proxy or sing-box/Xray TUN behavior; synchronizing templates with active configs; or deciding whether routing belongs in JSON versus Python runtime code. Treat the original core JSON formats as the source of truth and prevent custom routing DSLs, overlays, generated policy layers, or hidden route injection.
 ---
 
 # Zapret KVN Native JSON Routing
