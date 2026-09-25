@@ -59,6 +59,14 @@ PUBLISHER_COMMAND = Path(
 PUBLISHER_STATE = Path(
     "/home/codex-pve/zapretgpt/data/zapretkvn_publisher_state.json"
 )
+# The publisher only ever syncs the newest installer into this cache, so older
+# version directories are safe to prune (same env name as the publisher).
+PUBLISHER_WINDOWS_CACHE = Path(
+    os.getenv(
+        "ZAPRETKVN_WINDOWS_CACHE_ROOT",
+        "/home/codex-pve/zapretkvn-release-work/windows",
+    )
+)
 EXPECTED_ASSET_NAMES = (
     "ZapretKVN-v{version}-windows-x64.exe",
     "ZapretKVN-v{version}-windows-x64.zip",
@@ -160,6 +168,60 @@ def prune_release_archive(
         shutil.rmtree(entry)
         removed.append(entry.name)
     return removed
+
+
+def remote_dist_asset_pattern() -> str:
+    # .NET allows the same named group in every alternative; only the exact
+    # release asset shapes match, never the ZapretKVN\ build folder or portable zip.
+    shapes = (
+        re.escape(name).replace(re.escape("{version}"), r"(?<v>\d+\.\d+\.\d+)")
+        for name in EXPECTED_ASSET_NAMES
+    )
+    return "^(?:" + "|".join(shapes) + ")$"
+
+
+def prune_remote_dist(current: str, keep: int = RELEASE_ARCHIVE_KEEP) -> None:
+    command = (
+        "$ErrorActionPreference='Stop';"
+        f"$pattern='{remote_dist_asset_pattern()}';"
+        f"$files=Get-ChildItem -LiteralPath '{WINDOWS_ROOT}\\dist' -File | ForEach-Object {{"
+        " if ($_.Name -match $pattern) { [pscustomobject]@{File=$_;Version=[version]$Matches['v']} } };"
+        "$keep=@($files | ForEach-Object { $_.Version } | Sort-Object -Descending -Unique"
+        f" | Select-Object -First {keep}) + [version]'{current}';"
+        "$files | Where-Object { $keep -notcontains $_.Version } | ForEach-Object {"
+        " Remove-Item -LiteralPath $_.File.FullName; Write-Output ('pruned ' + $_.File.Name) }"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    run(
+        [
+            "ssh",
+            WINDOWS_HOST,
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded,
+        ],
+        timeout=300,
+    )
+
+
+def prune_release_archives(version: str) -> None:
+    # Best effort: the release is already complete, so cleanup must never fail it.
+    for root in (RELEASE_ROOT, PUBLISHER_WINDOWS_CACHE):
+        try:
+            removed = prune_release_archive(version, root)
+        except OSError as exc:
+            log(f"warning: pruning {root} failed: {exc}")
+        else:
+            if removed:
+                log(f"pruned {root}: {', '.join(removed)}")
+    try:
+        prune_remote_dist(version)
+    except (OSError, ReleaseError, subprocess.SubprocessError) as exc:
+        log(f"warning: pruning {WINDOWS_HOST} dist failed: {exc}")
 
 
 def latest_stable_tag() -> str:
@@ -946,13 +1008,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     require_clean_main()
     mark_phase(state, "complete")
     os.replace(STATE_PATH, LAST_RESULT_PATH)
-    try:
-        removed = prune_release_archive(version)
-    except OSError as exc:
-        log(f"warning: release archive pruning failed: {exc}")
-    else:
-        if removed:
-            log(f"pruned local release archive: {', '.join(removed)}")
+    prune_release_archives(version)
     result = {
         "status": "published",
         "version": version,

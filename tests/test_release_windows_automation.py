@@ -42,6 +42,16 @@ class ReleaseVersionTests(unittest.TestCase):
                 ["notes", "v0.6.10", "v0.6.11", "v0.6.12"],
             )
 
+    def test_remote_dist_pattern_matches_only_release_assets(self) -> None:
+        # Python has no duplicate named groups; the shape check is the same.
+        pattern = release_windows.remote_dist_asset_pattern().replace("(?<v>", "(")
+        for name in release_windows.EXPECTED_ASSET_NAMES:
+            with self.subTest(name=name):
+                self.assertRegex(name.format(version="0.6.12"), pattern)
+        for name in ("ZapretKVN", "ZapretKVN-portable.zip", "ZapretKVN-v0.6.12-windows-x64.exe.bak"):
+            with self.subTest(name=name):
+                self.assertNotRegex(name, pattern)
+
     def test_skipped_or_major_versions_are_rejected(self) -> None:
         for value in ("0.4.103", "0.5.1", "0.6.0", "1.0.0"):
             with self.subTest(value=value), self.assertRaises(release_windows.ReleaseError):
