@@ -1,6 +1,6 @@
 ---
 name: zapret-kvn-release
-description: Build, verify, package, publish, resume, or deliver Zapret KVN Windows x64 stable releases with the repository one-command runner, local Windows dev/stable gates, immutable Forgejo assets, and stable-only Telegram delivery through ZapretGPT. Use for release, build, version bump, stable publication, release assets, Telegram channel delivery, or recovery of an interrupted Windows release in /home/codex-pve/Xray-windows-64.
+description: Build, verify, package, publish, resume, or deliver Zapret KVN Windows x64 stable releases with the repository one-command runner, local Windows dev/stable gates, immutable Forgejo assets, and stable-only Telegram delivery through ZapretGPT. Use for release, build, version bump, stable publication, release assets, Telegram channel delivery, or recovery of an interrupted Windows release in /home/codex-pve/zapret-kvn/windows.
 ---
 
 # Release Zapret KVN Windows stable
