@@ -29,6 +29,19 @@ class ReleaseVersionTests(unittest.TestCase):
             "0.4.102",
         )
 
+    def test_release_archive_keeps_newest_versions_numerically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("v0.5.0", "v0.6.9", "v0.6.10", "v0.6.11", "v0.6.12", "notes"):
+                (root / name).mkdir()
+                (root / name / "asset.zip").write_bytes(b"x")
+            removed = release_windows.prune_release_archive("0.6.12", root, keep=3)
+            self.assertEqual(sorted(removed), ["v0.5.0", "v0.6.9"])
+            self.assertEqual(
+                sorted(entry.name for entry in root.iterdir()),
+                ["notes", "v0.6.10", "v0.6.11", "v0.6.12"],
+            )
+
     def test_skipped_or_major_versions_are_rejected(self) -> None:
         for value in ("0.4.103", "0.5.1", "0.6.0", "1.0.0"):
             with self.subTest(value=value), self.assertRaises(release_windows.ReleaseError):

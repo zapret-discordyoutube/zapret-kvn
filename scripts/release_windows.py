@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -39,6 +40,9 @@ WINDOWS_SCP_ROOT = WINDOWS_ROOT.replace("\\", "/")
 RELEASE_ROOT = Path(
     os.getenv("ZAPRETKVN_RELEASE_ROOT", "/home/codex-pve/releases/zapret-kvn")
 )
+# Published assets are immutable in Forgejo, so the local archive only needs
+# the newest bundles for quick re-checks; older ones are pruned after success.
+RELEASE_ARCHIVE_KEEP = max(1, int(os.getenv("ZAPRETKVN_RELEASE_KEEP", "3")))
 FORGEJO_BASE = os.getenv("FORGEJO_URL", "https://git.zapret.moe").rstrip("/")
 FORGEJO_REPO = os.getenv("ZAPRETKVN_FORGEJO_REPO", "zapretkvn/zapret-kvn")
 FORGEJO_TOKEN_PATH = Path(
@@ -138,6 +142,24 @@ def parse_version(value: str) -> tuple[int, int, int]:
 
 def version_text(parts: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in parts)
+
+
+def prune_release_archive(
+    current: str, root: Path = RELEASE_ROOT, keep: int = RELEASE_ARCHIVE_KEEP
+) -> list[str]:
+    versions = []
+    for entry in root.iterdir() if root.is_dir() else ():
+        match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", entry.name)
+        if match and entry.is_dir() and not entry.is_symlink():
+            versions.append((tuple(int(part) for part in match.groups()), entry))
+    versions.sort(reverse=True)
+    removed = []
+    for _, entry in versions[keep:]:
+        if entry.name == f"v{current}":
+            continue
+        shutil.rmtree(entry)
+        removed.append(entry.name)
+    return removed
 
 
 def latest_stable_tag() -> str:
@@ -924,6 +946,13 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     require_clean_main()
     mark_phase(state, "complete")
     os.replace(STATE_PATH, LAST_RESULT_PATH)
+    try:
+        removed = prune_release_archive(version)
+    except OSError as exc:
+        log(f"warning: release archive pruning failed: {exc}")
+    else:
+        if removed:
+            log(f"pruned local release archive: {', '.join(removed)}")
     result = {
         "status": "published",
         "version": version,
