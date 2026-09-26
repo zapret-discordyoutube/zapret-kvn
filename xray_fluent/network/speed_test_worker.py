@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -20,6 +23,7 @@ from ..constants import (
     SPEED_TEST_TEMP_SOCKS_PORT,
     SPEED_TEST_TIMEOUT,
     SPEED_TEST_URLS_BY_COUNTRY,
+    SPEED_TEST_XRAY_PATH,
 )
 from .http_utils import build_opener
 from ..profiles.models import AppSettings, Node, RoutingSettings
@@ -82,6 +86,74 @@ def measure_download_bps(
     if elapsed <= 0 or total_bytes <= 0:
         return None
     return total_bytes / elapsed
+
+
+def _same_binary(source: Path, target: Path) -> bool:
+    try:
+        src, dst = source.stat(), target.stat()
+    except OSError:
+        return False
+    return src.st_size == dst.st_size and abs(src.st_mtime - dst.st_mtime) < 2.0
+
+
+def prepare_speed_test_xray(source: Path, target: Path = SPEED_TEST_XRAY_PATH) -> Path:
+    """Путь, из которого запускать временный xray теста скорости.
+
+    Тот же бинарь, но под своим именем (жёсткая ссылка, иначе копия):
+    правило ``process_path → direct`` в плане sing-box TUN
+    (``runtime_planner._ensure_speed_test_process_direct_route``) выводит его
+    трафик мимо туннеля, не задевая ``xray.exe`` гибридного сайдкара.  Если
+    источник обновился, ссылка пересоздаётся (сверка размера и mtime).  Любой
+    сбой — запуск из исходного пути: замер важнее обхода TUN.
+    Блокирующий вызов: только из рабочего потока.
+    """
+
+    source = Path(source)
+    if not source.is_file():
+        return source
+    try:
+        if source.resolve() == target.resolve():
+            return source
+    except OSError:
+        return source
+    if _same_binary(source, target):
+        return target
+    tmp = target.with_name(target.name + ".tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp.unlink(missing_ok=True)
+        try:
+            os.link(source, tmp)
+        except OSError:
+            shutil.copy2(source, tmp)
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return source
+    return target if _same_binary(source, target) else source
+
+
+def _speed_test_env(source: Path) -> dict[str, str]:
+    """geoip.dat/geosite.dat лежат рядом с исходным xray, а не с его ссылкой."""
+
+    env = dict(os.environ)
+    env.setdefault("XRAY_LOCATION_ASSET", str(Path(source).parent))
+    return env
+
+
+# Сколько ждать готовности временного xray сверх первой секунды.
+SPEED_TEST_CORE_START_TIMEOUT = 20.0
+
+
+def _port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.5):
+            return True
+    except OSError:
+        return False
 
 
 def _get_speed_url(country_code: str) -> str:
@@ -161,6 +233,7 @@ class SpeedTestWorker(QThread):
     def run(self) -> None:
         total = len(self._nodes)
         self._completed_nodes = 0
+        self._launch_path = str(prepare_speed_test_xray(Path(self._xray_path)))
         try:
             for node in self._nodes:
                 if self._cancelled:
@@ -241,19 +314,31 @@ class SpeedTestWorker(QThread):
             tmp.close()
 
             proc = subprocess.Popen(
-                [self._xray_path, "run", "-c", tmp.name],
+                [getattr(self, "_launch_path", "") or self._xray_path, "run", "-c", tmp.name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=_speed_test_env(Path(self._xray_path)),
                 creationflags=0x08000000,  # CREATE_NO_WINDOW
             )
             self._current_proc = proc
 
-            # Даём xray время на запуск (с проверкой отмены)
+            # Даём xray время на запуск (с проверкой отмены): минимум 1 с, как
+            # раньше, дальше — до готовности HTTP-inbound.  С холодным кэшем
+            # диска загрузка geosite.dat (правила режима «rule») занимала на
+            # живом Windows 9–16 с, и фиксированной секунды не хватало: все
+            # раунды получали «connection refused».
             for _ in range(10):
                 if self._cancelled:
                     return False, None, False
                 self.node_progress.emit(node.id, 2 + _ * 2)
                 time.sleep(0.1)
+            deadline = time.monotonic() + SPEED_TEST_CORE_START_TIMEOUT
+            while not _port_open(PROXY_HOST, self._http_port):
+                if self._cancelled:
+                    return False, None, False
+                if proc.poll() is not None or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.2)
 
             if proc.poll() is not None:
                 if self._cancelled:

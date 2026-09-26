@@ -29,6 +29,7 @@ from xray_fluent.importer.link_parser import (
     parse_single,
     validate_node_outbound,
 )
+from xray_fluent.constants import SPEED_TEST_XRAY_PATH
 from xray_fluent.profiles.models import Node
 
 
@@ -587,7 +588,17 @@ class WireguardDnsPreservationTests(unittest.TestCase):
                 plan = planner(parse_singbox_document(TEMPLATE_PATH, json.dumps(raw)), nodes[0])
                 self.assertEqual(raw, before)
                 self.assertEqual(plan.singbox_config["dns"], raw["dns"])
-                self.assertEqual(plan.singbox_config["route"]["rules"][1:], raw["route"]["rules"])
+                # Вне пользовательских правил — только app-owned: защита AWG-сайдкара
+                # первой и (в TUN) обход TUN временным ядром теста скорости.
+                speed_test_rule = {
+                    "process_path": [str(SPEED_TEST_XRAY_PATH.resolve())],
+                    "action": "route",
+                    "outbound": "direct",
+                }
+                user_rules = [
+                    rule for rule in plan.singbox_config["route"]["rules"][1:] if rule != speed_test_rule
+                ]
+                self.assertEqual(user_rules, raw["route"]["rules"])
                 self.assertNotIn("_dns", plan.amnezia_sidecar.config["endpoint"])
                 self.assertNotIn("awg3-direct", json.dumps(plan.singbox_config))
 

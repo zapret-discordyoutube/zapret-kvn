@@ -23,6 +23,7 @@ from ...constants import (
     SINGBOX_PROVIDER_FILE,
     SS_PROTECT_PORT_END,
     SS_PROTECT_PORT_START,
+    SPEED_TEST_XRAY_PATH,
 )
 from ...application.outbound_pool_service import (
     SINGBOX_PROVIDER_TAG,
@@ -963,12 +964,57 @@ def _ensure_singbox_tun_runtime_contract(payload: dict[str, Any]) -> None:
     inbounds = payload.get("inbounds")
     if not isinstance(inbounds, list):
         return
+    has_tun = False
     for inbound in inbounds:
         if not isinstance(inbound, dict):
             continue
         if str(inbound.get("type") or "").strip().lower() != "tun":
             continue
         inbound["interface_name"] = _generate_tun_interface_name()
+        has_tun = True
+    if has_tun:
+        _ensure_speed_test_process_direct_route(payload)
+
+
+def _ensure_speed_test_process_direct_route(payload: dict[str, Any]) -> None:
+    """Временное ядро теста скорости — мимо TUN (app-owned safety contract).
+
+    Тест скорости и «умная проверка» меряют КАНДИДАТА через временный xray,
+    запущенный из собственного пути ``SPEED_TEST_XRAY_PATH``.  В TUN его
+    соединение с сервером-кандидатом иначе попадёт в туннель и пойдёт через
+    текущий (возможно, медленный) сервер — замер покажет скорость текущего.
+    Схема та же, что у сайдкара Hysteria (``process_path → direct``), но
+    правило ставится после ведущих sniff/hijack-dns: DNS-запросы временного
+    ядра по-прежнему отвечает DNS sing-box.  Пользовательский JSON не
+    меняется — только runtime-копия; без outbound ``direct`` правило не
+    добавляется (sing-box отверг бы ссылку на несуществующий тег).
+    """
+
+    outbounds = payload.get("outbounds")
+    if not isinstance(outbounds, list) or not any(
+        isinstance(item, dict) and item.get("tag") == "direct" for item in outbounds
+    ):
+        return
+    route = _ensure_dict(payload, "route")
+    rules = _ensure_list(route, "rules")
+    executable = str(SPEED_TEST_XRAY_PATH.resolve())
+    direct_rule = {"process_path": [executable], "action": "route", "outbound": "direct"}
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        paths = rule.get("process_path")
+        if isinstance(paths, list) and executable in [str(item) for item in paths]:
+            rules[index] = direct_rule
+            return
+    insert_index = 0
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("action") == "sniff" or rule.get("protocol") == "dns":
+            insert_index = index + 1
+            continue
+        break
+    rules.insert(insert_index, direct_rule)
 
 
 def _strip_singbox_tun_inbounds(payload: dict[str, Any]) -> int:

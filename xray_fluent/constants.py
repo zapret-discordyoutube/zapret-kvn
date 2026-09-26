@@ -88,6 +88,11 @@ SPEED_TEST_TIMEOUT = 20  # seconds per single measurement
 SPEED_TEST_ROUNDS = 3    # number of measurements per node (best avg of N-1)
 SPEED_TEST_TEMP_SOCKS_PORT = 19100
 SPEED_TEST_TEMP_HTTP_PORT = 19101
+# Временное ядро теста скорости запускается из отдельной ссылки/копии xray.exe
+# с собственным именем: план sing-box TUN уводит ровно этот путь в direct
+# (process_path), чтобы замер кандидата не шёл через текущий сервер. Путь
+# отличается от xray.exe гибридного сайдкара, поэтому правило его не задевает.
+SPEED_TEST_XRAY_PATH = RUNTIME_DIR / "speedtest" / "xray-speedtest.exe"
 
 SS_PROTECT_PORT_START = 19200
 SS_PROTECT_PORT_END = 19300
