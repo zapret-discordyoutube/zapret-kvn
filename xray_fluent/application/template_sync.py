@@ -60,25 +60,42 @@ def _atomic_write(payload: bytes, target: Path) -> bool:
     return True
 
 
-def sync_config_dns(active_config: Path, template: Path) -> bool:
-    """Persist the shipped native DNS section; preserve all other JSON fields.
-
-    DNS is intentionally app-maintained, including in custom active configs.
-    Invalid editor documents remain available for normal validation/repair.
-    Engines/templates without a DNS section do not impose a new DNS policy.
-    """
+def _load_json_object(path: Path) -> dict | None:
     try:
-        active = json.loads(active_config.read_text(encoding="utf-8-sig"))
-        source = json.loads(template.read_text(encoding="utf-8-sig"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError):
-        return False
-    if not isinstance(active, dict) or not isinstance(source, dict):
-        return False
-    dns = source.get("dns")
-    if not isinstance(dns, dict) or not dns or active.get("dns") == dns:
-        return False
-    active["dns"] = dns
-    return _atomic_write((json.dumps(active, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), active_config)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+_MISSING = object()
+
+
+def merge_stock_sections(active: dict, previous: dict, current: dict) -> dict:
+    """Three-way merge of top-level native sections.
+
+    A section the user left equal to the previously shipped template follows the
+    new template (added, replaced or removed with it). A section the user edited
+    is kept verbatim. Keys only the user added are kept. Order follows the
+    active document, new stock sections are appended in template order.
+    """
+
+    merged: dict = {}
+    for key, value in active.items():
+        if key in current or key in previous:
+            if value == previous.get(key, _MISSING):
+                if key in current:
+                    merged[key] = current[key]
+                continue
+        merged[key] = value
+    for key, value in current.items():
+        if key not in merged and key not in active and key not in previous:
+            merged[key] = value
+    return merged
+
+
+def _dump_json(payload: dict) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
 def sync_packaged_templates(
@@ -87,14 +104,15 @@ def sync_packaged_templates(
     templates_dir: Path = TEMPLATES_DIR,
     configs_dir: Path = CONFIGS_DIR,
 ) -> TemplateSyncResult:
-    """Install native templates; refresh stock configs and every DNS section.
+    """Install native templates and let untouched sections follow them.
 
     The self-updater deliberately preserves ``data/``. Release builds therefore
     carry the current native JSON templates under ``assets/template-update``.
     Before replacing a built-in template, compare its previous installed text
     with the same-path active config. An equivalent active copy is still stock
-    and follows the new template. Custom routing is preserved, while DNS always
-    follows the engine's current default template, including without an update.
+    and follows the new template byte for byte. Otherwise each top-level section
+    (``dns``, ``route``, ``outbounds``…) that still equals the previous template
+    follows the new one, and every section the user edited is preserved.
     """
 
     templates_updated: list[str] = []
@@ -115,35 +133,29 @@ def sync_packaged_templates(
             installed_template = templates_dir / engine / relative
             active_config = configs_dir / engine / relative
             template_will_change = not _same_bytes(installed_template, bundled_path)
-            active_matches_previous_template = (
-                installed_template.is_file()
-                and active_config.is_file()
-                and _same_json_document(installed_template, active_config)
-            )
 
             # Refresh the active copy first. If startup is interrupted between
             # the two atomic writes, the active config is already on the safe
             # new version and the template write is retried next launch.
-            if active_matches_previous_template and _atomic_copy(bundled_path, active_config):
-                configs_updated.append(key)
-            elif (
-                template_will_change
-                and installed_template.is_file()
-                and active_config.is_file()
-                and not _same_json_document(active_config, bundled_path)
-            ):
-                configs_preserved.append(key)
+            if template_will_change and installed_template.is_file() and active_config.is_file():
+                if _same_json_document(installed_template, active_config):
+                    if _atomic_copy(bundled_path, active_config):
+                        configs_updated.append(key)
+                else:
+                    active = _load_json_object(active_config)
+                    previous = _load_json_object(installed_template)
+                    current = _load_json_object(bundled_path)
+                    if active is not None and previous is not None and current is not None:
+                        merged = merge_stock_sections(active, previous, current)
+                        if merged != active and _atomic_write(_dump_json(merged), active_config):
+                            configs_updated.append(key)
+                        if merged != current:
+                            configs_preserved.append(key)
+                    elif not _same_json_document(active_config, bundled_path):
+                        configs_preserved.append(key)
 
             if _atomic_copy(bundled_path, installed_template):
                 templates_updated.append(key)
-
-    for engine in SUPPORTED_ENGINES:
-        template = templates_dir / engine / "default.json"
-        for active_config in sorted((configs_dir / engine).rglob("*.json")):
-            if sync_config_dns(active_config, template):
-                key = f"{engine}/{active_config.relative_to(configs_dir / engine).as_posix()}"
-                if key not in configs_updated:
-                    configs_updated.append(key)
 
     return TemplateSyncResult(
         templates_updated=tuple(templates_updated),

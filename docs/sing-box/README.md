@@ -83,6 +83,7 @@ Important version note:
 
 ## What Is Documented Here
 
+- [routing-gui.md](./routing-gui.md) — структурный редактор «Маршрутизация»
 - [runtime-config.md](./runtime-config.md)
   Current `sing-box` runtime config shape used by the app, with the supported
   subset and the rule pipeline.

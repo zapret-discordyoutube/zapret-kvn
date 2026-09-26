@@ -11,7 +11,9 @@
 
 `application/profile_service.py` copies a selected or imported template into the corresponding active config. Reset performs the same copy. Saving in the raw editor writes the active config.
 
-The self-updater preserves the installed `data/` directory. To deliver template updates through that boundary, `build.py` generates `assets/template-update` from the versioned `data/templates` tree. Before the UI starts, `template_sync.py` compares each same-path active config with the previously installed template, refreshes the active config only when their parsed JSON is equivalent, and then installs the new shipped template. User-edited routing and other fields remain unchanged. The top-level `dns` section is explicitly app-maintained and always follows the engine default native template, on startup and before use. This is persisted in the active raw JSON, not injected into runtime copies. The generated asset is transport, not a second authoring source.
+The self-updater preserves the installed `data/` directory. To deliver template updates through that boundary, `build.py` generates `assets/template-update` from the versioned `data/templates` tree. Before the UI starts, `template_sync.py` compares each same-path active config with the previously installed template. A JSON-equivalent copy is replaced by the new template; otherwise each top-level section that still equals the previous template follows the new one (`merge_stock_sections`) and every user-edited section stays verbatim. No section, `dns` included, is rewritten outside this update merge. The generated asset is transport, not a second authoring source.
+
+The «Маршрутизация» GUI (`xray_fluent/ui/configs_page.py`, `xray_fluent/ui/singbox/`) edits the same active JSON: forms are generated from the pinned core schema in `assets/sing-box-schema/` and change the parsed document in place, preserving unknown keys, key order and the scalar/list form of `Listable` fields. It is an editor of native JSON, not a routing layer; the JSON page shows the identical document.
 
 ## Mode map
 

@@ -23,6 +23,7 @@ from qfluentwidgets import (
 
 from ..diagnostics.connection_message import connection_message
 from ..application.controller import AppController
+from ..application.singbox_editor_check import SingboxEditorCheck
 from ..profiles.storage import PassphraseRequired
 from ..constants import APP_ICON_PATH, APP_NAME, APP_VERSION, BASE_DIR, LOG_DIR
 from ..profiles.models import AppSettings, Node, RoutingSettings, Subscription, SubscriptionUpdateResult
@@ -34,7 +35,7 @@ from .deferred_page import DeferredPage
 from .lock_dialog import PasswordDialog
 from .logs_page import LogsPage
 from .nodes_page import NodesPage
-from .configs_page import ConfigsPage
+from .configs_page import SECTIONS as ROUTING_SECTIONS, ConfigsPage
 from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
 from .about_page import AboutPage
@@ -233,7 +234,19 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.dashboard_page, FIF.SPEED_HIGH, "Панель")
         self.addSubInterface(self.nodes_page, FIF.LINK, "Серверы")
         self.addSubInterface(self.subscriptions_page, FIF.CLOUD, "Подписки")
-        self.addSubInterface(self.configs_page, FIF.CODE, "Конфиги")
+        routing_item = self.addSubInterface(self.configs_page, FIF.CONNECT, "Маршрутизация")
+        routing_item.clicked.connect(lambda *_args: self._open_routing_section("overview"))
+        for key, title, icon in ROUTING_SECTIONS:
+            if key == "overview":
+                continue
+            self.navigationInterface.addItem(
+                routeKey=f"configs-{key}",
+                icon=icon,
+                text=title,
+                onClick=lambda *_args, section=key: self._open_routing_section(section),
+                tooltip=title,
+                parentRouteKey=self.configs_page.objectName(),
+            )
         self.addSubInterface(self.zapret_page, FIF.COMMAND_PROMPT, "Zapret")
         self.addSubInterface(self.logs_page, FIF.DOCUMENT, "Логи")
         self.addSubInterface(self.history_page, FIF.HISTORY, "История")
@@ -243,6 +256,13 @@ class MainWindow(FluentWindow):
         # Подключаемся после внутреннего toggle() панели — к моменту вызова
         # слота режим уже выбран.
         self.navigationInterface.panel.menuButton.clicked.connect(self._on_nav_menu_clicked)
+
+    def _open_routing_section(self, key: str) -> None:
+        """Подпункт «Маршрутизации»: одна страница-контейнер, свой раздел внутри."""
+        self.switchTo(self.configs_page)
+        self.configs_page.show_section(key)
+        route = self.configs_page.objectName() if key == "overview" else f"configs-{key}"
+        self.navigationInterface.setCurrentItem(route)
 
     # ── Боковое меню: запоминаем явный выбор пользователя ──────
 
@@ -1191,11 +1211,30 @@ class MainWindow(FluentWindow):
                 self._show_status("warning-long", message)
                 return
             ok, message = self.controller.validate_singbox_json_text(text)
+            if ok:
+                self._start_singbox_editor_check(text)
+                return
         else:
             ok, message = self.controller.validate_xray_json_text(text)
         self.configs_page.set_status(core, "success" if ok else "error", message)
         if ok:
             self._show_status("success", "JSON корректен")
+
+    def _start_singbox_editor_check(self, text: str) -> None:
+        """«Проверить»: сам sing-box check по редактируемому JSON, вне GUI-потока."""
+        checker = getattr(self, "_singbox_editor_check", None)
+        if checker is None:
+            checker = SingboxEditorCheck(self)
+            checker.finished.connect(self._on_singbox_editor_check_finished)
+            self._singbox_editor_check = checker
+        self._singbox_editor_check_generation = checker.start(self.controller.state.settings.singbox_path, text)
+        self.configs_page.set_status("singbox", "info", "JSON корректен. Проверяю ядром sing-box…")
+
+    def _on_singbox_editor_check_finished(self, generation: int, level: str, message: str) -> None:
+        if generation != getattr(self, "_singbox_editor_check_generation", 0):
+            return
+        self.configs_page.set_status("singbox", level, message)
+        self._show_status("success" if level == "success" else "warning-long" if level == "warning" else "error", message.splitlines()[0])
 
     def _apply_core_config(self, core: str, text: str) -> None:
         if core == "singbox":

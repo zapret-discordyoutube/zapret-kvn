@@ -1,5 +1,7 @@
 # AI Handoff: sing-box Raw Config Editor V1
 
+> **Устарело.** Структурный редактор маршрутизации (формы по схеме ядра поверх того же native JSON) заменил решение «только текст, без форм». Актуальное устройство: [sing-box/routing-gui.md](sing-box/routing-gui.md).
+
 ## Copy-Paste Prompt
 
 Implement V1 of a raw `sing-box.json` editor in this repository.

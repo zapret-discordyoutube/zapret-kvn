@@ -18,7 +18,7 @@ import gc
 import logging
 
 from PyQt6 import sip
-from PyQt6.QtCore import QProcess, QThread
+from PyQt6.QtCore import QProcess, QThread, QTimer
 from PyQt6.QtWidgets import QApplication, QWidget
 
 
@@ -72,3 +72,38 @@ def dispose_all_widgets(windows: list[QWidget], logger: logging.Logger | None = 
         rest = [widget for widget in app.topLevelWidgets() if not any(widget is k for k in kept)]
         kept += dispose_windows(rest, logger)
     return kept
+
+
+_disposal_queue: list[QWidget] = []
+
+
+def dispose_later(widget: QWidget) -> None:
+    """Hide ``widget`` now and destroy it on the next event-loop turn.
+
+    Replaces ``deleteLater`` for subtrees that hold qfluentwidgets scroll
+    delegates (``ScrollArea``, ``PlainTextEdit``, ``RoundMenu``…): those patch
+    bound methods onto their widget, so a cyclic-GC pass racing the Qt
+    destructors can touch a half-destroyed wrapper (see :func:`dispose_windows`).
+    The deferral lets the signal that triggered a rebuild return first; the
+    destruction itself runs synchronously with cyclic GC disabled.
+    """
+    if sip.isdeleted(widget):
+        return
+    widget.hide()
+    _disposal_queue.append(widget)
+    if len(_disposal_queue) == 1:
+        QTimer.singleShot(0, _flush_disposals)
+
+
+def _flush_disposals() -> None:
+    pending = list(_disposal_queue)
+    _disposal_queue.clear()
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for widget in pending:
+            if not sip.isdeleted(widget):
+                sip.delete(widget)
+    finally:
+        if gc_was_enabled:
+            gc.enable()

@@ -255,7 +255,7 @@ def _sync_packaged_templates() -> None:
             )
         if result.configs_preserved:
             _bootstrap_logger.info(
-                "Preserved user-edited fields outside managed DNS during template sync: %s",
+                "Preserved user-edited sections during template sync: %s",
                 list(result.configs_preserved),
             )
     except Exception:

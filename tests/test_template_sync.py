@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from build import stage_template_update_bundle
-from xray_fluent.application.template_sync import sync_packaged_templates, sync_config_dns
+from xray_fluent.application.template_sync import merge_stock_sections, sync_packaged_templates
 
 
 def _write_json(path: Path, payload: object, *, compact: bool = False) -> None:
@@ -112,32 +112,66 @@ class TemplateSyncTests(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertTrue((destination / "sing-box" / "default.json").is_file())
 
-    def test_custom_routing_survives_automatic_dns_replacement_on_every_start(self):
-        dns = {"servers": [{"type": "local", "tag": "proxy-dns"}], "final": "proxy-dns"}
-        template = self.templates / "sing-box/default.json"
-        active = self.configs / "sing-box/custom.json"
-        _write_json(template, {"dns": dns})
-        custom = {"dns": {"servers": [{"type": "tcp", "server": "8.8.8.8"}]},
-                  "route": {"rules": [{"domain_suffix": ["example.org"], "outbound": "direct"}]},
-                  "outbounds": [{"type": "direct", "tag": "proxy"}], "log": {"level": "debug"}}
-        _write_json(active, custom)
-        self.assertEqual(self._sync().configs_updated, ("sing-box/custom.json",))
-        self.assertEqual(json.loads(active.read_text()), {**custom, "dns": dns})
-        stamp = active.stat().st_mtime_ns
+    def test_untouched_sections_follow_stock_while_edited_sections_are_kept(self):
+        old_dns = {"servers": [{"type": "local", "tag": "proxy-dns"}], "final": "proxy-dns"}
+        new_dns = {"servers": [{"type": "udp", "tag": "proxy-dns", "server": "1.1.1.1"}], "final": "proxy-dns"}
+        old = {"log": {"level": "warn"}, "dns": old_dns, "route": {"final": "proxy"}}
+        new = {"log": {"level": "warn"}, "dns": new_dns, "route": {"final": "proxy", "rules": []}}
+        custom_route = {"final": "direct", "rules": [{"domain_suffix": ["example.org"], "outbound": "proxy"}]}
+        _write_json(self.templates / "sing-box" / "default.json", old)
+        _write_json(self.configs / "sing-box" / "default.json", {**old, "route": custom_route})
+        _write_json(self.bundle / "sing-box" / "default.json", new)
+
+        result = self._sync()
+
+        active = json.loads((self.configs / "sing-box" / "default.json").read_text(encoding="utf-8"))
+        self.assertEqual(active, {"log": {"level": "warn"}, "dns": new_dns, "route": custom_route})
+        self.assertEqual(result.configs_updated, ("sing-box/default.json",))
+        self.assertEqual(result.configs_preserved, ("sing-box/default.json",))
         self.assertFalse(self._sync().changed)
-        self.assertEqual(stamp, active.stat().st_mtime_ns)
+
+    def test_user_dns_is_never_rewritten_without_a_template_change(self):
+        stock = {"dns": {"servers": [{"type": "local", "tag": "local"}]}, "route": {"final": "proxy"}}
+        custom = {"dns": {"servers": [{"type": "tcp", "tag": "mine", "server": "9.9.9.9"}]}, "route": {"final": "proxy"}}
+        _write_json(self.templates / "sing-box" / "default.json", stock)
+        _write_json(self.bundle / "sing-box" / "default.json", stock)
+        active = self.configs / "sing-box" / "default.json"
         _write_json(active, custom)
-        self.assertTrue(self._sync().changed)
-        self.assertEqual(json.loads(active.read_text())["dns"], dns)
+        other = self.configs / "sing-box" / "other.json"
+        _write_json(other, custom)
+        stamp = active.stat().st_mtime_ns
 
-    def test_dns_sync_does_not_destroy_invalid_editor_text(self):
-        active = self.root / "invalid.json"
-        template = self.root / "template.json"
-        active.write_text('{"dns": unfinished')
-        _write_json(template, {"dns": {"servers": ["localhost"]}})
-        self.assertFalse(sync_config_dns(active, template))
-        self.assertEqual(active.read_text(), '{"dns": unfinished')
+        self.assertFalse(self._sync().changed)
 
+        self.assertEqual(json.loads(active.read_text(encoding="utf-8")), custom)
+        self.assertEqual(json.loads(other.read_text(encoding="utf-8")), custom)
+        self.assertEqual(stamp, active.stat().st_mtime_ns)
+
+    def test_merge_keeps_user_removals_and_additions_and_adds_new_stock_sections(self):
+        previous = {"log": {"level": "warn"}, "dns": {"final": "a"}, "ntp": {"enabled": False}}
+        current = {"log": {"level": "info"}, "dns": {"final": "b"}, "experimental": {"cache_file": {"enabled": True}}}
+        active = {"dns": {"final": "a"}, "ntp": {"enabled": False}, "inbounds": [{"type": "tun"}]}
+
+        merged = merge_stock_sections(active, previous, current)
+
+        # log was deleted by the user and stays deleted; dns and ntp were
+        # untouched and follow the stock (ntp removed); inbounds is user-only.
+        self.assertEqual(
+            merged,
+            {"dns": {"final": "b"}, "inbounds": [{"type": "tun"}], "experimental": {"cache_file": {"enabled": True}}},
+        )
+
+    def test_invalid_active_json_is_left_untouched_on_update(self):
+        _write_json(self.templates / "sing-box" / "default.json", {"dns": {"final": "a"}})
+        _write_json(self.bundle / "sing-box" / "default.json", {"dns": {"final": "b"}})
+        active = self.configs / "sing-box" / "default.json"
+        active.parent.mkdir(parents=True, exist_ok=True)
+        active.write_text('{"dns": unfinished', encoding="utf-8")
+
+        result = self._sync()
+
+        self.assertEqual(active.read_text(encoding="utf-8"), '{"dns": unfinished')
+        self.assertEqual(result.configs_preserved, ("sing-box/default.json",))
 
 if __name__ == "__main__":
     unittest.main()

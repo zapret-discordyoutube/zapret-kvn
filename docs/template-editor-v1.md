@@ -1,5 +1,7 @@
 # Template Editor V1
 
+> **Устарело.** Структурный редактор маршрутизации (формы по схеме ядра поверх того же native JSON) заменил решение «только текст, без форм». Актуальное устройство: [sing-box/routing-gui.md](sing-box/routing-gui.md).
+
 ## Purpose
 
 This document fixes the intended editor model for runtime engine configs in

@@ -79,6 +79,9 @@ def _shared(name, factory):
 
 def _scroll_areas(page):
     """All scroll areas that AC7 covers for the given page."""
+    if isinstance(page, ConfigsPage):
+        # «Маршрутизация» is a container: every sub-page scrolls on its own.
+        return page.scroll_areas()
     if isinstance(page, DashboardPage):
         return [
             page._main_page.scroll_area,
@@ -133,7 +136,7 @@ class PagesUseScrollablePageTest(unittest.TestCase):
 
     def test_non_dashboard_pages_subclass_scrollable_page(self) -> None:
         for name, page in _pages():
-            if name == "dashboard":
+            if name in ("dashboard", "configs"):
                 continue
             with self.subTest(page=name):
                 self.assertIsInstance(page, ScrollablePage)
