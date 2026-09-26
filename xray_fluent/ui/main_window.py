@@ -77,6 +77,8 @@ class MainWindow(FluentWindow):
         self._restoring_geometry = False
         self._geometry_applied = False
         self._app_update_scheduler_ready = False
+        self._update_prompt_open = False
+        self._postponed_update_version: str | None = None
         self._app_update_timer = QTimer(self)
         self._app_update_timer.setSingleShot(True)
         self._app_update_timer.timeout.connect(self._on_app_update_timer_timeout)
@@ -1368,10 +1370,31 @@ class MainWindow(FluentWindow):
 
         # A silent check only suppresses routine progress, errors and the
         # "up to date" message.  A newer version is actionable and must still
-        # be shown to the user.
+        # be shown to the user — but only once: a background check must not
+        # re-prompt for a version the user already postponed this session.
+        if silent and update.version == self._postponed_update_version:
+            return
         self._show_update_available_dialog(update, open_updates_page=not silent)
 
     def _show_update_available_dialog(
+        self,
+        update: AppUpdate,
+        *,
+        open_updates_page: bool,
+    ) -> None:
+        # box.exec() крутит вложенный цикл событий: пока окно открыто, таймер
+        # фоновой проверки или ручная проверка могли открыть второе такое же
+        # окно прямо под первым — «Позже» закрывало верхнее, и казалось, что
+        # кнопка не нажимается. Одновременно показывается только одно окно.
+        if self._update_prompt_open:
+            return
+        self._update_prompt_open = True
+        try:
+            self._run_update_available_dialog(update, open_updates_page=open_updates_page)
+        finally:
+            self._update_prompt_open = False
+
+    def _run_update_available_dialog(
         self,
         update: AppUpdate,
         *,
@@ -1405,9 +1428,11 @@ class MainWindow(FluentWindow):
         box.yesButton.setText("Скачать и установить")
         box.cancelButton.setText("Позже")
         if box.exec():
+            self._postponed_update_version = None
             self._start_update_download(update)
             return
 
+        self._postponed_update_version = update.version
         if was_hidden:
             self.hide()
         elif was_minimized:

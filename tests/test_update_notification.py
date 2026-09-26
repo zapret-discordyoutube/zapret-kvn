@@ -258,6 +258,7 @@ class UpdateNotificationTests(unittest.TestCase):
         window = SimpleNamespace(
             _update_in_progress=True,
             _pending_update=None,
+            _postponed_update_version=None,
             controller=SimpleNamespace(
                 state=SimpleNamespace(settings=SimpleNamespace(allow_updates=True))
             ),
@@ -327,6 +328,9 @@ class UpdateNotificationTests(unittest.TestCase):
 
         class Window:
             updates_page = object()
+            _update_prompt_open = False
+            _postponed_update_version = None
+            _run_update_available_dialog = MainWindow._run_update_available_dialog
 
             def __init__(self) -> None:
                 self.visible = False
@@ -383,6 +387,54 @@ class UpdateNotificationTests(unittest.TestCase):
         self.assertEqual(box.cancelButton.text, "Позже")
         self.assertEqual(events, ["show", "activate", "raise", "hide"])
         self.assertFalse(window.visible)
+        self.assertEqual(window._postponed_update_version, "0.4.67")
+        self.assertFalse(window._update_prompt_open)
+
+    def test_second_dialog_is_not_stacked_while_one_is_open(self) -> None:
+        # «Позже иногда не нажимается»: пока box.exec() крутит вложенный цикл,
+        # таймер фоновой проверки открывал второе такое же окно под первым.
+        opened: list[str] = []
+
+        class Window:
+            _update_prompt_open = False
+
+            def _run_update_available_dialog(self, update, *, open_updates_page):
+                opened.append(update.version)
+                # Вложенный цикл окна: фоновая проверка пытается показать ещё одно.
+                MainWindow._show_update_available_dialog(self, update, open_updates_page=False)
+
+        window = Window()
+        MainWindow._show_update_available_dialog(window, _update(), open_updates_page=False)
+        self.assertEqual(opened, ["0.4.67"])
+        self.assertFalse(window._update_prompt_open)
+        # После закрытия окна новое показывается как обычно.
+        MainWindow._show_update_available_dialog(window, _update(), open_updates_page=False)
+        self.assertEqual(len(opened), 2)
+
+    def test_background_check_does_not_reprompt_postponed_version(self) -> None:
+        def make_window(postponed):
+            return SimpleNamespace(
+                _update_in_progress=True,
+                _pending_update=None,
+                _postponed_update_version=postponed,
+                controller=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(allow_updates=True))),
+                updates_page=_FakeUpdatesPage(),
+                _start_update_download=Mock(),
+                _show_update_available_dialog=Mock(),
+            )
+
+        postponed = make_window("0.4.67")
+        MainWindow._on_update_check_result(postponed, _update(), silent=True)
+        postponed._show_update_available_dialog.assert_not_called()
+        self.assertEqual(postponed.updates_page.available_version, "0.4.67")
+
+        manual = make_window("0.4.67")
+        MainWindow._on_update_check_result(manual, _update(), silent=False)
+        manual._show_update_available_dialog.assert_called_once()
+
+        newer = make_window("0.4.66")
+        MainWindow._on_update_check_result(newer, _update(), silent=True)
+        newer._show_update_available_dialog.assert_called_once()
 
 
 if __name__ == "__main__":
