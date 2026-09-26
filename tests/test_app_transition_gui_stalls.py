@@ -543,7 +543,7 @@ class TransitionGuiStallTests(unittest.TestCase):
         finally:
             settings.zapret_target.tcp_proxy_enabled = False
             controller.zapret.set_target_settings(settings.zapret_target)
-            controller.zapret.stop()
+            controller.zapret.stop(wait=True)
             _spin_until(lambda: controller.zapret._start_runner is None, 5_000)
 
 

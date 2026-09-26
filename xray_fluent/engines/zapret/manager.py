@@ -869,10 +869,7 @@ class ZapretManager(QObject):
         if process.state() != QProcess.ProcessState.NotRunning:
             log.info("zapret stop")
             self._stop_expected = True
-            try:
-                process.disconnect()
-            except (TypeError, RuntimeError):
-                pass
+            self._detach_process_signals(process)
             process.kill()
             if wait:
                 process.waitForFinished(5000)
@@ -891,6 +888,20 @@ class ZapretManager(QObject):
             self._fail_pending_proxy_protection("stopped")
 
     # ── internals ───────────────────────────────────────────────
+
+    def _detach_process_signals(self, process: QProcess) -> None:
+        """Late signals of a killed process must not reach this manager."""
+        for signal, slot in (
+            (process.readyReadStandardOutput, self._on_stdout),
+            (process.readyReadStandardError, self._on_stderr),
+            (process.started, self._on_started),
+            (process.errorOccurred, self._on_process_error),
+            (process.finished, self._on_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
 
     @staticmethod
     def _exit_code_hint(code: int) -> str:
