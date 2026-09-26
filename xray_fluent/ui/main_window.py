@@ -1286,7 +1286,7 @@ class MainWindow(FluentWindow):
         self.controller.start_zapret(preset_name)
 
     def _on_zapret_stop(self) -> None:
-        self.controller.zapret.stop()
+        self.controller.stop_zapret()
 
     def _on_zapret_started(self) -> None:
         active = self.controller.state.settings.zapret_preset

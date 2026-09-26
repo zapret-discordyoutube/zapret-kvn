@@ -413,6 +413,8 @@ class AppController(QObject):
         self._proxy_protection_workers: dict[int, TargetProfileResolver] = {}
         self._manual_zapret_worker: TargetProfileResolver | None = None
         self._manual_zapret_generation = 0
+        # «Занято» поднято ручным запуском Zapret (DNS + запуск winws2).
+        self._manual_zapret_busy = False
         self._proxy_protection_wait_generation = 0
         self._proxy_protection_wait_token = 0
         self._singbox_documents = SingboxDocumentCache()
@@ -509,6 +511,9 @@ class AppController(QObject):
         self.zapret.target_profile_ready.connect(self._on_proxy_protection_ready)
         self.zapret.target_profile_failed.connect(self._on_proxy_protection_failed)
         self.zapret.stopped.connect(self._on_zapret_stopped_safety)
+        # Ручной запуск заканчивается фактом процесса: запущен или ошибка.
+        self.zapret.started.connect(self._settle_manual_zapret_busy)
+        self.zapret.error.connect(self._settle_manual_zapret_busy)
 
         self.network_monitor.network_changed.connect(self._on_network_changed)
         self._background_log.connect(self._log)
@@ -2616,28 +2621,36 @@ class AppController(QObject):
         self.state.settings.zapret_preset = preset_name
         self.zapret.set_target_settings(self.state.settings.zapret_target)
         self.schedule_save()
+        # Новый запуск отменяет ожидающий DNS прежнего: побеждает последний клик.
+        self._manual_zapret_generation += 1
         node = self.selected_node
         if not self._active_config_uses_selected_node(node):
             self.zapret.clear_target_profile()
+            self._settle_manual_zapret_busy()
             self.zapret.start(preset_name)
             return
         spec = self.zapret.target_spec(node)
         if spec is None:
             self.zapret.clear_target_profile()
+            self._settle_manual_zapret_busy()
             self.zapret.start(preset_name)
             return
-        self._manual_zapret_generation += 1
         generation = self._manual_zapret_generation
         worker = TargetProfileResolver(generation, spec, self.zapret.resolve_target, parent=self)
         self._manual_zapret_worker = worker
+        self._manual_zapret_busy = True
         self.transition_state_changed.emit(True, "DNS выбранного VPN-сервера...")
 
         def resolved_callback(result_generation, result_spec, endpoint, error) -> None:
             if result_generation != self._manual_zapret_generation:
+                # Отменён остановкой: не держать ссылку на воркер, который
+                # сейчас удалится (выход приложения ждёт по этой ссылке).
+                if self._manual_zapret_worker is worker:
+                    self._manual_zapret_worker = None
                 return
             self._manual_zapret_worker = None
             if error is not None or result_spec != self.zapret.target_spec(self.selected_node):
-                self.transition_state_changed.emit(False, "")
+                self._settle_manual_zapret_busy()
                 self._set_connection_status(
                     "error",
                     "Zapret не запущен: не удалось определить IP выбранного сервера",
@@ -2645,7 +2658,7 @@ class AppController(QObject):
                 )
                 return
             if not self.zapret.apply_resolved_target(self.selected_node, endpoint):
-                self.transition_state_changed.emit(False, "")
+                self._settle_manual_zapret_busy()
                 self._set_connection_status(
                     "error",
                     "Zapret не запущен: проверьте выбранную стратегию",
@@ -2653,11 +2666,41 @@ class AppController(QObject):
                 )
                 return
             self.transition_state_changed.emit(True, "Запуск Zapret...")
+            # «Занято» снимет факт процесса: started или error (_settle_manual_zapret_busy).
             self.zapret.start_with_target(preset_name)
 
         worker.resolved.connect(resolved_callback)
         worker.finished.connect(worker.deleteLater)
         worker.start()
+
+    def stop_zapret(self) -> None:
+        """Ручная остановка Zapret.
+
+        Отменяет и ожидающий ручной запуск (DNS выбранного сервера): иначе
+        его колбэк поднял бы winws2 обратно уже после клика «Остановить».
+        """
+        self._manual_zapret_generation += 1
+        self.zapret.stop()
+        self._settle_manual_zapret_busy()
+
+    def _settle_manual_zapret_busy(self, *_args) -> None:
+        """Ручной запуск Zapret закончился — снять поднятое им «занято».
+
+        Раньше после успешного запуска «занято» не снималось вовсе: панель
+        оставалась с недоступными плитками и сферой до следующего перехода.
+        Индикатор, который держит переход подключения, не трогаем.
+        """
+        if not self._manual_zapret_busy:
+            return
+        self._manual_zapret_busy = False
+        if (
+            self._transition_active
+            or self._transition_scheduled
+            or self._transition_pending
+            or self._proxy_protection_wait_generation
+        ):
+            return
+        self.transition_state_changed.emit(False, "")
 
     def _schedule_transition_drain(self, delay_ms: int) -> None:
         if self._transition_active or self._proxy_protection_wait_generation == self._transition_generation:
