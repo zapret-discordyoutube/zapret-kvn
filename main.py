@@ -295,6 +295,12 @@ def main() -> int:
         _recover_system_proxy_from_previous_run()
         _sync_packaged_templates()
 
+    from xray_fluent.diagnostics.gui_stall_watchdog import install_from_environment
+
+    stall_watchdog = install_from_environment(STARTUP_LOG_DIR, parent=app)
+    if stall_watchdog is not None:
+        _bootstrap_logger.info("GUI stall watchdog enabled: threshold=%.0f ms", stall_watchdog.threshold_ms)
+
     loader = StartupLoader(app, prepare=prepare_runtime)
     windows = []
 
