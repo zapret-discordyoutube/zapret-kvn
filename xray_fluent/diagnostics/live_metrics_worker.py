@@ -19,6 +19,7 @@ from ..network.ping_worker import tcp_ping
 from ..platform.windows.process_traffic_collector import collect_process_stats, ProcessTrafficSnapshot
 from ..platform.windows.subprocess_utils import decode_output, run_text
 from ..platform.windows.win_proc_monitor import get_proxy_connections, ProxyProcessInfo
+from .proxy_demand import clash_proxy_demand, local_proxy_demand
 
 
 class LiveMetricsWorker(QThread):
@@ -60,6 +61,11 @@ class LiveMetricsWorker(QThread):
             if clean and clean not in normalized_inbound_tags:
                 normalized_inbound_tags.append(clean)
         self._xray_inbound_tags = tuple(normalized_inbound_tags)
+        # Спрос на туннель для «умной проверки» авто-переключения: считается
+        # здесь, в потоке воркера, из уже полученных данных о соединениях.
+        self._demand_prev_bytes: dict[str, tuple[int, int]] = {}
+        self._demand_prev_ts: float | None = None
+        self._proxy_demand: dict[str, float | int] | None = None
 
     def stop(self) -> None:
         self._stopped = True
@@ -135,6 +141,10 @@ class LiveMetricsWorker(QThread):
                 self._last_ping_ts = now
 
             process_stats = None
+            if self._mode != "singbox":
+                # sing-box обновляет спрос каждую итерацию (в _query_clash_api_totals),
+                # xray — только на итерациях со сбором процессов; иначе «нет данных».
+                self._proxy_demand = None
             if iteration_count % 2 == 0:
                 if self._mode == "singbox":
                     process_stats = collect_process_stats(self._clash_api_port)
@@ -156,6 +166,7 @@ class LiveMetricsWorker(QThread):
                         else None
                     ),
                     "process_stats": process_stats,
+                    "proxy_demand": self._proxy_demand,
                 }
             )
 
@@ -180,6 +191,9 @@ class LiveMetricsWorker(QThread):
             proxy_procs = get_proxy_connections(self._socks_port, self._http_port)
         except Exception:
             return None
+        self._proxy_demand = local_proxy_demand(
+            proxy_procs or (), self._demand_prev_bytes, self._demand_elapsed(),
+        )
         if not proxy_procs:
             return None
 
@@ -230,9 +244,24 @@ class LiveMetricsWorker(QThread):
                 data = json.loads(resp.read())
             upload = int(data.get("uploadTotal") or 0)
             download = int(data.get("downloadTotal") or 0)
-            return upload, download
         except Exception:
+            self._proxy_demand = None
             return None, None
+        try:
+            self._proxy_demand = clash_proxy_demand(
+                data.get("connections") or (),
+                self._demand_prev_bytes,
+                self._demand_elapsed(),
+            )
+        except Exception:
+            self._proxy_demand = None
+        return upload, download
+
+    def _demand_elapsed(self) -> float:
+        now = time.perf_counter()
+        prev = self._demand_prev_ts
+        self._demand_prev_ts = now
+        return max(0.001, now - prev) if prev is not None else float(self._interval_ms) / 1000.0
 
     def _query_xray_stats(self) -> tuple[int | None, int | None]:
         if self._api_port <= 0:
