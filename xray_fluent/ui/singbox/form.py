@@ -18,6 +18,7 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     FluentIcon as FIF,
+    IconWidget,
     StrongBodyLabel,
     TransparentToolButton,
 )
@@ -27,6 +28,7 @@ from ...singbox_config.schema import Field, FieldGroup
 from .fields import FieldEditor, FormContext, JsonEditor, create_editor
 from ..qt_lifecycle import dispose_later
 from .lists import menu_button
+from .visuals import FIELD_ICONS, variant_icon
 
 GROUP_TITLES = {
     ("rule", 0): "Условия",
@@ -153,12 +155,32 @@ class SchemaForm(QWidget):
         for item in visible:
             self._add_row(form, item)
         if hidden and not self.locked:
-            form.addRow("", self._add_button(index, hidden))
+            holder = QWidget(self._body)
+            line = QHBoxLayout(holder)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.addWidget(self._add_button(index, hidden))
+            line.addStretch(1)
+            form.addRow("", holder)
 
     def _label(self, name: str) -> QWidget:
-        label = BodyLabel(catalog.field_label(name), self._body)
-        label.setToolTip(name)
-        return label
+        host = QWidget(self._body)
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 2, 0, 0)
+        row.setSpacing(8)
+        icon = FIELD_ICONS.get(name)
+        glyph = IconWidget(icon if icon is not None else FIF.TAG, host)
+        glyph.setFixedSize(14, 14)
+        glyph.setVisible(icon is not None)
+        row.addWidget(glyph, 0, Qt.AlignmentFlag.AlignTop)
+        text = BodyLabel(catalog.field_label(name), host)
+        text.setToolTip(name)
+        row.addWidget(text)
+        row.addStretch(1)
+        # One label column width for every group of the form.
+        host.setMinimumWidth(190)
+        host.text = text
+        host.setToolTip(name)
+        return host
 
     def _variant_combo(self, group: FieldGroup) -> QWidget:
         key = group.discriminator or ""
@@ -168,7 +190,7 @@ class SchemaForm(QWidget):
         if current is not None and current not in values:
             values.append(current)
         for value in values:
-            combo.addItem(catalog.enum_label(key, value), userData=value)
+            combo.addItem(catalog.enum_label(key, value), icon=variant_icon(self.context, key, value), userData=value)
         if current in values:
             combo.setCurrentIndex(values.index(current))
         combo.setMinimumWidth(240)
@@ -204,7 +226,7 @@ class SchemaForm(QWidget):
         editor.changed.connect(self.changed)
         label = self._label(item.name)
         if item.shape.deprecated:
-            label.setText(label.text() + " (устарело)")
+            label.text.setText(label.text.text() + " (устарело)")
         if item.required or self.locked:
             form.addRow(label, editor)
             return

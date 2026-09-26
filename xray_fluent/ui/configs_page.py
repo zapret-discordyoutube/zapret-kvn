@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QEasingCurve, pyqtSignal
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -22,6 +22,7 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     MessageBox,
     PlainTextEdit,
+    PopUpAniStackedWidget,
     PrimaryPushButton,
     PushButton,
     StrongBodyLabel,
@@ -31,6 +32,7 @@ from qfluentwidgets import (
 from ..singbox_config import catalog
 from ..singbox_config.document import differing_sections
 from .adaptive_buttons import AdaptiveButtonRow
+from .motion import reduced_motion
 from .base_page import BODY_MARGINS, ScrollablePage
 from .singbox.sections import (
     DnsSection,
@@ -39,8 +41,10 @@ from .singbox.sections import (
     RulesSection,
     SystemSection,
 )
+from .singbox.art import JsonArt, KindBadge, PulseDot, RouteMapArt
 from .singbox.lists import popup_menu
 from .singbox.session import SingboxSession
+from .singbox.visuals import PROXY, Visual, rule_outcomes
 
 
 def _expand_horizontally(widget) -> None:
@@ -53,7 +57,7 @@ def _expand_horizontally(widget) -> None:
 #: (key, title, icon) of the sub-pages, in navigation order.
 SECTIONS: tuple[tuple[str, str, object], ...] = (
     ("overview", "Обзор", FIF.HOME),
-    ("rules", "Правила", FIF.ALIGNMENT),
+    ("rules", "Правила", FIF.FILTER),
     ("rule_sets", "Наборы правил", FIF.LIBRARY),
     ("dns", "DNS", FIF.GLOBE),
     ("outbounds", "Исходящие", FIF.SEND),
@@ -85,7 +89,16 @@ class _OverviewPanel(ScrollablePage):
         self._selected_template_key = ""
         root = self.body_layout
 
-        root.addWidget(SubtitleLabel("Маршрутизация sing-box", self.body))
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        badge = KindBadge(self.body, size=32)
+        badge.set_visual(Visual(FIF.IOT, PROXY), vivid=True)
+        title_row.addWidget(badge)
+        title_row.addWidget(SubtitleLabel("Маршрутизация sing-box", self.body))
+        title_row.addStretch(1)
+        root.addLayout(title_row)
+        self.route_map = RouteMapArt(self.body)
+        root.addWidget(self.route_map)
         intro = CaptionLabel(
             "Все разделы редактируют один native JSON ядра sing-box: маршрутизация и DNS работают "
             "одинаково в TUN и в системном прокси. Обновление приложения ваши правки не перезаписывает: "
@@ -154,6 +167,8 @@ class _OverviewPanel(ScrollablePage):
     # -- state ------------------------------------------------------------------
 
     def refresh_state(self) -> None:
+        if self.session.document is not None:
+            self.route_map.set_counts(*rule_outcomes(self.session.document))
         path = self.session.path.as_posix() if self.session.path else "--"
         self.file_label.setText(f"Файл: {path}{' *' if self.session.is_dirty() else ''}")
         if self.session.document is None:
@@ -322,7 +337,15 @@ class _JsonPanel(ScrollablePage):
         self._syncing = False
         self._pending = False
         root = self.body_layout
-        root.addWidget(SubtitleLabel("JSON", self.body))
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        badge = KindBadge(self.body, size=32)
+        badge.set_visual(Visual(FIF.CODE, PROXY), vivid=True)
+        title_row.addWidget(badge)
+        title_row.addWidget(SubtitleLabel("JSON", self.body))
+        title_row.addStretch(1)
+        title_row.addWidget(JsonArt(self.body), 1)
+        root.addLayout(title_row)
         hint = CaptionLabel(
             "Полный текст конфига. Правки здесь и в разделах — одно и то же; разделы обновятся, "
             "когда вы уйдёте с этой страницы. Если в outbounds есть тег proxy, при запуске туда "
@@ -381,6 +404,8 @@ class ConfigsPage(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(left, top, right, 4)
         bar.setSpacing(8)
+        self.dirty_dot = PulseDot(self)
+        bar.addWidget(self.dirty_dot)
         self.state_label = CaptionLabel("", self)
         self.state_label.setWordWrap(True)
         self.state_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -395,7 +420,7 @@ class ConfigsPage(QWidget):
         outer.addLayout(bar)
         self._bar_fit = AdaptiveButtonRow(bar, [self.apply_btn, self.save_btn, self.validate_btn, self.revert_btn])
 
-        self.stack = QStackedWidget(self)
+        self.stack = PopUpAniStackedWidget(self)
         outer.addWidget(self.stack, 1)
 
         self.overview = _OverviewPanel(self.session, self)
@@ -410,7 +435,7 @@ class ConfigsPage(QWidget):
             "json": self.json_panel,
         }
         for widget in self._sections.values():
-            self.stack.addWidget(widget)
+            self.stack.addWidget(widget, deltaX=0, deltaY=36)
         self._current = "overview"
         # Kept for callers/tests that address the editor per core.
         self._editors = {"singbox": self.overview}
@@ -454,7 +479,8 @@ class ConfigsPage(QWidget):
         activate = getattr(self._sections[key], "set_active", None)
         if activate is not None:
             activate(True)
-        self.stack.setCurrentWidget(self._sections[key])
+        self.stack.setAnimationEnabled(not reduced_motion())
+        self.stack.setCurrentWidget(self._sections[key], duration=240, easingCurve=QEasingCurve.Type.OutCubic)
         self.section_changed.emit(key)
 
     def current_section(self) -> str:
@@ -488,6 +514,7 @@ class ConfigsPage(QWidget):
         else:
             self.state_label.setText("Сохранено")
         self.revert_btn.setEnabled(dirty)
+        self.dirty_dot.set_active(dirty and self.session.document is not None)
 
     # -- API used by the main window (unchanged) --------------------------------
 

@@ -252,6 +252,35 @@ class RoutingPageTests(unittest.TestCase):
         bootstrap = next(s for s in page.session.document["dns"]["servers"] if s["tag"] == "bootstrap-dns")
         self.assertIn("не запустится", warn(bootstrap))
 
+    def test_nav_stack_stays_consistent_through_animated_slides(self) -> None:
+        page = _page()
+        rules = _section(page, "rules")
+        for _ in range(3):
+            rules.rules.open_requested.emit(1)
+            self.assertEqual(rules.nav.depth, 1)
+            self.assertIsInstance(rules.nav.currentWidget(), ItemPage)
+            rules.nav.pop()
+            self.assertEqual(rules.nav.depth, 0)
+            self.assertIs(rules.nav.currentWidget(), rules.root)
+        _pump()
+
+    def test_rows_show_badges_and_art_follows_edits(self) -> None:
+        from xray_fluent.ui.singbox.art import KindBadge
+
+        page = _page()
+        rules = _section(page, "rules")
+        badges = [b for b in rules.rules.findChildren(KindBadge) if b.isVisibleTo(rules.rules)]
+        self.assertEqual(len(badges), len(rules.rules._items()))
+        self.assertEqual(len(rules.art._visuals), min(8, len(rules.rules._items())))
+        page.show_section("overview")
+        self.assertEqual(page.overview.route_map._counts, (2, 5, 2))
+        page.session.document["route"]["rules"].append({"domain": ["x.org"], "action": "reject"})
+        page.session.mark_edited()
+        self.assertEqual(page.overview.route_map._counts, (2, 5, 3))
+        self.assertTrue(page.dirty_dot.isVisibleTo(page))
+        page.session.revert()
+        self.assertFalse(page.dirty_dot.isVisibleTo(page))
+
     def test_reference_counting(self) -> None:
         document = json.loads(TEMPLATE_TEXT)
         own = next(item for item in document["route"]["rule_set"] if item["tag"] == "geoip-ru")

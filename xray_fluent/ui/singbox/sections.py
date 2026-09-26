@@ -11,14 +11,15 @@ import json
 from typing import Callable
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     CaptionLabel,
+    CardWidget,
     IconWidget,
     InfoBarIcon,
     PushButton,
     PrimaryPushButton,
-    FluentIcon as FIF,
+    StrongBodyLabel,
     SubtitleLabel,
 )
 
@@ -34,10 +35,26 @@ from ...singbox_config.schema import SingboxSchema, bundled_schema
 from ..base_page import ScrollablePage
 from ..detail_page import DetailPage
 from ..qt_lifecycle import dispose_later
+from qfluentwidgets import FluentIcon as FIF
+
+from .art import ArtCanvas, DnsArt, KindBadge, OutboundHubArt, RuleScanArt, RuleSetArt, TunnelArt
 from .fields import FieldEditor, FormContext, create_editor
 from .form import SchemaForm
 from .lists import AddOption, NavStack, ObjectList, RowInfo, section_header, unique_tag
 from .session import SingboxSession
+from .visuals import (
+    DNS,
+    NEUTRAL,
+    PROXY,
+    SPECIAL,
+    Visual,
+    dns_server_visual,
+    endpoint_visual,
+    inbound_visual,
+    outbound_visual,
+    rule_set_visual,
+    rule_visual,
+)
 
 
 class InlineNote(QWidget):
@@ -100,6 +117,33 @@ class _LazyObject:
             self.document[self.key] = self.value
 
 
+class _SummaryCard(CardWidget):
+    """What the edited object does, live: vivid badge + one-line summary."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 12, 14, 12)
+        row.setSpacing(14)
+        self.badge = KindBadge(self, size=42)
+        row.addWidget(self.badge)
+        column = QVBoxLayout()
+        column.setSpacing(2)
+        self.title = StrongBodyLabel("", self)
+        self.title.setWordWrap(True)
+        self.subtitle = CaptionLabel("", self)
+        self.subtitle.setWordWrap(True)
+        column.addWidget(self.title)
+        column.addWidget(self.subtitle)
+        row.addLayout(column, 1)
+
+    def show_info(self, info: RowInfo) -> None:
+        self.badge.set_visual(info.visual or Visual(FIF.FILTER, NEUTRAL), vivid=True)
+        self.title.setText(info.title)
+        self.subtitle.setText(info.subtitle)
+        self.subtitle.setVisible(bool(info.subtitle))
+
+
 class ItemPage(DetailPage):
     """Edit one object of a list; changes are live, «Отменить правки» restores."""
 
@@ -115,12 +159,17 @@ class ItemPage(DetailPage):
         note: str = "",
         locked: bool = False,
         check: Callable[[dict], str] | None = None,
+        describe: Callable[[dict], RowInfo] | None = None,
     ):
         super().__init__(root_label, page_label, section, root_key="back", page_key="item")
         self.section = section
         self.item = item
         self._snapshot = json.loads(json.dumps(item))
         self._check = check
+        self._describe = describe
+        self.summary = _SummaryCard(self.body) if describe is not None else None
+        if self.summary is not None:
+            self.content_layout.addWidget(self.summary)
         if note:
             self.content_layout.addWidget(inline_note(note, self.body))
         self.warning = inline_note("", self.body, warning=True)
@@ -138,11 +187,17 @@ class ItemPage(DetailPage):
             self.add_header_action(self.undo_btn)
         self.add_header_action(done)
         self._refresh_warning()
+        self._refresh_summary()
 
     def _on_changed(self) -> None:
         self.undo_btn.setEnabled(self.item != self._snapshot)
         self._refresh_warning()
+        self._refresh_summary()
         self.section.edited()
+
+    def _refresh_summary(self) -> None:
+        if self.summary is not None and self._describe is not None:
+            self.summary.show_info(self._describe(self.item))
 
     def _refresh_warning(self) -> None:
         problem = self._check(self.item) if self._check is not None else ""
@@ -172,7 +227,7 @@ class ListPage(DetailPage):
         self.list = ObjectList(
             lambda: self.items,
             lambda: self.items,
-            lambda item, _index: RowInfo(catalog.match_summary(item)),
+            lambda item, _index: RowInfo(catalog.match_summary(item), visual=Visual(FIF.FILTER, NEUTRAL)),
             [AddOption("Условие", dict)],
             self.body,
             add_text="Добавить правило",
@@ -194,6 +249,7 @@ class ListPage(DetailPage):
             f"Правило {index + 1}",
             check=_rule_condition_check,
             on_close=self.list.refresh,
+            describe=lambda item: RowInfo(catalog.match_summary(item), visual=Visual(FIF.FILTER, NEUTRAL)),
         )
 
 
@@ -217,6 +273,9 @@ class Section(QWidget):
     key = ""
     title = ""
     hint = ""
+    icon = FIF.FILTER
+    tone = PROXY
+    art_class: type[ArtCanvas] | None = None
 
     def __init__(self, session: SingboxSession, parent: QWidget | None = None, schema: SingboxSchema | None = None):
         super().__init__(parent)
@@ -233,7 +292,45 @@ class Section(QWidget):
         self.body: QWidget = self.root.body
         self._active = False
         self._stale = True
+        self.art: ArtCanvas | None = None
+        self.root.body_layout.addWidget(self._make_header())
         session.document_replaced.connect(self._on_document_replaced)
+        session.state_changed.connect(self._refresh_art)
+
+    def _make_header(self) -> QWidget:
+        """Title, hint and the section's live illustration (built once)."""
+        header = QWidget(self.root.body)
+        header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        row = QHBoxLayout(header)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(16)
+        column = QVBoxLayout()
+        column.setSpacing(6)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        badge = KindBadge(header, size=32)
+        badge.set_visual(Visual(self.icon, self.tone), vivid=True)
+        title_row.addWidget(badge)
+        title_row.addWidget(SubtitleLabel(self.title, header))
+        title_row.addStretch(1)
+        column.addLayout(title_row)
+        if self.hint:
+            hint = CaptionLabel(self.hint, header)
+            hint.setWordWrap(True)
+            column.addWidget(hint)
+        column.addStretch(1)
+        row.addLayout(column, 3)
+        if self.art_class is not None:
+            self.art = self.art_class(header)
+            row.addWidget(self.art, 2)
+        return header
+
+    def _refresh_art(self) -> None:
+        if self.art is not None and self.session.document is not None:
+            self.refresh_art(self.art)
+
+    def refresh_art(self, art: ArtCanvas) -> None:
+        """Feed the illustration with the user's config (override)."""
 
     @property
     def scroll_area(self):
@@ -283,16 +380,12 @@ class Section(QWidget):
             self.root.body_layout.removeWidget(self._content)
             dispose_later(self._content)
         self._content = QWidget(self.root.body)
-        self.root.body_layout.addWidget(self._content)
+        # Only the content takes spare height; the header keeps its size.
+        self.root.body_layout.addWidget(self._content, 1)
         layout = QVBoxLayout(self._content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         self.body = self._content
-        layout.addWidget(SubtitleLabel(self.title, self.body))
-        if self.hint:
-            hint = CaptionLabel(self.hint, self.body)
-            hint.setWordWrap(True)
-            layout.addWidget(hint)
         if not self.session.editable:
             layout.addWidget(
                 inline_note(
@@ -306,6 +399,7 @@ class Section(QWidget):
             return
         self.build(layout)
         layout.addStretch(1)
+        self._refresh_art()
 
     def build(self, layout: QVBoxLayout) -> None:
         raise NotImplementedError
@@ -323,9 +417,12 @@ class Section(QWidget):
         locked: bool = False,
         check: Callable[[dict], str] | None = None,
         on_close: Callable[[], None] | None = None,
+        describe: Callable[[dict], RowInfo] | None = None,
     ) -> None:
         root_label = self.title if self.nav.depth == 0 else "Назад"
-        page = ItemPage(self, item, node, context, root_label, label, note=note, locked=locked, check=check)
+        page = ItemPage(
+            self, item, node, context, root_label, label, note=note, locked=locked, check=check, describe=describe
+        )
         self._on_close.append(on_close)
         self.nav.push(page)
 
@@ -383,6 +480,7 @@ class Section(QWidget):
                 locked=locked(item),
                 check=check,
                 on_close=view.refresh,
+                describe=lambda current, i=index: describe(current, i),
             )
 
         view.open_requested.connect(open_item)
@@ -451,6 +549,8 @@ def _type_options(schema: SingboxSchema, node: dict, common: tuple[str, ...], fa
 class RulesSection(Section):
     key = "rules"
     title = "Правила"
+    icon = FIF.FILTER
+    art_class = RuleScanArt
     hint = (
         "Правила проверяются сверху вниз, срабатывает первое подошедшее. "
         "Это native route.rules ядра sing-box: одинаково для TUN и системного прокси."
@@ -470,7 +570,7 @@ class RulesSection(Section):
             ("route", "rules"),
             node,
             "rule",
-            lambda rule, _index: RowInfo(catalog.match_summary(rule), catalog.action_summary(rule)),
+            lambda rule, _index: RowInfo(catalog.match_summary(rule), catalog.action_summary(rule), visual=rule_visual(rule)),
             [AddOption("Правило", new_rule), AddOption("Логическое правило (И / ИЛИ)", new_logical)],
             add_text="Добавить правило",
             empty_text="Правил нет — весь трафик уходит по «Если ничего не подошло».",
@@ -489,10 +589,17 @@ class RulesSection(Section):
         editor.changed.connect(final_changed)
         layout.addWidget(editor)
 
+    def refresh_art(self, art: ArtCanvas) -> None:
+        rules = section_items(self.document, ("route", "rules"))
+        art.set_rules([rule_visual(rule) for rule in rules if isinstance(rule, dict)])
+
 
 class RuleSetsSection(Section):
     key = "rule_sets"
     title = "Наборы правил"
+    icon = FIF.LIBRARY
+    tone = DNS
+    art_class = RuleSetArt
     hint = (
         "Наборы (route.rule_set) подключают готовые списки доменов и адресов: локальные .srs/.json, "
         "загружаемые по URL или встроенные. Относительные пути считаются от папки core."
@@ -518,7 +625,11 @@ class RuleSetsSection(Section):
             tag = item.get("tag")
             uses = count_references(self.document, tag, item) if isinstance(tag, str) else 0
             used = f" · используется: {uses}" if uses else " · не используется"
-            return RowInfo(str(tag or "без тега"), f"{catalog.TYPE_LABELS.get(kind, kind)} · {detail}{used}")
+            return RowInfo(
+                str(tag or "без тега"),
+                f"{catalog.TYPE_LABELS.get(kind, kind)} · {detail}{used}",
+                visual=rule_set_visual(item),
+            )
 
         self.add_list(
             layout,
@@ -537,10 +648,17 @@ class RuleSetsSection(Section):
             can_remove=self.reference_warning("набор"),
         )
 
+    def refresh_art(self, art: ArtCanvas) -> None:
+        kinds = [str(item.get("type") or "inline") for item in section_items(self.document, ("route", "rule_set")) if isinstance(item, dict)]
+        art.set_counts(kinds.count("local"), kinds.count("remote"), kinds.count("inline"))
+
 
 class DnsSection(Section):
     key = "dns"
     title = "DNS"
+    icon = FIF.GLOBE
+    tone = DNS
+    art_class = DnsArt
     hint = (
         "Native секция dns: серверы, правила выбора сервера и общие параметры. "
         "Приложение её больше не перезаписывает; вернуть стоковый вариант можно на странице «Обзор»."
@@ -562,6 +680,7 @@ class DnsSection(Section):
                 str(item.get("tag") or "без тега"),
                 f"{item.get('type', '?')}{detail}",
                 note=app_owned_note("dns.servers", item),
+                visual=dns_server_visual(item),
             )
 
         self.add_list(
@@ -589,7 +708,9 @@ class DnsSection(Section):
             ("dns", "rules"),
             rule_node,
             "dns_rule",
-            lambda rule, _index: RowInfo(catalog.match_summary(rule), catalog.action_summary(rule, dns=True)),
+            lambda rule, _index: RowInfo(
+                catalog.match_summary(rule), catalog.action_summary(rule, dns=True), visual=rule_visual(rule, dns=True)
+            ),
             [
                 AddOption("Правило", new_rule),
                 AddOption("Логическое правило (И / ИЛИ)", lambda: {"type": "logical", "mode": "or", "rules": [], **new_rule()}),
@@ -600,10 +721,15 @@ class DnsSection(Section):
             check=_rule_condition_check,
         )
 
+    def refresh_art(self, art: ArtCanvas) -> None:
+        art.set_servers(len(section_items(self.document, ("dns", "servers"))))
+
 
 class OutboundsSection(Section):
     key = "outbounds"
     title = "Исходящие"
+    icon = FIF.SEND
+    art_class = OutboundHubArt
     hint = (
         "Куда правила отправляют трафик. Outbound с тегом proxy — место, куда при запуске подставляется "
         "выбранный сервер; остальные (direct, block, selector, urltest, …) полностью ваши."
@@ -624,6 +750,7 @@ class OutboundsSection(Section):
                 f"{item.get('type', '?')}{detail}",
                 note=app_owned_note("outbounds", item),
                 removable=True,
+                visual=outbound_visual(item),
             )
 
         self.add_list(
@@ -658,13 +785,19 @@ class OutboundsSection(Section):
             ("endpoints",),
             endpoint_node,
             "endpoint",
-            lambda item, _index: RowInfo(str(item.get("tag") or "без тега"), str(item.get("type", "?"))),
+            lambda item, _index: RowInfo(
+                str(item.get("tag") or "без тега"), str(item.get("type", "?")), visual=endpoint_visual(item)
+            ),
             _type_options(self.schema, endpoint_node, ("wireguard", "warp"), new_endpoint),
             add_text="Добавить endpoint",
             empty_text="Endpoints нет.",
             item_label=lambda item, _index: str(item.get("tag") or "Endpoint"),
             can_remove=self.reference_warning("endpoint"),
         )
+
+    def refresh_art(self, art: ArtCanvas) -> None:
+        items = [item for item in section_items(self.document, "outbounds") if isinstance(item, dict)]
+        art.set_outbounds([outbound_visual(item) for item in items])
 
 
 # Sections edited on dedicated pages; everything else appears under «Прочее».
@@ -674,6 +807,9 @@ _DEDICATED_ROOT_KEYS = ("log", "dns", "inbounds", "outbounds", "endpoints", "rou
 class SystemSection(Section):
     key = "system"
     title = "Система"
+    icon = FIF.DEVELOPER_TOOLS
+    tone = SPECIAL
+    art_class = TunnelArt
     hint = "Входящие (TUN), общие параметры маршрутизации, журнал ядра и остальные секции конфига."
 
     def build(self, layout: QVBoxLayout) -> None:
@@ -702,6 +838,7 @@ class SystemSection(Section):
                 str(item.get("tag") or item.get("type") or "без тега"),
                 str(item.get("type", "?")),
                 note=app_owned_note("inbounds", item),
+                visual=inbound_visual(item),
             ),
             _type_options(self.schema, node, ("tun", "mixed", "socks", "http", "direct"), new_inbound),
             add_text="Добавить inbound",

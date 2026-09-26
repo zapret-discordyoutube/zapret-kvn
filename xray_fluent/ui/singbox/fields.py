@@ -31,6 +31,7 @@ from qfluentwidgets import (
 
 from ...singbox_config import catalog
 from ..qt_lifecycle import dispose_later
+from .visuals import enum_icon, tag_icon
 from ...singbox_config.document import as_list, store_list, tags
 from ...singbox_config.schema import Shape, SingboxSchema
 
@@ -152,7 +153,7 @@ class EnumEditor(FieldEditor):
         if current is not None and current not in values:
             values.append(current)
         for item in values:
-            self.combo.addItem(catalog.enum_label(self.name, item), userData=item)
+            self.combo.addItem(catalog.enum_label(self.name, item), icon=enum_icon(self.name, item), userData=item)
         if current in values:
             self.combo.setCurrentIndex(values.index(current))
         else:
@@ -178,7 +179,7 @@ class TagEditor(FieldEditor):
             label = catalog.outbound_label(tag) if self.shape.tag_ref == "outbound" else tag
             if tag == current and tag not in tags(self.ctx.document, self.shape.tag_ref or ""):
                 label = f"{tag} — нет такого тега"
-            self.combo.addItem(label, userData=tag)
+            self.combo.addItem(label, icon=tag_icon(self.shape.tag_ref, tag), userData=tag)
         if current in choices:
             self.combo.setCurrentIndex(choices.index(current))
         else:

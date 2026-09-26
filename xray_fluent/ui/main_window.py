@@ -234,7 +234,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.dashboard_page, FIF.SPEED_HIGH, "Панель")
         self.addSubInterface(self.nodes_page, FIF.LINK, "Серверы")
         self.addSubInterface(self.subscriptions_page, FIF.CLOUD, "Подписки")
-        routing_item = self.addSubInterface(self.configs_page, FIF.CONNECT, "Маршрутизация")
+        routing_item = self.addSubInterface(self.configs_page, FIF.IOT, "Маршрутизация")
         routing_item.clicked.connect(lambda *_args: self._open_routing_section("overview"))
         for key, title, icon in ROUTING_SECTIONS:
             if key == "overview":
