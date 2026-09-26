@@ -511,5 +511,60 @@ class TunnelLoadScaleTest(unittest.TestCase):
 _KEEP_SCENES: list = []
 
 
+
+class SystemProxySwitchIntentTest(unittest.TestCase):
+    """Клик по «Системному прокси» не откатывается, пока Windows применяет изменение."""
+
+    def setUp(self) -> None:
+        from xray_fluent.platform.windows.proxy_manager import SystemProxyState
+
+        self.State = SystemProxyState
+        self.page = _shared_page()
+        _reset(self.page)
+        self.page.set_settings_snapshot(AppSettings(tun_mode=False, enable_system_proxy=True))
+        self.page.set_connection(True)
+        self.page.set_system_proxy_state(self._registry(enabled=True))
+        self.emitted: list[bool] = []
+        self.page.proxy_toggled.connect(self.emitted.append)
+
+    def tearDown(self) -> None:
+        self.page.proxy_toggled.disconnect(self.emitted.append)
+        self.page._proxy_intent.clear()
+        self.page.set_system_proxy_state(None)
+        _reset(self.page)
+
+    def _registry(self, *, enabled: bool):
+        fields = getattr(self.State, "__dataclass_fields__", {})
+        values = {name: None for name in fields}
+        values.update(supported=True, enabled=enabled, is_ours=enabled)
+        try:
+            return self.State(**{k: v for k, v in values.items() if k in fields})
+        except TypeError:
+            return SimpleNamespace(supported=True, enabled=enabled, is_ours=enabled)
+
+    def test_click_off_shows_intent_until_windows_catches_up(self) -> None:
+        switch = self.page.proxy_switch
+        self.assertTrue(switch.isChecked())
+        switch.setChecked(False)  # пользователь кликнул «выкл»
+        self.assertEqual(self.emitted, [False])
+        # Настройки уже «выкл», а реестр Windows ещё «вкл» — раньше тут был откат.
+        self.page.set_settings_snapshot(AppSettings(tun_mode=False, enable_system_proxy=False))
+        self.page.set_system_proxy_state(self._registry(enabled=True))
+        self.assertFalse(switch.isChecked())
+        self.assertTrue(switch.text.endswith("…"))
+        # Очередь прокси применила изменение — пришёл свежий снимок.
+        self.page.set_system_proxy_state(self._registry(enabled=False))
+        self.assertFalse(switch.isChecked())
+        self.assertEqual(switch.text, "Выкл")
+
+    def test_intent_times_out_to_the_truth(self) -> None:
+        switch = self.page.proxy_switch
+        switch.setChecked(False)
+        self.page._proxy_intent._deadline = 0.0  # таймаут истёк
+        self.page.set_system_proxy_state(self._registry(enabled=True))
+        self.assertTrue(switch.isChecked())
+        self.assertEqual(switch.text, "Вкл")
+
+
 if __name__ == "__main__":
     unittest.main()

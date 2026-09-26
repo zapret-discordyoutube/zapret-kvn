@@ -338,6 +338,7 @@ class MainWindow(FluentWindow):
         self.dashboard_page.toggle_connection_requested.connect(self.controller.toggle_connection)
         self.dashboard_page.tun_toggled.connect(self._on_dashboard_tun_toggled)
         self.dashboard_page.proxy_toggled.connect(self._on_dashboard_proxy_toggled)
+        self.controller.system_proxy_state_changed.connect(self.dashboard_page.set_system_proxy_state)
         self.dashboard_page.servers_requested.connect(lambda: self.switchTo(self.nodes_page))
         self.dashboard_page.next_node_requested.connect(self.controller.switch_next_node)
         self.dashboard_page.configs_requested.connect(lambda: self.switchTo(self.configs_page))

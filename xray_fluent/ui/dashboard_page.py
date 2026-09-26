@@ -64,6 +64,7 @@ from .privacy import masked_endpoint, node_name_text
 from .theme import error_color, graph_down_color, graph_up_color, on_theme_or_accent_changed, positive_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 from .adaptive_buttons import AdaptiveButtonRow
+from .pending_state import PendingValue
 
 #: Ширина области прокрутки, ниже которой карточки встают в одну колонку.
 NARROW_WIDTH = 900
@@ -173,6 +174,7 @@ class DashboardPage(StackedSection):
         self._connected_since: float | None = None
         self._grid_narrow = False
         self._compact: bool | None = None
+        self._proxy_intent: PendingValue[bool] = PendingValue()
         self._in_grid_relayout = False
         self._title_state = IDLE
 
@@ -1159,21 +1161,36 @@ class DashboardPage(StackedSection):
         self.tun_toggled.emit(tun)
 
     def _on_proxy_toggled(self, checked: bool) -> None:
+        # Показываем выбор сразу; фактический прокси Windows догонит в фоне.
+        self._proxy_intent.request(checked)
+        QTimer.singleShot(int(self._proxy_intent.timeout_s * 1000) + 50, self._sync_switches)
         self.proxy_toggled.emit(checked)
+
+    def _observed_system_proxy(self) -> bool:
+        """Факт: включён ли наш системный прокси (без подключения — просто настройка)."""
+        proxy_on = self._settings.enable_system_proxy
+        state = self._system_proxy_state
+        if self._connected and state is not None and state.supported:
+            # Подключено: правда — в реестре Windows, а не во флаге настроек.
+            proxy_on = bool(state.enabled and state.is_ours)
+        elif state is not None and state.supported and state.enabled and state.is_ours:
+            # Наш прокси реально активен в Windows — показываем «Вкл»,
+            # даже если сохранённый флаг ещё не синхронизирован.
+            proxy_on = True
+        return proxy_on
 
     def _sync_switches(self) -> None:
         self.vpn_tile.setChecked(self._settings.tun_mode)
         self.proxy_tile.setChecked(not self._settings.tun_mode)
 
-        proxy_on = self._settings.enable_system_proxy
-        state = self._system_proxy_state
-        if state is not None and state.supported and state.enabled and state.is_ours:
-            # Наш прокси реально активен в Windows — показываем «Вкл»,
-            # даже если сохранённый флаг ещё не синхронизирован.
-            proxy_on = True
+        # Намерение пользователя поверх факта: пока изменение применяется,
+        # переключатель не откатывается к старому состоянию реестра.
+        proxy_on = self._proxy_intent.display(self._observed_system_proxy())
+        applying = self._proxy_intent.pending
         self.proxy_switch.blockSignals(True)
         self.proxy_switch.setChecked(proxy_on)
-        self.proxy_switch.setText("Вкл" if proxy_on else "Выкл")
+        self.proxy_switch.setText(("Вкл" if proxy_on else "Выкл") + ("…" if applying else ""))
+        self.proxy_switch.setToolTip("Применяется…" if applying else "")
         self.proxy_switch.blockSignals(False)
         self._apply_interaction_state()
 

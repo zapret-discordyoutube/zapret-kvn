@@ -329,6 +329,10 @@ class HotSwitchPlan:
 
 class AppController(QObject):
     runtime_errors_changed = pyqtSignal(object)
+    # Снимок реестра после каждой операции системного прокси (очередь WinAPI
+    # асинхронная — без этого UI держал старое «Вкл» до следующего события).
+    system_proxy_state_changed = pyqtSignal(object)
+    _proxy_operation_done = pyqtSignal()
     nodes_changed = pyqtSignal(object)
     countries_changed = pyqtSignal(object)
     subscriptions_changed = pyqtSignal(object)
@@ -508,6 +512,7 @@ class AppController(QObject):
 
         self.network_monitor.network_changed.connect(self._on_network_changed)
         self._background_log.connect(self._log)
+        self._proxy_operation_done.connect(self._emit_system_proxy_state)
         self.connection_changed.connect(lambda _: self._sync_rotation_timer())
         # П3 (AC10): любое изменение нод инвалидирует кэш пула явно — идентичность
         # списка не видит in-place правок содержимого outbound-словаря.
@@ -790,6 +795,12 @@ class AppController(QObject):
 
     def get_active_xray_template_path(self) -> Path | None:
         return get_active_template_path_operation(self, "xray")
+
+    def _emit_system_proxy_state(self, *_args) -> None:
+        try:
+            self.system_proxy_state_changed.emit(self.query_system_proxy_state())
+        except Exception:  # noqa: BLE001 — снимок для UI не должен ломать переход
+            pass
 
     def query_system_proxy_state(self) -> SystemProxyState:
         """Быстрый снимок реального состояния системного прокси Windows.
@@ -1923,7 +1934,10 @@ class AppController(QObject):
     def _proxy_steps(self, method: str, *args: Any, **kwargs: Any) -> TransitionSteps:
         """Await one ProxyManager call in the ordered proxy thread."""
         call = getattr(self.proxy, method)
-        return (yield run_in_worker(lambda: call(*args, **kwargs), executor=PROXY_EXECUTOR))
+        try:
+            return (yield run_in_worker(lambda: call(*args, **kwargs), executor=PROXY_EXECUTOR))
+        finally:
+            self._emit_system_proxy_state()
 
     def _proxy_nowait(self, method: str, *args: Any, **kwargs: Any) -> None:
         """Queue one ProxyManager call without waiting (signal handlers)."""
@@ -1932,10 +1946,11 @@ class AppController(QObject):
 
         def _report(done) -> None:
             error = done.exception()
-            if error is None:
-                return
             try:
-                self._background_log.emit(f"[proxy] {method} failed: {error!r}")
+                # Поток очереди прокси → GUI-поток (queued): там перечитаем реестр.
+                self._proxy_operation_done.emit()
+                if error is not None:
+                    self._background_log.emit(f"[proxy] {method} failed: {error!r}")
             except RuntimeError:
                 pass
 
