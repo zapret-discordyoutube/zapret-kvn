@@ -491,7 +491,12 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         from xray_fluent.constants import SINGBOX_CLASH_API_PORT
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
-            blocker.bind(("127.0.0.1", SINGBOX_CLASH_API_PORT))
+            try:
+                blocker.bind(("127.0.0.1", SINGBOX_CLASH_API_PORT))
+            except OSError:
+                # Порт уже занят кем-то другим (на гейте win10 так бывает) —
+                # условие теста выполнено и без нашего сокета.
+                pass
             plan = self._build_plan(
                 "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             )
