@@ -122,19 +122,22 @@ class ProcessLookupStalenessGuardTests(unittest.TestCase):
         repo = self.tmp / "repo"
         (repo / "common/process").mkdir(parents=True)
         searcher = repo / "common/process/searcher_windows.go"
-        searcher.write_text("package process\n\nfunc lookup() uint32 {\n\treturn scanWholeTable()\n}\n", encoding="utf-8")
+        # Байты, а не write_text: на Windows текстовый режим пишет CRLF, и хеш
+        # фикстуры не совпал бы с тем, что вернёт git show.
+        searcher.write_bytes(b"package process\n\nfunc lookup() uint32 {\n\treturn scanWholeTable()\n}\n")
         _git(repo, "init", "-q")
         _git(repo, "add", "-A")
         _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
-        searcher.write_text("package process\n\nfunc lookup() uint32 {\n\treturn cachedTable()\n}\n", encoding="utf-8")
-        (repo / "common/process/zapret_pid_table_cache.go").write_text("package process\n", encoding="utf-8")
+        searcher.write_bytes(b"package process\n\nfunc lookup() uint32 {\n\treturn cachedTable()\n}\n")
+        (repo / "common/process/zapret_pid_table_cache.go").write_bytes(b"package process\n")
         _git(repo, "add", "-N", "common/process/zapret_pid_table_cache.go")
         self.patch = self.tmp / builder.PROCESS_LOOKUP_PATCH
-        self.patch.write_text("Описание патча перед diff игнорируется git apply.\n\n" + _git(repo, "diff", "--full-index"), encoding="utf-8")
+        self.patch.write_text("Описание патча перед diff игнорируется git apply.\n\n" + _git(repo, "diff", "--full-index"), encoding="utf-8", newline="\n")
         self.source = self.tmp / "source"
         (self.source / "common/process").mkdir(parents=True)
-        (self.source / "common/process/searcher_windows.go").write_bytes(
-            _git(repo, "show", "HEAD:common/process/searcher_windows.go").encode())
+        (self.source / "common/process/searcher_windows.go").write_bytes(subprocess.run(
+            ["git", "show", "HEAD:common/process/searcher_windows.go"], cwd=repo, check=True, capture_output=True
+        ).stdout)
 
     def test_pristine_upstream_is_patched(self):
         builder.apply_process_lookup_patch(self.source, self.patch)
@@ -143,7 +146,7 @@ class ProcessLookupStalenessGuardTests(unittest.TestCase):
 
     def test_changed_upstream_searcher_stops_build(self):
         path = self.source / "common/process/searcher_windows.go"
-        path.write_text(path.read_text(encoding="utf-8") + "\n// upstream change\n", encoding="utf-8")
+        path.write_text(path.read_text(encoding="utf-8") + "\n// upstream change\n", encoding="utf-8", newline="\n")
         with self.assertRaises(builder.StaleProcessLookupPatch) as caught:
             builder.apply_process_lookup_patch(self.source, self.patch)
         message = str(caught.exception)
@@ -153,7 +156,7 @@ class ProcessLookupStalenessGuardTests(unittest.TestCase):
         self.assertNotIn("cachedTable", path.read_text(encoding="utf-8"))
 
     def test_upstream_adding_our_file_stops_build(self):
-        (self.source / "common/process/zapret_pid_table_cache.go").write_text("package process\n", encoding="utf-8")
+        (self.source / "common/process/zapret_pid_table_cache.go").write_text("package process\n", encoding="utf-8", newline="\n")
         with self.assertRaisesRegex(builder.StaleProcessLookupPatch, "upstream изменил поиск процесса"):
             builder.apply_process_lookup_patch(self.source, self.patch)
 
@@ -161,15 +164,15 @@ class ProcessLookupStalenessGuardTests(unittest.TestCase):
         dependency = self.tmp / "sing"
         (dependency / "common/winiphlpapi").mkdir(parents=True)
         helper = dependency / "common/winiphlpapi/helper.go"
-        helper.write_text("package winiphlpapi\n\nfunc FindPid() {}\n", encoding="utf-8")
+        helper.write_text("package winiphlpapi\n\nfunc FindPid() {}\n", encoding="utf-8", newline="\n")
         builder.assert_process_lookup_patch_needed(self.source, dependency)
-        helper.write_text("package winiphlpapi\n\nfunc FindSocketOwner() {}\n", encoding="utf-8")
+        helper.write_text("package winiphlpapi\n\nfunc FindSocketOwner() {}\n", encoding="utf-8", newline="\n")
         with self.assertRaisesRegex(builder.StaleProcessLookupPatch, "вероятно, устарел"):
             builder.assert_process_lookup_patch_needed(self.source, dependency)
 
     def test_own_files_do_not_trigger_the_staleness_marker(self):
         (self.source / "common/process/zapret_pid_table_cache.go").write_text(
-            "package process\n// shares one fetch, like singleflight\n", encoding="utf-8")
+            "package process\n// shares one fetch, like singleflight\n", encoding="utf-8", newline="\n")
         builder.assert_process_lookup_patch_needed(self.source)
 
 

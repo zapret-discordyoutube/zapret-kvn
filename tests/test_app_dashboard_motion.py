@@ -318,10 +318,13 @@ class NavPreferenceTest(unittest.TestCase):
         global _nav_window_ref
         window = FluentWindow()
         _nav_window_ref = window  # общий на процесс, не уничтожаем (см. докстринг модуля)
-        window.navigationInterface.setMinimumExpandWidth(1100)
         window.resize(1400, 800)
         window.show()
         QApplication.processEvents()
+        # Экран может ужать окно (у отключённой сессии Windows ~1036 px):
+        # порог развёртывания считаем от фактической ширины, иначе панель
+        # уходит во всплывающий режим MENU, который предпочтением не считается.
+        window.navigationInterface.setMinimumExpandWidth(max(1, window.width() - 100))
         settings = AppSettings(nav_expanded=False)
         controller = Mock()
         controller.state.settings = settings
