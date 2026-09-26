@@ -186,9 +186,10 @@ class MinimumWidthsTest(unittest.TestCase):
         page = dict(_pages())["dashboard"]
         cards = (
             page.connection_card,
+            page.mode_card,
             page.routing_card,
             page.traffic_card,
-            page.process_link,
+            page.processes_card,
         )
         for card in cards:
             policy = card.sizePolicy()

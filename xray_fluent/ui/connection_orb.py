@@ -10,20 +10,22 @@ DPI и сразу подхватывает цвета темы/акцента.
   спутника на орбитах;
 * ``error``      — кольцо цвета ошибки, без анимации.
 
-Экономия CPU: таймер кадров работает только в анимированных состояниях и
-только пока виджет виден, а окно не свёрнуто; перерисовывается лишь
-собственный прямоугольник виджета. Фаза анимации считается от реального
-времени, так что просадка кадров не замедляет движение.
+Экономия CPU: таймер кадров (``motion.FrameGate``) работает только в
+анимированных состояниях и только пока виджет виден, окно не свёрнуто и в
+Windows не выключена анимация; перерисовывается лишь собственный
+прямоугольник виджета. Фаза анимации считается от реального времени, так что
+просадка кадров не замедляет движение.
 """
 
 from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import QElapsedTimer, QEvent, QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QElapsedTimer, QEvent, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
+from .motion import FrameGate
 from .theme import accent_color, error_color, on_theme_or_accent_changed, positive_color, text_color, text_muted_color
 
 IDLE, CONNECTING, CONNECTED, ERROR = "idle", "connecting", "connected", "error"
@@ -51,10 +53,8 @@ class ConnectionOrb(QWidget):
         self._pressed = False
         self._clock = QElapsedTimer()
         self._clock.start()
-        self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.TimerType.CoarseTimer)
-        self._timer.timeout.connect(self._tick)
-        self._watched_window: QWidget | None = None
+        self._frames = FrameGate(self)
+        self._frames.frame.connect(self.update)
         on_theme_or_accent_changed(self._on_theme_changed)
 
     # ── Состояние ──────────────────────────────────────────
@@ -67,57 +67,14 @@ class ConnectionOrb(QWidget):
         if state == self._state:
             return
         self._state = state
-        self._sync_timer()
+        self._frames.set_interval(_FRAME_MS.get(state))
         self.update()
 
     def is_animating(self) -> bool:
-        return self._timer.isActive()
-
-    def _should_animate(self) -> bool:
-        if self._state not in _FRAME_MS or not self.isVisible():
-            return False
-        window = self.window()
-        return window is None or not window.isMinimized()
-
-    def _sync_timer(self) -> None:
-        if self._should_animate():
-            interval = _FRAME_MS[self._state]
-            if not self._timer.isActive() or self._timer.interval() != interval:
-                self._timer.start(interval)
-        else:
-            self._timer.stop()
-
-    def _tick(self) -> None:
-        if not self._should_animate():
-            self._timer.stop()
-            return
-        self.update()
+        return self._frames.is_running()
 
     def _on_theme_changed(self, *_args) -> None:
         self.update()
-
-    # ── Видимость окна ─────────────────────────────────────
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        window = self.window()
-        if window is not self._watched_window and window is not self:
-            if self._watched_window is not None:
-                self._watched_window.removeEventFilter(self)
-            self._watched_window = window
-            window.installEventFilter(self)
-        self._sync_timer()
-
-    def hideEvent(self, event) -> None:
-        super().hideEvent(event)
-        self._timer.stop()
-
-    def eventFilter(self, obj, event) -> bool:
-        if obj is self._watched_window and event.type() in (
-            QEvent.Type.WindowStateChange, QEvent.Type.Show, QEvent.Type.Hide
-        ):
-            QTimer.singleShot(0, self._sync_timer)
-        return super().eventFilter(obj, event)
 
     # ── Мышь: кликабелен только центральный диск ───────────
 

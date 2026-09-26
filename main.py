@@ -345,6 +345,11 @@ def main() -> int:
     for window in windows:
         window.finish_background_shutdown()
     _bootstrap_logger.info("Qt event loop exited with code %s", exit_code)
+    # Окна разрушаются здесь, пока жив QApplication, а не при финализации
+    # интерпретатора в случайном порядке (см. xray_fluent/ui/qt_lifecycle.py).
+    from xray_fluent.ui.qt_lifecycle import dispose_all_widgets
+
+    dispose_all_widgets(windows, _bootstrap_logger)
     return exit_code
 
 

@@ -44,6 +44,7 @@ class TrafficGraphWidget(QWidget):
         self._max_points = max_points
         self._down_data: deque[float] = deque(maxlen=max_points)
         self._up_data: deque[float] = deque(maxlen=max_points)
+        self._placeholder = ""
         self.setMinimumHeight(96)
         self.setMaximumHeight(150)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -63,6 +64,12 @@ class TrafficGraphWidget(QWidget):
         self._up_data.clear()
         self.update()
 
+    def set_placeholder(self, text: str) -> None:
+        """Подсказка поверх пустого графика (пока точек меньше двух)."""
+        if text != self._placeholder:
+            self._placeholder = text
+            self.update()
+
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
@@ -72,6 +79,9 @@ class TrafficGraphWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         _draw_graph(painter, self.rect(), self._down_data, self._up_data, compact=True)
+        if self._placeholder and len(self._down_data) < 2:
+            painter.setPen(graph_text_color())
+            painter.drawText(QRectF(self.rect()), Qt.AlignmentFlag.AlignCenter, self._placeholder)
         painter.end()
 
 

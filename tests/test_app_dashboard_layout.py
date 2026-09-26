@@ -75,10 +75,11 @@ class DashboardWordWrapTest(unittest.TestCase):
             Node(name="Server", scheme="vless", server="secret.example", port=443)
         )
         page._do_refresh_dashboard()
-        self.assertEqual(page.profile_endpoint_label.text(), "********  (VLESS)")
-        self.assertIn("********", page.connection_target_label.text())
-        self.assertNotIn("secret.example", page.profile_endpoint_label.text())
-        self.assertNotIn("secret.example", page.connection_target_label.text())
+        self.assertEqual(page.connection_target_label.text(), "VLESS · ********")
+        self.assertEqual(page.server_name_label.text(), "Server")
+        for label in (page.connection_target_label, page.server_name_label, page.connection_status_label):
+            self.assertNotIn("secret.example", label.text())
+        self.assertNotIn("secret.example", page.connection_scene._server_caption)
         page.deleteLater()
         QApplication.processEvents()
 
@@ -87,6 +88,8 @@ class DashboardWordWrapTest(unittest.TestCase):
         page.set_selected_node(Node(name="awg-203.0.113.8:443", scheme="awg", server="203.0.113.8", port=443))
         page._do_refresh_dashboard()
         self.assertNotIn("203.0.113.8", page.connection_target_label.text())
+        self.assertNotIn("203.0.113.8", page.server_name_label.text())
+        self.assertNotIn("203.0.113.8", page.connection_scene._server_caption)
         page.deleteLater()
         QApplication.processEvents()
 
@@ -112,7 +115,8 @@ class DashboardWordWrapTest(unittest.TestCase):
 
 
 class DashboardAdaptiveGridTest(unittest.TestCase):
-    """AC10: routing card moves to row 1 below 900px, back at >= 900px."""
+    """AC10: routing card moves to row 1 below 900px, back at >= 900px;
+    the four traffic tiles fold into a 2×2 grid on the narrow layout."""
 
     def test_routing_card_reflows_on_resize(self) -> None:
         page = DashboardPage()
@@ -123,6 +127,8 @@ class DashboardAdaptiveGridTest(unittest.TestCase):
             row, col, _rspan, cspan = _routing_card_position(page)
             self.assertEqual((row, col), (1, 0), "narrow: routing card in second row")
             self.assertEqual(cspan, 2, "narrow: routing card spans both columns")
+            stats = page._stats_grid
+            self.assertEqual(stats.getItemPosition(stats.indexOf(page.session_tile))[:2], (1, 1))
 
             page.resize(1200, 700)
             QApplication.processEvents()
@@ -130,10 +136,12 @@ class DashboardAdaptiveGridTest(unittest.TestCase):
             self.assertEqual((row, col), (0, 1), "wide: routing card back in first row")
             self.assertEqual(cspan, 1)
 
-            # Reflow must not recreate widgets: same connection card position.
+            self.assertEqual(stats.getItemPosition(stats.indexOf(page.session_tile))[:2], (0, 3))
+
+            # Reflow must not recreate widgets: same processes card position.
             grid = page._cards_grid
             conn_row, conn_col, _r, _c = grid.getItemPosition(
-                grid.indexOf(page.connection_card)
+                grid.indexOf(page.processes_card)
             )
             self.assertEqual((conn_row, conn_col), (0, 0))
         finally:

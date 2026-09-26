@@ -67,7 +67,7 @@ class ConnectionOrbTests(unittest.TestCase):
         self.orb.set_state(CONNECTED)
         self.window.showMinimized()
         _spin(30)
-        self.orb._tick()
+        self.orb._frames._on_timeout()  # кадр на свёрнутом окне сам гасит таймер
         self.assertFalse(self.orb.is_animating())
 
     def test_every_state_paints(self) -> None:

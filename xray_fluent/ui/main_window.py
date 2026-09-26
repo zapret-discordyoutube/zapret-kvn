@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 
+from copy import deepcopy
+from dataclasses import fields
 from pathlib import Path
 import sys
 import time
@@ -15,6 +17,7 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarIcon,
     InfoBarPosition,
+    NavigationDisplayMode,
     NavigationItemPosition,
 )
 
@@ -39,6 +42,15 @@ from .history_page import HistoryPage
 from .theme import apply_theme, sync_system_theme_listener
 from .updates_page import UpdatesPage
 from .zapret_page import ZapretPage
+
+#: Поля настроек, которые пишет само окно (геометрия, боковое меню, вид
+#: таблицы серверов). Страница настроек их не редактирует, но отправляет
+#: снимок, сделанный при ``set_values``, — без переноса этих полей любое
+#: изменение настроек откатывало бы их к старым значениям.
+_WINDOW_OWNED_SETTINGS = tuple(
+    item.name for item in fields(AppSettings)
+    if item.name.startswith(("window_", "nodes_")) or item.name == "nav_expanded"
+)
 
 
 APP_UPDATE_INITIAL_DELAY_MS = 2500
@@ -76,6 +88,7 @@ class MainWindow(FluentWindow):
         self._geometry_persistence_ready = False
         self._restoring_geometry = False
         self._geometry_applied = False
+        self._nav_expanded_pref = False
         self._app_update_scheduler_ready = False
         self._update_prompt_open = False
         self._postponed_update_version: str | None = None
@@ -176,6 +189,7 @@ class MainWindow(FluentWindow):
         self._geometry_persistence_ready = True
         self.dashboard_page.set_initializing(False)
         self.navigationInterface.setEnabled(True)
+        self._restore_nav_preference(state.settings)
         for action in (self.tray_connect_action, self.tray_next_action):
             if action:
                 action.setEnabled(True)
@@ -226,6 +240,46 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.about_page, FIF.INFO, "О проекте", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.updates_page, FIF.UPDATE, "Обновления", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.settings_page, FIF.SETTING, "Настройки", NavigationItemPosition.BOTTOM)
+        # Подключаемся после внутреннего toggle() панели — к моменту вызова
+        # слота режим уже выбран.
+        self.navigationInterface.panel.menuButton.clicked.connect(self._on_nav_menu_clicked)
+
+    # ── Боковое меню: запоминаем явный выбор пользователя ──────
+
+    def _on_nav_menu_clicked(self) -> None:
+        """Запоминает развёрнуто ли меню — только по клику на кнопку меню.
+
+        Автосворачивание на узком окне и всплывающий режим MENU (окно уже
+        порога развёртывания) предпочтением не считаются.
+        """
+        panel = self.navigationInterface.panel
+        if panel.displayMode == NavigationDisplayMode.MENU:
+            return
+        expanded = panel.displayMode == NavigationDisplayMode.EXPAND and bool(panel.expandAni.property("expand"))
+        self._nav_expanded_pref = expanded
+        controller = getattr(self, "controller", None)
+        if controller is None or not self._geometry_persistence_ready:
+            return
+        if controller.state.settings.nav_expanded != expanded:
+            controller.state.settings.nav_expanded = expanded
+            controller.schedule_save()
+
+    def _restore_nav_preference(self, settings: AppSettings) -> None:
+        self._nav_expanded_pref = bool(settings.nav_expanded)
+        self._sync_nav_to_preference()
+
+    def _sync_nav_to_preference(self) -> None:
+        """Разворачивает меню, если пользователь так оставил и окно достаточно широкое."""
+        if not self._nav_expanded_pref:
+            return
+        panel = self.navigationInterface.panel
+        if panel.displayMode == NavigationDisplayMode.COMPACT and self.width() >= panel.minimumExpandWidth:
+            panel.expand(useAni=False)
+            # expand(useAni=False) не испускает displayModeChanged, а FluentWindow
+            # по нему поднимает заголовок окна над панелью — делаем это сами.
+            title_bar = getattr(self, "titleBar", None)
+            if title_bar is not None:
+                title_bar.raise_()
 
     def _create_tray(self) -> None:
         if not self._tray_available:
@@ -284,6 +338,9 @@ class MainWindow(FluentWindow):
         self.dashboard_page.toggle_connection_requested.connect(self.controller.toggle_connection)
         self.dashboard_page.tun_toggled.connect(self._on_dashboard_tun_toggled)
         self.dashboard_page.proxy_toggled.connect(self._on_dashboard_proxy_toggled)
+        self.dashboard_page.servers_requested.connect(lambda: self.switchTo(self.nodes_page))
+        self.dashboard_page.next_node_requested.connect(self.controller.switch_next_node)
+        self.dashboard_page.configs_requested.connect(lambda: self.switchTo(self.configs_page))
         self.nodes_page.import_clipboard_requested.connect(self._import_nodes_from_clipboard)
         self.nodes_page.delete_requested.connect(self.controller.remove_nodes)
         self.nodes_page.hide_subscription_nodes_requested.connect(self.controller.hide_subscription_nodes)
@@ -348,7 +405,7 @@ class MainWindow(FluentWindow):
         self.logs_page.clear_requested.connect(self._clear_logs_view)
         self.logs_page.export_diag_requested.connect(self._export_diagnostics)
 
-        self.settings_page.save_requested.connect(self.controller.update_settings)
+        self.settings_page.save_requested.connect(self._on_settings_page_saved)
         self.settings_page.auto_lock_minutes_changed.connect(self._update_auto_lock_minutes)
         self.settings_page.set_password_requested.connect(self._set_password)
         self.settings_page.disable_password_requested.connect(self.controller.disable_master_password)
@@ -1142,6 +1199,12 @@ class MainWindow(FluentWindow):
         self.configs_page.set_status(core, level, message)
         self._show_status(level, message.splitlines()[0])
 
+    def _on_settings_page_saved(self, settings: AppSettings) -> None:
+        current = self.controller.state.settings
+        for name in _WINDOW_OWNED_SETTINGS:
+            setattr(settings, name, deepcopy(getattr(current, name)))
+        self.controller.update_settings(settings)
+
     def _on_dashboard_tun_toggled(self, checked: bool) -> None:
         from copy import deepcopy
         settings = deepcopy(self.controller.state.settings)
@@ -1733,6 +1796,8 @@ class MainWindow(FluentWindow):
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
         self._save_geometry(persist=False)
+        if self._geometry_persistence_ready:
+            self._sync_nav_to_preference()
 
     def closeEvent(self, e: QCloseEvent) -> None:
         if self._quitting:

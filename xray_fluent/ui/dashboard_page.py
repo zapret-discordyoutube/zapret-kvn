@@ -1,3 +1,20 @@
+"""Главная панель: статус защиты, сервер, режим, трафик, приложения, маршрутизация.
+
+Экран читается сверху вниз так же, как в привычных VPN-клиентах:
+
+1. **Статус** — сцена «Этот ПК ⟷ сфера ⟷ сервер» (сфера — кнопка питания),
+   крупный заголовок состояния, одна понятная строка пояснения, кнопка и
+   строка текущего сервера со сменой сервера;
+2. **Режим работы** — две плитки «VPN (TUN)» / «Прокси» и системный прокси;
+3. **Трафик** — плитки скорости/пинга/объёма и график;
+4. **Приложения** и **Маршрутизация** — рядом на широком окне, друг под
+   другом на узком.
+
+Живая графика (``dashboard_widgets``) экономит CPU: таймер кадров работает
+только у сцены и только пока идёт подключение или трафик, при этом страница
+видна, а окно не свёрнуто.
+"""
+
 from __future__ import annotations
 
 import math
@@ -9,6 +26,7 @@ from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -21,29 +39,32 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
-    SwitchSettingCard,
-    ExpandGroupSettingCard,
-    PushSettingCard,
-    PushButton,
-    IndeterminateProgressBar,
     ComboBox,
     FluentIcon as FIF,
+    IndeterminateProgressBar,
     PrimaryPushButton,
+    PushButton,
     StrongBodyLabel,
     SubtitleLabel,
     SwitchButton,
     TableWidget,
+    TitleLabel,
+    TransparentPushButton,
 )
 
 from ..diagnostics.connection_message import connection_message
 from ..profiles.models import AppSettings, Node, RoutingSettings
 from ..platform.windows.proxy_manager import SystemProxyState
 from .base_page import ScrollablePage
-from .connection_orb import CONNECTED, CONNECTING, ERROR, IDLE, ConnectionOrb
+from .connection_orb import CONNECTED, CONNECTING, ERROR, IDLE
+from .dashboard_widgets import ConnectionScene, FlagBadge, ModeTile, ProcessBars, SignalBars, StatTile, latency_color
 from .detail_page import DetailPage, StackedSection
 from .privacy import masked_endpoint, node_name_text
 from .theme import error_color, graph_down_color, graph_up_color, on_theme_or_accent_changed, positive_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
+
+#: Ширина области прокрутки, ниже которой карточки встают в одну колонку.
+NARROW_WIDTH = 900
 
 
 def _format_speed(value_bps: float) -> str:
@@ -64,6 +85,18 @@ def _format_latency(value_ms: int | None) -> str:
     return f"{value_ms} ms"
 
 
+def _latency_quality(value_ms: int | None) -> str:
+    if value_ms is None:
+        return "Нет замера"
+    if value_ms < 80:
+        return "Отличная связь"
+    if value_ms < 150:
+        return "Хорошая связь"
+    if value_ms < 300:
+        return "Средняя связь"
+    return "Слабая связь"
+
+
 def _mode_title(mode: str) -> str:
     mapping = {
         "global": "Глобальный",
@@ -73,12 +106,24 @@ def _mode_title(mode: str) -> str:
     return mapping.get(mode, mode.title() or "Неизвестно")
 
 
+def _card_header(parent: QWidget, title: str) -> tuple[QHBoxLayout, StrongBodyLabel]:
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    label = StrongBodyLabel(title, parent)
+    row.addWidget(label)
+    row.addStretch(1)
+    return row, label
+
+
 class DashboardPage(StackedSection):
     logs_requested = pyqtSignal()
     toggle_connection_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)
     tun_toggled = pyqtSignal(bool)
     proxy_toggled = pyqtSignal(bool)
+    servers_requested = pyqtSignal()
+    next_node_requested = pyqtSignal()
+    configs_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -102,12 +147,14 @@ class DashboardPage(StackedSection):
         self._last_down_bps = 0.0
         self._last_up_bps = 0.0
         self._peak_bps = 0.0
+        self._session_proxy_bytes: int | None = None
         self._down_history: deque[float] = deque(maxlen=300)
         self._up_history: deque[float] = deque(maxlen=300)
         self._last_process_stats: list | None = None
         self._connected_since: float | None = None
         self._grid_narrow = False
         self._in_grid_relayout = False
+        self._title_state = IDLE
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
@@ -120,182 +167,278 @@ class DashboardPage(StackedSection):
 
         container = self._main_page.body
         root = self._main_page.body_layout
-
         root.addWidget(SubtitleLabel("Панель управления", container))
-        self.summary_label = CaptionLabel("Краткий обзор подключения, профиля, трафика и маршрутизации.", self)
-        self.summary_label.setWordWrap(True)
-        self.summary_label.hide()
         self._main_page.scroll_area.viewport().installEventFilter(self)
+
+        self._build_connection_card(container)
+        self._build_mode_card(container)
+        self._build_traffic_card(container)
+        self._build_processes_card(container)
+        self._build_routing_card(container)
+
+        for card in (
+            self.connection_card,
+            self.mode_card,
+            self.traffic_card,
+            self.processes_card,
+            self.routing_card,
+        ):
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
+        grid.addWidget(self.processes_card, 0, 0)
+        grid.addWidget(self.routing_card, 0, 1)
         self._cards_grid = grid
 
-        # ── Connection card ───────────────────────────────────
-        self.connection_card = CardWidget(self)
-        hero_layout = QHBoxLayout(self.connection_card)
-        hero_layout.setContentsMargins(14, 14, 18, 14)
-        hero_layout.setSpacing(16)
-        # Эмблема состояния; центральный диск — та же кнопка, что toggle_btn.
-        self.connection_orb = ConnectionOrb(self.connection_card, diameter=144)
-        self.connection_orb.clicked.connect(self._on_orb_clicked)
-        hero_layout.addWidget(self.connection_orb, 0, Qt.AlignmentFlag.AlignVCenter)
-        connection_layout = QVBoxLayout()
-        connection_layout.setSpacing(6)
-        hero_layout.addLayout(connection_layout, 1)
-        connection_layout.addWidget(StrongBodyLabel("Подключение", self.connection_card))
-        self.connection_state_label = SubtitleLabel("Ожидание", self.connection_card)
-        self.connection_state_label.setWordWrap(True)
-        self.connection_engine_label = BodyLabel("Системный прокси", self.connection_card)
-        self.connection_engine_label.setWordWrap(True)
-        self.connection_ports_label = CaptionLabel("", self.connection_card)
-        self.connection_ports_label.setWordWrap(True)
-        self.connection_ports_label.setVisible(False)
-        self.connection_status_label = CaptionLabel("Прокси остановлен", self.connection_card)
-        self.connection_target_label = CaptionLabel("Активный профиль не выбран", self.connection_card)
-        self.connection_target_label.setWordWrap(True)
-        self.connection_uptime_label = CaptionLabel("", self.connection_card)
-        self.connection_uptime_label.setWordWrap(True)
-        self.connection_uptime_label.hide()
-        connection_layout.addWidget(self.connection_state_label)
-        connection_layout.addWidget(self.connection_engine_label)
-        connection_layout.addWidget(self.connection_ports_label)
-        connection_layout.addWidget(self.connection_uptime_label)
+        root.addWidget(self.connection_card)
+        root.addWidget(self.mode_card)
+        root.addWidget(self.traffic_card)
+        root.addLayout(grid)
+        root.addStretch(1)
 
-        # Toggle button inside connection card
-        self.toggle_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Запустить прокси", self.connection_card)
-        connection_layout.addWidget(self.toggle_btn)
-        self.startup_progress = IndeterminateProgressBar(self.connection_card)
-        self.startup_progress.hide()
-        connection_layout.addWidget(self.startup_progress)
-        self.logs_btn = PushButton(FIF.DOCUMENT, "Открыть логи", self.connection_card)
-        self.logs_btn.clicked.connect(self.logs_requested)
-        self.logs_btn.hide()
-        connection_layout.addWidget(self.logs_btn)
+        self._build_sub_pages()
 
-        connection_layout.addStretch(1)
-        self.connection_status_label.setWordWrap(True)
-        connection_layout.addWidget(self.connection_status_label)
-        self.connection_target_label.setWordWrap(True)
-        connection_layout.addWidget(self.connection_target_label)
-
-        # Profile info labels (read-only, hidden — data shown via status/target labels)
-        self.profile_name_label = BodyLabel("", self)
-        self.profile_name_label.setVisible(False)
-        self.profile_endpoint_label = CaptionLabel("", self)
-        self.profile_endpoint_label.setVisible(False)
-        self.profile_group_label = CaptionLabel("", self)
-        self.profile_group_label.setVisible(False)
-        self.profile_latency_label = CaptionLabel("", self)
-        self.profile_latency_label.setVisible(False)
-
-        # ── Traffic card ──────────────────────────────────────
-        self.traffic_card = CardWidget(self)
-        traffic_layout = QVBoxLayout(self.traffic_card)
-        traffic_layout.setContentsMargins(18, 16, 18, 16)
-        traffic_layout.setSpacing(6)
-        traffic_layout.addWidget(StrongBodyLabel("Трафик", self.traffic_card))
-        # Плитки «подпись + крупное значение»; цветные точки у загрузки и
-        # отдачи заменяют легенду графика.
-        self.traffic_down_label = SubtitleLabel("0 B/s", self.traffic_card)
-        self.traffic_up_label = SubtitleLabel("0 B/s", self.traffic_card)
-        self.traffic_rtt_label = SubtitleLabel("--", self.traffic_card)
-        self.traffic_peak_label = SubtitleLabel("0 B/s", self.traffic_card)
-        self._traffic_down_caption = CaptionLabel("● Загрузка", self.traffic_card)
-        self._traffic_up_caption = CaptionLabel("● Отдача", self.traffic_card)
-        metrics = QHBoxLayout()
-        metrics.setSpacing(12)
-        for caption, value in (
-            (self._traffic_down_caption, self.traffic_down_label),
-            (self._traffic_up_caption, self.traffic_up_label),
-            (CaptionLabel("Пинг", self.traffic_card), self.traffic_rtt_label),
-            (CaptionLabel("Пик за сессию", self.traffic_card), self.traffic_peak_label),
-        ):
-            tile = QVBoxLayout()
-            tile.setSpacing(0)
-            tile.addWidget(caption)
-            tile.addWidget(value)
-            metrics.addLayout(tile, 1)
-        self._color_traffic_captions()
         on_theme_or_accent_changed(self._color_traffic_captions)
         on_theme_or_accent_changed(self._color_state_title)
-        self.traffic_graph = TrafficGraphWidget(self.traffic_card)
+        self._color_traffic_captions()
+
+        self.show_root()
+        self._sync_switches()
+        self._refresh_dashboard()
+
+    # ── Построение карточек ───────────────────────────────────
+
+    def _build_connection_card(self, container: QWidget) -> None:
+        card = CardWidget(container)
+        self.connection_card = card
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 8, 16, 14)
+        layout.setSpacing(4)
+
+        # Сцена туннеля; сфера в её центре — кнопка питания.
+        self.connection_scene = ConnectionScene(card, orb_diameter=164)
+        self.connection_orb = self.connection_scene.orb
+        self.connection_orb.clicked.connect(self._on_orb_clicked)
+        layout.addWidget(self.connection_scene)
+
+        center = Qt.AlignmentFlag.AlignHCenter
+        self.connection_state_label = TitleLabel("Не подключено", card)
+        self.connection_state_label.setAlignment(center)
+        self.connection_state_label.setWordWrap(True)
+        self.connection_uptime_label = CaptionLabel("", card)
+        self.connection_uptime_label.setAlignment(center)
+        self.connection_uptime_label.setWordWrap(True)
+        self.connection_uptime_label.hide()
+        self.connection_status_label = BodyLabel("", card)
+        self.connection_status_label.setAlignment(center)
+        self.connection_status_label.setWordWrap(True)
+        layout.addWidget(self.connection_state_label)
+        layout.addWidget(self.connection_uptime_label)
+        layout.addWidget(self.connection_status_label)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.toggle_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Подключить", card)
+        self.toggle_btn.setMinimumWidth(220)
+        self.toggle_btn.clicked.connect(self.toggle_connection_requested)
+        buttons.addWidget(self.toggle_btn)
+        self.logs_btn = PushButton(FIF.DOCUMENT, "Открыть логи", card)
+        self.logs_btn.clicked.connect(self.logs_requested)
+        self.logs_btn.hide()
+        buttons.addWidget(self.logs_btn)
+        buttons.addStretch(1)
+        layout.addSpacing(6)
+        layout.addLayout(buttons)
+        self.startup_progress = IndeterminateProgressBar(card)
+        self.startup_progress.hide()
+        layout.addWidget(self.startup_progress)
+
+        separator = QFrame(card)
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Plain)
+        separator.setEnabled(False)
+        layout.addSpacing(8)
+        layout.addWidget(separator)
+        layout.addSpacing(4)
+
+        # Строка текущего сервера — «где я», как выбор локации в VPN-клиентах.
+        self.server_row = QWidget(card)
+        row = QHBoxLayout(self.server_row)
+        row.setContentsMargins(0, 4, 0, 0)
+        row.setSpacing(12)
+        self.server_flag = FlagBadge(self.server_row, diameter=40)
+        row.addWidget(self.server_flag)
+        info = QVBoxLayout()
+        info.setSpacing(0)
+        self.server_name_label = StrongBodyLabel("Сервер не выбран", self.server_row)
+        self.server_name_label.setWordWrap(True)
+        self.connection_target_label = CaptionLabel("", self.server_row)
+        self.connection_target_label.setWordWrap(True)
+        info.addWidget(self.server_name_label)
+        info.addWidget(self.connection_target_label)
+        row.addLayout(info, 1)
+        self.signal_bars = SignalBars(self.server_row)
+        row.addWidget(self.signal_bars, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.server_ping_label = CaptionLabel("--", self.server_row)
+        self.server_ping_label.setMinimumWidth(48)
+        row.addWidget(self.server_ping_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.next_server_btn = PushButton(FIF.SYNC, "Следующий", self.server_row)
+        self.next_server_btn.setToolTip("Переключиться на следующий сервер из списка")
+        self.next_server_btn.clicked.connect(self.next_node_requested)
+        row.addWidget(self.next_server_btn)
+        self.servers_btn = PushButton(FIF.MENU, "Все серверы", self.server_row)
+        self.servers_btn.clicked.connect(self.servers_requested)
+        row.addWidget(self.servers_btn)
+        layout.addWidget(self.server_row)
+
+    def _build_mode_card(self, container: QWidget) -> None:
+        card = CardWidget(container)
+        self.mode_card = card
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(10)
+        header, _title = _card_header(card, "Режим работы")
+        self.connection_engine_label = CaptionLabel("", card)
+        self.connection_engine_label.setWordWrap(True)
+        header.addWidget(self.connection_engine_label)
+        layout.addLayout(header)
+
+        tiles = QHBoxLayout()
+        tiles.setSpacing(10)
+        self.vpn_tile = ModeTile(
+            "vpn", "VPN (TUN)", "Весь трафик компьютера идёт через туннель — любые программы и игры", card
+        )
+        self.proxy_tile = ModeTile(
+            "proxy", "Прокси", "Через туннель идут программы, которые используют прокси: браузеры и большинство приложений", card
+        )
+        # Слоты — bound-методы, не лямбды: замыкание на self держало бы
+        # Python-обёртку страницы (см. motion.FrameGate про циклы владения).
+        self.vpn_tile.clicked.connect(self._on_vpn_tile_clicked)
+        self.proxy_tile.clicked.connect(self._on_proxy_tile_clicked)
+        tiles.addWidget(self.vpn_tile, 1)
+        tiles.addWidget(self.proxy_tile, 1)
+        layout.addLayout(tiles)
+
+        self.proxy_options = QWidget(card)
+        options = QHBoxLayout(self.proxy_options)
+        options.setContentsMargins(4, 2, 0, 0)
+        options.setSpacing(12)
+        texts = QVBoxLayout()
+        texts.setSpacing(0)
+        texts.addWidget(BodyLabel("Системный прокси Windows", self.proxy_options))
+        self.proxy_hint_label = CaptionLabel(
+            "Программы подхватят прокси сами; выключите, чтобы настраивать их вручную", self.proxy_options
+        )
+        self.proxy_hint_label.setWordWrap(True)
+        texts.addWidget(self.proxy_hint_label)
+        options.addLayout(texts, 1)
+        self.proxy_switch = SwitchButton(self.proxy_options)
+        self.proxy_switch.setOnText("Вкл")
+        self.proxy_switch.setOffText("Выкл")
+        self.proxy_switch.checkedChanged.connect(self._on_proxy_toggled)
+        options.addWidget(self.proxy_switch, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.proxy_options)
+
+        self.connection_ports_label = CaptionLabel("", card)
+        self.connection_ports_label.setWordWrap(True)
+        self.connection_ports_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.connection_ports_label.setVisible(False)
+        layout.addWidget(self.connection_ports_label)
+
+    def _build_traffic_card(self, container: QWidget) -> None:
+        card = CardWidget(container)
+        self.traffic_card = card
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(10)
+        header, _title = _card_header(card, "Трафик")
+        details = TransparentPushButton(FIF.CHEVRON_RIGHT, "Подробнее", card)
+        details.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        details.clicked.connect(self._show_traffic_page)
+        header.addWidget(details)
+        layout.addLayout(header)
+
+        self.down_tile = StatTile("● Загрузка", card, value="0 B/s")
+        self.up_tile = StatTile("● Отдача", card, value="0 B/s")
+        self.ping_tile = StatTile("Пинг", card)
+        self.session_tile = StatTile("Через VPN за сессию", card)
+        self.traffic_down_label = self.down_tile.value_label
+        self.traffic_up_label = self.up_tile.value_label
+        self.traffic_rtt_label = self.ping_tile.value_label
+        self.traffic_session_label = self.session_tile.value_label
+        self.traffic_peak_label = self.session_tile.detail_label
+        self._traffic_down_caption = self.down_tile.caption_label
+        self._traffic_up_caption = self.up_tile.caption_label
+        self.ping_quality_label = self.ping_tile.detail_label
+        self.down_tile.detail_label.setText("к вам")
+        self.up_tile.detail_label.setText("от вас")
+        self._stat_tiles = (self.down_tile, self.up_tile, self.ping_tile, self.session_tile)
+        stats = QGridLayout()
+        stats.setHorizontalSpacing(16)
+        stats.setVerticalSpacing(10)
+        self._stats_grid = stats
+        self._place_stat_tiles(narrow=False)
+        layout.addLayout(stats)
+
+        self.traffic_graph = TrafficGraphWidget(card)
         self.traffic_graph.clicked.connect(self._show_traffic_page)
-        traffic_layout.addLayout(metrics)
-        traffic_layout.addWidget(self.traffic_graph, 1)
+        layout.addWidget(self.traffic_graph, 1)
 
-        _col_tooltips = [
-            "Имя исполняемого файла приложения",
-            "Текущая скорость загрузки/выгрузки",
-            "Объём трафика через VPN (зашифрованный, через прокси-сервер)",
-            "Объём трафика напрямую (без VPN, к серверу напрямую)",
-            "Активные соединения (всего за сессию)",
-            "Домен или IP с наибольшим трафиком",
-            "Общий объём трафика за сессию",
-        ]
+    def _build_processes_card(self, container: QWidget) -> None:
+        card = CardWidget(container)
+        self.processes_card = card
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(8)
+        header, _title = _card_header(card, "Приложения")
+        self.processes_btn = TransparentPushButton(FIF.CHEVRON_RIGHT, "Все", card)
+        self.processes_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.processes_btn.clicked.connect(self._show_proc_page)
+        header.addWidget(self.processes_btn)
+        layout.addLayout(header)
+        self.process_summary_label = CaptionLabel("Статистика появится после подключения", card)
+        self.process_summary_label.setWordWrap(True)
+        layout.addWidget(self.process_summary_label)
+        self.process_bars = ProcessBars(card, rows=4)
+        self.process_bars.hide()
+        layout.addWidget(self.process_bars)
+        layout.addStretch(1)
 
-        # ── Routing card ──────────────────────────────────────
-        self.routing_card = QWidget(self)
-        controls_layout = QVBoxLayout(self.routing_card)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(12)
-        self.tun_card = SwitchSettingCard(FIF.GLOBE, "VPN (TUN)", parent=self.routing_card)
-        self.proxy_card = SwitchSettingCard(FIF.LINK, "Системный прокси", parent=self.routing_card)
-        self.tun_switch = self.tun_card.switchButton
-        self.proxy_switch = self.proxy_card.switchButton
-        for switch in (self.tun_switch, self.proxy_switch):
-            switch.setOnText("Вкл")
-            switch.setOffText("Выкл")
-        controls_layout.addWidget(self.tun_card)
-        controls_layout.addWidget(self.proxy_card)
-        self.routing_expander = ExpandGroupSettingCard(FIF.SETTING, "Маршрутизация", "Подробности подключения", self.routing_card)
-        controls_layout.addWidget(self.routing_expander)
-        controls_layout.addStretch(1)
-        routing_details = QWidget(self.routing_expander)
-        routing_layout = QVBoxLayout(routing_details)
-        routing_layout.setContentsMargins(18, 16, 18, 16)
-        self.routing_expander.addGroupWidget(routing_details)
-        routing_layout.setSpacing(8)
-        routing_layout.addWidget(StrongBodyLabel("Маршрутизация", self.routing_card))
-        self.mode_combo = ComboBox(self.routing_card)
+    def _build_routing_card(self, container: QWidget) -> None:
+        card = CardWidget(container)
+        self.routing_card = card
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(6)
+        header, _title = _card_header(card, "Маршрутизация")
+        self.configs_btn = TransparentPushButton(FIF.CODE, "Конфиг", card)
+        self.configs_btn.setToolTip("Открыть редактор конфига — правила и DNS задаются там")
+        self.configs_btn.clicked.connect(self.configs_requested)
+        header.addWidget(self.configs_btn)
+        layout.addLayout(header)
+        self.routing_mode_label = BodyLabel("", card)
+        self.routing_mode_label.setWordWrap(True)
+        layout.addWidget(self.routing_mode_label)
+        self.mode_combo = ComboBox(card)
         self.mode_combo.addItem("Глобальный", userData="global")
         self.mode_combo.addItem("Правила", userData="rule")
         self.mode_combo.addItem("Прямой", userData="direct")
-        routing_layout.addWidget(self.mode_combo)
-        self.routing_mode_label = BodyLabel("Правила", self.routing_card)
-        self.routing_mode_label.setWordWrap(True)
-        self.routing_dns_label = CaptionLabel("DNS: Системный", self.routing_card)
-        self.routing_dns_label.setWordWrap(True)
-        self.routing_rules_label = CaptionLabel("Прямые: 0   Прокси: 0   Блок: 0", self.routing_card)
-        self.routing_rules_label.setWordWrap(True)
-        self.routing_bypass_label = CaptionLabel("Обход LAN: включён", self.routing_card)
-        self.routing_bypass_label.setWordWrap(True)
-        routing_layout.addWidget(self.routing_mode_label)
-        routing_layout.addStretch(1)
-        routing_layout.addWidget(self.routing_dns_label)
-        routing_layout.addWidget(self.routing_rules_label)
-        routing_layout.addWidget(self.routing_bypass_label)
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        layout.addWidget(self.mode_combo)
+        self.routing_rules_label = CaptionLabel("", card)
+        self.routing_bypass_label = CaptionLabel("", card)
+        self.routing_dns_label = CaptionLabel("", card)
+        for label in (self.routing_rules_label, self.routing_bypass_label, self.routing_dns_label):
+            label.setWordWrap(True)
+            layout.addWidget(label)
+        layout.addStretch(1)
 
-        for card in (
-            self.connection_card,
-            self.routing_card,
-            self.traffic_card,
-        ):
-            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-
-        grid.addWidget(self.connection_card, 0, 0)
-        grid.addWidget(self.routing_card, 0, 1)
-        root.addLayout(grid)
-        root.addWidget(self.traffic_card)
-        self.process_link = PushSettingCard("Открыть", FIF.APPLICATION, "Трафик по процессам", "Статистика появится после подключения", parent=container)
-        self.process_link.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.process_link.clicked.connect(self._show_proc_page)
-        root.addWidget(self.process_link)
-        root.addStretch(1)
-
+    def _build_sub_pages(self) -> None:
         # ── Sub-page: traffic detail (scrollable, AC7) ──
         self._traffic_detail_page = DetailPage(
             "Панель управления",
@@ -334,22 +477,26 @@ class DashboardPage(StackedSection):
 
         proc_detail_layout = self._proc_detail_page.content_layout
 
+        col_tooltips = [
+            "Имя исполняемого файла приложения",
+            "Текущая скорость загрузки/выгрузки",
+            "Объём трафика через VPN (зашифрованный, через прокси-сервер)",
+            "Объём трафика напрямую (без VPN, к серверу напрямую)",
+            "Активные соединения (всего за сессию)",
+            "Домен или IP с наибольшим трафиком",
+            "Общий объём трафика за сессию",
+        ]
         self._proc_detail_table = TableWidget(self._proc_detail_page)
         self._proc_detail_table.setColumnCount(7)
         self._proc_detail_table.setHorizontalHeaderLabels(
             ["Процесс", "Скорость", "VPN", "Прямой", "Соединения", "Основной хост", "Всего"]
         )
-        self._proc_detail_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Interactive
-        )
-        self._proc_detail_table.horizontalHeader().setSectionResizeMode(
-            5, QHeaderView.ResizeMode.Stretch
-        )
+        header = self._proc_detail_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         for col in (1, 2, 3, 4, 6):
-            self._proc_detail_table.horizontalHeader().setSectionResizeMode(
-                col, QHeaderView.ResizeMode.ResizeToContents
-            )
-        for col, tip in enumerate(_col_tooltips):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        for col, tip in enumerate(col_tooltips):
             item = self._proc_detail_table.horizontalHeaderItem(col)
             if item:
                 item.setToolTip(tip)
@@ -359,46 +506,44 @@ class DashboardPage(StackedSection):
         self._proc_detail_table.setMinimumHeight(400)
         proc_detail_layout.addWidget(self._proc_detail_table, 1)
 
-        # ── Signal connections ────────────────────────────────
-        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        self.tun_switch.checkedChanged.connect(self._on_tun_toggled)
-        self.proxy_switch.checkedChanged.connect(self._on_proxy_toggled)
-        self.toggle_btn.clicked.connect(self.toggle_connection_requested)
-
-        self.show_root()
-        self._sync_switches()
-        self._refresh_dashboard()
-
     # ── Adaptive card grid (AC10) ─────────────────────────────
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_adaptive_grid()
 
-    def _update_adaptive_grid(self) -> None:
-        """Move the routing card to its own row when the viewport is narrow.
+    def _place_stat_tiles(self, *, narrow: bool) -> None:
+        for tile in self._stat_tiles:
+            self._stats_grid.removeWidget(tile)
+        columns = 2 if narrow else 4
+        for index, tile in enumerate(self._stat_tiles):
+            self._stats_grid.addWidget(tile, index // columns, index % columns)
+        for column in range(4):
+            self._stats_grid.setColumnStretch(column, 1 if column < columns else 0)
 
-        Below 900 px the two top cards no longer fit side by side, so the
-        routing card is re-anchored to a second grid row (spanning both
-        columns); at >= 900 px the original two-column layout is restored.
-        Widgets are moved with removeWidget/addWidget — never recreated.
+    def _update_adaptive_grid(self) -> None:
+        """На узком окне (< 900 px) карточки встают в одну колонку.
+
+        «Маршрутизация» уходит во вторую строку под «Приложения», плитки
+        трафика — в сетку 2×2. Виджеты только переставляются, не пересоздаются.
         """
         if self._in_grid_relayout:
             return
-        narrow = self._main_page.scroll_area.viewport().width() < 900
+        narrow = self._main_page.scroll_area.viewport().width() < NARROW_WIDTH
         if narrow == self._grid_narrow:
             return
         self._in_grid_relayout = True
         try:
             self._grid_narrow = narrow
             self._cards_grid.removeWidget(self.routing_card)
-            self._cards_grid.removeWidget(self.connection_card)
+            self._cards_grid.removeWidget(self.processes_card)
             if narrow:
-                self._cards_grid.addWidget(self.connection_card, 0, 0, 1, 2)
+                self._cards_grid.addWidget(self.processes_card, 0, 0, 1, 2)
                 self._cards_grid.addWidget(self.routing_card, 1, 0, 1, 2)
             else:
-                self._cards_grid.addWidget(self.connection_card, 0, 0)
+                self._cards_grid.addWidget(self.processes_card, 0, 0)
                 self._cards_grid.addWidget(self.routing_card, 0, 1)
+            self._place_stat_tiles(narrow=narrow)
         finally:
             self._in_grid_relayout = False
 
@@ -441,12 +586,14 @@ class DashboardPage(StackedSection):
             self._last_up_bps = 0.0
             self._live_rtt_ms = None
             self._peak_bps = 0.0
+            self._session_proxy_bytes = None
             self._down_history.clear()
             self._up_history.clear()
             self.traffic_graph.clear_data()
+            self.connection_scene.set_traffic(0.0, 0.0)
             self._clear_process_tables()
             self._last_process_stats = None
-            self.process_link.setContent("Статистика появится после подключения")
+            self._show_process_summary("Статистика появится после подключения", [])
             if self._connection_phase == "running":
                 self._connection_phase = "idle"
                 self._connection_message = self._default_connection_message()
@@ -483,6 +630,7 @@ class DashboardPage(StackedSection):
         self._settings.tun_mode = enabled
         if self._connection_phase in {"idle", "running"}:
             self._connection_message = self._default_connection_message()
+        self._sync_switches()
         self._refresh_dashboard()
 
     def set_settings_snapshot(self, settings: AppSettings) -> None:
@@ -520,6 +668,7 @@ class DashboardPage(StackedSection):
         self._down_history.append(self._last_down_bps)
         self._up_history.append(self._last_up_bps)
         self.traffic_graph.add_point(self._last_down_bps, self._last_up_bps)
+        self.connection_scene.set_traffic(self._last_down_bps, self._last_up_bps)
         if self._stack.currentWidget() is self._traffic_detail_page:
             self._detail_graph.add_point(self._last_down_bps, self._last_up_bps)
         self._refresh_dashboard()
@@ -527,17 +676,35 @@ class DashboardPage(StackedSection):
     def set_process_stats(self, stats: list | None) -> None:
         if stats is None:
             self._last_process_stats = None
+            self._session_proxy_bytes = None
             self._clear_process_tables()
-            self.process_link.setContent("Статистика недоступна для текущего подключения")
+            self._show_process_summary("Статистика по приложениям недоступна для этого режима", [])
+            self._refresh_dashboard()
             return
         self._last_process_stats = list(stats)
-        self.process_link.setContent(f"Процессов: {len(stats)}" if stats else "Активных соединений пока нет")
+        # Счётчики процессов накопительные за сессию — сумма не теряет
+        # выборки, пропущенные, пока панель была скрыта.
+        self._session_proxy_bytes = sum(max(0, int(ps.proxy_bytes)) for ps in stats)
+        ranked = sorted(stats, key=lambda ps: ps.upload + ps.download, reverse=True)
+        top_total = max((ps.upload + ps.download for ps in ranked), default=0)
+        items = [
+            (ps.exe, self._format_bytes(ps.upload + ps.download),
+             (ps.upload + ps.download) / top_total if top_total > 0 else 0.0)
+            for ps in ranked[: self.process_bars.rows()]
+        ]
+        if stats:
+            summary = f"Приложений с трафиком: {len(stats)}"
+        else:
+            summary = "Активных соединений пока нет"
+        self._show_process_summary(summary, items)
         if self._stack.currentWidget() is self._proc_detail_page:
             self._apply_process_stats_to_table(self._proc_detail_table, stats)
+        self._refresh_dashboard()
 
     def set_transition_busy(self, busy: bool) -> None:
         self._transition_busy = busy
         self._apply_interaction_state()
+        self._refresh_dashboard()
 
     @staticmethod
     def _format_bytes(b: int) -> str:
@@ -562,7 +729,7 @@ class DashboardPage(StackedSection):
 
     def _do_refresh_dashboard(self) -> None:
         self._refresh_connection_card()
-        self._refresh_profile_card()
+        self._refresh_mode_card()
         self._refresh_traffic_card()
         self._refresh_routing_card()
         self._apply_interaction_state()
@@ -570,39 +737,47 @@ class DashboardPage(StackedSection):
             self._refresh_detail_stats()
 
     def _refresh_connection_card(self) -> None:
-        state_title, status_text = self._connection_texts()
-        proxy_note = self._system_proxy_note()
-        if proxy_note:
-            status_text = f"{status_text} • {proxy_note}" if status_text else proxy_note
-        self.connection_state_label.setText("Подготовка" if self._initializing else state_title)
+        self.connection_state_label.setText(self._headline())
+        self.connection_status_label.setText(self._status_line())
         self.logs_btn.setVisible(self._connection_phase == "error")
-        core = self._settings.tun_engine if self._settings.tun_mode else self._settings.proxy_engine
-        self.connection_engine_label.setText(f"{'VPN' if self._settings.tun_mode else 'Прокси'} · {core}")
-        self.connection_engine_label.setToolTip(self._route_engine_label())
-        ports_text = self._proxy_ports_text()
-        self.connection_ports_label.setText(ports_text)
-        self.connection_ports_label.setVisible(bool(ports_text))
-        self.connection_status_label.setText("Загрузка данных…" if self._initializing else status_text)
-        self.connection_target_label.setText(self._selected_node_summary())
         self.toggle_btn.setText("Подготовка…" if self._initializing else self._toggle_action_text())
         icon = FIF.PAUSE_BOLD if self._connected else FIF.PLAY_SOLID
         if icon is not getattr(self, "_toggle_icon", None):
             self._toggle_icon = icon
             self.toggle_btn.setIcon(icon)
-        self.summary_label.setText(self._summary_text())
         orb_state = self._orb_state()
         self.connection_orb.set_state(orb_state)
         self.connection_orb.setToolTip(self._toggle_action_text())
-        if orb_state != getattr(self, "_title_state", None):
+        self.connection_scene.set_state(orb_state)
+        if orb_state != self._title_state:
             self._title_state = orb_state
             self._color_state_title()
         uptime = self._uptime_text()
         self.connection_uptime_label.setText(uptime)
         self.connection_uptime_label.setVisible(bool(uptime))
 
+        node = self._selected_node
+        country = (node.country_code or node.country_override) if node is not None else ""
+        self.server_name_label.setText(self._server_title())
+        self.connection_target_label.setText(self._selected_node_summary())
+        self.server_flag.set_country(country)
+        self.connection_scene.set_server(node_name_text(node) if node is not None else "Сервер", country)
+        latency = self._effective_latency()
+        self.signal_bars.set_latency(latency)
+        self.server_ping_label.setText(_format_latency(latency))
+
+    def _refresh_mode_card(self) -> None:
+        core = self._settings.tun_engine if self._settings.tun_mode else self._settings.proxy_engine
+        self.connection_engine_label.setText(f"Ядро: {core}")
+        self.connection_engine_label.setToolTip(self._route_engine_label())
+        self.proxy_options.setVisible(not self._settings.tun_mode)
+        ports_text = self._proxy_ports_text()
+        self.connection_ports_label.setText(ports_text)
+        self.connection_ports_label.setVisible(bool(ports_text))
+
     def _color_state_title(self, *_args) -> None:
         """Заголовок состояния в цвет сферы: зелёный — есть защита, красный — ошибка."""
-        state = getattr(self, "_title_state", IDLE)
+        state = self._title_state
         if state == CONNECTED:
             color = positive_color()
             self.connection_state_label.setTextColor(color, color)
@@ -632,75 +807,90 @@ class DashboardPage(StackedSection):
         if self.toggle_btn.isEnabled():
             self.toggle_connection_requested.emit()
 
-    def _refresh_profile_card(self) -> None:
-        selected = self._selected_node
-        if selected is None:
-            self.profile_name_label.setText("Профиль не выбран")
-            self.profile_endpoint_label.setText("Сначала импортируйте или выберите узел")
-            self.profile_group_label.setText(f"Профилей: {self._node_count}")
-            self.profile_latency_label.setText("Задержка: --")
-            return
-
-        self.profile_name_label.setText(selected.name or "Безымянный профиль")
-        scheme = selected.scheme.upper() if selected.scheme else "NODE"
-        self.profile_endpoint_label.setText(f"{masked_endpoint()}  ({scheme})")
-        self.profile_group_label.setText(f"Группа: {selected.group or 'По умолчанию'}")
-        self.profile_latency_label.setText(f"Задержка: {_format_latency(self._effective_latency())}")
-
     def _refresh_traffic_card(self) -> None:
         self.traffic_down_label.setText(_format_speed(self._last_down_bps))
         self.traffic_up_label.setText(_format_speed(self._last_up_bps))
-        self.traffic_rtt_label.setText(_format_latency(self._effective_latency()))
-        self.traffic_peak_label.setText(_format_speed(self._peak_bps))
+        latency = self._effective_latency()
+        self.traffic_rtt_label.setText(_format_latency(latency))
+        self.ping_quality_label.setText(_latency_quality(latency))
+        self._set_quality_color(latency_color(latency))
+        if self._session_proxy_bytes is None:
+            self.traffic_session_label.setText("--")
+        else:
+            self.traffic_session_label.setText(self._format_bytes(self._session_proxy_bytes))
+        self.traffic_peak_label.setText(f"Пик: {_format_speed(self._peak_bps)}")
+        if not self._connected:
+            self.traffic_graph.set_placeholder("График появится после подключения")
+        else:
+            self.traffic_graph.set_placeholder("Ждём первые данные…")
 
     def _color_traffic_captions(self, *_args) -> None:
         for caption, color in ((self._traffic_down_caption, graph_down_color()),
                                (self._traffic_up_caption, graph_up_color())):
             caption.setTextColor(color, color)
+        self._quality_color_name = None  # тема сменилась — цвет применить заново
+        self._set_quality_color(latency_color(self._effective_latency()))
+
+    def _set_quality_color(self, color: QColor) -> None:
+        # setTextColor у меток qfluentwidgets переустанавливает стиль;
+        # при обновлении раз в секунду зовём только при реальной смене цвета.
+        name = color.name(QColor.NameFormat.HexArgb)
+        if name == getattr(self, "_quality_color_name", None):
+            return
+        self._quality_color_name = name
+        self.ping_quality_label.setTextColor(color, color)
+
+    def _show_process_summary(self, summary: str, items: list[tuple[str, str, float]]) -> None:
+        self.process_summary_label.setText(summary)
+        self.process_bars.set_items(items)
+        self.process_bars.setVisible(bool(items))
 
     def _refresh_routing_card(self) -> None:
+        self.configs_btn.setVisible(not self._is_tun2socks_mode())
         if not self._settings.tun_mode:
-            core = "sing-box" if self._is_singbox_proxy_mode() else "xray"
-            self.routing_mode_label.setText(f"Routing из raw {core} config")
-            self.routing_dns_label.setText("DNS и routing берутся из editor JSON")
+            core = "sing-box" if self._is_singbox_proxy_mode() else "Xray"
+            self.routing_mode_label.setText(f"Правила из конфига {core}")
             self.routing_rules_label.setText(
-                f"Правила {core} работают для трафика, уже вошедшего в локальный SOCKS/HTTP inbound"
+                "Правила работают для трафика, который пришёл в прокси; что не попало в прокси — идёт напрямую."
             )
             if self._settings.enable_system_proxy:
-                self.routing_bypass_label.setText("Сейчас это обычно трафик приложений, которые используют системный прокси Windows")
+                self.routing_bypass_label.setText(
+                    "Системный прокси Windows включён — браузеры и большинство программ идут через него."
+                )
             else:
                 self.routing_bypass_label.setText(
-                    f"Сист. прокси выключен: трафик попадёт в {core} только из приложений с ручной proxy-настройкой"
+                    "Системный прокси выключен — программы нужно настроить на прокси вручную."
                 )
+            self.routing_dns_label.setText("DNS и правила меняются в редакторе конфига.")
             return
         if self._is_xray_tun_mode():
-            self.routing_mode_label.setText("Routing из raw xray config")
-            self.routing_dns_label.setText("xray TUN подаёт системный трафик прямо в xray, системный прокси Windows здесь не используется")
+            self.routing_mode_label.setText("Правила из конфига Xray (экспериментальный TUN)")
             self.routing_rules_label.setText(
-                "Process/path rules из raw xray routing начинают работать на системный трафик; GUI routing не влияет на xray TUN"
+                "Весь трафик системы попадает в Xray — правила по процессам и путям работают для всех программ."
             )
             self.routing_bypass_label.setText(
-                "Режим experimental: live traffic totals работают, но process traffic telemetry остаётся скромнее, чем у sing-box TUN"
+                "Системный прокси Windows не используется; статистика по приложениям скромнее, чем у sing-box."
             )
+            self.routing_dns_label.setText("DNS и правила меняются в редакторе конфига.")
             return
-        if self._settings.tun_mode and self._settings.tun_engine == "singbox":
-            self.routing_mode_label.setText("Routing из raw sing-box config")
-            self.routing_dns_label.setText("DNS и routing берутся из editor JSON")
+        if self._settings.tun_engine == "singbox":
+            self.routing_mode_label.setText("Правила из конфига sing-box")
             self.routing_rules_label.setText(
-                "sing-box TUN перехватывает системный трафик, поэтому process/path rules работают полноценно"
+                "Перехватывается весь трафик системы — правила по программам, доменам и IP работают полностью."
             )
             self.routing_bypass_label.setText(
-                "GUI routing не влияет на sing-box. Unsupported node transports вроде xhttp будут автоматически "
-                "обслужены через local Xray sidecar; ссылки Hysteria2 — через официальный Hysteria sidecar."
+                "Серверы xhttp и Hysteria 2 автоматически обслуживаются вспомогательными ядрами."
             )
+            self.routing_dns_label.setText("DNS и правила меняются в редакторе конфига.")
             return
-        self.routing_mode_label.setText(_mode_title(self._routing.mode))
-        self.routing_dns_label.setText(f"DNS: {self._routing.dns_mode.title()}")
+        self.routing_mode_label.setText(f"Режим: {_mode_title(self._routing.mode)}")
         self.routing_rules_label.setText(
-            f"Прямые: {len(self._routing.direct_domains)}   Прокси: {len(self._routing.proxy_domains)}   Блок: {len(self._routing.block_domains)}"
+            f"Напрямую: {len(self._routing.direct_domains)}   Через VPN: {len(self._routing.proxy_domains)}   "
+            f"Блок: {len(self._routing.block_domains)}"
         )
         bypass = "включён" if self._routing.bypass_lan else "выключен"
-        self.routing_bypass_label.setText(f"Обход LAN: {bypass}")
+        self.routing_bypass_label.setText(f"Обход локальной сети: {bypass}")
+        self.routing_dns_label.setText(f"DNS: {self._routing.dns_mode.title()}")
 
     def _refresh_detail_stats(self) -> None:
         self._detail_down_label.setText(f"Загрузка: {_format_speed(self._last_down_bps)}")
@@ -828,64 +1018,71 @@ class DashboardPage(StackedSection):
             return "Системный прокси: включён (другое приложение)"
         return ""
 
-    def _singbox_editor_summary(self) -> str:
-        config_name = Path(self._settings.singbox_config_file or "default.json").name
-        return f"sing-box config: {config_name}"
+    def _config_summary(self) -> str:
+        if (self._settings.tun_mode and self._settings.tun_engine == "singbox") or self._is_singbox_proxy_mode():
+            return f"Конфиг sing-box: {Path(self._settings.singbox_config_file or 'default.json').name}"
+        if (not self._settings.tun_mode and self._settings.proxy_engine == "xray") or self._is_xray_tun_mode():
+            return f"Конфиг Xray: {Path(self._settings.xray_config_file or 'default.json').name}"
+        return "Выберите сервер на странице «Серверы»"
 
-    def _xray_editor_summary(self) -> str:
-        config_name = Path(self._settings.xray_config_file or "default.json").name
-        return f"xray config: {config_name}"
+    def _connected_title(self) -> str:
+        """Честный заголовок: «Защищено» — только когда туннель ловит весь трафик."""
+        if self._settings.tun_mode:
+            return "Защищено"
+        if self._settings.enable_system_proxy:
+            return "Подключено"
+        return "Прокси запущен"
 
-    def _connection_texts(self) -> tuple[str, str]:
+    def _headline(self) -> str:
+        if self._initializing:
+            return "Подготовка…"
         if self._connection_phase == "starting":
-            return "Подключение…", self._connection_message
+            return "Подключение…"
         if self._connection_phase == "error":
-            return "Ошибка", self._connection_message
+            return "Ошибка подключения"
         if self._connection_phase == "running" or self._connected:
-            return "Подключено", self._connection_message or self._default_connection_message()
-        return "Не подключено", self._connection_message or self._default_connection_message()
+            return self._connected_title()
+        return "Не подключено"
+
+    def _status_line(self) -> str:
+        if self._initializing:
+            return "Загрузка данных…"
+        if self._connection_phase in {"starting", "error"}:
+            text = self._connection_message
+        elif self._connected:
+            if self._settings.tun_mode:
+                text = "Весь трафик компьютера идёт через VPN"
+            elif self._settings.enable_system_proxy:
+                text = "Браузеры и программы, использующие системный прокси, идут через туннель"
+            else:
+                text = "Системный прокси выключен — через туннель идут только программы с ручной настройкой прокси"
+        else:
+            text = "Нажмите на кнопку питания, чтобы подключиться"
+        note = self._system_proxy_note()
+        if note:
+            text = f"{text} • {note}" if text else note
+        return text
 
     def _toggle_action_text(self) -> str:
         if self._settings.tun_mode:
-            return "Остановить VPN" if self._connected else "Запустить VPN"
+            return "Отключить VPN" if self._connected else "Подключить VPN"
         return "Остановить прокси" if self._connected else "Запустить прокси"
 
-    def _selected_node_summary(self) -> str:
+    def _server_title(self) -> str:
         if self._selected_node is None:
-            if (self._settings.tun_mode and self._settings.tun_engine == "singbox") or self._is_singbox_proxy_mode():
-                return self._singbox_editor_summary()
-            if (not self._settings.tun_mode and self._settings.proxy_engine == "xray") or self._is_xray_tun_mode():
-                return self._xray_editor_summary()
-            return "Активный профиль не выбран"
-        group = self._selected_node.group or "По умолчанию"
-        scheme = self._selected_node.scheme.upper() if self._selected_node.scheme else "NODE"
-        return f"{node_name_text(self._selected_node)} · {scheme} · {masked_endpoint()}"
+            return "Сервер не выбран"
+        return node_name_text(self._selected_node) or "Безымянный сервер"
 
-    def _summary_text(self) -> str:
-        if self._connection_phase in {"starting", "error"}:
-            return self._connection_message
+    def _selected_node_summary(self) -> str:
+        """Протокол и замаскированный адрес выбранного сервера (без имени)."""
         if self._selected_node is None:
-            if (self._settings.tun_mode and self._settings.tun_engine == "singbox") or self._is_singbox_proxy_mode():
-                return (
-                    f"Готов к запуску: {self._singbox_editor_summary()}"
-                    if not self._connected
-                    else f"Активный сеанс: {self._singbox_editor_summary()}"
-                )
-            if (not self._settings.tun_mode and self._settings.proxy_engine == "xray") or self._is_xray_tun_mode():
-                return (
-                    f"Готов к запуску: {self._xray_editor_summary()}"
-                    if not self._connected
-                    else f"Активный сеанс: {self._xray_editor_summary()}"
-                )
-            return "Выберите узел, чтобы запустить прокси или VPN и просмотреть состояние сеанса."
-        if not self._settings.tun_mode and not self._settings.enable_system_proxy:
-            core = "sing-box" if self._is_singbox_proxy_mode() else "xray"
-            if self._connected:
-                return f"Активен локальный {core} proxy: только приложения с ручной proxy-настройкой попадут в {core}"
-            return f"Готов к запуску локального {core} proxy: без системного прокси приложения должны быть настроены вручную"
-        if self._connected:
-            return f"Активный сеанс: {self._selected_node_summary()}"
-        return f"Готов к запуску: {self._selected_node_summary()}"
+            return self._config_summary()
+        scheme = self._selected_node.scheme.upper() if self._selected_node.scheme else "NODE"
+        parts = [scheme, masked_endpoint()]
+        group = self._selected_node.group
+        if group and group not in {"Default", "По умолчанию"}:
+            parts.append(group)
+        return " · ".join(parts)
 
     # ── Signal handlers ───────────────────────────────────────
 
@@ -894,18 +1091,26 @@ class DashboardPage(StackedSection):
         if value:
             self.mode_changed.emit(str(value))
 
-    def _on_tun_toggled(self, checked: bool) -> None:
-        self.proxy_switch.setEnabled(not checked)
-        self.tun_toggled.emit(checked)
+    def _on_vpn_tile_clicked(self) -> None:
+        self._on_mode_tile_clicked(True)
+
+    def _on_proxy_tile_clicked(self) -> None:
+        self._on_mode_tile_clicked(False)
+
+    def _on_mode_tile_clicked(self, tun: bool) -> None:
+        if tun == bool(self._settings.tun_mode):
+            return
+        # Плитка отзывается сразу; настоящее состояние придёт снимком настроек.
+        self.vpn_tile.setChecked(tun)
+        self.proxy_tile.setChecked(not tun)
+        self.tun_toggled.emit(tun)
 
     def _on_proxy_toggled(self, checked: bool) -> None:
         self.proxy_toggled.emit(checked)
 
     def _sync_switches(self) -> None:
-        self.tun_switch.blockSignals(True)
-        self.tun_switch.setChecked(self._settings.tun_mode)
-        self.tun_switch.setText("Вкл" if self._settings.tun_mode else "Выкл")
-        self.tun_switch.blockSignals(False)
+        self.vpn_tile.setChecked(self._settings.tun_mode)
+        self.proxy_tile.setChecked(not self._settings.tun_mode)
 
         proxy_on = self._settings.enable_system_proxy
         state = self._system_proxy_state
@@ -927,7 +1132,9 @@ class DashboardPage(StackedSection):
         self.toggle_btn.setEnabled(has_profiles and not busy)
         self.connection_orb.setEnabled(has_profiles and not busy)
         self.connection_orb.set_state(self._orb_state())
-        self.tun_switch.setEnabled(not busy)
+        self.vpn_tile.setEnabled(not busy)
+        self.proxy_tile.setEnabled(not busy)
+        self.next_server_btn.setEnabled(self._node_count > 1 and not busy)
         self.mode_combo.setVisible(self._is_tun2socks_mode())
         self.mode_combo.setEnabled(not busy and self._is_tun2socks_mode())
         self.proxy_switch.setEnabled(not busy and not self._settings.tun_mode)
