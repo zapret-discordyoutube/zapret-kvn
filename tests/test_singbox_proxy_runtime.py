@@ -21,6 +21,7 @@ from xray_fluent.constants import HYSTERIA_PATH_DEFAULT
 from xray_fluent.engines.hysteria.manager import HysteriaManager
 from xray_fluent.importer.link_parser import LinkParseError, parse_single
 from xray_fluent.profiles.models import Node
+from tests.step_fakes import bridge, bridge_controller
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,7 +87,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             controller._plan_runtime_singbox.return_value = plan
         else:
             controller._plan_proxy_runtime_singbox.return_value = plan
-        return controller, tags
+        return bridge_controller(controller), tags
 
     def test_proxy_restart_preserves_hot_switch_pool_in_session(self) -> None:
         controller, tags = self._restart_controller(tun=False)
@@ -137,7 +138,8 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                         controller._capture_active_session.assert_not_called()
                         controller.selection_changed.assert_not_called()
                         controller.schedule_save.assert_not_called()
-                        replacement.stop.assert_called_once()
+                        # Неподтверждённый кандидат закрывается без ожидания в GUI-потоке.
+                        replacement.request_stop.assert_called_once()
                         replacement.deleteLater.assert_called_once()
                         if stage == "sidecar":
                             controller.singbox.stop.assert_not_called()
@@ -207,7 +209,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                     plan = (controller._plan_runtime_singbox.return_value if tun
                             else controller._plan_proxy_runtime_singbox.return_value)
                     plan.hysteria_sidecar = SimpleNamespace(relay_port=12001)
-                    replacement = Mock(is_running=True)
+                    replacement = bridge(Mock(is_running=True), "stop")
                     controller._prepare_hysteria_replacement.return_value = replacement
 
                     def reject_security(result):

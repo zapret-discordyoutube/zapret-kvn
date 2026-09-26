@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from xray_fluent.application.controller import AppController
+from tests.step_fakes import bridge_controller, drive
 from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
 from xray_fluent.application.node_service import set_selected_node
 from xray_fluent.application.signature_service import transition_signature
@@ -498,7 +499,9 @@ class HybridRuntimeStartupTests(unittest.TestCase):
             4,
         )
 
-        controller.singbox.stop.assert_called_once_with(expected=True)
+        # Admission closes without a GUI-thread wait: kill now, exit arrives as a signal.
+        controller.singbox.request_stop.assert_called_once_with(expected=True)
+        controller.singbox.stop.assert_not_called()
         controller._request_transition.assert_not_called()
         controller._try_hot_switch_selected_node.assert_not_called()
         self.assertFalse(controller._desired_connected)
@@ -530,7 +533,9 @@ class HybridRuntimeStartupTests(unittest.TestCase):
             "outbound connection failed: x509: certificate signed by unknown authority"
         )
 
-        controller.singbox.stop.assert_called_once_with(expected=True)
+        # Admission closes without a GUI-thread wait: kill now, exit arrives as a signal.
+        controller.singbox.request_stop.assert_called_once_with(expected=True)
+        controller.singbox.stop.assert_not_called()
         controller._request_transition.assert_not_called()
         self.assertFalse(controller._desired_connected)
 
@@ -566,7 +571,9 @@ class HybridRuntimeStartupTests(unittest.TestCase):
         )
 
         self.assertEqual(HysteriaFailureCode.TARGET_PIN_MISMATCH, manager._last_failure_code)
-        controller.singbox.stop.assert_called_once_with(expected=True)
+        # Admission closes without a GUI-thread wait: kill now, exit arrives as a signal.
+        controller.singbox.request_stop.assert_called_once_with(expected=True)
+        controller.singbox.stop.assert_not_called()
         controller._request_transition.assert_not_called()
         controller._try_hot_switch_selected_node.assert_not_called()
         self.assertFalse(controller._desired_connected)
@@ -628,7 +635,7 @@ class HybridRuntimeStartupTests(unittest.TestCase):
             is_hybrid=True,
             hybrid_relay_selected_tag="relay-a",
         )
-        controller = Mock()
+        controller = bridge_controller(Mock())
         controller.state.settings.xray_path = "xray.exe"
         controller.state.settings.singbox_path = "sing-box.exe"
         controller.xray.start.return_value = True
@@ -636,7 +643,7 @@ class HybridRuntimeStartupTests(unittest.TestCase):
         controller.singbox.start.return_value = True
         controller._apply_core_outbound_tag.return_value = True
 
-        self.assertTrue(AppController._start_singbox_runtime_plan(controller, plan))
+        self.assertTrue(drive(AppController._start_singbox_runtime_plan_steps(controller, plan)))
 
         self.assertEqual(
             controller._apply_core_outbound_tag.call_args_list,
@@ -659,17 +666,18 @@ class HybridRuntimeStartupTests(unittest.TestCase):
             is_hybrid=False,
             hybrid_relay_selected_tag="",
         )
-        controller = Mock()
+        controller = bridge_controller(Mock())
         controller.state.settings.singbox_path = "sing-box.exe"
         controller.singbox.start.return_value = True
         controller._apply_core_outbound_tag.side_effect = [False, True]
+        sleeps: list[int] = []
 
-        with patch("xray_fluent.application.controller.sleep_with_events") as sleep_mock:
-            self.assertTrue(AppController._start_singbox_runtime_plan(controller, plan))
+        self.assertTrue(drive(AppController._start_singbox_runtime_plan_steps(controller, plan), sleeps=sleeps))
 
         self.assertEqual(controller.singbox.start.call_count, 2)
         controller.singbox.stop.assert_called_once()
-        sleep_mock.assert_called_once_with(0.5)
+        # Пауза перед повтором — таймерный шаг, не сон GUI-потока.
+        self.assertEqual(sleeps, [500])
         self.assertEqual(
             controller._apply_core_outbound_tag.call_args_list,
             [
@@ -689,18 +697,25 @@ class HybridRuntimeStartupTests(unittest.TestCase):
             is_hybrid=False,
             hybrid_relay_selected_tag="",
         )
-        controller = Mock()
+        controller = bridge_controller(Mock())
         controller.state.settings.singbox_path = "sing-box.exe"
         controller.singbox.start.side_effect = [False, True]
         controller.singbox.last_start_failure_retryable = True
         controller._apply_core_outbound_tag.return_value = True
+        sleeps: list[int] = []
 
-        with patch("xray_fluent.application.controller.sleep_with_events") as sleep_mock:
-            self.assertTrue(AppController._start_singbox_runtime_plan(controller, plan))
+        self.assertTrue(drive(AppController._start_singbox_runtime_plan_steps(controller, plan), sleeps=sleeps))
 
         self.assertEqual(controller.singbox.start.call_count, 2)
         controller.singbox.stop.assert_not_called()
-        sleep_mock.assert_called_once_with(0.5)
+        self.assertEqual(sleeps, [500])
+
+    def test_sync_wrapper_rejects_a_non_generator_instead_of_spinning(self) -> None:
+        # Регресс: Mock-контроллер отдавал в run_steps_blocking Mock вместо
+        # генератора, Mock.send() бесконечно порождал новые «шаги», и память
+        # росла без предела. Драйвер обязан падать сразу.
+        with self.assertRaises(TypeError):
+            AppController._start_singbox_runtime_plan(Mock(), SimpleNamespace())
 
 
 if __name__ == "__main__":

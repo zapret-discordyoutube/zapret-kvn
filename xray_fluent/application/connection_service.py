@@ -5,12 +5,13 @@ import socket
 from typing import TYPE_CHECKING
 
 from ..constants import DEFAULT_XRAY_STATS_API_PORT
-from ..engines.singbox.operations import capture_runtime_session
-from ..engines.singbox import (
-    SingboxRuntimePlan,
-    start_proxy as start_singbox_proxy,
-    start_tun as start_singbox_tun,
+from ..engines.singbox.operations import (
+    capture_runtime_session,
+    start_proxy_steps as start_singbox_proxy_steps,
+    start_tun_steps as start_singbox_tun_steps,
 )
+from ..engines.singbox import SingboxRuntimePlan
+from .async_steps import TransitionSteps, run_steps_blocking
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -32,6 +33,11 @@ def find_free_api_port(preferred: int | None = None, excluded: set[int] | None =
 
 
 def connect_selected(controller: AppController, allow_during_reconnect: bool = False) -> bool:
+    """Синхронный драйвер (shutdown/тесты). Переходы — ``connect_selected_steps``."""
+    return bool(run_steps_blocking(connect_selected_steps(controller, allow_during_reconnect)))
+
+
+def connect_selected_steps(controller: AppController, allow_during_reconnect: bool = False) -> TransitionSteps:
     if controller._connecting:
         return False
     controller._connecting = True
@@ -80,16 +86,18 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
 
             # Перед TUN принудительно убираем только НАШ системный прокси
             # (или восстанавливаем бэкап); чужой прокси не отключаем.
-            controller.proxy.release_if_owned(restore_previous=True)
+            yield from controller._proxy_steps("release_if_owned", restore_previous=True)
 
             controller._tun_log_count = 0
-            result = start_singbox_tun(controller, node, prev_active_core=prev_active_core)
+            result = yield from start_singbox_tun_steps(controller, node, prev_active_core=prev_active_core)
         else:
-            result = start_singbox_proxy(controller, node, prev_active_core=prev_active_core)
+            result = yield from start_singbox_proxy_steps(controller, node, prev_active_core=prev_active_core)
         if result is None:
             return False
-        if generation != controller._transition_generation:
-            controller._stop_active_connection_processes(disable_proxy=not controller._desired_connected)
+        if generation != controller._transition_generation or not controller._desired_connected:
+            yield from controller._stop_active_connection_processes_steps(
+                disable_proxy=not controller._desired_connected
+            )
             controller._refresh_connected_state()
             return False
         singbox_plan: SingboxRuntimePlan = result.plan
@@ -99,21 +107,10 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
         if not singbox_plan.used_selected_node:
             session_node = None
 
-        outbound_pool_tags = singbox_plan.selector_tags
-        control_core = "xray" if singbox_plan.is_hybrid else "singbox"
-        if not controller._pin_started_outbound(session_node, control_core, outbound_pool_tags):
-            controller._set_connection_status(
-                "error",
-                "Ядро запущено, но не подтвердило выбор активного сервера.",
-                level="error",
-            )
-            controller._stop_active_connection_processes(disable_proxy=True)
-            return False
-
-        if generation != controller._transition_generation or not controller._desired_connected:
-            controller._stop_active_connection_processes(disable_proxy=not controller._desired_connected)
-            controller._refresh_connected_state()
-            return False
+        # Выбор активного сервера уже закреплён в _start_singbox_runtime_plan_steps
+        # тем же тегом plan.selected_outbound_tag == selector_tags[node.id] (для
+        # гибрида — в Xray-сайдкаре, для нативного пула — в селекторе sing-box).
+        # Повторный PUT был дублем и лишним control-plane вызовом на connect.
 
         controller._set_connection_status(
             "running",
@@ -135,7 +132,7 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
         )
         capture_runtime_session(controller, singbox_plan, node, tun=tun)
         if not controller._commit_pending_transport_selection(session_node):
-            controller._handle_unexpected_disconnect()
+            yield from controller._handle_unexpected_disconnect_steps()
             return False
         controller.schedule_save()
         controller._traffic_history.start_session(session_label, "singbox")
@@ -148,6 +145,13 @@ def connect_selected(controller: AppController, allow_during_reconnect: bool = F
 
 
 def disconnect_current(controller: AppController, disable_proxy: bool = True, emit_status: bool = True) -> bool:
+    """Синхронный драйвер (shutdown/обновление ядра). Переходы — ``disconnect_current_steps``."""
+    return bool(run_steps_blocking(disconnect_current_steps(controller, disable_proxy, emit_status)))
+
+
+def disconnect_current_steps(
+    controller: AppController, disable_proxy: bool = True, emit_status: bool = True,
+) -> TransitionSteps:
     controller._disconnecting = True
     # A pending recovery may have set switching before a runner was started.
     # A user disconnect owns that state too; otherwise callbacks stay muted.
@@ -163,7 +167,7 @@ def disconnect_current(controller: AppController, disable_proxy: bool = True, em
         active_tun = controller._active_session.tun_mode if controller._active_session is not None else controller.state.settings.tun_mode
         if emit_status and active_tun:
             controller.status.emit("info", "Остановка VPN...")
-        stopped = controller._stop_active_connection_processes(disable_proxy=disable_proxy)
+        stopped = yield from controller._stop_active_connection_processes_steps(disable_proxy=disable_proxy)
         if stopped:
             controller._active_core = "singbox"
             controller._clear_active_session()
@@ -181,6 +185,11 @@ def disconnect_current(controller: AppController, disable_proxy: bool = True, em
 
 
 def reconnect(controller: AppController, reason: str) -> bool:
+    """Синхронный драйвер (тесты). Переходы — ``reconnect_steps``."""
+    return bool(run_steps_blocking(reconnect_steps(controller, reason)))
+
+
+def reconnect_steps(controller: AppController, reason: str) -> TransitionSteps:
     if controller._reconnecting:
         return False
     controller._reconnecting = True
@@ -188,16 +197,16 @@ def reconnect(controller: AppController, reason: str) -> bool:
     try:
         controller._log(f"[reconnect] {reason}")
         controller._set_connection_status("starting", "Переподключение...", level="info")
-        stopped = disconnect_current(controller, disable_proxy=False, emit_status=False)
+        stopped = yield from disconnect_current_steps(controller, disable_proxy=False, emit_status=False)
         if not stopped:
             controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray", level="error")
             if controller.state.settings.enable_system_proxy:
-                controller.proxy.disable(restore_previous=True)
+                yield from controller._proxy_steps("disable", restore_previous=True)
             return False
 
-        ok = connect_selected(controller, allow_during_reconnect=True)
+        ok = yield from connect_selected_steps(controller, allow_during_reconnect=True)
         if not ok and controller.state.settings.enable_system_proxy:
-            controller.proxy.disable(restore_previous=True)
+            yield from controller._proxy_steps("disable", restore_previous=True)
         return ok
     finally:
         controller._reconnecting = False

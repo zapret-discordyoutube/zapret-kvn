@@ -1,14 +1,23 @@
 """Runtime/session/transition facade."""
 
-from .connection_service import connect_selected, disconnect_current, reconnect
+from .connection_service import (
+    connect_selected,
+    connect_selected_steps,
+    disconnect_current,
+    disconnect_current_steps,
+    reconnect,
+    reconnect_steps,
+)
 from .runtime_services import (
     cleanup_connection_runtime_state,
     handle_unexpected_disconnect,
+    handle_unexpected_disconnect_steps,
     on_core_state_changed,
     on_live_metrics,
     shutdown,
     start_metrics_worker,
     stop_active_connection_processes,
+    stop_active_connection_processes_steps,
     stop_metrics_worker,
 )
 from .session_state import ActiveSessionSnapshot, XrayRuntimeConfig, build_active_session_snapshot

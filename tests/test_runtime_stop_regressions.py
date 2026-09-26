@@ -8,6 +8,7 @@ from xray_fluent.application.controller import AppController
 from xray_fluent.application.connection_service import connect_selected, disconnect_current
 from xray_fluent.application.node_service import set_selected_node
 from xray_fluent.profiles.models import Node
+from tests.step_fakes import bridge_controller, drive, steps_via
 
 
 class RuntimeStopTests(TestCase):
@@ -17,7 +18,7 @@ class RuntimeStopTests(TestCase):
                 if kind == 'native' and stage == 'sidecar':
                     continue
                 with self.subTest(kind=kind, stage=stage):
-                    controller = Mock()
+                    controller = bridge_controller(Mock())
                     controller._transition_generation = 1
                     controller._desired_connected = True
                     controller._active_singbox_plan = None
@@ -40,7 +41,7 @@ class RuntimeStopTests(TestCase):
                         def select(core, *_a, **_k):
                             return cancel() if core == 'singbox' else True
                         controller._apply_core_outbound_tag.side_effect = select
-                    self.assertFalse(AppController._start_singbox_runtime_plan(controller, plan))
+                    self.assertFalse(drive(AppController._start_singbox_runtime_plan_steps(controller, plan)))
                     self.assertIsNone(controller._active_singbox_plan)
                     if stage == 'sidecar':
                         controller.singbox.start.assert_not_called()
@@ -59,7 +60,7 @@ class RuntimeStopTests(TestCase):
         self.assertTrue(runner.cancelled)
 
     def test_stop_reconciles_connected_even_when_recovery_suppressed_signals(self):
-        controller = Mock()
+        controller = bridge_controller(Mock())
         controller.connected = True
         controller._switching = True
         controller._active_session = SimpleNamespace(tun_mode=True)
@@ -85,7 +86,7 @@ class RuntimeStopTests(TestCase):
         for scheme in ('awg', 'wireguard', 'hysteria2', 'vless', 'vmess', 'trojan', 'ss'):
             with self.subTest(scheme=scheme):
                 node = Node(id='new', name='New', scheme=scheme)
-                controller = Mock()
+                controller = bridge_controller(Mock())
                 controller._connecting = controller._reconnecting = controller.locked = False
                 controller._transition_generation = 3
                 controller._desired_connected = True
@@ -101,7 +102,8 @@ class RuntimeStopTests(TestCase):
                     is_hysteria_sidecar=False, sidecar_kind=scheme, socks_port=1390, http_port=1391,
                     xray_sidecar=None, hysteria_sidecar=None, amnezia_sidecar=None,
                     singbox_config={}, hybrid_relay_selector_tags=(), hybrid_relay_selected_tag='')
-                with patch('xray_fluent.application.connection_service.start_singbox_proxy', return_value=SimpleNamespace(plan=plan, session_label='New')) as start:
+                start = Mock(return_value=SimpleNamespace(plan=plan, session_label='New'))
+                with patch('xray_fluent.application.connection_service.start_singbox_proxy_steps', steps_via(start)):
                     self.assertTrue(connect_selected(controller))
                 self.assertIs(start.call_args.args[1], node)
                 self.assertIs(controller._capture_active_session.call_args.args[0], node)

@@ -302,12 +302,30 @@ class ZapretTargetBarrierTests(unittest.TestCase):
         AppController._on_zapret_stopped_safety(controller)
 
         self.assertFalse(controller._desired_connected)
-        self.assertFalse(controller._transition_pending)
+        # Остановка идёт через координатор переходов (без синхронного
+        # disconnect_current в обработчике сигнала): тихий disconnect в очереди.
+        controller._request_stop.assert_called_once_with("zapret stopped", quiet=True)
+        controller.disconnect_current.assert_not_called()
+
+    def test_zapret_loss_request_stop_supersedes_and_queues_quiet_disconnect(self) -> None:
+        controller = Mock()
+        controller._transition_generation = 5
+        controller._transition_active = False
+        controller._blocked_transition_signature = "blocked"
+
+        AppController._request_stop(controller, "zapret stopped", quiet=True)
+
+        self.assertFalse(controller._desired_connected)
+        self.assertTrue(controller._quiet_disconnect)
+        controller._request_transition.assert_called_once_with("zapret stopped", keep_blocked=True)
+
+        AppController._request_transition(controller, "zapret stopped", keep_blocked=True)
+
+        self.assertTrue(controller._transition_pending)
         self.assertEqual(controller._transition_generation, 6)
-        controller.disconnect_current.assert_called_once_with(
-            disable_proxy=True,
-            emit_status=False,
-        )
+        # Блок сигнатуры сохраняется: остановка не разрешает повторный connect.
+        self.assertEqual(controller._blocked_transition_signature, "blocked")
+        controller._kick_transition.assert_called_once()
 
     def test_server_change_stops_old_vpn_before_dns_worker(self) -> None:
         controller = Mock()
@@ -335,12 +353,18 @@ class ZapretTargetBarrierTests(unittest.TestCase):
         with patch("xray_fluent.application.controller.TargetProfileResolver", return_value=worker):
             waiting = AppController._prepare_proxy_protection(controller, 12)
 
-        self.assertTrue(waiting)
-        controller.disconnect_current.assert_called_once_with(
-            disable_proxy=False,
-            emit_status=False,
-        )
-        self.assertTrue(controller._desired_connected)
+            self.assertTrue(waiting)
+            # Старый VPN останавливается шагом координатора, не синхронно:
+            # DNS-воркер стартует только после завершения остановки.
+            controller.disconnect_current.assert_not_called()
+            controller._run_prestop.assert_called_once()
+            args, kwargs = controller._run_prestop.call_args
+            self.assertEqual(args[0], 12)
+            worker.start.assert_not_called()
+
+            on_stopped = args[1]
+            on_stopped()
+
         worker.start.assert_called_once()
 
     def test_empty_preset_falls_back_instead_of_cancelling(self) -> None:

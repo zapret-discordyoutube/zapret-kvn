@@ -265,14 +265,16 @@ class OwnershipGateWiringTestCase(unittest.TestCase):
         from xray_fluent.application import runtime_services
 
         source = inspect.getsource(runtime_services)
-        self.assertIn("proxy.release_if_owned(", source)
+        # Через FIFO-очередь прокси с ожиданием — после ранее поставленных записей.
+        self.assertIn('controller._proxy_blocking("release_if_owned", restore_previous=True)', source)
         self.assertNotIn("if controller.proxy.is_enabled():\n        controller.proxy.disable", source)
 
     def test_tun_start_path_uses_ownership_gate(self) -> None:
         from xray_fluent.application import connection_service
 
         source = inspect.getsource(connection_service)
-        self.assertIn("proxy.release_if_owned(", source)
+        # Шагом перехода в потоке прокси, не в GUI-потоке.
+        self.assertIn('controller._proxy_steps("release_if_owned", restore_previous=True)', source)
 
     def test_main_exit_safety_net_uses_ownership_gate(self) -> None:
         import main

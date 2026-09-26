@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from xray_fluent.application.controller import AppController
+from tests.step_fakes import bridge_controller, drive
 from xray_fluent.diagnostics.runtime_errors import RuntimeErrorJournal, core_failure
 
 
@@ -11,7 +12,7 @@ class AmneziaFailureOwnershipTests(unittest.TestCase):
         for stage in ("sidecar", "front", "dns"):
             for disconnect in (True, False):
                 with self.subTest(stage=stage, disconnect=disconnect):
-                    controller = Mock()
+                    controller = bridge_controller(Mock())
                     controller._transition_generation = 1
                     controller._desired_connected = True
                     controller._active_singbox_plan = None
@@ -19,7 +20,7 @@ class AmneziaFailureOwnershipTests(unittest.TestCase):
                         hysteria_sidecar=None, xray_sidecar=None, provider_payload=None,
                         used_selected_node=True, clash_api_port=0, is_hybrid=False,
                         selected_outbound_tag="", singbox_config={})
-                    def supersede(*_args):
+                    def supersede(*_args, **_kwargs):
                         if disconnect:
                             controller._desired_connected = False
                         else:
@@ -32,7 +33,7 @@ class AmneziaFailureOwnershipTests(unittest.TestCase):
                                  "front": controller.singbox.start,
                                  "dns": controller.amnezia.verify_front_dns}[stage]
                     operation.side_effect = supersede
-                    self.assertFalse(AppController._start_singbox_runtime_plan(controller, plan))
+                    self.assertFalse(drive(AppController._start_singbox_runtime_plan_steps(controller, plan)))
                     self.assertIsNone(controller._active_singbox_plan)
                     controller.amnezia.stop.assert_called_once()
                     if stage == "sidecar":

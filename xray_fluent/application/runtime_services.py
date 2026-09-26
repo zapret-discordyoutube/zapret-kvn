@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..constants import SINGBOX_CLASH_API_PORT
+from .async_steps import TransitionSteps, run_steps_blocking
 from .auto_switch_service import transport_kind_for_node
 
 if TYPE_CHECKING:
@@ -116,46 +117,104 @@ def cleanup_connection_runtime_state(
     clear_pid_cache()
 
 
-def stop_active_connection_processes(controller: AppController, *, disable_proxy: bool) -> bool:
-    stopped = True
-
+def _connection_managers(controller: AppController) -> tuple:
     # Close traffic admission before stopping its transport.
-    for manager in (controller.singbox, controller.xray, controller.hysteria, getattr(controller, "amnezia", None)):
-        if manager is None:
-            continue
-        if manager.is_running:
-            stopped = manager.stop() and stopped
+    return tuple(
+        manager
+        for manager in (controller.singbox, controller.xray, controller.hysteria, getattr(controller, "amnezia", None))
+        if manager is not None
+    )
+
+
+def _manager_active(manager) -> bool:
+    """Running, or spawned but not yet confirmed ready (``process_alive``)."""
+    return bool(manager.is_running) or getattr(manager, "process_alive", False) is True
+
+
+def stop_active_connection_processes(controller: AppController, *, disable_proxy: bool) -> bool:
+    """Синхронный драйвер — только shutdown приложения."""
+    return bool(run_steps_blocking(stop_active_connection_processes_steps(controller, disable_proxy=disable_proxy)))
+
+
+def stop_active_connection_processes_steps(controller: AppController, *, disable_proxy: bool) -> TransitionSteps:
+    stopped = True
+    for manager in _connection_managers(controller):
+        if _manager_active(manager):
+            stopped = (yield from manager.stop_steps()) and stopped
 
     if disable_proxy and controller.state.settings.enable_system_proxy:
-        controller.proxy.disable(restore_previous=True)
+        yield from controller._proxy_steps("disable", restore_previous=True)
 
     return stopped
 
 
-def handle_unexpected_disconnect(controller: AppController) -> None:
+def stop_active_connection_processes_nowait(controller: AppController, *, disable_proxy: bool) -> None:
+    """Fail-closed остановка из обработчиков сигналов: без ожидания в GUI-потоке.
+
+    Процессы получают kill (у AWG — закрытие stdin и kill по таймеру), их
+    ``finished`` придёт через event loop. Следующий старт любого ядра сам
+    дожидается выхода предыдущего процесса шагом ``wait_process_finished``.
+    """
+    for manager in _connection_managers(controller):
+        if not _manager_active(manager):
+            continue
+        request_stop = getattr(manager, "request_stop", None)
+        if callable(request_stop):
+            request_stop()
+        else:
+            manager.stop()
+    if disable_proxy and controller.state.settings.enable_system_proxy:
+        controller._proxy_nowait("disable", restore_previous=True)
+
+
+def _begin_unexpected_disconnect(controller: AppController) -> bool:
     if controller._cleaning_connection_state:
-        return
+        return False
     controller._cleaning_connection_state = True
+    cleanup_connection_runtime_state(
+        controller,
+        end_traffic_session=True,
+        reset_auto_switch_cycle=not controller._auto_switch_transitioning,
+        reset_auto_switch_cooldown=True,
+    )
+    return True
+
+
+def _finish_unexpected_disconnect(controller: AppController) -> None:
+    controller._active_core = (
+        "singbox"
+        if not controller.state.settings.tun_mode
+        and str(controller.state.settings.proxy_engine) == "singbox"
+        else "xray"
+    )
+    controller._clear_active_session()
+    if not controller._reconnecting:
+        controller._desired_connected = False
+
+
+def handle_unexpected_disconnect(controller: AppController) -> None:
+    """Аварийное отключение из обработчиков сигналов (без блокировки GUI)."""
+    if not _begin_unexpected_disconnect(controller):
+        return
     try:
-        cleanup_connection_runtime_state(
-            controller,
-            end_traffic_session=True,
-            reset_auto_switch_cycle=not controller._auto_switch_transitioning,
-            reset_auto_switch_cooldown=True,
-        )
-        stop_active_connection_processes(controller, disable_proxy=not controller._reconnecting)
-        controller._active_core = (
-            "singbox"
-            if not controller.state.settings.tun_mode
-            and str(controller.state.settings.proxy_engine) == "singbox"
-            else "xray"
-        )
-        controller._clear_active_session()
-        if not controller._reconnecting:
-            controller._desired_connected = False
+        stop_active_connection_processes_nowait(controller, disable_proxy=not controller._reconnecting)
+        _finish_unexpected_disconnect(controller)
     finally:
         controller._auto_switch_transitioning = False
         controller._cleaning_connection_state = False
+
+
+def handle_unexpected_disconnect_steps(controller: AppController) -> TransitionSteps:
+    """Аварийное отключение внутри перехода: остановка процессов — шагами."""
+    if not _begin_unexpected_disconnect(controller):
+        return None
+    try:
+        yield from stop_active_connection_processes_steps(controller, disable_proxy=not controller._reconnecting)
+        _finish_unexpected_disconnect(controller)
+    finally:
+        controller._auto_switch_transitioning = False
+        controller._cleaning_connection_state = False
+    return None
 
 
 def on_core_state_changed(controller: AppController, _running: bool) -> None:
@@ -196,7 +255,7 @@ def on_core_state_changed(controller: AppController, _running: bool) -> None:
         and not controller._reconnecting
         and not controller._switching
     ):
-        controller.proxy.disable(restore_previous=True)
+        controller._proxy_nowait("disable", restore_previous=True)
 
 
 def on_live_metrics(controller: AppController, payload: dict[str, object]) -> None:
@@ -274,10 +333,12 @@ def shutdown(controller: AppController) -> None:
         controller.xray.stop()
     controller._xray_tun_routes.cleanup()
     if controller.zapret.running:
-        controller.zapret.stop()
+        controller.zapret.stop(wait=True)
     # Выключаем только наш прокси (или восстанавливаем из бэкапа):
-    # чужой/корпоративный прокси при завершении не трогаем.
-    controller.proxy.release_if_owned(restore_previous=True)
+    # чужой/корпоративный прокси при завершении не трогаем. Через ту же
+    # FIFO-очередь прокси и с ожиданием: запрос enable, поставленный раньше,
+    # не может лечь поверх финального восстановления.
+    controller._proxy_blocking("release_if_owned", restore_previous=True)
     controller._cleanup_tun_adapter()
     controller.network_monitor.stop()
     controller._lock_timer.stop()

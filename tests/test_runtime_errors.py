@@ -40,6 +40,7 @@ class RuntimeErrorTests(unittest.TestCase):
                 self.assertFalse(manager._failure_reported)
                 self.assertIsNone(manager.last_failure_code)
                 controller.singbox.stop.assert_not_called()
+                controller.singbox.request_stop.assert_not_called()
                 controller._request_transition.assert_not_called()
                 with patch.object(manager._process, 'state', return_value=QProcess.ProcessState.Running), \
                      patch.object(manager, '_probe_remote_endpoint', return_value=None):
@@ -146,7 +147,8 @@ class RuntimeErrorTests(unittest.TestCase):
                 manager.failure.connect(lambda failure_code, message, generation:
                     AppController._on_hysteria_failure(controller, manager, failure_code, message, generation))
                 manager._emit_process_line(line)
-                controller.singbox.stop.assert_called_once_with(expected=True)
+                controller.singbox.request_stop.assert_called_once_with(expected=True)
+                controller.singbox.stop.assert_not_called()
                 controller._request_transition.assert_not_called()
                 self.assertFalse(controller._desired_connected)
                 self.assertEqual(controller._hysteria_last_failure_code.value, code)

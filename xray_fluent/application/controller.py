@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import json
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -102,8 +102,11 @@ from .runtime import (
     cleanup_connection_runtime_state as cleanup_connection_runtime_state_operation,
     compute_transition_action,
     connect_selected as connect_selected_operation,
+    connect_selected_steps as connect_selected_steps_operation,
     disconnect_current as disconnect_current_operation,
+    disconnect_current_steps as disconnect_current_steps_operation,
     handle_unexpected_disconnect as handle_unexpected_disconnect_operation,
+    handle_unexpected_disconnect_steps as handle_unexpected_disconnect_steps_operation,
     needs_transition,
     on_connectivity_result as on_connectivity_result_operation,
     on_core_state_changed as on_core_state_changed_operation,
@@ -118,6 +121,7 @@ from .runtime import (
     on_xray_update_worker_done as on_xray_update_worker_done_operation,
     ping_nodes as ping_nodes_operation,
     reconnect as reconnect_operation,
+    reconnect_steps as reconnect_steps_operation,
     routing_signature as routing_signature_operation,
     run_xray_core_update as run_xray_core_update_operation,
     shutdown as shutdown_operation,
@@ -125,6 +129,7 @@ from .runtime import (
     speed_test_nodes as speed_test_nodes_operation,
     start_metrics_worker as start_metrics_worker_operation,
     stop_active_connection_processes as stop_active_connection_processes_operation,
+    stop_active_connection_processes_steps as stop_active_connection_processes_steps_operation,
     stop_metrics_worker as stop_metrics_worker_operation,
     system_proxy_bypass_lan as system_proxy_bypass_lan_operation,
     test_connectivity as test_connectivity_operation,
@@ -134,6 +139,7 @@ from .runtime import (
     tun_layer_signature as tun_layer_signature_operation,
     xray_layer_signature as xray_layer_signature_operation,
 )
+from .signature_service import SingboxPlanFacts
 from .subscription_service import (
     apply_not_modified,
     hide_subscription_node as hide_subscription_node_operation,
@@ -142,7 +148,7 @@ from .subscription_service import (
     remove_subscription as remove_subscription_operation,
     subscription_due,
 )
-from .async_steps import TransitionRunner, TransitionSteps, run_in_worker, run_steps_blocking
+from .async_steps import TransitionRunner, TransitionSteps, run_in_worker, run_steps_blocking, sleep_ms
 from .rotation_service import (
     RotationPlan,
     build_rotation_plan,
@@ -180,11 +186,13 @@ from ..engines.singbox import (
     plan_singbox_proxy_runtime,
     plan_singbox_runtime,
     restart_proxy_runtime as restart_singbox_proxy_runtime_operation,
+    restart_proxy_runtime_steps as restart_singbox_proxy_runtime_steps_operation,
     restart_runtime as restart_singbox_runtime_operation,
+    restart_runtime_steps as restart_singbox_runtime_steps_operation,
     SingboxDocumentState,
     SingboxRuntimePlan,
     select_outbound as select_singbox_outbound,
-    select_outbound_when_ready as select_singbox_outbound_when_ready,
+    select_outbound_when_ready_steps as select_singbox_outbound_when_ready_steps,
 )
 from ..constants import (
     APP_NAME,
@@ -224,7 +232,7 @@ from ..importer.subscription_http import (
 )
 from ..importer.subscription_parser import validate_filter_patterns
 from ..network.network_monitor import NetworkMonitor
-from ..platform.windows.proxy_manager import ProxyManager, SystemProxyState
+from ..platform.windows.proxy_manager import PROXY_EXECUTOR, ProxyManager, SystemProxyState
 from ..platform.windows.security import create_password_hash, get_idle_seconds, verify_password
 from ..diagnostics.runtime_logging import (
     RuntimeLogContext,
@@ -235,7 +243,7 @@ from ..diagnostics.runtime_logging import (
 )
 from ..profiles.storage import PassphraseRequired, StateStorage
 from ..platform.windows.startup import build_startup_command, set_startup_enabled
-from ..platform.windows.subprocess_utils import result_output_text, run_text, sleep_with_events
+from ..platform.windows.subprocess_utils import result_output_text, run_text
 from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistoryStorage
 from .zapret_prewarm_service import start_proxy_dns_prewarm
 from ..engines.zapret.manager import ZapretManager
@@ -270,6 +278,19 @@ def _find_free_api_port(preferred: int | None = None, excluded: set[int] | None 
             except OSError:
                 continue
     raise RuntimeError(f"No free port in range {preferred}-{preferred + 100}")
+
+
+def _process_alive(manager: object) -> bool:
+    """Spawned-but-not-ready processes are invisible to ``is_running``."""
+    return getattr(manager, "process_alive", False) is True
+
+
+def _write_json_atomically(path: Path, payload: object) -> None:
+    """Worker-only: serialize and atomically replace a runtime JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
 # AC6 (startup-subscription-settings): hard fallback for the
@@ -325,6 +346,8 @@ class AppController(QObject):
     passphrase_required = pyqtSignal()
     auto_switch_triggered = pyqtSignal(str)  # node name we're switching to
     transition_state_changed = pyqtSignal(bool, str)
+    # Строки лога из рабочих потоков (очередь прокси) — в GUI-поток.
+    _background_log = pyqtSignal(str)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -423,6 +446,16 @@ class AppController(QObject):
         self._transition_generation = 0
         self._blocked_transition_signature = ""
         self._transition_runner: TransitionRunner | None = None
+        # Подготовка выбранного сервера (DNS/Zapret) выполняется один раз на
+        # поколение запроса; клик во время перехода откладывает её до конца.
+        self._protection_prepared_generation = 0
+        # Процессы прерванного перехода гасятся отдельным шагом очереди.
+        self._cleanup_pending = False
+        # Поля плана для сигнатур (без портов): ключ — документ, режим, нода, пул.
+        self._plan_facts_cache: dict[tuple, SingboxPlanFacts | None] = {}
+        # Следующий disconnect из очереди — без статуса «Отключено»
+        # (ошибку, объяснившую остановку, уже показали).
+        self._quiet_disconnect = False
         # П2 (AC5/AC8): асинхронный горячий свитч — control-plane I/O в воркере,
         # generation-сериализация запросов, устаревший результат отбрасывается.
         self._hot_switch_runner: TransitionRunner | None = None
@@ -466,10 +499,12 @@ class AppController(QObject):
         self.zapret.stopped.connect(self._on_zapret_stopped_safety)
 
         self.network_monitor.network_changed.connect(self._on_network_changed)
+        self._background_log.connect(self._log)
         self.connection_changed.connect(lambda _: self._sync_rotation_timer())
         # П3 (AC10): любое изменение нод инвалидирует кэш пула явно — идентичность
         # списка не видит in-place правок содержимого outbound-словаря.
         self.nodes_changed.connect(lambda _nodes: self._invalidate_xray_outbound_pool_cache())
+        self.nodes_changed.connect(lambda _nodes: self._invalidate_plan_facts_cache())
 
         self._lock_timer = QTimer(self)
         self._lock_timer.setInterval(15_000)
@@ -1027,6 +1062,52 @@ class AppController(QObject):
             pool_nodes=self.state.nodes,
         )
 
+    def _singbox_plan_facts(self, node: Node | None, *, tun: bool) -> SingboxPlanFacts | None:
+        """Selector tags / provider / used_selected_node for signatures, cached.
+
+        Сигнатуры переходов и предпроверка выбранного сервера вызывались по
+        7–10 раз за клик, и каждый раз строили полный план (outbound'ы всего
+        пула, пробы портов). Нужные им поля зависят только от документа
+        конфигурации, режима и ноды с составом пула — по этому ключу и кэш.
+        Порты из этого кэша не берутся никогда: запуск планирует заново.
+        Инвалидация: смена документа (хеш), состава/объектов нод и сигнал
+        ``nodes_changed`` (in-place правки outbound, инвариант пула).
+        """
+        state = self._get_singbox_document_state()
+        nodes = self.state.nodes
+        key = (
+            str(state.source_path),
+            state.text_hash,
+            bool(tun),
+            node.id if node is not None else None,
+            id(node.outbound) if node is not None else 0,
+            id(nodes),
+            tuple((id(item), id(item.outbound), item.sort_order) for item in nodes),
+        )
+        cache = self._plan_facts_cache
+        if key in cache:
+            return cache[key]
+        try:
+            plan = (
+                self._plan_runtime_singbox(node)
+                if tun
+                else self._plan_proxy_runtime_singbox(node)
+            )
+            facts: SingboxPlanFacts | None = SingboxPlanFacts(
+                selector_tags=dict(plan.selector_tags or {}),
+                provider_payload=plan.provider_payload,
+                used_selected_node=bool(plan.used_selected_node),
+            )
+        except ValueError:
+            facts = None
+        if len(cache) >= 8:
+            cache.pop(next(iter(cache)))
+        cache[key] = facts
+        return facts
+
+    def _invalidate_plan_facts_cache(self) -> None:
+        self._plan_facts_cache.clear()
+
     def _configure_singbox_log_contexts(self, plan: SingboxRuntimePlan) -> None:
         """Freeze tag-to-node mappings before any runtime process starts."""
 
@@ -1122,6 +1203,24 @@ class AppController(QObject):
         prepared_hysteria: HysteriaManager | None = None,
         prepared_amnezia: AmneziaManager | None = None,
     ) -> bool:
+        """Синхронный драйвер (тесты). Переходы — ``_start_singbox_runtime_plan_steps``."""
+        return bool(
+            run_steps_blocking(
+                self._start_singbox_runtime_plan_steps(
+                    plan,
+                    prepared_hysteria=prepared_hysteria,
+                    prepared_amnezia=prepared_amnezia,
+                )
+            )
+        )
+
+    def _start_singbox_runtime_plan_steps(
+        self,
+        plan: SingboxRuntimePlan,
+        *,
+        prepared_hysteria: HysteriaManager | None = None,
+        prepared_amnezia: AmneziaManager | None = None,
+    ) -> TransitionSteps:
         request_generation = getattr(self, "_transition_generation", None)
         owned_amnezia = prepared_amnezia or getattr(self, "amnezia", None)
 
@@ -1142,22 +1241,22 @@ class AppController(QObject):
             return False
         self._configure_singbox_log_contexts(plan)
         if plan.provider_payload is not None:
-            SINGBOX_PROVIDER_FILE.parent.mkdir(parents=True, exist_ok=True)
-            temporary = SINGBOX_PROVIDER_FILE.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(plan.provider_payload, ensure_ascii=True, indent=2),
-                encoding="utf-8",
-            )
-            temporary.replace(SINGBOX_PROVIDER_FILE)
+            # Провайдер несёт outbound'ы всего пула: сериализация и запись — в воркере.
+            provider_payload = plan.provider_payload
+            provider_file = SINGBOX_PROVIDER_FILE
+            yield run_in_worker(lambda: _write_json_atomically(provider_file, provider_payload))
+            if request_cancelled():
+                return False
+        should_continue = lambda: not request_cancelled()  # noqa: E731
         if getattr(plan, "amnezia_sidecar", None) is not None:
             target_amnezia = owned_amnezia
             if prepared_amnezia is not None:
                 if not target_amnezia.is_running:
                     return False
-            elif not self._start_amnezia_manager(target_amnezia, plan):
+            elif not (yield from self._start_amnezia_manager_steps(target_amnezia, plan)):
                 return False
             if request_cancelled():
-                target_amnezia.stop()
+                yield from target_amnezia.stop_steps()
                 return False
         if plan.hysteria_sidecar is not None:
             self._protect_ss_port = 0
@@ -1193,12 +1292,13 @@ class AppController(QObject):
                     getattr(self, "_hysteria_process_generation", 0)
                 )
                 self._hysteria_active_generation = self._hysteria_process_generation
-                if not target_manager.start(
+                if not (yield from target_manager.start_steps(
                     plan.hysteria_sidecar.config,
                     plan.hysteria_sidecar.relay_port,
                     context=plan.hysteria_sidecar.context,
                     process_generation=self._hysteria_process_generation,
-                ):
+                    should_continue=should_continue,
+                )):
                     return False
         elif plan.xray_sidecar is not None:
             self._protect_ss_port = plan.xray_sidecar.protect_port
@@ -1208,15 +1308,15 @@ class AppController(QObject):
                 f"relay=127.0.0.1:{plan.xray_sidecar.relay_port} "
                 f"protect=127.0.0.1:{plan.xray_sidecar.protect_port}"
             )
-            if not self.xray.start(self.state.settings.xray_path, plan.xray_sidecar.config):
+            if not (yield from self.xray.start_steps(self.state.settings.xray_path, plan.xray_sidecar.config)):
                 self._protect_ss_port = 0
                 self._protect_ss_password = ""
                 return False
             self._xray_api_port = plan.xray_sidecar.api_port
-            if plan.selected_outbound_tag and not self._apply_core_outbound_tag(
+            if plan.selected_outbound_tag and not (yield from self._apply_core_outbound_tag_steps(
                 "xray", plan.selected_outbound_tag
-            ):
-                self.xray.stop()
+            )):
+                yield from self.xray.stop_steps()
                 self._xray_api_port = 0
                 self._protect_ss_port = 0
                 self._protect_ss_password = ""
@@ -1240,13 +1340,13 @@ class AppController(QObject):
             used_selected_node=bool(getattr(plan, "used_selected_node", True)),
         )):
             if plan.xray_sidecar is not None and self.xray.is_running:
-                self.xray.stop()
+                yield from self.xray.stop_steps()
             if plan.hysteria_sidecar is not None:
                 target_manager = prepared_hysteria or self.hysteria
                 if target_manager.is_running:
-                    target_manager.stop()
+                    yield from target_manager.stop_steps()
             if getattr(plan, "amnezia_sidecar", None) is not None:
-                (prepared_amnezia or self.amnezia).stop()
+                yield from (prepared_amnezia or self.amnezia).stop_steps()
             return False
         singbox_start_tag = (
             plan.hybrid_relay_selected_tag if plan.is_hybrid else plan.selected_outbound_tag
@@ -1261,10 +1361,14 @@ class AppController(QObject):
         for start_attempt in range(2):
             if request_cancelled():
                 break
-            sb_ok = self.singbox.start(self.state.settings.singbox_path, plan.singbox_config)
+            sb_ok = yield from self.singbox.start_steps(
+                self.state.settings.singbox_path,
+                plan.singbox_config,
+                should_continue=should_continue,
+            )
             self._log(f"[sing-box] start result: {sb_ok}")
             if request_cancelled():
-                self.singbox.stop()
+                yield from self.singbox.stop_steps()
                 break
             if not sb_ok:
                 retryable = getattr(
@@ -1277,19 +1381,19 @@ class AppController(QObject):
                         "[sing-box] self-heal: control plane did not become ready; "
                         "restarting sing-box once"
                     )
-                    sleep_with_events(0.5)
+                    yield sleep_ms(500)
                     continue
                 break
             self._singbox_clash_api_port = plan.clash_api_port
-            if not singbox_start_tag or self._apply_core_outbound_tag(
+            if not singbox_start_tag or (yield from self._apply_core_outbound_tag_steps(
                 "singbox", singbox_start_tag, startup=True
-            ):
+            )):
                 if getattr(plan, "amnezia_sidecar", None) is not None:
                     if not owned_amnezia.verify_front_dns(plan.amnezia_sidecar.config) or request_cancelled():
-                        self.singbox.stop()
+                        yield from self.singbox.stop_steps()
                         break
                 if request_cancelled():
-                    self.singbox.stop()
+                    yield from self.singbox.stop_steps()
                     break
                 self._front_process_generation = _increment_int(
                     getattr(self, "_front_process_generation", 0)
@@ -1300,23 +1404,23 @@ class AppController(QObject):
                 self._active_singbox_plan = plan
                 return True
 
-            self.singbox.stop()
+            yield from self.singbox.stop_steps()
             self._singbox_clash_api_port = 0
-            if start_attempt == 0:
+            if start_attempt == 0 and not request_cancelled():
                 self._log(
                     "[sing-box] self-heal: control plane did not become ready; "
                     "restarting sing-box once"
                 )
-                sleep_with_events(0.5)
+                yield sleep_ms(500)
 
-        if plan.xray_sidecar is not None and self.xray.is_running:
-            self.xray.stop()
+        if plan.xray_sidecar is not None and (self.xray.is_running or _process_alive(self.xray)):
+            yield from self.xray.stop_steps()
         if getattr(plan, "amnezia_sidecar", None) is not None:
-            owned_amnezia.stop()
+            yield from owned_amnezia.stop_steps()
         if plan.hysteria_sidecar is not None:
             target_manager = prepared_hysteria or self.hysteria
-            if target_manager.is_running:
-                target_manager.stop()
+            if target_manager.is_running or _process_alive(target_manager):
+                yield from target_manager.stop_steps()
         self._protect_ss_port = 0
         self._protect_ss_password = ""
         self._singbox_clash_api_port = 0
@@ -1363,26 +1467,28 @@ class AppController(QObject):
                     self._handle_unexpected_disconnect()
             QTimer.singleShot(0, close_owned)
 
-    def _start_amnezia_manager(self, manager, plan: SingboxRuntimePlan) -> bool:
+    def _start_amnezia_manager_steps(self, manager, plan: SingboxRuntimePlan) -> TransitionSteps:
         sidecar = plan.amnezia_sidecar
         if sidecar is None:
             return False
         self._amnezia_target_generation = _increment_int(getattr(self, "_amnezia_target_generation", 0))
         generation = self._transition_generation
-        return manager.start(sidecar.config, sidecar.relay_port, context=sidecar.context,
-                             session_generation=_increment_int(getattr(self, "_session_generation", 0)),
-                             target_generation=self._amnezia_target_generation,
-                             is_current=lambda: self._desired_connected and self._transition_generation == generation)
+        return (yield from manager.start_steps(
+            sidecar.config, sidecar.relay_port, context=sidecar.context,
+            session_generation=_increment_int(getattr(self, "_session_generation", 0)),
+            target_generation=self._amnezia_target_generation,
+            is_current=lambda: self._desired_connected and self._transition_generation == generation,
+        ))
 
-    def _prepare_amnezia_replacement(self, plan: SingboxRuntimePlan):
+    def _prepare_amnezia_replacement_steps(self, plan: SingboxRuntimePlan) -> TransitionSteps:
         candidate = self._new_amnezia_manager()
-        if self._start_amnezia_manager(candidate, plan):
+        if (yield from self._start_amnezia_manager_steps(candidate, plan)):
             return candidate
-        candidate.stop()
+        yield from candidate.stop_steps()
         candidate.deleteLater()
         return None
 
-    def _prepare_hysteria_replacement(self, plan: SingboxRuntimePlan) -> HysteriaManager | None:
+    def _prepare_hysteria_replacement_steps(self, plan: SingboxRuntimePlan) -> TransitionSteps:
         sidecar = plan.hysteria_sidecar
         if sidecar is None:
             return None
@@ -1400,13 +1506,17 @@ class AppController(QObject):
             HysteriaRuntimeState.WAITING_RELAY,
             generation=self._hysteria_contract.session.session_generation,
         )
-        if not replacement.start(
+        request_generation = self._transition_generation
+        if not (yield from replacement.start_steps(
             sidecar.config,
             sidecar.relay_port,
             context=sidecar.context,
             process_generation=generation,
             allow_parallel=True,
-        ):
+            should_continue=lambda: (
+                self._desired_connected and self._transition_generation == request_generation
+            ),
+        )):
             failure = replacement.last_failure_code or HysteriaFailureCode.LOCAL_RELAY_NOT_READY
             self._hysteria_last_failure_code = failure
             self._hysteria_contract.terminal(
@@ -1427,21 +1537,21 @@ class AppController(QObject):
         )
         return replacement
 
-    def _commit_hysteria_replacement(self, replacement: HysteriaManager | None) -> bool:
+    def _commit_hysteria_replacement_steps(self, replacement: HysteriaManager | None) -> TransitionSteps:
         old = self.hysteria
         if replacement is not None:
             self.hysteria = replacement
             self._hysteria_active_generation = replacement.process_generation
         stopped = True
         if old is not replacement and old.is_running:
-            stopped = old.stop(expected=True)
+            stopped = yield from old.stop_steps(expected=True)
         if old is not replacement and stopped:
             old.deleteLater()
         elif old is not replacement:
             old.stopped.connect(old.deleteLater)
         return stopped
 
-    def _rollback_singbox_front(self, plan: SingboxRuntimePlan | None) -> bool:
+    def _rollback_singbox_front_steps(self, plan: SingboxRuntimePlan | None) -> TransitionSteps:
         if plan is None:
             return False
         if plan.hysteria_sidecar is not None and not self.hysteria.is_running:
@@ -1451,12 +1561,12 @@ class AppController(QObject):
         if plan.xray_sidecar is not None and not self.xray.is_running:
             return False
         self._log("[transport-transition] replacement front failed; restoring previous generation")
-        if not self.singbox.start(self.state.settings.singbox_path, plan.singbox_config):
+        if not (yield from self.singbox.start_steps(self.state.settings.singbox_path, plan.singbox_config)):
             return False
         self._singbox_clash_api_port = plan.clash_api_port
         selected = plan.hybrid_relay_selected_tag if plan.is_hybrid else plan.selected_outbound_tag
-        if selected and not self._apply_core_outbound_tag("singbox", selected, startup=True):
-            self.singbox.stop()
+        if selected and not (yield from self._apply_core_outbound_tag_steps("singbox", selected, startup=True)):
+            yield from self.singbox.stop_steps()
             return False
         self._active_singbox_plan = plan
         return True
@@ -1541,7 +1651,7 @@ class AppController(QObject):
             # Fail closed: do not leave the front admitting connections into a
             # transport whose pin/CA/auth/obfs contract was rejected.
             if self.singbox.is_running:
-                self.singbox.stop(expected=True)
+                self.singbox.request_stop(expected=True)
             return
         if (
             code not in AUTOMATIC_SWITCH_FAILURES
@@ -1599,7 +1709,7 @@ class AppController(QObject):
             # Stop admission immediately; otherwise front keeps opening new
             # connections against an already dead loopback relay.
             if self.singbox.is_running:
-                self.singbox.stop(expected=True)
+                self.singbox.request_stop(expected=True)
             self._desired_connected = False
             return
 
@@ -1620,8 +1730,10 @@ class AppController(QObject):
         # Close admission to the failed loopback relay once.  The recovery
         # state fence above keeps the logical old session available to the
         # full-transition planner while no connection-refused storm is created.
-        if self.singbox.is_running and not self.singbox.stop(expected=True):
-            self._log("[hysteria-recovery] failed to close front admission")
+        if self.singbox.is_running:
+            # kill без ожидания: выход процесса придёт сигналом, а переход
+            # дождётся его шагом перед запуском нового front'а.
+            self.singbox.request_stop(expected=True)
 
     def _record_hysteria_switch_commit(self) -> None:
         started = float(getattr(self, "_hysteria_failure_started_at", 0.0))
@@ -1798,7 +1910,43 @@ class AppController(QObject):
         self._active_session = None
         self._core_log_contexts.clear()
 
+    # ── System proxy: WinAPI only in the FIFO proxy thread ──
+
+    def _proxy_steps(self, method: str, *args: Any, **kwargs: Any) -> TransitionSteps:
+        """Await one ProxyManager call in the ordered proxy thread."""
+        call = getattr(self.proxy, method)
+        return (yield run_in_worker(lambda: call(*args, **kwargs), executor=PROXY_EXECUTOR))
+
+    def _proxy_nowait(self, method: str, *args: Any, **kwargs: Any) -> None:
+        """Queue one ProxyManager call without waiting (signal handlers)."""
+        call = getattr(self.proxy, method)
+        future = PROXY_EXECUTOR.submit(call, *args, **kwargs)
+
+        def _report(done) -> None:
+            error = done.exception()
+            if error is None:
+                return
+            try:
+                self._background_log.emit(f"[proxy] {method} failed: {error!r}")
+            except RuntimeError:
+                pass
+
+        future.add_done_callback(_report)
+
+    def _proxy_blocking(self, method: str, *args: Any, timeout: float = 10.0, **kwargs: Any) -> Any:
+        """Shutdown only: run after everything already queued, and wait."""
+        future = PROXY_EXECUTOR.submit(getattr(self.proxy, method), *args, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — shutdown must continue
+            self._log(f"[proxy] {method} failed during shutdown: {exc!r}")
+            return None
+
     def _apply_proxy_runtime_change(self) -> bool:
+        """Синхронный драйвер (тесты). Переходы — ``_apply_proxy_runtime_change_steps``."""
+        return bool(run_steps_blocking(self._apply_proxy_runtime_change_steps()))
+
+    def _apply_proxy_runtime_change_steps(self) -> TransitionSteps:
         settings = self.state.settings
         bypass_lan = self._system_proxy_bypass_lan()
         if self._active_session is not None:
@@ -1808,13 +1956,14 @@ class AppController(QObject):
             socks_port, http_port = self.get_effective_proxy_ports()
         try:
             if settings.enable_system_proxy:
-                self.proxy.enable(
+                yield from self._proxy_steps(
+                    "enable",
                     http_port,
                     socks_port,
                     bypass_lan=bypass_lan,
                 )
             else:
-                self.proxy.disable(restore_previous=True)
+                yield from self._proxy_steps("disable", restore_previous=True)
         except Exception as exc:
             self._set_connection_status(
                 "error",
@@ -1932,22 +2081,98 @@ class AppController(QObject):
     def _transition_status_text(self, action: str) -> str:
         return transition_status_text(action)
 
-    def _request_transition(self, reason: str) -> None:
-        self._blocked_transition_signature = ""
+    def _request_transition(self, reason: str, *, keep_blocked: bool = False) -> None:
+        """Единственный вход в координатор переходов.
+
+        Запрос только фиксирует желаемое состояние и новое поколение. Если
+        переход уже идёт, он сам увидит устаревшее поколение на ближайшем
+        шаге и завершится; подготовка (DNS/Zapret) и новый переход начнутся
+        после него (``_kick_transition``). Никаких вложенных остановок из
+        обработчиков кликов: все клики сливаются в последнее состояние.
+        """
+        if not keep_blocked:
+            self._blocked_transition_signature = ""
         self._transition_pending = True
         self._transition_reason = reason
         self._transition_generation += 1
-        generation = self._transition_generation
         self._proxy_protection_wait_generation = 0
         self._proxy_protection_wait_token = 0
-        if self._desired_connected and self._prepare_proxy_protection(generation):
-            if self._transition_timer.isActive():
-                self._transition_timer.stop()
-            self._transition_scheduled = False
-            return
         if self._transition_active:
             return
-        self._schedule_transition_drain(transition_request_delay_ms(reason))
+        self._kick_transition(transition_request_delay_ms(reason))
+
+    def _kick_transition(self, delay_ms: int = 0) -> None:
+        """Run the selected-server preparation once per generation, then drain."""
+        generation = self._transition_generation
+        if self._desired_connected and self._protection_prepared_generation != generation:
+            self._protection_prepared_generation = generation
+            if self._prepare_proxy_protection(generation):
+                if self._transition_timer.isActive():
+                    self._transition_timer.stop()
+                self._transition_scheduled = False
+                return
+        self._schedule_transition_drain(delay_ms)
+
+    def _run_prestop(
+        self,
+        generation: int,
+        on_stopped: Callable[[], None],
+        *,
+        failure_message: str | None,
+        disable_proxy: bool = False,
+    ) -> None:
+        """Stop the data plane as a coordinator-owned step transition.
+
+        Used where the selected-server preparation must stop the old tunnel
+        before DNS/winws2 changes. The stop runs through TransitionRunner
+        (``_transition_active`` holds the queue), never synchronously inside a
+        click or signal handler.
+        """
+        self._transition_active = True
+        self._proxy_protection_wait_generation = generation
+        runner = TransitionRunner(
+            self._disconnect_current_steps(disable_proxy=disable_proxy, emit_status=False),
+            on_finished=lambda finished: self._on_prestop_finished(
+                finished, generation, on_stopped, failure_message
+            ),
+            parent=self,
+        )
+        self._transition_runner = runner
+        runner.start()
+
+    def _on_prestop_finished(
+        self,
+        runner: TransitionRunner,
+        generation: int,
+        on_stopped: Callable[[], None],
+        failure_message: str | None,
+    ) -> None:
+        if self._transition_runner is runner:
+            self._transition_runner = None
+        runner.deleteLater()
+        self._transition_active = False
+        if runner.cancelled:
+            return
+        if runner.error is not None:
+            self._log(f"[transition] pre-stop failed with error: {runner.error!r}")
+        stopped = bool(runner.result) and runner.error is None
+        if generation != self._transition_generation:
+            # A newer request arrived while stopping: prepare for it instead.
+            self._kick_transition(0)
+            return
+        self._proxy_protection_wait_generation = 0
+        if not stopped and failure_message is not None:
+            self._cancel_target_transition(failure_message)
+            return
+        self._desired_connected = True
+        on_stopped()
+
+    def _request_stop(self, reason: str, *, quiet: bool) -> None:
+        """Queue a coordinated disconnect (desired state is already False)."""
+        self._desired_connected = False
+        if quiet:
+            self._quiet_disconnect = True
+        self._request_transition(reason, keep_blocked=True)
 
     def _prepare_proxy_protection(self, generation: int) -> bool:
         """Resolve and activate the selected-server profile before core start.
@@ -1987,47 +2212,51 @@ class AppController(QObject):
             worker.start()
             return True
         requires_zapret = self.zapret.target_requires_zapret(node)
+
+        def start_resolution() -> bool:
+            if requires_zapret and not self.state.settings.zapret_preset:
+                fallback = self.zapret.default_preset()
+                if not fallback:
+                    self._cancel_target_transition(
+                        "Для обхода выбранного сервера сначала выберите пресет Zapret"
+                    )
+                    return True
+                self._logger.info("Zapret preset not chosen, falling back to %r", fallback)
+                self.state.settings.zapret_preset = fallback
+                self.schedule_save()
+                self.transition_state_changed.emit(
+                    True, f"Zapret: пресет по умолчанию «{fallback}»"
+                )
+
+            worker = TargetProfileResolver(
+                generation,
+                spec,
+                self.zapret.resolve_target,
+                parent=self,
+            )
+            self._proxy_protection_workers[generation] = worker
+            self._proxy_protection_wait_generation = generation
+            self._proxy_protection_wait_token = 0
+            worker.resolved.connect(self._on_proxy_protection_resolved)
+            worker.finished.connect(
+                lambda generation=generation, worker=worker: self._forget_proxy_protection_worker(generation, worker)
+            )
+            self.transition_state_changed.emit(True, "DNS выбранного VPN-сервера...")
+            worker.start()
+            return True
+
         if self.connected and not self.zapret.target_profile_is_ready(node):
             # A server/strategy change must stop the old data plane before DNS
             # and before winws2 can be rebuilt.  This also disables core-owned
             # retry loops while the new endpoint is not protected yet.
             self.transition_state_changed.emit(True, "Остановка VPN перед DNS...")
-            if not self.disconnect_current(disable_proxy=False, emit_status=False):
-                self._cancel_target_transition(
-                    "Не удалось остановить VPN перед обновлением профиля Zapret"
-                )
-                return True
-            self._desired_connected = True
-        if requires_zapret and not self.state.settings.zapret_preset:
-            fallback = self.zapret.default_preset()
-            if not fallback:
-                self._cancel_target_transition(
-                    "Для обхода выбранного сервера сначала выберите пресет Zapret"
-                )
-                return True
-            self._logger.info("Zapret preset not chosen, falling back to %r", fallback)
-            self.state.settings.zapret_preset = fallback
-            self.schedule_save()
-            self.transition_state_changed.emit(
-                True, f"Zapret: пресет по умолчанию «{fallback}»"
+            self._run_prestop(
+                generation,
+                start_resolution,
+                failure_message="Не удалось остановить VPN перед обновлением профиля Zapret",
             )
-
-        worker = TargetProfileResolver(
-            generation,
-            spec,
-            self.zapret.resolve_target,
-            parent=self,
-        )
-        self._proxy_protection_workers[generation] = worker
-        self._proxy_protection_wait_generation = generation
-        self._proxy_protection_wait_token = 0
-        worker.resolved.connect(self._on_proxy_protection_resolved)
-        worker.finished.connect(
-            lambda generation=generation, worker=worker: self._forget_proxy_protection_worker(generation, worker)
-        )
-        self.transition_state_changed.emit(True, "DNS выбранного VPN-сервера...")
-        worker.start()
-        return True
+            return True
+        return start_resolution()
 
     def _active_config_uses_selected_node(self, node: Node | None) -> bool:
         """Avoid targeting a node ignored by the active raw JSON document."""
@@ -2035,12 +2264,11 @@ class AppController(QObject):
             return False
         try:
             if self.is_singbox_editor_mode():
-                plan = (
-                    self._plan_runtime_singbox(node)
-                    if self.state.settings.tun_mode
-                    else self._plan_proxy_runtime_singbox(node)
-                )
-                return bool(plan.used_selected_node)
+                facts = self._singbox_plan_facts(node, tun=bool(self.state.settings.tun_mode))
+                if facts is None:
+                    # The normal planner will show its specific error later.
+                    return True
+                return facts.used_selected_node
             if self.uses_xray_raw_config():
                 runtime = self._build_runtime_xray_config(
                     node,
@@ -2154,9 +2382,24 @@ class AppController(QObject):
                 )
             else:
                 # Stop data-plane retries before winws2 loses the old profile.
+                # The stop is a coordinator step transition; the profile is
+                # applied only after it finished and only if still current.
                 self.transition_state_changed.emit(True, "Остановка VPN перед Zapret...")
-                self.disconnect_current(disable_proxy=False, emit_status=False)
-                self._desired_connected = True
+                self._run_prestop(
+                    generation,
+                    lambda: self._apply_resolved_protection(generation, runtime_node, resolved, requires_zapret),
+                    failure_message=None,
+                )
+                return
+        self._apply_resolved_protection(generation, runtime_node, resolved, requires_zapret)
+
+    def _apply_resolved_protection(
+        self,
+        generation: int,
+        runtime_node: Node | None,
+        resolved: object,
+        requires_zapret: bool,
+    ) -> None:
         if not self.zapret.apply_resolved_target(runtime_node, resolved):
             self._cancel_target_transition("Не удалось подготовить стратегию выбранного сервера")
             return
@@ -2220,8 +2463,8 @@ class AppController(QObject):
             self.status.emit("warning", "Не удалось подтвердить UDP-защиту; переход отменён")
             self.transition_state_changed.emit(False, "")
             return
-        if self.connected:
-            self.disconnect_current(disable_proxy=True, emit_status=False)
+        if self.connected or self._has_residual_processes():
+            self._request_stop("zapret profile failed", quiet=True)
         self._log(f"[zapret] точечный профиль не подтверждён: {reason}; подключение отменено")
         self._set_connection_status(
             "error",
@@ -2263,10 +2506,10 @@ class AppController(QObject):
         if not self.connected or not self.zapret.target_requires_zapret(self.selected_node):
             return
         self._log("[zapret] процесс остановлен во время защищённой VPN-сессии")
+        # Fail closed through the coordinator: the current transition (if
+        # any) is superseded, the queued disconnect stops every process.
         self._desired_connected = False
-        self._transition_pending = False
-        self._transition_generation += 1
-        self.disconnect_current(disable_proxy=True, emit_status=False)
+        self._request_stop("zapret stopped", quiet=True)
         self._set_connection_status(
             "error",
             "VPN остановлен: Zapret больше не защищает выбранный сервер",
@@ -2347,42 +2590,58 @@ class AppController(QObject):
         if self._proxy_protection_wait_generation == self._transition_generation:
             return
 
-        if not self._transition_pending and not self._needs_transition():
-            self.transition_state_changed.emit(False, "")
-            return
+        if self._cleanup_pending or self._has_residual_processes():
+            # Процессы недостартовавшего/прерванного перехода гасятся отдельным
+            # шагом до любого нового действия; следующий drain решит, что дальше.
+            self._cleanup_pending = False
+            action, reason = "cleanup", "cleanup"
+        else:
+            if not self._transition_pending and not self._needs_transition():
+                self.transition_state_changed.emit(False, "")
+                return
 
-        action = self._compute_transition_action()
-        if action is None:
+            action = self._compute_transition_action()
+            if action is None:
+                self._transition_pending = False
+                self.transition_state_changed.emit(False, "")
+                return
+
             self._transition_pending = False
-            self.transition_state_changed.emit(False, "")
-            return
-
-        self._transition_pending = False
-        reason = self._transition_reason or action
+            reason = self._transition_reason or action
         self._transition_active = True
         self.transition_state_changed.emit(True, self._transition_status_text(action))
-        # Переход выполняется генератором через TransitionRunner: блокирующие шаги
-        # (ожидание QProcess, subprocess-вызовы, паузы) не держат GUI-поток, а на
-        # каждом резюме проверяется _transition_generation — устаревший переход
-        # (пришёл новый запрос) закрывается, его оставшиеся шаги не выполняются.
+        # Переход выполняется генератором через TransitionRunner: ожидания
+        # процессов — сигналы QProcess, блокирующий I/O — воркеры, паузы —
+        # таймеры; GUI-поток между шагами свободен. Устаревание поколения
+        # генераторы проверяют сами после каждого шага и сами прибирают
+        # недостартовавшее (явные ветки отмены), поэтому раннер их не закрывает.
         generation = self._transition_generation
         runner = TransitionRunner(
             self._transition_action_steps(action, reason),
-            is_current=lambda: self._transition_generation == generation,
-            on_finished=self._on_transition_runner_finished,
+            on_finished=lambda finished, generation=generation, action=action: (
+                self._on_transition_runner_finished(finished, generation, action)
+            ),
             parent=self,
         )
         self._transition_runner = runner
         runner.start()
 
-    def _on_transition_runner_finished(self, runner: TransitionRunner) -> None:
+    def _on_transition_runner_finished(
+        self,
+        runner: TransitionRunner,
+        generation: int | None = None,
+        action: str = "",
+    ) -> None:
         if self._transition_runner is runner:
             self._transition_runner = None
         runner.deleteLater()
+        superseded = runner.cancelled or (
+            generation is not None and generation != self._transition_generation
+        )
         try:
-            if not runner.cancelled:
-                if runner.error is not None:
-                    self._log(f"[transition] failed with error: {runner.error!r}")
+            if runner.error is not None:
+                self._log(f"[transition] failed with error: {runner.error!r}")
+            if action != "cleanup" and not superseded:
                 ok = bool(runner.result) and runner.error is None
                 if ok:
                     self._blocked_transition_signature = ""
@@ -2391,73 +2650,97 @@ class AppController(QObject):
                         self._runtime_selected_node()
                     )
                     self._desired_connected = self.connected
-            else:
-                # Отменённый переход не трогает blocked-сигнатуру и desired_connected
-                # (актуальное действие пересчитает следующий drain), но обязан
+            elif superseded and not runner.cancelled:
+                # Устаревший переход не блокирует сигнатуру и не трогает
+                # desired_connected (их задаёт последний запрос), но обязан
                 # оставить связку процессов консистентной.
                 self._reconcile_cancelled_transition()
+            if (
+                not runner.cancelled
+                and not self.connected
+                and not getattr(self, "_hysteria_recovery_active", False)
+                and self._has_residual_processes()
+            ):
+                self._cleanup_pending = True
         finally:
             self._transition_active = False
-            if not runner.cancelled and self._pending_transport_node_id:
+            if not superseded and self._pending_transport_node_id:
                 self._clear_pending_transport_selection()
                 self._hysteria_recovery_active = False
-            if self._transition_pending or self._needs_transition():
-                self._schedule_transition_drain(0)
+            if runner.cancelled:
+                pass
+            elif self._transition_pending or self._cleanup_pending or self._needs_transition():
+                self._kick_transition(0)
             else:
                 self.transition_state_changed.emit(False, "")
 
-    def _reconcile_cancelled_transition(self) -> None:
-        """Привести процессы к консистентному виду после отменённого перехода.
+    def _has_residual_processes(self) -> bool:
+        """Processes alive without a connected session (aborted transition)."""
+        if self.connected:
+            return False
+        for manager in (self.singbox, self.xray, self.hysteria, getattr(self, "amnezia", None)):
+            if manager is None:
+                continue
+            if manager.is_running is True or _process_alive(manager):
+                return True
+        return False
 
-        Отмена по generation может остановить hot-swap между шагами: например
-        транспорт уже остановлен, а sing-box ещё жив (connected=False).
-        Тогда очередь не вычислит disconnect (connected=False), и без уборки
-        остался бы частично работающий runtime. Такая связка гасится,
-        сессия очищается; следующий drain пересчитает актуальное действие
-        (connect при desired_connected=True даёт полный переезд на новую ноду).
+    def _reconcile_cancelled_transition(self) -> None:
+        """Привести состояние к консистентному виду после устаревшего перехода.
+
+        Устаревший переход мог остановиться между шагами: например транспорт
+        уже остановлен, а sing-box ещё жив (connected=False). Сессия без
+        живого соединения очищается сразу; остановку оставшихся процессов
+        выполнит отдельный шаг ``cleanup`` в очереди (не синхронно здесь).
         """
         if self.connected:
             return
-        any_running = (
-            self.xray.is_running
-            or self.singbox.is_running
-            or self.hysteria.is_running
-            or self.amnezia.is_running
-        )
-        if any_running:
-            self._log("[transition] cancelled mid-swap — stopping partial connection processes")
-            self._stop_active_connection_processes(disable_proxy=not self._desired_connected)
+        if self._has_residual_processes():
+            self._log("[transition] superseded mid-swap — partial connection processes will be stopped")
+            self._cleanup_pending = True
         if self._active_session is not None:
             self._clear_active_session()
             if not self._desired_connected:
                 self._set_connection_status("idle", "Отключено", level="info")
 
+    def _cleanup_residual_steps(self) -> TransitionSteps:
+        self._log("[transition] stopping partial connection processes")
+        stopped = yield from self._stop_active_connection_processes_steps(
+            disable_proxy=not self._desired_connected
+        )
+        self._refresh_connected_state()
+        if not self.connected and self._active_session is not None:
+            self._clear_active_session()
+            if not self._desired_connected:
+                self._set_connection_status("idle", "Отключено", level="info")
+        return stopped
+
     def _transition_action_steps(self, action: str, reason: str) -> TransitionSteps:
         """Generator executed by TransitionRunner for one transition action.
 
-        Горячие пути (tun_hot_swap, proxy_hot_swap) полностью генераторные.
-        Холодные пути (connect/disconnect/reconnect/proxy_update) пока выполняются
-        синхронно одним шагом: полная миграция connect-цепочки (sing-box, zapret,
-        TUN-роуты) отложена как слишком рискованная за один заход (частичный AC22).
+        Все действия генераторные: ожидания процессов, control-plane, пробы,
+        системный прокси и паузы — шаги; GUI-поток не блокируется и не
+        прокачивает события вложенно.
         """
+        if action == "cleanup":
+            return (yield from self._cleanup_residual_steps())
+        if action == "disconnect":
+            quiet = bool(getattr(self, "_quiet_disconnect", False))
+            self._quiet_disconnect = False
+            return (yield from self._disconnect_current_steps(disable_proxy=True, emit_status=not quiet))
+        if action == "connect":
+            return (yield from self._connect_selected_steps())
+        if action == "proxy_update":
+            return (yield from self._apply_proxy_runtime_change_steps())
         if action == "tun_hot_swap":
             return (yield from self._hot_swap_node_steps(reason))
         if action == "proxy_hot_swap":
             return (yield from self._restart_proxy_core_steps(reason))
-        return self._run_transition_action(action, reason)
+        return (yield from self._reconnect_steps(reason))
 
     def _run_transition_action(self, action: str, reason: str) -> bool:
-        if action == "disconnect":
-            return self.disconnect_current()
-        if action == "connect":
-            return self.connect_selected()
-        if action == "proxy_update":
-            return self._apply_proxy_runtime_change()
-        if action == "proxy_hot_swap":
-            return self._restart_proxy_core(reason)
-        if action == "tun_hot_swap":
-            return self._hot_swap_node(reason)
-        return self._reconnect(reason)
+        """Синхронный драйвер действия (тесты)."""
+        return bool(run_steps_blocking(self._transition_action_steps(action, reason)))
 
     # ── Country detection helpers ──
 
@@ -3027,47 +3310,6 @@ class AppController(QObject):
         self._xray_outbound_pool_cache = None
         self._xray_outbound_pool_cache_key = None
 
-    def _apply_core_outbound_tag(
-        self,
-        core: str,
-        outbound_tag: str,
-        *,
-        startup: bool = False,
-    ) -> bool:
-        if core == "singbox":
-            selector = (
-                select_singbox_outbound_when_ready if startup else select_singbox_outbound
-            )
-            kwargs = {"wait": sleep_with_events} if startup else {}
-            ok, output = selector(
-                self._singbox_clash_api_port,
-                SINGBOX_SELECTOR_TAG,
-                outbound_tag,
-                **kwargs,
-            )
-        else:
-            xray_path = getattr(self.xray, "_exe_path", None) or self.state.settings.xray_path
-            ok, output = apply_balancer_override(
-                xray_path,
-                self._xray_api_port,
-                XRAY_BALANCER_TAG,
-                outbound_tag,
-            )
-        if not ok:
-            self._log(f"[core-switch] {core} control plane rejected {outbound_tag}: {output}")
-        return ok
-
-    def _pin_started_outbound(
-        self,
-        node: Node | None,
-        core: str,
-        tags: dict[str, str] | None,
-    ) -> bool:
-        if node is None or not tags:
-            return True
-        tag = tags.get(node.id, "")
-        return bool(tag) and self._apply_core_outbound_tag(core, tag)
-
     def _hot_switch_precheck(self) -> HotSwitchPlan | None:
         """Чистые (in-memory) проверки применимости горячего свитча (A3).
 
@@ -3078,6 +3320,11 @@ class AppController(QObject):
 
         node = self.selected_node
         session = self._active_session
+        if getattr(self, "_transition_active", False) is True:
+            # Полный переход уже идёт: запрос сливается в очередь переходов,
+            # а не выполняет control-plane параллельно с ним.
+            self._log("[core-switch] transition in progress; request queued")
+            return None
         if node is None:
             self._log("[core-switch] fallback: selected node is missing")
             return None
@@ -3209,13 +3456,30 @@ class AppController(QObject):
         if runner is not None:
             runner.cancel()
 
-    def _apply_core_outbound_tag_steps(self, core: str, outbound_tag: str) -> TransitionSteps:
+    def _apply_core_outbound_tag_steps(
+        self,
+        core: str,
+        outbound_tag: str,
+        *,
+        startup: bool = False,
+    ) -> TransitionSteps:
         """Control-plane вызов на воркере (AC5); лог — в GUI-потоке; без pump (AC6).
 
         Параметры (порты, путь к xray) снимаются в GUI-потоке, воркеру уходит
-        чистый callable без обращения к состоянию контроллера.
+        чистый callable без обращения к состоянию контроллера. ``startup`` —
+        холодный старт sing-box: Clash API ещё может не слушать, попытки
+        повторяются до дедлайна, пауза между ними — таймер, не GUI-поток.
         """
 
+        if core == "singbox" and startup:
+            ok, output = yield from select_singbox_outbound_when_ready_steps(
+                self._singbox_clash_api_port,
+                SINGBOX_SELECTOR_TAG,
+                outbound_tag,
+            )
+            if not ok:
+                self._log(f"[core-switch] {core} control plane rejected {outbound_tag}: {output}")
+            return bool(ok)
         if core == "singbox":
             api_port = self._singbox_clash_api_port
             call = lambda: select_singbox_outbound(api_port, SINGBOX_SELECTOR_TAG, outbound_tag)  # noqa: E731
@@ -3454,24 +3718,41 @@ class AppController(QObject):
         )
 
     def _stop_active_connection_processes(self, *, disable_proxy: bool) -> bool:
+        """Синхронный драйвер — только shutdown."""
         return stop_active_connection_processes_operation(self, disable_proxy=disable_proxy)
 
+    def _stop_active_connection_processes_steps(self, *, disable_proxy: bool) -> TransitionSteps:
+        return (yield from stop_active_connection_processes_steps_operation(self, disable_proxy=disable_proxy))
+
     def _handle_unexpected_disconnect(self) -> None:
+        """Из обработчиков сигналов: fail-closed без ожидания в GUI-потоке."""
         handle_unexpected_disconnect_operation(self)
 
+    def _handle_unexpected_disconnect_steps(self) -> TransitionSteps:
+        """Внутри перехода: остановка процессов шагами."""
+        return (yield from handle_unexpected_disconnect_steps_operation(self))
+
     def connect_selected(self, allow_during_reconnect: bool = False) -> bool:
+        """Синхронный драйвер (тесты). Переходы — через координатор."""
         return connect_selected_operation(self, allow_during_reconnect=allow_during_reconnect)
 
+    def _connect_selected_steps(self, allow_during_reconnect: bool = False) -> TransitionSteps:
+        return (yield from connect_selected_steps_operation(self, allow_during_reconnect=allow_during_reconnect))
+
     def disconnect_current(self, disable_proxy: bool = True, emit_status: bool = True) -> bool:
+        """Синхронный драйвер: shutdown и обновление ядра Xray. Клики — через координатор."""
         return disconnect_current_operation(self, disable_proxy=disable_proxy, emit_status=emit_status)
+
+    def _disconnect_current_steps(self, disable_proxy: bool = True, emit_status: bool = True) -> TransitionSteps:
+        return (yield from disconnect_current_steps_operation(
+            self, disable_proxy=disable_proxy, emit_status=emit_status,
+        ))
 
     def _restart_proxy_core(self, reason: str) -> bool:
         return restart_singbox_proxy_runtime_operation(self, reason)
 
     def _restart_proxy_core_steps(self, reason: str) -> TransitionSteps:
-        """Keep the transition runner interface for the single front runtime."""
-        yield from ()
-        return restart_singbox_proxy_runtime_operation(self, reason)
+        return (yield from restart_singbox_proxy_runtime_steps_operation(self, reason))
 
     def _restart_singbox_runtime(self, reason: str) -> bool:
         return restart_singbox_runtime_operation(self, reason)
@@ -3634,7 +3915,7 @@ class AppController(QObject):
         self.locked = True
         self.lock_state_changed.emit(True)
         self._desired_connected = False
-        self.disconnect_current()
+        self._request_transition("locked")
 
     def build_diagnostics(self) -> Path:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3886,7 +4167,6 @@ class AppController(QObject):
 
     def _hot_swap_node_steps(self, reason: str) -> TransitionSteps:
         """Handle node switch while TUN is active."""
-        yield from ()
         session = self._active_session
         if session is None:
             self._auto_switch_transitioning = False
@@ -3897,12 +4177,15 @@ class AppController(QObject):
         self._protect_ss_password = session.protect_ss_password
 
         try:
-            return self._restart_singbox_runtime(reason)
+            return (yield from restart_singbox_runtime_steps_operation(self, reason))
         finally:
             self._auto_switch_transitioning = False
 
     def _reconnect(self, reason: str) -> bool:
         return reconnect_operation(self, reason)
+
+    def _reconnect_steps(self, reason: str) -> TransitionSteps:
+        return (yield from reconnect_steps_operation(self, reason))
 
     def export_backup(self, path: Path, passphrase: str = "") -> None:
         self.storage.export_backup(path, passphrase)

@@ -4,6 +4,7 @@ import ctypes
 import json
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 try:
@@ -15,6 +16,13 @@ from ...constants import PROXY_HOST, RUNTIME_DIR
 
 
 logger = logging.getLogger(__name__)
+
+#: Записи системного прокси (реестр, RasEnumEntriesW, InternetSetOptionW,
+#: широковещательные SETTINGS_CHANGED/REFRESH) блокируют на сотни мс, поэтому
+#: из GUI-потока не выполняются. Один поток даёт строгий FIFO: enable/disable
+#: применяются ровно в порядке запросов, резервная копия не гоняется сама с
+#: собой. Перед финальным восстановлением при выходе очередь дренируется.
+PROXY_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xray_fluent_proxy")
 
 INTERNET_OPTION_REFRESH = 37
 INTERNET_OPTION_SETTINGS_CHANGED = 39

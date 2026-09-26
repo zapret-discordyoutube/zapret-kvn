@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT, HYSTERIA_PATH_DEFAULT
@@ -10,6 +11,15 @@ from ..importer.link_parser import hysteria2_uri_fingerprint
 if TYPE_CHECKING:
     from .controller import AppController
     from ..profiles.models import AppSettings, Node, RoutingSettings
+
+
+@dataclass(frozen=True, slots=True)
+class SingboxPlanFacts:
+    """The plan fields a signature/preflight needs (never the ports)."""
+
+    selector_tags: dict[str, str]
+    provider_payload: object
+    used_selected_node: bool
 
 
 def signature(payload: object) -> str:
@@ -65,18 +75,35 @@ def _singbox_runtime_signature_payload(
         pool = controller.xray_outbound_pool()
         selector_pool = {"xray_sidecar": pool.signature_payload()}
     if has_proxy_outbound and node is not None and planner_outcome == "native_singbox":
-        try:
-            plan = (
-                controller._plan_runtime_singbox(node)
-                if controller.is_singbox_tun_mode(settings)
-                else controller._plan_proxy_runtime_singbox(node)
+        tun = bool(controller.is_singbox_tun_mode(settings))
+        facts_getter = getattr(controller, "_singbox_plan_facts", None)
+        if callable(facts_getter):
+            # Полный план (сборка outbound'ов всего пула, пробы портов) нужен
+            # сигнатуре только ради тегов селектора и провайдера — они
+            # кэшируются по документу, ноде и составу пула.
+            facts = facts_getter(node, tun=tun)
+        else:
+            try:
+                plan = (
+                    controller._plan_runtime_singbox(node)
+                    if tun
+                    else controller._plan_proxy_runtime_singbox(node)
+                )
+            except ValueError:
+                plan = None
+            facts = (
+                SingboxPlanFacts(
+                    selector_tags=dict(plan.selector_tags or {}),
+                    provider_payload=plan.provider_payload,
+                    used_selected_node=bool(plan.used_selected_node),
+                )
+                if plan is not None
+                else None
             )
-        except ValueError:
-            plan = None
-        if plan is not None and plan.selector_tags and node.id in plan.selector_tags:
+        if facts is not None and facts.selector_tags and node.id in facts.selector_tags:
             selector_pool = {
-                "tags": [[node_id, tag] for node_id, tag in sorted(plan.selector_tags.items())],
-                "provider": plan.provider_payload,
+                "tags": [[node_id, tag] for node_id, tag in sorted(facts.selector_tags.items())],
+                "provider": facts.provider_payload,
             }
     payload: dict[str, object] = {
         "mode": "singbox-tun" if controller.is_singbox_tun_mode(settings) else "singbox-proxy",
