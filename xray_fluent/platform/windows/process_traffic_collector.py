@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...constants import SINGBOX_CLASH_API_PORT
+from ...diagnostics.proxy_demand import is_proxied_chain
 
 # Processes to hide (internal, not user traffic)
 _HIDDEN_PROCESSES = {"xray.exe", "sing-box.exe", "tun2socks.exe"}
@@ -103,11 +104,12 @@ def collect_process_stats(clash_api_port: int = SINGBOX_CLASH_API_PORT) -> list[
         entry["conns"] += 1
 
         # Route + per-route bytes
+        # Clash API отдаёт цепочку от листа к корню: у гибрида и пула первым
+        # идёт тег узла (``__app_hybrid_relay_a``), а ``proxy`` — последним.
         chains = conn.get("chains") or []
         is_proxy = False
         if chains:
-            chain = chains[0].lower()
-            if "proxy" in chain:
+            if is_proxied_chain(chains):
                 entry["routes"].add("proxy")
                 entry["proxy_bytes"] += conn_total
                 is_proxy = True

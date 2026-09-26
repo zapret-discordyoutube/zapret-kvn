@@ -33,8 +33,12 @@ def own_process_names() -> frozenset[str]:
     return frozenset(names | _CORE_PROCESSES)
 
 
-def _is_proxied_chain(chains: Any) -> bool:
-    """Та же классификация, что у колонки «маршрут» (process_traffic_collector)."""
+def is_proxied_chain(chains: Any) -> bool:
+    """Прошло ли соединение через outbound ``proxy`` — по всей цепочке Clash API.
+
+    Общая классификация для спроса на туннель и колонки «маршрут»
+    (``process_traffic_collector``).
+    """
 
     if not isinstance(chains, list):
         return False
@@ -63,7 +67,7 @@ def clash_proxy_demand(
     for conn in connections or ():
         if not isinstance(conn, dict):
             continue
-        if not _is_proxied_chain(conn.get("chains")):
+        if not is_proxied_chain(conn.get("chains")):
             continue
         meta = conn.get("metadata") if isinstance(conn.get("metadata"), dict) else {}
         # ntpath понимает и «\\», и «/»: путь процесса приходит в Windows-формате.

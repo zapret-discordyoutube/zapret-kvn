@@ -59,5 +59,20 @@ class BoundedCollectorTests(unittest.TestCase):
         self.assertEqual(collector._conn_total["app.exe"], 200 * 20)
 
 
+    def test_route_follows_whole_leaf_first_chain(self) -> None:
+        # Форма цепочек снята с живого sing-box TUN (гибрид с xray-сайдкаром):
+        # Clash API идёт от листа к корню, поэтому ``proxy`` стоит последним.
+        tunneled = _conn("a", "curl.exe", 10, 600)
+        tunneled["chains"] = ["__app_hybrid_relay_a", "proxy"]
+        direct = _conn("b", "yandexmusic.exe", 5, 50)
+        direct["chains"] = ["direct"]
+        stats = _poll([tunneled, direct])
+        self.assertEqual(stats["curl.exe"].route, "proxy")
+        self.assertEqual(stats["curl.exe"].proxy_bytes, 610)
+        self.assertEqual(stats["curl.exe"].direct_bytes, 0)
+        self.assertEqual(stats["yandexmusic.exe"].route, "direct")
+        self.assertEqual(stats["yandexmusic.exe"].direct_bytes, 55)
+
+
 if __name__ == "__main__":
     unittest.main()
