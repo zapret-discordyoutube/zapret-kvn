@@ -612,15 +612,23 @@ class ModeTileIntentTest(unittest.TestCase):
         self.page.set_active_tun_mode(None)
         self.page.set_connection(False)
         self._assert_shows(True, applying=True)
-        # Промежуточное «не занято» (подготовка Zapret) при живой старой сессии.
-        self.page.set_active_tun_mode(False)
-        self.page.set_transition_busy(False)
-        self._assert_shows(True, applying=True)
         # TUN-сессия поднялась — обычная подпись.
         self.page.set_active_tun_mode(True)
         self.page.set_connection(True)
         self._assert_shows(True, applying=False)
         self.assertEqual(self.page.vpn_tile.title_label.text(), "VPN (TUN)")
+        self.page.set_transition_busy(False)
+        self._assert_shows(True, applying=False)
+
+    def test_abandoned_transition_shows_the_running_session(self) -> None:
+        self.page.vpn_tile.clicked.emit()
+        self.page.set_transition_busy(True)
+        self._assert_shows(True, applying=True)
+        # Переход отменён до остановки старой сессии (например, DNS сервера
+        # для Zapret не определился): «занято» снято, работает прокси.
+        self.page.set_active_tun_mode(False)
+        self.page.set_transition_busy(False)
+        self._assert_shows(False, applying=False)
 
     def test_intent_times_out_to_the_running_session(self) -> None:
         self.page.vpn_tile.clicked.emit()

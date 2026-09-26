@@ -763,6 +763,11 @@ class DashboardPage(StackedSection):
         self._refresh_dashboard()
 
     def set_transition_busy(self, busy: bool) -> None:
+        if self._transition_busy and not busy:
+            # Координатор снимает «занято» только в конце: переход выполнен,
+            # отменён или не удался. Ждать больше нечего — дальше показываем
+            # факт (режим сессии), а не выбор с «…» до таймаута.
+            self._tun_intent.clear()
         self._transition_busy = busy
         self._sync_switches()
         self._refresh_dashboard()
