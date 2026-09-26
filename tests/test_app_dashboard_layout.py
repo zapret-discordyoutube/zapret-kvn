@@ -209,5 +209,40 @@ class DashboardEffectivePortsWiringTest(unittest.TestCase):
         dashboard.set_proxy_ports.assert_called_once_with(0, 0)
         controller.get_effective_proxy_ports.assert_not_called()
 
+
+class DashboardDensityTests(unittest.TestCase):
+    """Графика панели плавно следует окну, текст — только две плотности."""
+
+    def test_hero_scales_smoothly_within_bounds(self) -> None:
+        from xray_fluent.ui.dashboard_page import hero_sizes
+
+        sizes = [hero_sizes(h) for h in range(300, 1600, 50)]
+        orbs = [orb for orb, _pad, _graph in sizes]
+        self.assertEqual(orbs, sorted(orbs))  # монотонно растёт с окном
+        self.assertGreaterEqual(min(orbs), 96)
+        self.assertLessEqual(max(orbs), 156)
+        mid = hero_sizes(700)[0]
+        self.assertTrue(96 < mid < 156)  # между пределами — плавно, не ступенькой
+
+    def test_page_applies_sizes_and_keeps_orb_inside_scene(self) -> None:
+        from xray_fluent.ui.dashboard_page import DashboardPage, hero_sizes
+
+        page = DashboardPage()
+        for height in (480, 700, 1100):
+            page._apply_hero_size(height)
+            orb, padding, graph = hero_sizes(height)
+            self.assertEqual(page.connection_orb.width(), orb)
+            self.assertEqual(page.connection_scene.height(), orb + padding)
+            self.assertEqual(page.traffic_graph.height(), graph)
+        page._apply_density(True)
+        page._apply_density(False)
+        # Страницу не удаляем: пакетный deleteLater страниц на Windows падает
+        # (см. память ui-theme-architecture) — держим до конца процесса.
+        _KEEP_ALIVE.append(page)
+
+
+_KEEP_ALIVE: list = []
+
+
 if __name__ == "__main__":
     unittest.main()

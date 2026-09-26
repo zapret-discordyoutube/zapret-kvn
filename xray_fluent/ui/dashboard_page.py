@@ -23,7 +23,7 @@ from collections import deque
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -35,7 +35,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets.common.font import getFont
 from qfluentwidgets import (
+    ToolButton,
     BodyLabel,
     CaptionLabel,
     CardWidget,
@@ -55,7 +57,7 @@ from qfluentwidgets import (
 from ..diagnostics.connection_message import connection_message
 from ..profiles.models import AppSettings, Node, RoutingSettings
 from ..platform.windows.proxy_manager import SystemProxyState
-from .base_page import ScrollablePage
+from .base_page import BODY_MARGINS, ScrollablePage
 from .connection_orb import CONNECTED, CONNECTING, ERROR, IDLE
 from .dashboard_widgets import ConnectionScene, FlagBadge, ModeTile, ProcessBars, SignalBars, StatTile, latency_color
 from .detail_page import DetailPage, StackedSection
@@ -65,6 +67,23 @@ from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 
 #: Ширина области прокрутки, ниже которой карточки встают в одну колонку.
 NARROW_WIDTH = 900
+# Компактная плотность: маленький экран или ноутбук с масштабом 125–150 %.
+COMPACT_HEIGHT = 780
+COMPACT_WIDTH = 980
+# Графика тянется под окно плавно: доля высоты области просмотра с пределами.
+# Текст и кнопки не масштабируются (читаемость и масштаб Windows важнее) —
+# у них только две плотности.
+_ORB_SHARE, _ORB_MIN, _ORB_MAX = 0.18, 96, 156
+_GRAPH_SHARE, _GRAPH_MIN, _GRAPH_MAX = 0.16, 64, 170
+_TITLE_PX = {True: 20, False: 24}
+
+
+def hero_sizes(viewport_height: int) -> tuple[int, int, int]:
+    """(диаметр сферы, поле сцены, высота графика) для высоты области просмотра."""
+    orb = int(max(_ORB_MIN, min(_ORB_MAX, viewport_height * _ORB_SHARE)))
+    padding = int(18 + (orb - _ORB_MIN) * 0.3)
+    graph = int(max(_GRAPH_MIN, min(_GRAPH_MAX, viewport_height * _GRAPH_SHARE)))
+    return orb, padding, graph
 
 
 def _format_speed(value_bps: float) -> str:
@@ -153,6 +172,7 @@ class DashboardPage(StackedSection):
         self._last_process_stats: list | None = None
         self._connected_since: float | None = None
         self._grid_narrow = False
+        self._compact: bool | None = None
         self._in_grid_relayout = False
         self._title_state = IDLE
 
@@ -216,11 +236,12 @@ class DashboardPage(StackedSection):
         card = CardWidget(container)
         self.connection_card = card
         layout = QVBoxLayout(card)
+        self._connection_layout = layout
         layout.setContentsMargins(16, 8, 16, 14)
         layout.setSpacing(4)
 
         # Сцена туннеля; сфера в её центре — кнопка питания.
-        self.connection_scene = ConnectionScene(card, orb_diameter=164)
+        self.connection_scene = ConnectionScene(card, orb_diameter=_ORB_MAX)
         self.connection_orb = self.connection_scene.orb
         self.connection_orb.clicked.connect(self._on_orb_clicked)
         layout.addWidget(self.connection_scene)
@@ -294,6 +315,18 @@ class DashboardPage(StackedSection):
         self.servers_btn = PushButton(FIF.MENU, "Все серверы", self.server_row)
         self.servers_btn.clicked.connect(self.servers_requested)
         row.addWidget(self.servers_btn)
+        # На узком окне вместо кнопок с подписью — отдельные кнопки-значки:
+        # у PushButton без текста значок смещён и обрезается.
+        self.next_server_icon_btn = ToolButton(FIF.SYNC, self.server_row)
+        self.next_server_icon_btn.setToolTip("Следующий сервер")
+        self.next_server_icon_btn.clicked.connect(self.next_node_requested)
+        self.next_server_icon_btn.hide()
+        row.addWidget(self.next_server_icon_btn)
+        self.servers_icon_btn = ToolButton(FIF.MENU, self.server_row)
+        self.servers_icon_btn.setToolTip("Все серверы")
+        self.servers_icon_btn.clicked.connect(self.servers_requested)
+        self.servers_icon_btn.hide()
+        row.addWidget(self.servers_icon_btn)
         layout.addWidget(self.server_row)
 
     def _build_mode_card(self, container: QWidget) -> None:
@@ -521,15 +554,50 @@ class DashboardPage(StackedSection):
         for column in range(4):
             self._stats_grid.setColumnStretch(column, 1 if column < columns else 0)
 
+    def _apply_hero_size(self, viewport_height: int) -> None:
+        """Сфера, сцена и график плавно следуют высоте окна."""
+        orb, padding, graph = hero_sizes(viewport_height)
+        if abs(orb - self.connection_orb.width()) >= 2:
+            self.connection_scene.set_orb_diameter(orb, padding)
+        if abs(graph - self.traffic_graph.maximumHeight()) >= 2:
+            self.traffic_graph.setFixedHeight(graph)
+
+    def _apply_density(self, compact: bool) -> None:
+        """Размеры под экран: на маленьком всё меньше, чтобы главное влезало.
+
+        Меняются только размеры и поля существующих виджетов.
+        """
+        self.connection_state_label.setFont(getFont(_TITLE_PX[compact], QFont.Weight.DemiBold))
+        self._connection_layout.setContentsMargins(*((12, 4, 12, 10) if compact else (16, 8, 16, 14)))
+        self.toggle_btn.setMinimumWidth(180 if compact else 220)
+        self.server_flag.set_diameter(32 if compact else 40)
+        for tile in (self.vpn_tile, self.proxy_tile):
+            tile.set_compact(compact)
+        body = self._main_page.body_layout
+        body.setContentsMargins(*((16, 12, 16, 12) if compact else BODY_MARGINS))
+        body.setSpacing(8 if compact else 12)
+
     def _update_adaptive_grid(self) -> None:
         """На узком окне (< 900 px) карточки встают в одну колонку.
 
         «Маршрутизация» уходит во вторую строку под «Приложения», плитки
         трафика — в сетку 2×2. Виджеты только переставляются, не пересоздаются.
+        На маленьком экране (``COMPACT_*``) панель ещё и уменьшается.
         """
         if self._in_grid_relayout:
             return
-        narrow = self._main_page.scroll_area.viewport().width() < NARROW_WIDTH
+        viewport = self._main_page.scroll_area.viewport()
+        self._apply_hero_size(viewport.height())
+        compact = viewport.height() < COMPACT_HEIGHT or viewport.width() < COMPACT_WIDTH
+        if compact != self._compact:
+            self._compact = compact
+            self._apply_density(compact)
+        narrow = viewport.width() < NARROW_WIDTH
+        # На узком окне кнопки сервера — только значки (с подсказками).
+        self.next_server_btn.setVisible(not narrow)
+        self.servers_btn.setVisible(not narrow)
+        self.next_server_icon_btn.setVisible(narrow)
+        self.servers_icon_btn.setVisible(narrow)
         if narrow == self._grid_narrow:
             return
         self._in_grid_relayout = True
@@ -1135,6 +1203,7 @@ class DashboardPage(StackedSection):
         self.vpn_tile.setEnabled(not busy)
         self.proxy_tile.setEnabled(not busy)
         self.next_server_btn.setEnabled(self._node_count > 1 and not busy)
+        self.next_server_icon_btn.setEnabled(self._node_count > 1 and not busy)
         self.mode_combo.setVisible(self._is_tun2socks_mode())
         self.mode_combo.setEnabled(not busy and self._is_tun2socks_mode())
         self.proxy_switch.setEnabled(not busy and not self._settings.tun_mode)

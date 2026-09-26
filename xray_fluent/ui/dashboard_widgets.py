@@ -235,7 +235,7 @@ class ConnectionScene(QWidget):
 
     def __init__(self, parent: QWidget | None = None, *, orb_diameter: int = 168):
         super().__init__(parent)
-        self.setMinimumHeight(orb_diameter + 36)
+        self.setFixedHeight(orb_diameter + 36)
         self.setMinimumWidth(320)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.orb = ConnectionOrb(self, diameter=orb_diameter)
@@ -353,9 +353,19 @@ class ConnectionScene(QWidget):
         orb = self.orb.geometry().adjusted(10, 10, -10, -10)
         return region.subtracted(QRegion(orb, QRegion.RegionType.Ellipse))
 
+    def set_orb_diameter(self, diameter: int, padding: int = 36) -> None:
+        """Высота сцены идёт за сферой: на маленьком экране сцена ниже."""
+        self.orb.set_diameter(diameter)
+        self.setFixedHeight(diameter + padding)
+        self._center_orb()
+        self._invalidate()
+
+    def _center_orb(self) -> None:
+        self.orb.move(int((self.width() - self.orb.width()) / 2), int((self.height() - self.orb.height()) / 2))
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self.orb.move(int((self.width() - self.orb.width()) / 2), int((self.height() - self.orb.height()) / 2))
+        self._center_orb()
         self._invalidate()
 
     def changeEvent(self, event) -> None:
@@ -598,7 +608,8 @@ class ConnectionScene(QWidget):
                 continue
             radius = base + local * self.width() * 0.32
             painter.setPen(QPen(_with_alpha(positive_color(), 200 * (1 - local)), width))
-            painter.drawEllipse(center, radius, radius * 0.62)
+            # По вертикали волна не выходит за сцену — на низкой сцене её не обрезает.
+            painter.drawEllipse(center, radius, min(radius * 0.62, self.height() / 2 - 2))
 
 
 # ── Плитка режима ─────────────────────────────────────────────────────
@@ -620,6 +631,7 @@ class ModeTile(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setAccessibleName(title)
         layout = QHBoxLayout(self)
+        self._layout = layout
         layout.setContentsMargins(16 + 44 + 12, 12, 14, 12)
         text = QVBoxLayout()
         text.setSpacing(2)
@@ -637,6 +649,12 @@ class ModeTile(QWidget):
 
     def _repaint(self, *_args) -> None:
         self.update()
+
+    def set_compact(self, compact: bool) -> None:
+        """Ниже плитка и поля на маленьком экране; глиф 44 px по-прежнему влезает."""
+        vertical = 6 if compact else 12
+        self._layout.setContentsMargins(16 + 44 + 12, vertical, 14, vertical)
+        self.setMinimumHeight(58 if compact else 76)
 
     def isChecked(self) -> bool:
         return self._checked
@@ -755,6 +773,11 @@ class FlagBadge(QWidget):
         self._country = ""
         self.setFixedSize(diameter, diameter)
         on_theme_or_accent_changed(self._repaint)
+
+    def set_diameter(self, diameter: int) -> None:
+        if diameter != self.width():
+            self.setFixedSize(diameter, diameter)
+            self.update()
 
     def _repaint(self, *_args) -> None:
         self.update()

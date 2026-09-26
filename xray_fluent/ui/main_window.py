@@ -1796,7 +1796,9 @@ class MainWindow(FluentWindow):
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
         self._save_geometry(persist=False)
-        if self._geometry_persistence_ready:
+        # resizeEvent приходит ещё из конструктора FluentWindow — до того, как
+        # __init__ успел создать флаг.
+        if getattr(self, "_geometry_persistence_ready", False):
             self._sync_nav_to_preference()
 
     def closeEvent(self, e: QCloseEvent) -> None:

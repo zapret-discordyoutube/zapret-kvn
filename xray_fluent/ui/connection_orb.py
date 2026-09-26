@@ -57,6 +57,12 @@ class ConnectionOrb(QWidget):
         self._frames.frame.connect(self.update)
         on_theme_or_accent_changed(self._on_theme_changed)
 
+    def set_diameter(self, diameter: int) -> None:
+        """Размер сферы под плотность панели (маленький экран — меньше)."""
+        if (diameter, diameter) != (self.width(), self.height()):
+            self.setFixedSize(diameter, diameter)
+            self.update()
+
     # ── Состояние ──────────────────────────────────────────
 
     def state(self) -> str:
