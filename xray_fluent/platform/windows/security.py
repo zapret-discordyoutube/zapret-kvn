@@ -131,12 +131,25 @@ def _derive_fernet_key(passphrase: str, salt: bytes) -> bytes:
     return base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
 
 
-def encrypt_with_passphrase(data: bytes, passphrase: str) -> str:
-    salt = os.urandom(16)
-    key = _derive_fernet_key(passphrase, salt)
+def derive_passphrase_key(passphrase: str, salt: bytes) -> bytes:
+    """Дорогой шаг (PBKDF2, 480k итераций) — вызывать один раз и кэшировать."""
+    return _derive_fernet_key(passphrase, salt)
+
+
+def encrypt_with_derived_key(data: bytes, key: bytes, salt: bytes) -> str:
+    """Тот же формат, что у ``encrypt_with_passphrase``, но с готовым ключом.
+
+    Fernet сам берёт случайный IV на каждое шифрование, поэтому повторное
+    использование пары (salt, key) в пределах сессии безопасно.
+    """
     token = Fernet(key).encrypt(data)
     salt_b64 = base64.b64encode(salt).decode("ascii")
     return f"{ENCRYPTED_PREFIX}:{salt_b64}:{token.decode('ascii')}"
+
+
+def encrypt_with_passphrase(data: bytes, passphrase: str) -> str:
+    salt = os.urandom(16)
+    return encrypt_with_derived_key(data, derive_passphrase_key(passphrase, salt), salt)
 
 
 def decrypt_with_passphrase(encrypted: str, passphrase: str) -> bytes:

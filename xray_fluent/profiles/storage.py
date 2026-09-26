@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 from ..constants import (
@@ -21,6 +23,8 @@ from .path_utils import normalize_configured_path
 from ..platform.windows.security import (
     decode_encrypted,
     decrypt_with_passphrase,
+    derive_passphrase_key,
+    encrypt_with_derived_key,
     encrypt_with_passphrase,
     is_passphrase_encrypted,
 )
@@ -34,6 +38,11 @@ class StateStorage:
     def __init__(self, state_file: Path = STATE_FILE):
         self.state_file = state_file
         self._passphrase: str = ""
+        # (passphrase, salt, key): PBKDF2 считается один раз за сессию, а не
+        # на каждое сохранение. Пишет только поток записи, но save() может
+        # позвать и GUI-поток — отсюда замок.
+        self._key_cache: tuple[str, bytes, bytes] | None = None
+        self._key_lock = threading.Lock()
         self._ensure_dirs()
 
     @property
@@ -135,18 +144,33 @@ class StateStorage:
 
         return payload
 
-    def save(self, state: AppState) -> None:
-        self._ensure_dirs()
-        payload = self._serialize_state(state)
+    def serialize_state(self, state: AppState) -> str:
+        """Снимок состояния в текст. Дёшево (~мс), делается в GUI-потоке,
+        поэтому поток записи никогда не читает живые объекты состояния."""
+        return self._serialize_state(state)
 
-        if self._passphrase:
-            content = encrypt_with_passphrase(payload.encode("utf-8"), self._passphrase)
+    def write_serialized(self, payload: str, passphrase: str) -> None:
+        """Зашифровать (если задан пароль) и атомарно записать снимок."""
+        self._ensure_dirs()
+        if passphrase:
+            content = encrypt_with_derived_key(payload.encode("utf-8"), *self._session_key(passphrase))
         else:
             content = payload
-
         tmp_file = self.state_file.with_suffix(".tmp")
         tmp_file.write_text(content, encoding="utf-8")
         tmp_file.replace(self.state_file)
+
+    def _session_key(self, passphrase: str) -> tuple[bytes, bytes]:
+        with self._key_lock:
+            cached = self._key_cache
+            if cached is None or cached[0] != passphrase:
+                salt = os.urandom(16)
+                cached = (passphrase, salt, derive_passphrase_key(passphrase, salt))
+                self._key_cache = cached
+            return cached[2], cached[1]
+
+    def save(self, state: AppState) -> None:
+        self.write_serialized(self.serialize_state(state), self._passphrase)
         self._known_encrypted = bool(self._passphrase)
 
     def export_backup(self, path: Path, passphrase: str = "") -> None:

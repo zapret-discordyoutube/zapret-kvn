@@ -1684,7 +1684,7 @@ class MainWindow(FluentWindow):
         if app is not None:
             app.quit()
 
-    def _save_geometry(self) -> None:
+    def _save_geometry(self, *, persist: bool = True) -> None:
         controller = getattr(self, "controller", None)
         if controller is None or self._restoring_geometry or not self._geometry_persistence_ready:
             return
@@ -1696,16 +1696,18 @@ class MainWindow(FluentWindow):
         s.window_y = geo.y()
         s.window_width = geo.width()
         s.window_height = geo.height()
-        if self._geometry_persistence_ready:
+        if persist and self._geometry_persistence_ready:
             controller.schedule_save()
 
+    # Перетаскивание/ресайз только запоминают геометрию: на диск она уходит
+    # при сворачивании в трей, выходе или любом другом сохранении.
     def moveEvent(self, e) -> None:
         super().moveEvent(e)
-        self._save_geometry()
+        self._save_geometry(persist=False)
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
-        self._save_geometry()
+        self._save_geometry(persist=False)
 
     def closeEvent(self, e: QCloseEvent) -> None:
         if self._quitting:

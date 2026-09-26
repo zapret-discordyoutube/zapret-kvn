@@ -158,7 +158,7 @@ from .outbound_pool_service import (
 from ..profiles.country_flags import CountryResolver
 from ..network.background_workers import (
     ProxyProtectionResolver,
-    StateSaveWorker,
+    StateWriter,
     SubscriptionUpdateWorker,
     TargetProfileResolver,
 )
@@ -236,7 +236,7 @@ from ..diagnostics.runtime_logging import (
 from ..profiles.storage import PassphraseRequired, StateStorage
 from ..platform.windows.startup import build_startup_command, set_startup_enabled
 from ..platform.windows.subprocess_utils import result_output_text, run_text, sleep_with_events
-from ..diagnostics.traffic_history import TrafficHistoryStorage
+from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistoryStorage
 from .zapret_prewarm_service import start_proxy_dns_prewarm
 from ..engines.zapret.manager import ZapretManager
 from ..engines.zapret.target import ZapretEndpointSpec
@@ -368,7 +368,6 @@ class AppController(QObject):
         self._connectivity_worker: ConnectivityTestWorker | None = None
         self._metrics_worker: LiveMetricsWorker | None = None
         self._xray_update_worker: XrayCoreUpdateWorker | None = None
-        self._state_save_worker: StateSaveWorker | None = None
         self._subscription_workers: dict[str, SubscriptionUpdateWorker] = {}
         self._subscription_update_queue: list[
             tuple[Subscription, str, bool, bool, bool]
@@ -480,6 +479,11 @@ class AppController(QObject):
         self._save_timer.setInterval(250)
         self._save_timer.timeout.connect(self._flush_scheduled_save)
         self._save_pending = False
+        self._state_writer = StateWriter(self.storage, parent=self)
+        self._state_writer.failed.connect(lambda message: self._log(f"[storage] background save failed: {message}"))
+        self._traffic_writer = StateWriter(TrafficHistoryFileSink(), parent=self)
+        self._traffic_writer.failed.connect(lambda message: self._log(f"[traffic] background save failed: {message}"))
+        self._traffic_history.set_writer(self._traffic_writer)
         self._transition_timer = QTimer(self)
         self._transition_timer.setSingleShot(True)
         self._transition_timer.timeout.connect(self._drain_transition_queue)
@@ -503,6 +507,7 @@ class AppController(QObject):
         try:
             self.state = state if state is not None else self.storage.load()
             self._traffic_history = history if history is not None else TrafficHistoryStorage()
+            self._traffic_history.set_writer(self._traffic_writer)
         except PassphraseRequired:
             self.passphrase_required.emit()
             return False
@@ -542,40 +547,33 @@ class AppController(QObject):
         return self.storage.is_encrypted()
 
     def save(self) -> None:
+        """Сохранить состояние без блокировки GUI-потока.
+
+        Здесь только снимок в текст (единицы мс даже на тысячах серверов);
+        шифрование и запись делает ``StateWriter`` в своём потоке.
+        """
         if self._save_timer.isActive():
             self._save_timer.stop()
         self._save_pending = False
-        worker = self._state_save_worker
-        if worker is not None and worker.isRunning():
-            worker.wait(5000)
-        if self._state_save_worker is worker:
-            self._state_save_worker = None
-            if worker is not None:
-                worker.deleteLater()
-        self.storage.save(self.state)
+        passphrase = self.storage.passphrase
+        self._state_writer.submit(self.storage.serialize_state(self.state), passphrase)
+        self.storage._known_encrypted = bool(passphrase)
+
+    def save_blocking(self) -> None:
+        """Сохранить и дождаться записи — только при выходе из приложения."""
+        self.save()
+        if not self._state_writer.close():
+            self._log("[storage] state write did not finish before exit")
+        if not self._traffic_writer.close():
+            self._log("[traffic] history write did not finish before exit")
 
     def schedule_save(self) -> None:
         self._save_pending = True
         self._save_timer.start()
 
     def _flush_scheduled_save(self) -> None:
-        if not self._save_pending:
-            return
-        if self._state_save_worker is not None and self._state_save_worker.isRunning():
-            return
-        self._save_pending = False
-        worker = StateSaveWorker(self.storage, deepcopy(self.state), parent=self)
-        self._state_save_worker = worker
-        worker.failed.connect(lambda message: self._log(f"[storage] background save failed: {message}"))
-        worker.finished.connect(lambda worker=worker: self._on_scheduled_save_finished(worker))
-        worker.start()
-
-    def _on_scheduled_save_finished(self, worker: StateSaveWorker) -> None:
-        if self._state_save_worker is worker:
-            self._state_save_worker = None
-        worker.deleteLater()
-        if self._save_pending and not self._save_timer.isActive():
-            QTimer.singleShot(0, self._flush_scheduled_save)
+        if self._save_pending:
+            self.save()
 
     @staticmethod
     def _signature(payload: object) -> str:

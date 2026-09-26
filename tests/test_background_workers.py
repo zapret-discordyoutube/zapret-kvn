@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 from unittest.mock import Mock
 
-from xray_fluent.network.background_workers import ProxyProtectionResolver, StateSaveWorker
+from PyQt6.QtCore import Qt
+
+from xray_fluent.network.background_workers import ProxyProtectionResolver, StateWriter
 
 
 class BackgroundWorkerTests(unittest.TestCase):
@@ -34,15 +38,45 @@ class BackgroundWorkerTests(unittest.TestCase):
 
         self.assertEqual(events, [(8, "proxy.example.com", set(), error)])
 
-    def test_state_save_worker_delegates_write_off_the_caller(self) -> None:
+    def test_state_writer_writes_off_the_caller_thread(self) -> None:
+        caller = threading.get_ident()
+        writes = []
         storage = Mock()
-        state = object()
-        worker = StateSaveWorker(storage, state)
+        storage.write_serialized.side_effect = lambda payload, pw: writes.append((payload, pw, threading.get_ident()))
+        writer = StateWriter(storage)
+        writer.submit("{}", "pw")
+        self.assertTrue(writer.close())
+        self.assertEqual([(p, pw) for p, pw, _ in writes], [("{}", "pw")])
+        self.assertNotEqual(writes[0][2], caller)
 
-        worker.run()
+    def test_state_writer_coalesces_to_latest_snapshot(self) -> None:
+        gate = threading.Event()
+        writes = []
 
-        storage.save.assert_called_once_with(state)
+        def slow_write(payload, pw):
+            gate.wait(2)
+            writes.append(payload)
 
+        storage = Mock()
+        storage.write_serialized.side_effect = slow_write
+        writer = StateWriter(storage)
+        writer.submit("first", "")
+        time.sleep(0.05)  # писатель занят первым снимком
+        for payload in ("second", "third", "latest"):
+            writer.submit(payload, "")
+        gate.set()
+        self.assertTrue(writer.close())
+        self.assertEqual(writes, ["first", "latest"])
+
+    def test_state_writer_reports_failures(self) -> None:
+        storage = Mock()
+        storage.write_serialized.side_effect = OSError("disk full")
+        writer = StateWriter(storage)
+        errors = []
+        writer.failed.connect(errors.append, Qt.ConnectionType.DirectConnection)
+        writer.submit("{}", "")
+        self.assertTrue(writer.close())
+        self.assertEqual(errors, ["disk full"])
 
 if __name__ == "__main__":
     unittest.main()

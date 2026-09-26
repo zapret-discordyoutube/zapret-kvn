@@ -281,4 +281,4 @@ def shutdown(controller: AppController) -> None:
     controller._cleanup_tun_adapter()
     controller.network_monitor.stop()
     controller._lock_timer.stop()
-    controller.save()
+    controller.save_blocking()

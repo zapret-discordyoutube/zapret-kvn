@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from ..importer.subscription_http import fetch_subscription
 from ..importer.subscription_parser import parse_subscription_payload
@@ -61,21 +62,63 @@ class TargetProfileResolver(QThread):
         self.resolved.emit(self._generation, self._spec, endpoint, error)
 
 
-class StateSaveWorker(QThread):
-    """Serialize, encrypt and write a large state away from the GUI thread."""
+class StateWriter(QObject):
+    """Единственный поток записи состояния на диск; побеждает последний снимок.
+
+    GUI-поток отдаёт готовый текст (``StateStorage.serialize_state``) и сразу
+    возвращается; шифрование и запись идут здесь. Промежуточные снимки,
+    пришедшие во время записи, схлопываются в последний.
+    """
 
     failed = pyqtSignal(str)
 
-    def __init__(self, storage: StateStorage, state: AppState, parent=None) -> None:
+    def __init__(self, storage: StateStorage, parent=None) -> None:
         super().__init__(parent)
         self._storage = storage
-        self._state = state
+        self._cond = threading.Condition()
+        self._pending: tuple[str, str] | None = None
+        self._busy = False
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, name="state-writer", daemon=True)
+        self._thread.start()
 
-    def run(self) -> None:
-        try:
-            self._storage.save(self._state)
-        except Exception as exc:
-            self.failed.emit(str(exc))
+    def submit(self, payload: str, passphrase: str) -> None:
+        with self._cond:
+            if self._closed:
+                return
+            self._pending = (payload, passphrase)
+            self._cond.notify_all()
+
+    def flush(self, timeout: float = 15.0) -> bool:
+        """Дождаться записи всего отданного. Только для выхода из приложения."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self._pending is None and not self._busy, timeout)
+
+    def close(self, timeout: float = 15.0) -> bool:
+        done = self.flush(timeout)
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+        self._thread.join(timeout=1.0)
+        return done
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self._pending is not None or self._closed)
+                if self._pending is None:
+                    return
+                payload, passphrase = self._pending
+                self._pending = None
+                self._busy = True
+            try:
+                self._storage.write_serialized(payload, passphrase)
+            except Exception as exc:
+                self.failed.emit(str(exc))
+            finally:
+                with self._cond:
+                    self._busy = False
+                    self._cond.notify_all()
 
 
 class SubscriptionUpdateWorker(QThread):

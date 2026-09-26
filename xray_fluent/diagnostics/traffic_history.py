@@ -73,13 +73,35 @@ class TrafficSession:
         )
 
 
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+class TrafficHistoryFileSink:
+    """Приёмник для ``StateWriter``: атомарно пишет готовый текст истории."""
+
+    def write_serialized(self, payload: str, _passphrase: str) -> None:
+        TRAFFIC_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file = TRAFFIC_HISTORY_FILE.with_suffix(".tmp")
+        tmp_file.write_text(payload, encoding="utf-8")
+        tmp_file.replace(TRAFFIC_HISTORY_FILE)
+
+
 class TrafficHistoryStorage:
     def __init__(self, *, load: bool = True) -> None:
         self._sessions: list[TrafficSession] = []
         self._daily_totals: dict[str, dict[str, int]] = {}  # {"2026-03-24": {"upload": N, "download": N}}
         self._current_session: TrafficSession | None = None
+        # Закрытые сессии больше не меняются — их JSON считается один раз.
+        self._frozen_json: dict[str, str] = {}
+        # Фоновый писатель (``StateWriter``); без него запись синхронная
+        # (загрузка на старте идёт в рабочем потоке, тесты).
+        self._writer = None
         if load:
             self._load()
+
+    def set_writer(self, writer) -> None:
+        self._writer = writer
 
     def _load(self) -> None:
         if not TRAFFIC_HISTORY_FILE.exists():
@@ -123,13 +145,28 @@ class TrafficHistoryStorage:
         if changed:
             self._save()
 
+    def serialize(self) -> str:
+        """Текст файла истории. Заново кодируется только открытая сессия."""
+        frozen: dict[str, str] = {}
+        parts: list[str] = []
+        for session in self._sessions:
+            if session.ended_at is None:
+                parts.append(_compact_json(session.to_dict()))
+                continue
+            text = self._frozen_json.get(session.id)
+            if text is None:
+                text = _compact_json(session.to_dict())
+            frozen[session.id] = text
+            parts.append(text)
+        self._frozen_json = frozen
+        return '{"sessions":[' + ",".join(parts) + '],"daily_totals":' + _compact_json(self._daily_totals) + "}"
+
     def _save(self) -> None:
-        TRAFFIC_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "sessions": [s.to_dict() for s in self._sessions],
-            "daily_totals": self._daily_totals,
-        }
-        TRAFFIC_HISTORY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = self.serialize()
+        if self._writer is not None:
+            self._writer.submit(payload, "")
+        else:
+            TrafficHistoryFileSink().write_serialized(payload, "")
 
     def start_session(self, node_name: str, mode: str) -> str:
         if self._current_session is not None:
