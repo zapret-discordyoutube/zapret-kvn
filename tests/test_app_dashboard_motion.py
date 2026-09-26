@@ -474,5 +474,38 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(sip.isdeleted(orphan_menu))
 
 
+
+class TunnelLoadScaleTest(unittest.TestCase):
+    """Огоньки следуют реальной скорости до 1 Гбит/с; полоса меняется только под нагрузкой."""
+
+    def test_level_scale_distinguishes_high_speeds(self) -> None:
+        from xray_fluent.ui.dashboard_widgets import ConnectionScene
+
+        level = ConnectionScene._traffic_level
+        mbit = 125_000.0
+        points = [level(v) for v in (1_000.0, 1_000_000.0, 50 * mbit, 100 * mbit, 500 * mbit, 1000 * mbit)]
+        self.assertEqual(points, sorted(points))
+        self.assertAlmostEqual(level(1000 * mbit), 1.0, places=3)
+        self.assertEqual(level(5000 * mbit), 1.0)  # потолок — 1 Гбит/с
+        self.assertGreater(level(500 * mbit) - level(50 * mbit), 0.2)  # 500 и 50 Мбит заметно различаются
+        self.assertEqual(level(0), 0.0)
+
+    def test_background_traffic_does_not_thicken_the_tunnel(self) -> None:
+        from xray_fluent.ui.dashboard_widgets import ConnectionScene
+
+        scene = ConnectionScene()
+        try:
+            for bps, expect_load in ((20_000.0, False), (1_000_000.0, False), (60_000_000.0, True)):
+                scene._level = ConnectionScene._traffic_level(bps)
+                self.assertEqual(scene.load_level() > 0.05, expect_load, bps)
+            scene._level = 1.0
+            self.assertEqual(scene.load_level(), 1.0)
+        finally:
+            _KEEP_SCENES.append(scene)
+
+
+_KEEP_SCENES: list = []
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -72,9 +72,26 @@ _PULSE_PERIOD_S = 1.5
 _PATH_SAMPLES = 160
 # Подключено, но трафика нет дольше этого — сцена замирает (покой = без кадров).
 _QUIET_BPS = 1024.0
+# Шкала трафика: смесь логарифма (слабый трафик тоже заметен огоньками) и
+# корня (на больших скоростях видна разница); 1.0 — 1 Гбит/с.
+_LEVEL_CAP_BPS = 125_000_000.0
+_LEVEL_LOG_FLOOR = 2.0  # 100 Б/с
+# Толщина и цвет полосы меняются только под реальной нагрузкой: фон (до
+# ~1 МБ/с) полосу не трогает.
+_LOAD_VISIBLE_FROM = 0.38
 _QUIET_AFTER_S = 4.0
 # (направление, число частиц, фазовый сдвиг): вниз — от сервера к ПК.
 _LANES = (("down", 7, 0.0), ("up", 5, 0.37))
+
+
+def _mix(a: QColor, b: QColor, t: float) -> QColor:
+    """Линейная смесь двух цветов, ``t`` в [0, 1]."""
+    t = max(0.0, min(1.0, t))
+    return QColor(
+        round(a.red() + (b.red() - a.red()) * t),
+        round(a.green() + (b.green() - a.green()) * t),
+        round(a.blue() + (b.blue() - a.blue()) * t),
+    )
 
 
 def _with_alpha(color: QColor, alpha: int) -> QColor:
@@ -330,7 +347,7 @@ class ConnectionScene(QWidget):
         target = self._traffic_level(max(self._down_bps, self._up_bps))
         self._level += (target - self._level) * min(1.0, dt * 2.5)
         for lane, bps in (("down", self._down_bps), ("up", self._up_bps)):
-            speed = 0.07 + 0.38 * max(self._level * 0.35, self._traffic_level(bps))
+            speed = 0.07 + 0.55 * max(self._level * 0.35, self._traffic_level(bps))
             self._phase[lane] = (self._phase[lane] + dt * speed) % 1.0
         if self._burst_started is not None and not self._burst_active():
             self._burst_started = None
@@ -340,8 +357,17 @@ class ConnectionScene(QWidget):
 
     @staticmethod
     def _traffic_level(bps: float) -> float:
-        # 0 при простое, 1 примерно на 12 МБ/с.
-        return max(0.0, min(1.0, math.log10(1.0 + bps) / 7.1))
+        """0 при простое, 1 на 1 Гбит/с (см. ``_LEVEL_CAP_BPS``)."""
+        if bps <= 0:
+            return 0.0
+        span = math.log10(_LEVEL_CAP_BPS) - _LEVEL_LOG_FLOOR
+        log_part = (math.log10(1.0 + bps) - _LEVEL_LOG_FLOOR) / span
+        root_part = math.sqrt(bps / _LEVEL_CAP_BPS)
+        return max(0.0, min(1.0, 0.5 * max(0.0, log_part) + 0.5 * root_part))
+
+    def load_level(self) -> float:
+        """Насколько «нагружена» полоса туннеля: 0 — фон/простой, 1 — канал под завязку."""
+        return max(0.0, min(1.0, (self._level - _LOAD_VISIBLE_FROM) / (1.0 - _LOAD_VISIBLE_FROM)))
 
     def _dirty_region(self) -> QRegion:
         if self._burst_active() or not self._samples:
@@ -472,10 +498,7 @@ class ConnectionScene(QWidget):
         path = self._tunnel_path()
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if self._state == CONNECTED:
-            painter.setPen(QPen(_with_alpha(color, 34), 12, cap=Qt.PenCapStyle.RoundCap))
-            painter.drawPath(path)
-            painter.setPen(QPen(_with_alpha(color, 150), 2.4, cap=Qt.PenCapStyle.RoundCap))
-            painter.drawPath(path)
+            pass  # полоса зависит от нагрузки — рисуется в _paint_tunnel_flow каждый кадр
         elif self._state == ERROR:
             self._paint_broken_tunnel(painter, path, color)
         else:
@@ -536,6 +559,8 @@ class ConnectionScene(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.drawImage(0, 0, self._ensure_cache())
+        if self._state == CONNECTED:
+            self._paint_tunnel_flow(painter)
         if self._frames.is_running() or self._burst_active():
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             if self._state == CONNECTED:
@@ -546,6 +571,33 @@ class ConnectionScene(QWidget):
             if self._burst_active():
                 self._paint_burst(painter)
         painter.end()
+
+    def _paint_tunnel_flow(self, painter: QPainter) -> None:
+        """Полоса туннеля: толще и «горячее» только под реальной нагрузкой.
+
+        Спокойно — акцент, как раньше; под нагрузкой полоса утолщается,
+        светлеет до почти белой и получает широкий ореол.
+        """
+        load = self.load_level()
+        base = positive_color()
+        hot = QColor(base).lighter(150)
+        white = QColor(255, 255, 255)
+        if load < 0.6:
+            core = _mix(base, hot, load / 0.6)
+        else:
+            core = _mix(hot, white, (load - 0.6) / 0.4 * 0.7)
+        path = self._tunnel_path()
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(_with_alpha(base, 34 + 70 * load), 12 + 18 * load, cap=Qt.PenCapStyle.RoundCap))
+        painter.drawPath(path)
+        if load > 0.05:
+            painter.setPen(QPen(_with_alpha(hot, 60 * load), 6 + 8 * load, cap=Qt.PenCapStyle.RoundCap))
+            painter.drawPath(path)
+        painter.setPen(QPen(_with_alpha(core, 150 + 100 * load), 2.4 + 4.6 * load, cap=Qt.PenCapStyle.RoundCap))
+        painter.drawPath(path)
+        painter.restore()
 
     def _sample(self, t: float) -> QPointF:
         index = max(0, min(len(self._samples) - 1, round(t * (len(self._samples) - 1))))
@@ -569,10 +621,11 @@ class ConnectionScene(QWidget):
                 fade = min(1.0, t * 8, (1.0 - t) * 8)
                 dy = -3.2 if lane == "down" else 3.2
                 point = QPointF(point.x(), point.y() + dy)
+                grow = 1.0 + 0.6 * self.load_level()
                 painter.setBrush(_with_alpha(color, 60 * fade))
-                painter.drawEllipse(point, 5.5, 5.5)
+                painter.drawEllipse(point, 5.5 * grow, 5.5 * grow)
                 painter.setBrush(_with_alpha(color, 235 * fade))
-                painter.drawEllipse(point, 2.3, 2.3)
+                painter.drawEllipse(point, 2.3 * grow, 2.3 * grow)
 
     def _paint_server_pulse(self, painter: QPainter) -> None:
         _left, right = self._endpoints()
