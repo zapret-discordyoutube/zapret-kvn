@@ -426,10 +426,7 @@ class AppController(QObject):
         self._traffic_save_counter = 0
 
         # --- Auto-switch state ---
-        self._auto_switch_low_since: float = 0.0  # monotonic timestamp when speed first dropped
         self._auto_switch_last_switch: float = 0.0  # monotonic timestamp of last auto-switch
-        self._auto_switch_high_ticks: int = 0  # consecutive readings above threshold
-        self._auto_switch_active_download: bool = False  # True after sustained traffic
         self._auto_switch_cycle_attempts: int = 0
         self._auto_switch_exhausted: bool = False
         self._auto_switch_transitioning: bool = False
@@ -3677,9 +3674,6 @@ class AppController(QObject):
         return True
 
     def _reset_auto_switch_state(self, *, reset_cooldown: bool = False, reset_cycle: bool = True) -> None:
-        self._auto_switch_low_since = 0.0
-        self._auto_switch_high_ticks = 0
-        self._auto_switch_active_download = False
         self._auto_switch_link_down_since = 0.0
         if reset_cycle:
             self._auto_switch_cycle_attempts = 0
@@ -4101,11 +4095,6 @@ class AppController(QObject):
 
     def _on_live_metrics(self, payload: dict[str, object]) -> None:
         on_live_metrics_operation(self, payload)
-
-    # Require N consecutive high-speed readings to confirm "active download"
-    _AUTO_SWITCH_HIGH_TICKS_REQUIRED = 10  # ~10s of sustained traffic above threshold
-    # Minimum speed to count as "traffic exists" (1 KB/s) vs idle (0)
-    _AUTO_SWITCH_IDLE_BPS = 1024.0
 
     def _check_auto_switch(
         self,
