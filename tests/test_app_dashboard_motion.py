@@ -115,14 +115,18 @@ class SceneCpuBudgetTest(unittest.TestCase):
         self.assertEqual(self.scene.state(), CONNECTING)
         self.assertTrue(self.scene.is_animating())
 
-    def test_frame_dirty_region_skips_orb_centre(self) -> None:
+    def test_frame_dirty_region_is_the_tunnel_band_through_the_orb(self) -> None:
+        # Поток огоньков идёт через центр сферы, поэтому центр перерисовывается;
+        # экономия CPU — кадр трогает только полосу туннеля, а не всю сцену.
         self.page.set_connection(True)
         self.page._do_refresh_dashboard()
         self.scene._burst_started = None
         self.scene.grab()  # строит кэш и выборку пути
         region = self.scene._dirty_region()
-        self.assertFalse(region.contains(self.page.connection_orb.geometry().center()))
-        self.assertLess(region.boundingRect().height(), self.scene.height() + 1)
+        self.assertTrue(region.contains(self.page.connection_orb.geometry().center()))
+        band = region.boundingRect()
+        self.assertLessEqual(band.height(), 96)
+        self.assertLess(band.height(), self.scene.height() + 1)
 
 
 class DashboardHonestStatusTest(unittest.TestCase):
