@@ -20,19 +20,21 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QHeaderView
 
 from xray_fluent.profiles.models import AppSettings, Node
-from xray_fluent.ui.nodes_filter_proxy import SORT_KEYS
-from xray_fluent.ui.nodes_table_model import COL_PING, COL_SPEED
 from xray_fluent.ui.nodes_page import _COLUMN_WIDTHS, _FLAG_ICON_SIZE, _ROW_HEIGHT, NodesPage
-from xray_fluent.ui.nodes_table_delegate import NodesActivityDelegate
 from xray_fluent.ui.nodes_table_model import (
     COL_ADDRESS,
     COL_NAME,
+    COL_PING,
+    COL_SPEED,
     COL_TYPE,
     COLUMN_BY_KEY,
     COLUMN_KEYS,
     DEFAULT_VISIBLE_COLUMNS,
+    GROUP_KEY_ROLE,
     NODE_ID_ROLE,
+    SORT_KEYS,
 )
+from xray_fluent.ui.nodes_view import NodesDelegate
 
 _existing = QApplication.instance()
 if _existing is not None and not isinstance(_existing, QApplication):
@@ -44,18 +46,62 @@ if _existing is not None and not isinstance(_existing, QApplication):
 _APP = _existing or QApplication([])
 
 
-def _proxy_order(page: NodesPage) -> list[str]:
-    proxy = page._proxy
-    return [proxy.index(row, 0).data(NODE_ID_ROLE) for row in range(proxy.rowCount())]
+def _node_order(page: NodesPage) -> list[str]:
+    """Серверы после фильтра в порядке отображения."""
+    return page._table_model.visible_node_ids()
+
+
+# Одна страница на модуль: пачка deleteLater полных страниц в одном процессе
+# роняет Windows-прогон (access violation в деструкторах Qt). Каждый тест
+# начинает с одинакового состояния через _reset_page().
+_shared_page: NodesPage | None = None
+
+# Узкое окно: сумма ширин видимых колонок по умолчанию больше viewport, так
+# что flex-раскладке нечего раздавать соседям (как у нераскрытой страницы).
+_NARROW_SIZE = (500, 400)
+
+
+def _stop_timers(page: NodesPage) -> None:
+    for timer in (page._column_layout_timer, page._viewport_layout_timer, page._search_timer,
+                  page._ping_batch_timer, page._speed_progress_timer, page._table_model._relayout_timer):
+        timer.stop()
+
+
+def _reset_page() -> NodesPage:
+    global _shared_page
+    if _shared_page is None:
+        _shared_page = NodesPage()
+    page = _shared_page
+    _stop_timers(page)
+    page.search_edit.clear()
+    page.search_edit.hide()
+    page.set_subscriptions([])
+    page.apply_view_settings(AppSettings())
+    page._clear_filters()
+    page.table.clearSelection()
+    page.set_active_node(None)
+    page._table_model.set_endpoints_revealed(False)
+    page.set_nodes([])
+    page.resize(*_NARROW_SIZE)
+    page.show()
+    _APP.processEvents()
+    _stop_timers(page)
+    # Раскладка колонок по узкому viewport без отложенного таймера.
+    page.apply_view_settings(AppSettings())
+    _stop_timers(page)
+    return page
 
 
 class NodesPageViewTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.page = NodesPage()
+        self.page = _reset_page()
 
     def tearDown(self) -> None:
-        self.page.deleteLater()
-        _APP.processEvents()
+        _stop_timers(self.page)
+
+    def connect(self, signal, slot) -> None:
+        signal.connect(slot)
+        self.addCleanup(signal.disconnect, slot)
 
 
 class NodesPageCompactLayoutTests(NodesPageViewTestCase):
@@ -66,8 +112,11 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
 
     def test_table_rows_are_28px(self) -> None:
         self.page.set_nodes([Node(name="A")])
-        index = self.page._group_model.index(0, 0)
-        self.assertEqual(index.data(Qt.ItemDataRole.SizeHintRole).height(), 28)
+        model = self.page._table_model
+        self.assertEqual(model.rowCount(), 2)  # заголовок группы + сервер
+        for row in range(model.rowCount()):
+            self.assertEqual(model.index(row, 0).data(Qt.ItemDataRole.SizeHintRole).height(), 28)
+            self.assertEqual(self.page.table.rowHeight(row), 28)
 
     def test_flag_icon_size_is_18x13(self) -> None:
         self.assertEqual((_FLAG_ICON_SIZE.width(), _FLAG_ICON_SIZE.height()), (18, 13))
@@ -109,7 +158,8 @@ class NodesPageCompactLayoutTests(NodesPageViewTestCase):
         self.page.set_nodes(
             [Node(id="secret", server="secret.example", port=8443, scheme="vless")]
         )
-        index = self.page._table_model.index(0, COL_ADDRESS)
+        model = self.page._table_model
+        index = model.index(model.row_of_node("secret"), COL_ADDRESS)
         button = self.page.reveal_addresses_btn
 
         QTest.mousePress(button, Qt.MouseButton.LeftButton)
@@ -130,7 +180,7 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.prefs: list[dict] = []
-        self.page.view_prefs_changed.connect(self.prefs.append)
+        self.connect(self.page.view_prefs_changed, self.prefs.append)
         self.nodes = [
             Node(id="a", name="Alpha", group="EU", tags=["fast"], ping_ms=50, sort_order=0),
             Node(id="b", name="Bravo", group="EU", tags=["fast"], ping_ms=200, sort_order=1),
@@ -163,9 +213,9 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
         self.assertEqual(self.page.column_widths()["address"], 240)
         self.assertEqual(self.page.column_order()[:3], ["name", "address", "type"])
 
-        # Sort key "ping" descending is applied to the proxy; "d" is filtered
+        # Sort key "ping" descending is applied to the model; "d" is filtered
         # out (group US), None-ping stays last even in descending order.
-        self.assertEqual(_proxy_order(self.page), ["b", "a", "c"])
+        self.assertEqual(_node_order(self.page), ["b", "a", "c"])
 
         # Reading the preferences back reproduces exactly what was applied.
         self.page._emit_view_prefs()
@@ -208,14 +258,14 @@ class NodesPageApplyViewSettingsTests(NodesPageViewTestCase):
         self.assertEqual(len(self.prefs), 1)
         self.assertEqual(self.prefs[0]["nodes_sort_key"], "ping")
         self.assertFalse(self.prefs[0]["nodes_sort_desc"])
-        self.assertEqual(_proxy_order(self.page), ["a", "b", "d", "c"])
+        self.assertEqual(_node_order(self.page), ["a", "b", "d", "c"])
 
         # User toggles the sort direction.
         self.page.sort_order_btn.click()
         self.assertEqual(len(self.prefs), 2)
         self.assertEqual(self.prefs[1]["nodes_sort_key"], "ping")
         self.assertTrue(self.prefs[1]["nodes_sort_desc"])
-        self.assertEqual(_proxy_order(self.page), ["d", "b", "a", "c"])
+        self.assertEqual(_node_order(self.page), ["d", "b", "a", "c"])
 
 
 class NodesPageColumnLayoutTests(NodesPageViewTestCase):
@@ -229,18 +279,24 @@ class NodesPageColumnLayoutTests(NodesPageViewTestCase):
         QTest.qWait(50)
         _APP.processEvents()
         self.assertEqual(before, self.page.column_widths())
-        self.assertEqual(self.page.table.header().sectionSize(COL_NAME), 360)
-        header = self.page.table.header()
+        self.assertEqual(self.page.table.horizontalHeader().sectionSize(COL_NAME), 360)
+        header = self.page.table.horizontalHeader()
         used = sum(header.sectionSize(i) for i in range(header.count()) if not header.isSectionHidden(i))
         self.assertEqual(used, self.page.table.viewport().width())
 
-    def test_refresh_does_not_request_a_server_switch(self):
+    def test_refresh_and_selection_do_not_request_a_server_switch(self):
+        # Выбор ≠ подключение: ни обновление списка, ни программное
+        # выделение не переключают сервер.
         requests = []
-        self.page.selected_node_changed.connect(requests.append)
+        self.connect(self.page.selected_node_changed, requests.append)
         for _ in range(3):
             self.page.set_nodes([Node(id='one'), Node(id='two')], 'one')
+        self.assertEqual(self.page._selected_ids(), {'one'})
         self.assertEqual(requests, [])
         self.page._select_node('two')
+        self.assertEqual(self.page._selected_ids(), {'two'})
+        self.assertEqual(requests, [])
+        self.page._connect_node('two')
         self.assertEqual(requests, ['two'])
 
     def test_find_shortcut_shows_search_and_escape_clears_it(self):
@@ -257,7 +313,7 @@ class NodesPageColumnLayoutTests(NodesPageViewTestCase):
         self.assertEqual(self.page.search_edit.text(), '')
 
     def test_name_drag_does_not_resize_neighbors_and_is_persisted(self):
-        header = self.page.table.header()
+        header = self.page.table.horizontalHeader()
         others = [header.sectionSize(c) for c in (COL_TYPE, COL_PING, COL_SPEED)]
         header.resizeSection(COL_NAME, 500)
         self.assertEqual(self.page.column_widths()["name"], 500)
@@ -267,7 +323,7 @@ class NodesPageColumnLayoutTests(NodesPageViewTestCase):
 
     def test_programmatic_resize_does_not_save_preferences(self):
         events = []
-        self.page.view_prefs_changed.connect(events.append)
+        self.connect(self.page.view_prefs_changed, events.append)
         self.page.resize(1600, 900)
         self.page._relayout_flex_column()
         self.assertEqual(events, [])
@@ -288,11 +344,8 @@ class NodesActiveRowFillSeamTests(NodesPageViewTestCase):
         _APP.processEvents()
 
         table = self.page.table
-        proxy = self.page._proxy
-        row = next(
-            r for r in range(proxy.rowCount()) if proxy.index(r, 0).data(NODE_ID_ROLE) == "n2"
-        )
-        rect = table.visualRect(proxy.index(row, 0))
+        model = self.page._table_model
+        rect = table.visualRect(model.index(model.row_of_node("n2"), 0))
         image = table.viewport().grab().toImage()
 
         header = table.horizontalHeader()
@@ -323,14 +376,20 @@ class NodesActiveRowFillSeamTests(NodesPageViewTestCase):
                 )
 
 
-class NodesActivityDelegateTests(NodesPageViewTestCase):
-    def test_active_server_uses_stock_table_delegate_and_bold_font(self):
-        from qfluentwidgets import TableItemDelegate
+class NodesDelegateTests(NodesPageViewTestCase):
+    def test_rows_are_painted_by_nodes_delegate_without_bold_servers(self):
         self.page.set_nodes([Node(id="a", name="A")])
         self.page.set_active_node("a")
-        self.assertIsInstance(self.page.table.itemDelegate(), TableItemDelegate)
-        index = self.page._group_model.index(1, 0)
-        self.assertTrue(index.data(Qt.ItemDataRole.FontRole).bold())
+        self.assertIsInstance(self.page.table.itemDelegate(), NodesDelegate)
+        model = self.page._table_model
+        # Заголовок группы — жирный; активный сервер выделяется заливкой
+        # акцентом в делегате, а не жирным шрифтом.
+        header = model.index(0, 0)
+        self.assertEqual(header.data(GROUP_KEY_ROLE), "source:local")
+        self.assertTrue(header.data(Qt.ItemDataRole.FontRole).bold())
+        node_index = model.index(model.row_of_node("a"), 0)
+        self.assertIsNone(node_index.data(Qt.ItemDataRole.FontRole))
+        self.assertEqual(model.active_node_id(), "a")
 
 
 if __name__ == "__main__":

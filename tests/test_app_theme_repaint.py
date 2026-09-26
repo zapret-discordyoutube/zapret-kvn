@@ -33,22 +33,27 @@ class NodesModelThemeRepaintTest(unittest.TestCase):
     def setUp(self) -> None:
         self._saved_theme = qconfig.themeMode.value
         self.model = NodesTableModel()
-        self.model.set_nodes(
-            [
-                Node(name="a", server="1.1.1.1", port=443, scheme="vless", is_alive=True),
-                Node(name="b", server="2.2.2.2", port=443, scheme="vless", is_alive=False),
-            ]
-        )
+        self.nodes = [
+            Node(name="a", server="1.1.1.1", port=443, scheme="vless", is_alive=True),
+            Node(name="b", server="2.2.2.2", port=443, scheme="vless", is_alive=False),
+        ]
+        self.model.set_nodes(self.nodes)
 
     def tearDown(self) -> None:
         setTheme(self._saved_theme)
         QApplication.processEvents()
 
-    def test_theme_change_emits_foreground_role_for_all_rows(self) -> None:
-        emissions: list[tuple[int, int, list[int]]] = []
+    def test_theme_change_repaints_every_row_and_column(self) -> None:
+        # Цвета статуса берутся из темы в момент отрисовки; смена темы должна
+        # перерисовать все строки (включая заголовки групп) и все колонки.
+        # Пустой список ролей в dataChanged означает «все роли», в том числе
+        # ForegroundRole.
+        emissions: list[tuple[int, int, int, int, list[int]]] = []
 
         def on_data_changed(top_left, bottom_right, roles) -> None:
-            emissions.append((top_left.row(), bottom_right.row(), list(roles)))
+            emissions.append(
+                (top_left.row(), bottom_right.row(), top_left.column(), bottom_right.column(), list(roles))
+            )
 
         self.model.dataChanged.connect(on_data_changed)
         setTheme(Theme.DARK)
@@ -58,17 +63,17 @@ class NodesModelThemeRepaintTest(unittest.TestCase):
         setTheme(Theme.LIGHT)
         QApplication.processEvents()
 
-        foreground_spans = [
-            (first, last)
-            for first, last, roles in emissions
-            if Qt.ItemDataRole.ForegroundRole in roles
+        self.assertEqual(self.model.rowCount(), 3)  # заголовок группы + 2 сервера
+        full_spans = [
+            emission
+            for emission in emissions
+            if emission[:4] == (0, self.model.rowCount() - 1, 0, self.model.columnCount() - 1)
+            and (not emission[4] or Qt.ItemDataRole.ForegroundRole in emission[4])
         ]
-        self.assertTrue(foreground_spans, "no dataChanged with ForegroundRole on theme change")
-        first, last = foreground_spans[0]
-        self.assertEqual((first, last), (0, self.model.rowCount() - 1))
+        self.assertTrue(full_spans, f"no full-table dataChanged on theme change: {emissions}")
 
     def test_status_brushes_follow_theme(self) -> None:
-        index = self.model.index(1, COL_PING)  # dead node -> error brush
+        index = self.model.index(self.model.row_of_node(self.nodes[1].id), COL_PING)  # dead node -> error brush
         setTheme(Theme.DARK)
         dark_brush = self.model.data(index, Qt.ItemDataRole.ForegroundRole)
         setTheme(Theme.LIGHT)

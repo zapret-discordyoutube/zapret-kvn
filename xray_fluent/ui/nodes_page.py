@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal, QSize
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QKeyEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView,
@@ -18,7 +18,6 @@ from qfluentwidgets import (
     SearchLineEdit,
     SmoothMode,
     SubtitleLabel,
-    TableView,
     TransparentToolButton,
     VerticalSeparator,
 )
@@ -29,9 +28,7 @@ from .bulk_edit_page import BulkEditPage
 from .detail_page import StackedSection
 from .node_detail_widget import NodeDetailWidget
 from .node_edit_page import NodeEditPage
-from .nodes_filter_proxy import NodesFilterProxy, SORT_KEYS
-from .nodes_view import NodesView, NodesDelegate
-from .nodes_group_model import NodesGroupModel, GROUP_MODES, GROUP_KEY_ROLE
+from .nodes_view import FLAG_SIZE, NodesView
 from .nodes_table_model import (
     COL_ADDRESS,
     COL_GROUP,
@@ -46,15 +43,17 @@ from .nodes_table_model import (
     COLUMN_KEYS,
     COLUMN_SPECS,
     DEFAULT_VISIBLE_COLUMNS,
+    GROUP_MODES,
     NODE_ID_ROLE,
     NODE_ROW_HEIGHT,
+    SORT_KEYS,
     NodesTableModel,
 )
 from .privacy import HoldToRevealButton
 from .theme import on_accent_changed
 
 _ROW_HEIGHT = NODE_ROW_HEIGHT
-_FLAG_ICON_SIZE = QSize(18, 13)
+_FLAG_ICON_SIZE = FLAG_SIZE
 
 # Kept as a compatibility export; values come from the column contract above.
 _COLUMN_WIDTHS = {
@@ -94,6 +93,9 @@ class NodesPage(StackedSection):
     cancel_speed_test_requested = pyqtSignal()
     export_outbound_json_requested = pyqtSignal(str)
     export_runtime_json_requested = pyqtSignal(str)
+    # Запрос подключиться к серверу (controller.set_selected_node). Только явные
+    # действия: двойной клик, Enter, пункт меню «Подключить к этому серверу».
+    # Выделение строк (клик, стрелки, Shift/Ctrl, правый клик) его не эмитит.
     selected_node_changed = pyqtSignal(str)
     edit_node_requested = pyqtSignal(str)           # node_id
     node_edit_saved = pyqtSignal(str, dict)         # node_id, updated fields
@@ -109,9 +111,6 @@ class NodesPage(StackedSection):
         super().__init__(parent)
         self.setObjectName("nodes")
 
-        self._collapsed_groups: set[str] = set()
-        self._restoring_groups = False
-        self._restoring_nodes = False
         self._nodes: list[Node] = []
         self._id_to_node: dict[str, Node] = {}
         self._sort_ascending = True
@@ -267,20 +266,15 @@ class NodesPage(StackedSection):
 
         root.addLayout(toolbar)
 
-        # --- Table (source model behind a filter/sort proxy) ---
+        # --- Table: one flat model (filter + sort + groups) ---
         self.table = NodesView(self)
         self._table_model = NodesTableModel(self)
-        self._proxy = NodesFilterProxy(self)
-        self._proxy.setSourceModel(self._table_model)
-        self._group_model = NodesGroupModel(self)
-        self._group_model.setSourceModel(self._proxy)
-        self.table.setModel(self._group_model)
+        self.table.setModel(self._table_model)
         self.table.verticalHeader().setDefaultSectionSize(NODE_ROW_HEIGHT)
         self.table.verticalHeader().setMinimumSectionSize(NODE_ROW_HEIGHT)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self.table.verticalHeader().hide()
-        self.table.header().setStretchLastSection(False)
-        self._proxy.sort(0, Qt.SortOrder.AscendingOrder)
+        self.table.horizontalHeader().setStretchLastSection(False)
 
         horizontal_header = cast(QHeaderView, self.table.horizontalHeader())
         horizontal_header.setMinimumSectionSize(
@@ -305,7 +299,6 @@ class NodesPage(StackedSection):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.setIconSize(_FLAG_ICON_SIZE)
-        self.table.setWordWrap(False)
         self.table.scrollDelagate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -317,24 +310,11 @@ class NodesPage(StackedSection):
         if viewport is not None:
             viewport.installEventFilter(self)
 
-        self._activity_delegate = NodesDelegate(self.table)
-        self.table.setItemDelegate(self._activity_delegate)
+        self._activity_delegate = self.table.itemDelegate()
 
         # The delegate paints the active-row fill/stripe with the accent —
         # repaint the viewport live when only the accent changes (AC6).
         on_accent_changed(self._on_accent_changed)
-
-        # Prevent deselection on empty area click
-        orig_mouse_press = self.table.mousePressEvent
-
-        def _no_deselect_mouse_press(event):
-            if event.button() == Qt.MouseButton.LeftButton:
-                index = self.table.indexAt(event.pos())
-                if not index.isValid():
-                    return
-            orig_mouse_press(event)
-
-        self.table.mousePressEvent = _no_deselect_mouse_press
 
         self.group_by_combo = ComboBox(self)
         for mode, title in GROUP_MODES.items():
@@ -349,7 +329,7 @@ class NodesPage(StackedSection):
         self.view_btn = TransparentToolButton(FIF.VIEW, self)
         self.view_btn.setToolTip("Столбцы и вид таблицы")
         toolbar.addWidget(self.view_btn)
-        self.view_btn.clicked.connect(lambda: self._on_header_context_menu(self.table.header().rect().bottomLeft()))
+        self.view_btn.clicked.connect(lambda: self._on_header_context_menu(self.table.horizontalHeader().rect().bottomLeft()))
         self.more_btn = TransparentToolButton(FIF.MORE, self)
         self.more_btn.setToolTip("Ещё действия")
         toolbar.addWidget(self.more_btn)
@@ -365,10 +345,9 @@ class NodesPage(StackedSection):
                         self.sort_combo, self.group_by_combo, self.clear_filters_btn):
             control.hide()
         root.addWidget(self.table, 1)
-        self._group_model.layoutChanged.connect(self._restore_groups)
-        self._group_model.modelReset.connect(self._restore_groups)
-        self.table.collapsed.connect(lambda index: self._group_expanded(index, False))
-        self.table.expanded.connect(lambda index: self._group_expanded(index, True))
+        self._table_model.layoutChanged.connect(lambda *_: self._emit_selection())
+        self._table_model.modelReset.connect(self._emit_selection)
+        self.table.group_toggled.connect(self._group_expanded)
         horizontal_header.sectionHandleDoubleClicked.connect(self._fit_column)
 
 
@@ -432,10 +411,8 @@ class NodesPage(StackedSection):
         self.move_up_btn.clicked.connect(self._on_move_up)
         self.move_down_btn.clicked.connect(self._on_move_down)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._emit_selection())
-        self.table.doubleClicked.connect(self._on_double_click)
+        self.table.node_activated.connect(self._connect_node)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
-        # Keep qfluentwidgets row highlight in sync after proxy re-sorts.
-        self._proxy.layoutChanged.connect(lambda *_: self.table.updateSelectedRows())
 
         # --- Keyboard shortcuts ---
         paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self)
@@ -448,20 +425,13 @@ class NodesPage(StackedSection):
     # ── Public API ──
 
     def set_nodes(self, nodes: list[Node], selected_id: str | None = None) -> None:
-        self._restoring_nodes = True
-        try:
-            self._nodes = list(nodes)
-            self._id_to_node = {node.id: node for node in self._nodes}
-            self._rebuild_filter_combos()
-            self._proxy.invalidate_haystacks()
-            self.table.setUpdatesEnabled(False)
-            self._table_model.update_nodes(self._nodes)
-            self.table.setUpdatesEnabled(True)
-            if selected_id and selected_id not in self._selected_ids():
-                self._select_node(selected_id)
-            self._emit_selection()
-        finally:
-            self._restoring_nodes = False
+        self._nodes = list(nodes)
+        self._id_to_node = {node.id: node for node in self._nodes}
+        self._rebuild_filter_combos()
+        self._table_model.set_nodes(self._nodes)
+        if selected_id and selected_id not in self._selected_ids():
+            self._select_node(selected_id)
+        self._emit_selection()
 
 
     def set_subscriptions(self, subscriptions: list[Subscription]) -> None:
@@ -481,8 +451,6 @@ class NodesPage(StackedSection):
             self.source_filter.setCurrentIndex(index if index >= 0 else 0)
             self.source_filter.blockSignals(False)
             self._cached_sources = sources
-        self._proxy.set_source_names(self._source_names)
-        self._group_model.rebuild()
         self._try_apply_pending_filters()
 
     def apply_view_settings(self, settings) -> None:
@@ -503,14 +471,13 @@ class NodesPage(StackedSection):
             self.sort_combo.blockSignals(True)
             self.sort_combo.setCurrentIndex(_SORT_KEYS.index(key))
             self.sort_combo.blockSignals(False)
-            self._proxy.set_sort_key(key)
             self._apply_sort_order()
 
             columns = list(getattr(settings, "nodes_visible_columns", []) or [])
             if int(getattr(settings, "nodes_column_layout_version", 0) or 0) < 2:
                 if not columns or columns in (["name", "type", "address", "ping", "speed"], ["name", "ping", "speed"]):
                     columns = list(DEFAULT_VISIBLE_COLUMNS)
-            self._collapsed_groups = set(getattr(settings, "nodes_collapsed_groups", []))
+            self._table_model.set_collapsed_groups(getattr(settings, "nodes_collapsed_groups", []))
             mode = getattr(settings, "nodes_group_by", "source")
             if mode not in GROUP_MODES:
                 mode = "source"
@@ -591,8 +558,8 @@ class NodesPage(StackedSection):
         self.tag_filter.blockSignals(False)
 
         # Combo may have lost the previously applied value — resync the proxy.
-        self._proxy.set_group(self._combo_filter_value(self.group_filter))
-        self._proxy.set_tag(self._combo_filter_value(self.tag_filter))
+        self._table_model.set_group_filter(self._combo_filter_value(self.group_filter))
+        self._table_model.set_tag_filter(self._combo_filter_value(self.tag_filter))
 
         self._try_apply_pending_filters()
 
@@ -604,7 +571,7 @@ class NodesPage(StackedSection):
                 self.group_filter.blockSignals(True)
                 self.group_filter.setCurrentIndex(idx)
                 self.group_filter.blockSignals(False)
-                self._proxy.set_group(self._pending_group_filter)
+                self._table_model.set_group_filter(self._pending_group_filter)
                 self._pending_group_filter = None
         if self._pending_tag_filter:
             idx = self.tag_filter.findText(self._pending_tag_filter)
@@ -612,7 +579,7 @@ class NodesPage(StackedSection):
                 self.tag_filter.blockSignals(True)
                 self.tag_filter.setCurrentIndex(idx)
                 self.tag_filter.blockSignals(False)
-                self._proxy.set_tag(self._pending_tag_filter)
+                self._table_model.set_tag_filter(self._pending_tag_filter)
                 self._pending_tag_filter = None
         if self._pending_source_filter:
             idx = self.source_filter.findText(self._pending_source_filter)
@@ -620,7 +587,7 @@ class NodesPage(StackedSection):
                 self.source_filter.blockSignals(True)
                 self.source_filter.setCurrentIndex(idx)
                 self.source_filter.blockSignals(False)
-                self._proxy.set_source(self._pending_source_filter)
+                self._table_model.set_source_filter(self._pending_source_filter)
                 self._pending_source_filter = None
 
     @staticmethod
@@ -629,21 +596,21 @@ class NodesPage(StackedSection):
 
     def _on_group_filter_changed(self) -> None:
         self._pending_group_filter = None
-        self._proxy.set_group(self._combo_filter_value(self.group_filter))
+        self._table_model.set_group_filter(self._combo_filter_value(self.group_filter))
         self._emit_view_prefs()
 
     def _on_tag_filter_changed(self) -> None:
         self._pending_tag_filter = None
-        self._proxy.set_tag(self._combo_filter_value(self.tag_filter))
+        self._table_model.set_tag_filter(self._combo_filter_value(self.tag_filter))
         self._emit_view_prefs()
 
     def _on_source_filter_changed(self) -> None:
         self._pending_source_filter = None
-        self._proxy.set_source(self._combo_filter_value(self.source_filter))
+        self._table_model.set_source_filter(self._combo_filter_value(self.source_filter))
         self._emit_view_prefs()
 
     def _apply_search(self) -> None:
-        self._proxy.set_query(self.search_edit.text())
+        self._table_model.set_query(self.search_edit.text())
 
     # ── Ping / speed activity ──
 
@@ -721,11 +688,9 @@ class NodesPage(StackedSection):
         return "manual"
 
     def _apply_sort_order(self) -> None:
-        order = Qt.SortOrder.AscendingOrder if self._sort_ascending else Qt.SortOrder.DescendingOrder
-        self._proxy.sort(0, order)
+        self._table_model.set_sort(self._current_sort_key(), not self._sort_ascending)
 
     def _on_sort_combo_changed(self) -> None:
-        self._proxy.set_sort_key(self._current_sort_key())
         self._apply_sort_order()
         self._emit_selection()
         self._emit_view_prefs()
@@ -950,51 +915,41 @@ class NodesPage(StackedSection):
                 "nodes_column_widths": self.column_widths(),
                 "nodes_column_order": self.column_order(),
                 "nodes_column_layout_version": 2,
-                "nodes_group_by": self._group_model.mode,
-                "nodes_collapsed_groups": sorted(self._collapsed_groups),
+                "nodes_group_by": self._table_model.group_mode(),
+                "nodes_collapsed_groups": sorted(self._table_model.collapsed_groups()),
                 "nodes_favorites_only": self.favorites_filter.isChecked(),
             }
         )
 
     def _manual_moves_allowed(self) -> bool:
-        return (self._current_sort_key() == "manual" and self._group_model.mode == "none"
+        return (self._current_sort_key() == "manual" and self._table_model.group_mode() == "none"
                 and not self.search_edit.text().strip() and not self.favorites_filter.isChecked()
                 and all(combo.currentIndex() == 0 for combo in (self.group_filter, self.tag_filter, self.source_filter)))
 
     def _change_grouping(self, *_):
-        self._group_model.set_group_mode(self.group_by_combo.currentData())
+        self._table_model.set_group_mode(self.group_by_combo.currentData())
         self._emit_selection()
         self._emit_view_prefs()
 
     def _change_favorites_filter(self, enabled):
-        self._proxy.set_favorites_only(enabled)
+        self._table_model.set_favorites_only(enabled)
         self._emit_view_prefs()
 
     def _clear_filters(self):
         self.search_edit.clear()
-        self._proxy.set_query("")
+        self._table_model.set_query("")
         for combo in (self.group_filter, self.tag_filter, self.source_filter):
             combo.setCurrentIndex(0)
         self.favorites_filter.setChecked(False)
 
     def _update_counter(self):
         if hasattr(self, "counter_label"):
-            self.counter_label.setText(f"Показано: {self._proxy.rowCount()} из {len(self._nodes)} · Выбрано: {len(self._selected_ids())}")
+            self.counter_label.setText(
+                f"Показано: {self._table_model.visible_node_count()} из {len(self._nodes)} · Выбрано: {len(self._selected_ids())}"
+            )
 
-    def _restore_groups(self):
-        self.table.apply_collapsed_groups(self._collapsed_groups)
-        self._emit_selection(notify=False)
-
-    def _group_expanded(self, index, expanded):
-        if self._restoring_groups:
-            return
-        key = index.data(GROUP_KEY_ROLE)
-        if key:
-            if expanded:
-                self._collapsed_groups.discard(key)
-            else:
-                self._collapsed_groups.add(key)
-            self._queue_column_layout_save()
+    def _group_expanded(self, _key: str, _expanded: bool) -> None:
+        self._queue_column_layout_save()
 
     def _reset_columns(self):
         self._apply_column_widths({})
@@ -1005,9 +960,10 @@ class NodesPage(StackedSection):
         metrics = self.table.fontMetrics()
         width = metrics.horizontalAdvance(spec.title) + 36
         # Bounded sampling: no full-table resize scans on large subscriptions.
-        for row in range(min(200, self._proxy.rowCount())):
-            width = max(width, metrics.horizontalAdvance(str(self._proxy.index(row, column).data() or "")) + 64)
-        self.table.header().resizeSection(column, self._clamp_column_width(spec.key, width))
+        model = self._table_model
+        for row in range(min(200, model.rowCount())):
+            width = max(width, metrics.horizontalAdvance(str(model.index(row, column).data() or "")) + 64)
+        self.table.horizontalHeader().resizeSection(column, self._clamp_column_width(spec.key, width))
 
     def _show_search(self):
         self.search_edit.show()
@@ -1060,25 +1016,36 @@ class NodesPage(StackedSection):
             node_id = index.data(NODE_ID_ROLE)
             if node_id:
                 ids.add(node_id)
+        # Выделение внутри свёрнутых групп остаётся выделением (как было при
+        # скрытии строк): действия тулбара и счётчик его учитывают.
+        ids |= self.table.parked_node_ids()
         return ids
 
     def _select_node(self, node_id: str) -> None:
-        row = self._table_model.row_for_node(node_id)
-        if row is None:
-            return
-        proxy_index = self._proxy.mapFromSource(self._table_model.index(row, 0))
-        if proxy_index.isValid():
-            self.table.select_index(self._group_model.mapFromSource(proxy_index))
+        model = self._table_model
+        if model.row_of_node(node_id) is None:
+            group = model.collapsed_group_of(node_id)
+            if group is None:
+                return  # отфильтрован
+            self.table.set_group_expanded(group, True)
+        row = model.row_of_node(node_id)
+        if row is not None:
+            self.table.select_row(row)
 
-    def _emit_selection(self, *, notify=True) -> None:
+    def _emit_selection(self) -> None:
+        """Обновить кнопки и счётчик под выделение. Выбор ≠ подключение:
+        сервер здесь не переключается (см. ``_connect_node``)."""
         ids = self._selected_ids()
         self.bulk_edit_btn.setVisible(len(ids) > 1)
         self._update_counter()
         is_manual = self._manual_moves_allowed()
         self.move_up_btn.setEnabled(is_manual and len(ids) == 1)
         self.move_down_btn.setEnabled(is_manual and len(ids) == 1)
-        if notify and len(ids) == 1 and not self._restoring_nodes:
-            self.selected_node_changed.emit(next(iter(ids)))
+
+    def _connect_node(self, node_id: str) -> None:
+        """Явный запрос подключиться к серверу."""
+        if node_id in self._id_to_node:
+            self.selected_node_changed.emit(node_id)
 
     # ── Button handlers ──
 
@@ -1154,13 +1121,7 @@ class NodesPage(StackedSection):
             return
         self.export_runtime_json_requested.emit(next(iter(ids)))
 
-    # ── Double-click / context menu ──
-
-    def _on_double_click(self, index) -> None:
-        node_id = index.data(NODE_ID_ROLE)
-        node = self._id_to_node.get(node_id) if node_id else None
-        if node is not None:
-            self._show_detail(node)
+    # ── Context menu ──
 
     def _on_context_menu(self, pos) -> None:
         index = self.table.indexAt(pos)
@@ -1172,14 +1133,22 @@ class NodesPage(StackedSection):
 
         current_ids = self._selected_ids()
         if clicked_id not in current_ids:
-            self.table.clearSelection()
-            self.table.select_index(index)
+            self.table.select_row(index.row())
             ids = {clicked_id}
         else:
             ids = current_ids
 
         menu = RoundMenu(parent=self)
         count = len(ids)
+        if count == 1:
+            node_id = next(iter(ids))
+            connect_action = Action("Подключить к этому серверу", self)
+            connect_action.triggered.connect(lambda: self._connect_node(node_id))
+            menu.addAction(connect_action)
+            detail_action = Action("Подробности", self)
+            detail_action.triggered.connect(lambda: self._show_detail(self._id_to_node[node_id]))
+            menu.addAction(detail_action)
+            menu.addSeparator()
         favorite = not all(self._id_to_node[nid].is_favorite for nid in ids)
         action = Action("Добавить в избранное" if favorite else "Убрать из избранного", self)
         action.triggered.connect(lambda: self.favorite_requested.emit(ids, favorite))
@@ -1269,9 +1238,8 @@ class NodesPage(StackedSection):
 
     def _copy_multiple_links(self, node_ids: set[str]) -> None:
         links: list[str] = []
-        for row in range(self._proxy.rowCount()):
-            node_id = self._proxy.index(row, 0).data(NODE_ID_ROLE)
-            node = self._id_to_node.get(node_id) if node_id else None
+        for node_id in self._table_model.visible_node_ids():
+            node = self._id_to_node.get(node_id)
             if node is not None and node.id in node_ids and node.link:
                 links.append(node.link)
         if links:

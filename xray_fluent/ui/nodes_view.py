@@ -1,51 +1,289 @@
-"""Interactive virtual table with fixed rows and inexpensive group headers."""
-from PyQt6.QtCore import QItemSelectionModel, Qt, pyqtSignal, QRect, QPoint, QSignalBlocker
-from PyQt6.QtGui import QColor, QPainter, QPolygon
-from PyQt6.QtWidgets import QHeaderView
-from qfluentwidgets import TableView, themeColor, isDarkTheme
+"""Таблица серверов: лёгкий вид и делегат поверх ``NodesTableModel``.
 
-from .nodes_table_delegate import NodesActivityDelegate
-from .nodes_table_model import ACTIVE_ROLE, NODE_ID_ROLE
-from .nodes_group_model import GROUP_KEY_ROLE
+Цена кадра определяется только видимыми ячейками:
+
+* наведение/нажатие перерисовывают две строки, а не весь viewport
+  (у ``qfluentwidgets.TableView`` любое движение мыши — полный repaint);
+* делегат рисует ячейку сам: строка берётся из модели напрямую
+  (``row_at``), цвета/шрифты/метрики — из палитры, которая пересобирается
+  только при смене темы или акцента; ``QStyle`` и ``data()`` не участвуют.
+"""
+
+from __future__ import annotations
+
+from PyQt6.QtCore import QItemSelectionModel, QModelIndex, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
+from PyQt6.QtWidgets import QAbstractItemView, QHeaderView, QStyle, QStyledItemDelegate, QTableView
+from qfluentwidgets import FluentStyleSheet, SmoothScrollDelegate, isDarkTheme
+from qfluentwidgets.common.font import getFont
+
+from ..profiles.country_flags import get_flag_icon
+from ..profiles.node_presentation import node_country
+from .nodes_table_model import (
+    CENTERED_COLUMNS,
+    COL_NAME,
+    COL_PING,
+    COL_SPEED,
+    COL_TYPE,
+    NodesTableModel,
+)
+from .theme import (
+    accent_color,
+    accent_soft_bg,
+    accent_soft_bg_hover,
+    on_theme_or_accent_changed,
+    text_color,
+    text_muted_color,
+)
+
+FLAG_SIZE = QSize(18, 13)
+_ROW_MARGIN = 2          # вертикальный зазор между «карточками» строк
+_EDGE_INSET = 4          # отступ скруглённых краёв строки от краёв viewport
+_RADIUS = 5.0
+_PILL_WIDTH = 3
+_TEXT_PAD = 10
 
 
-class NodesDelegate(NodesActivityDelegate):
-    def _paint_active_row_fill(self, painter, option, index, color):
-        first, last = self._row_fill_span(index)
-        rect = option.rect.adjusted(4 if first else 0, self.margin, -4 if last else 0, -self.margin)
-        painter.fillRect(rect, color)
+class _Palette:
+    """Всё, что нужно для отрисовки, собранное один раз на тему/акцент."""
 
-    def _drawBackground(self, painter, option, index):
-        color = painter.brush().color()
-        if color.alpha():
-            first, last = self._row_fill_span(index)
-            rect = option.rect.adjusted(4 if first else 0, 0, -4 if last else 0, 0)
-            painter.fillRect(rect, color)
+    def __init__(self, font: QFont) -> None:
+        dark = isDarkTheme()
+        base = 255 if dark else 0
+        self.card = QColor(base, base, base, 6)
+        self.hover = QColor(base, base, base, 14)
+        self.pressed = QColor(base, base, base, 9 if dark else 6)
+        self.selected = QColor(base, base, base, 20 if dark else 14)
+        self.selected_hover = QColor(base, base, base, 28 if dark else 20)
+        self.active = accent_soft_bg()
+        self.active_hover = accent_soft_bg_hover()
+        self.accent = accent_color()
+        self.text = text_color()
+        self.muted = text_muted_color()
+        self.chevron = QColor(210, 210, 210) if dark else QColor(75, 75, 75)
+        self.track = QColor(self.muted)
+        self.track.setAlpha(80)
+        self.font = QFont(font)
+        self.bold = QFont(font)
+        self.bold.setBold(True)
+        self.metrics = QFontMetrics(self.font)
+        self.bold_metrics = QFontMetrics(self.bold)
+        self.badge_font = QFont(font)
+        if font.pixelSize() > 0:  # getFont() задаёт размер в пикселях
+            self.badge_font.setPixelSize(max(9, font.pixelSize() - 2))
+        else:
+            self.badge_font.setPointSizeF(max(7.0, font.pointSizeF() - 1.5))
+        self.badge_font.setWeight(QFont.Weight.DemiBold)
+        self.badge_font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 104)
+        self.badge_metrics = QFontMetrics(self.badge_font)
+        self.badge_fill = QColor(base, base, base, 10)
+        self.badge_border = QColor(base, base, base, 40 if dark else 34)
+        self.spinner_pen = QPen(self.accent, 2)
+        self.spinner_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        self.chevron_pen = QPen(self.chevron, 1.3)
+        self.chevron_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        self.chevron_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
 
-    def _row_fill_span(self, index):
-        edges = getattr(self.parent(), "_row_edges", None)
-        if edges is not None:
-            return index.column() == edges[0], index.column() == edges[1]
-        return super()._row_fill_span(index)
 
-    def row_fill_color(self, index):
-        if index.data(ACTIVE_ROLE) or index.row() in self.selectedRows:
-            color = themeColor()
-            color.setAlpha(95 if isDarkTheme() else 60)
-            return color
-        if index.data(NODE_ID_ROLE):
-            return QColor(255, 255, 255, 6) if isDarkTheme() else QColor(0, 0, 0, 6)
-        return None
+class NodesDelegate(QStyledItemDelegate):
+    def __init__(self, view: NodesView):
+        super().__init__(view)
+        self._view = view
+        self._palette: _Palette | None = None
+        self._flags: dict[tuple[str, float], object] = {}
+        on_theme_or_accent_changed(self.invalidate)
 
-    def paint(self, painter, option, index):
-        super().paint(painter, option, index)
-        if index.column() == 0 and index.data(GROUP_KEY_ROLE):
-            painter.save()
-            painter.setPen(QColor(210, 210, 210) if isDarkTheme() else QColor(75, 75, 75))
-            x, y = option.rect.left() + 8, option.rect.center().y()
-            points = [(x, y-3), (x+4, y), (x, y+3)] if not self.parent().isExpanded(index) else [(x-2,y-2),(x+1,y+2),(x+4,y-2)]
-            painter.drawPolyline(QPolygon([QPoint(*point) for point in points]))
-            painter.restore()
+    def invalidate(self, *_args) -> None:
+        self._palette = None
+        self._flags.clear()
+
+    def palette(self) -> _Palette:
+        if self._palette is None:
+            self._palette = _Palette(getFont(13))
+        return self._palette
+
+    def sizeHint(self, option, index) -> QSize:
+        return QSize(0, self._view.verticalHeader().defaultSectionSize())
+
+    def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
+        view = self._view
+        model: NodesTableModel = view.model()
+        r = index.row()
+        item = model.row_at(r)
+        if item is None:
+            return
+        col = index.column()
+        pal = self.palette()
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = r == view.hover_row
+        first = col == view.first_column
+        last = col == view.last_column
+
+        if item.is_group:
+            if hovered:
+                self._fill(painter, rect, pal.hover, first, last)
+            if first:
+                self._paint_group_title(painter, rect, item, pal)
+            return
+
+        node = item.node
+        active = node.id == model.active_node_id()
+        if active:
+            fill = pal.active_hover if hovered else pal.active
+        elif selected:
+            fill = pal.selected_hover if hovered else pal.selected
+        elif r == view.pressed_row:
+            fill = pal.pressed
+        elif hovered:
+            fill = pal.hover
+        else:
+            fill = pal.card
+        self._fill(painter, rect, fill, first, last)
+
+        if first and (active or selected) and view.horizontalScrollBar().value() == 0:
+            self._paint_pill(painter, rect, pal, pressed=r == view.pressed_row)
+
+        if col == COL_PING and model.is_ping_busy(node.id):
+            self._paint_spinner(painter, rect, pal)
+            return
+        if col == COL_SPEED:
+            progress = model.speed_progress(node.id)
+            if progress is not None:
+                self._paint_progress(painter, rect, pal, progress)
+                return
+
+        text = model.display_text(item, col)
+        color = model.status_color(item, col) or pal.text
+        text_rect = rect.adjusted(_TEXT_PAD, 0, -_TEXT_PAD, 0)
+        if col == COL_NAME:
+            text_rect.setLeft(text_rect.left() + _PILL_WIDTH + 2)
+            pixmap = self._flag(node_country(node), painter)
+            if pixmap is not None:
+                y = rect.top() + (rect.height() - FLAG_SIZE.height()) // 2
+                painter.drawPixmap(text_rect.left(), y, pixmap)
+                text_rect.setLeft(text_rect.left() + FLAG_SIZE.width() + 8)
+        if not text:
+            return
+        if col == COL_TYPE:
+            self._paint_badge(painter, rect, pal, text, color)
+            return
+        painter.setFont(pal.font)
+        painter.setPen(color)
+        align = Qt.AlignmentFlag.AlignCenter if col in CENTERED_COLUMNS else (
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        painter.drawText(text_rect, align, pal.metrics.elidedText(text, Qt.TextElideMode.ElideRight, text_rect.width()))
+
+    # ── Примитивы ──────────────────────────────────────────
+
+    @staticmethod
+    def _fill(painter: QPainter, rect: QRect, color: QColor, first: bool, last: bool) -> None:
+        if not color.alpha():
+            return
+        body = rect.adjusted(0, _ROW_MARGIN, 0, -_ROW_MARGIN)
+        if not (first or last):
+            painter.fillRect(body, color)
+            return
+        # Скругление только у крайних видимых колонок; сегмент строго внутри
+        # своей ячейки, чтобы полупрозрачные куски не перекрывались.
+        left = body.left() + _EDGE_INSET if first else body.left() - int(_RADIUS) - 1
+        right = body.right() - _EDGE_INSET if last else body.right() + int(_RADIUS) + 1
+        painter.save()
+        painter.setClipRect(body)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(QRectF(left, body.top(), right - left + 1, body.height()), _RADIUS, _RADIUS)
+        painter.restore()
+
+    @staticmethod
+    def _paint_pill(painter: QPainter, rect: QRect, pal: _Palette, *, pressed: bool) -> None:
+        inset = round(rect.height() * (0.35 if pressed else 0.27))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(pal.accent)
+        painter.drawRoundedRect(QRectF(rect.left() + _EDGE_INSET + 3, rect.top() + inset, _PILL_WIDTH,
+                                       rect.height() - 2 * inset), 1.5, 1.5)
+        painter.restore()
+
+    def _paint_group_title(self, painter: QPainter, rect: QRect, item, pal: _Palette) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pal.chevron_pen)
+        x, y = rect.left() + 14.0, float(rect.center().y()) + 0.5
+        if item.collapsed:
+            points = (QPointF(x - 1.5, y - 4), QPointF(x + 2.5, y), QPointF(x - 1.5, y + 4))
+        else:
+            points = (QPointF(x - 4, y - 2), QPointF(x, y + 2), QPointF(x + 4, y - 2))
+        path = QPainterPath(points[0])
+        path.lineTo(points[1])
+        path.lineTo(points[2])
+        painter.drawPath(path)
+        painter.setFont(pal.bold)
+        painter.setPen(pal.text)
+        text_rect = rect.adjusted(30, 0, -_TEXT_PAD, 0)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         pal.bold_metrics.elidedText(item.label, Qt.TextElideMode.ElideRight, text_rect.width()))
+        painter.restore()
+
+    @staticmethod
+    def _paint_badge(painter: QPainter, rect: QRect, pal: _Palette, text: str, color: QColor) -> None:
+        """Протокол — компактная «пилюля» с обводкой, а не голый капслок."""
+        metrics = pal.badge_metrics
+        width = min(metrics.horizontalAdvance(text) + 16, rect.width() - 8)
+        height = min(18, rect.height() - 8)
+        badge = QRectF(0, 0, width, height)
+        badge.moveCenter(QRectF(rect).center())
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(pal.badge_border, 1))
+        painter.setBrush(pal.badge_fill)
+        painter.drawRoundedRect(badge, height / 2, height / 2)
+        painter.setFont(pal.badge_font)
+        painter.setPen(color)
+        painter.drawText(badge, Qt.AlignmentFlag.AlignCenter,
+                         metrics.elidedText(text, Qt.TextElideMode.ElideRight, int(badge.width()) - 8))
+        painter.restore()
+
+    @staticmethod
+    def _paint_spinner(painter: QPainter, rect: QRect, pal: _Palette) -> None:
+        size = max(8, min(16, rect.height() - 8, rect.width() - 8))
+        spinner = QRect(0, 0, size, size)
+        spinner.moveCenter(rect.center())
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pal.spinner_pen)
+        painter.drawArc(spinner, 35 * 16, 250 * 16)
+        painter.restore()
+
+    @staticmethod
+    def _paint_progress(painter: QPainter, rect: QRect, pal: _Palette, percent: int) -> None:
+        track = QRect(0, 0, max(0, rect.width() - 16), 6)
+        track.moveCenter(rect.center())
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(pal.track)
+        painter.drawRoundedRect(track, 3, 3)
+        width = round(track.width() * max(0, min(100, percent)) / 100)
+        if width > 0:
+            fill = QRect(track)
+            fill.setWidth(width)
+            painter.setBrush(pal.accent)
+            painter.drawRoundedRect(fill, 3, 3)
+        painter.restore()
+
+    def _flag(self, code: str, painter: QPainter):
+        if not code:
+            return None
+        ratio = painter.device().devicePixelRatioF() if painter.device() is not None else 1.0
+        key = (code, ratio)
+        if key not in self._flags:
+            icon = get_flag_icon(code)
+            self._flags[key] = icon.pixmap(FLAG_SIZE, ratio) if icon is not None else None
+        return self._flags[key]
 
 
 class NodesHeader(QHeaderView):
@@ -53,167 +291,245 @@ class NodesHeader(QHeaderView):
         super().paintSection(painter, rect, logical_index)
         painter.save()
         painter.setPen(QColor(255, 255, 255, 28) if isDarkTheme() else QColor(0, 0, 0, 28))
-        painter.drawLine(rect.right(), rect.top()+4, rect.right(), rect.bottom()-4)
+        painter.drawLine(rect.right(), rect.top() + 4, rect.right(), rect.bottom() - 4)
         painter.restore()
 
 
-class NodesView(TableView):
-    collapsed = pyqtSignal(object)
-    expanded = pyqtSignal(object)
+class NodesView(QTableView):
+    """Плоская таблица с группами-заголовками; свёртка — через модель."""
+
+    group_toggled = pyqtSignal(str, bool)  # ключ группы, развёрнута
+    # Явная активация сервера (двойной клик или Enter по строке-серверу).
+    # Простое выделение строк её не вызывает.
+    node_activated = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setHorizontalHeader(NodesHeader(Qt.Orientation.Horizontal, self))
+        # Имя поля — как у qfluentwidgets.TableView (страница его настраивает).
+        self.scrollDelagate = SmoothScrollDelegate(self)
+        FluentStyleSheet.TABLE_VIEW.apply(self)
         self.setShowGrid(False)
-        self._collapsed_groups = set()
-        self._hidden_rows = set()
+        self.setMouseTracking(True)
+        self.setWordWrap(False)
+        self.horizontalHeader().setHighlightSections(False)
+        self.verticalHeader().setHighlightSections(False)
+        self.hover_row = -1
+        self.pressed_row = -1
+        self.first_column = 0
+        self.last_column = 0
+        self._saved_keys: list[str] = []
+        self._saved_current: str | None = None
+        self._saved_top: str | None = None
+        # Выделенные серверы, спрятанные свёрткой группы: строк в модели нет,
+        # но выделение не должно теряться (свернул/развернул — оно на месте).
+        self._parked_keys: set[str] = set()
+        self.setItemDelegate(NodesDelegate(self))
+        header = self.horizontalHeader()
+        header.sectionMoved.connect(lambda *_: self.update_edge_columns())
+        header.sectionCountChanged.connect(lambda *_: self.update_edge_columns())
+        self.doubleClicked.connect(self._on_double_clicked)
 
-    def setModel(self, model):
+    # ── Модель и выделение через reset ─────────────────────
+
+    def setModel(self, model: NodesTableModel) -> None:
         super().setModel(model)
-        model.modelAboutToBeReset.connect(self._remember_selection)
-        model.modelReset.connect(self._restore_selection)
+        model.modelAboutToBeReset.connect(self._remember_view_state)
+        model.modelReset.connect(self._restore_view_state)
+        self.update_edge_columns()
 
-    def _remember_selection(self):
-        # Read identities directly: the source may already have removed rows.
-        self._saved_selection = [
-            self.model().index(row, 0).internalPointer().key
-            for selected_range in self.selectionModel().selection()
-            for row in range(selected_range.top(), selected_range.bottom() + 1)
-        ]
+    def _remember_view_state(self) -> None:
+        model: NodesTableModel = self.model()
+        self._saved_keys = [model.row_at(index.row()).key for index in self.selectionModel().selectedRows()]
+        self._saved_keys.extend(key for key in self._parked_keys if key not in self._saved_keys)
         current = self.currentIndex()
-        self._saved_current = current.internalPointer().key if current.isValid() else None
+        self._saved_current = model.row_at(current.row()).key if current.isValid() else None
+        top = self.rowAt(0)
+        self._saved_top = model.row_at(top).key if top >= 0 else None
+        self.hover_row = self.pressed_row = -1
 
-    def _restore_selection(self):
-        self._hidden_rows.clear()
+    def _restore_view_state(self) -> None:
+        model: NodesTableModel = self.model()
         selection = self.selectionModel()
-        with QSignalBlocker(selection):
-            for key in self._saved_selection:
-                entry = self.model()._entries.get(key)
-                if entry is not None:
-                    selection.select(self.model().index(entry.row, 0),
-                                     QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
-            entry = self.model()._entries.get(self._saved_current)
-            if entry is not None:
-                selection.setCurrentIndex(self.model().index(entry.row, 0), QItemSelectionModel.SelectionFlag.NoUpdate)
-        self.apply_collapsed_groups(self._collapsed_groups)
-        self.updateSelectedRows()
+        flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        parked: set[str] = set()
+        selection.blockSignals(True)
+        try:
+            for key in self._saved_keys:
+                row = model.row_of_key(key)
+                if row is not None:
+                    selection.select(model.index(row, 0), flags)
+                elif self._hidden_by_collapse(key):
+                    parked.add(key)  # отфильтрованные/удалённые — забываются
+            self._parked_keys = parked
+            row = model.row_of_key(self._saved_current) if self._saved_current else None
+            if row is not None:
+                selection.setCurrentIndex(model.index(row, 0), QItemSelectionModel.SelectionFlag.NoUpdate)
+        finally:
+            selection.blockSignals(False)
+        top = model.row_of_key(self._saved_top) if self._saved_top else None
+        if top is not None:
+            self.verticalScrollBar().setValue(top)
 
-    def header(self):
-        return self.horizontalHeader()
+    def _hidden_by_collapse(self, key: str) -> bool:
+        return key.startswith("node:") and self.model().collapsed_group_of(key[5:]) is not None
 
-    def apply_collapsed_groups(self, keys):
-        self._collapsed_groups = set(keys)
-        hidden = set()
-        hidden_ids = set()
-        self.model().collapsed_groups = self._collapsed_groups
-        for index in self.model().group_indexes():
-            if index.data(GROUP_KEY_ROLE) in self._collapsed_groups:
-                hidden.update(child.row for child in index.internalPointer().children)
-                hidden_ids.update(child.node_id for child in index.internalPointer().children)
-        for row in self._hidden_rows - hidden:
-            self.setRowHidden(row, False)
-        for row in hidden - self._hidden_rows:
-            self.setRowHidden(row, True)
-        self._hidden_rows = hidden
-        self.model().sourceModel().set_deferred_nodes(hidden_ids)
-        self.viewport().update()
+    def parked_node_ids(self) -> set[str]:
+        """Выделенные серверы внутри свёрнутых групп (проверка — по живой модели)."""
+        return {key[5:] for key in self._parked_keys if self._hidden_by_collapse(key)}
 
-    def isExpanded(self, index):
-        return index.data(GROUP_KEY_ROLE) not in self._collapsed_groups
+    def selectionCommand(self, index, event=None):
+        flags = super().selectionCommand(index, event)
+        if flags & QItemSelectionModel.SelectionFlag.Clear:
+            # Обычный клик/стрелки заменяют выделение целиком — вместе со
+            # спрятанной частью; Ctrl+клик её не трогает.
+            self._parked_keys.clear()
+        return flags
 
-    def setExpanded(self, index, expanded):
-        key = index.data(GROUP_KEY_ROLE)
-        if not key or expanded == self.isExpanded(index):
-            return
-        keys = self._collapsed_groups - {key} if expanded else self._collapsed_groups | {key}
-        self.apply_collapsed_groups(keys)
-        (self.expanded if expanded else self.collapsed).emit(index)
+    def clearSelection(self) -> None:
+        self._parked_keys.clear()
+        super().clearSelection()
 
-    def expand(self, index):
-        self.setExpanded(index, True)
+    # ── Колонки ────────────────────────────────────────────
 
-    def collapse(self, index):
-        self.setExpanded(index, False)
+    def update_edge_columns(self) -> None:
+        header = self.horizontalHeader()
+        visible = [header.logicalIndex(v) for v in range(header.count())
+                   if not header.isSectionHidden(header.logicalIndex(v))]
+        edges = (visible[0], visible[-1]) if visible else (0, 0)
+        if edges != (self.first_column, self.last_column):
+            self.first_column, self.last_column = edges
+            self.viewport().update()
 
-    def _set_all_expanded(self, expanded):
-        groups = self.model().group_indexes()
-        changed = [index for index in groups if self.isExpanded(index) != expanded]
-        keys = set() if expanded else {index.data(GROUP_KEY_ROLE) for index in groups}
-        self.apply_collapsed_groups(keys)
-        signal = self.expanded if expanded else self.collapsed
-        for index in changed:
-            signal.emit(index)
+    def setColumnHidden(self, column: int, hide: bool) -> None:
+        super().setColumnHidden(column, hide)
+        self.update_edge_columns()
 
-    def expandAll(self):
-        self._set_all_expanded(True)
+    # ── Наведение/нажатие: перерисовка только затронутых строк ──
 
-    def collapseAll(self):
-        self._set_all_expanded(False)
+    def _update_row(self, row: int) -> None:
+        if row >= 0:
+            self.viewport().update(QRect(0, self.rowViewportPosition(row), self.viewport().width(), self.rowHeight(row)))
 
-    def mousePressEvent(self, event):
-        index = self.indexAt(event.pos())
-        if event.button() == Qt.MouseButton.LeftButton and index.data(GROUP_KEY_ROLE):
-            self.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
-            self.setExpanded(index, not self.isExpanded(index))
-            return
+    def _set_hover_row(self, row: int) -> None:
+        if row != self.hover_row:
+            previous, self.hover_row = self.hover_row, row
+            self._update_row(previous)
+            self._update_row(row)
+
+    def _set_pressed_row(self, row: int) -> None:
+        if row != self.pressed_row:
+            previous, self.pressed_row = self.pressed_row, row
+            self._update_row(previous)
+            self._update_row(row)
+
+    def mouseMoveEvent(self, event) -> None:
+        self._set_hover_row(self.rowAt(event.position().toPoint().y()))
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._set_hover_row(-1)
+        super().leaveEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        super().wheelEvent(event)
+        self._set_hover_row(self.rowAt(self.viewport().mapFromGlobal(event.globalPosition().toPoint()).y()))
+
+    def mousePressEvent(self, event) -> None:
+        index = self.indexAt(event.position().toPoint())
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not index.isValid():
+                return  # клик по пустому месту не снимает выделение
+            item = self.model().row_at(index.row())
+            if item is not None and item.is_group:
+                self.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                self.toggle_group(item.key)
+                return
+        if index.isValid():
+            self._set_pressed_row(index.row())
         super().mousePressEvent(event)
 
-    def keyPressEvent(self, event):
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        self._set_pressed_row(-1)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        item = self.model().row_at(self.rowAt(event.position().toPoint().y()))
+        if item is not None and item.is_group and event.button() == Qt.MouseButton.LeftButton:
+            # Первое нажатие уже свернуло/развернуло группу; второе нажатие
+            # двойного клика не должно откатывать это обратно.
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _on_double_clicked(self, index: QModelIndex) -> None:
+        node = self.model().node_at_row(index.row()) if index.isValid() else None
+        if node is not None:
+            self.node_activated.emit(node.id)
+
+    # ── Группы ─────────────────────────────────────────────
+
+    def is_group_expanded(self, key: str) -> bool:
+        return key not in self.model().collapsed_groups()
+
+    def set_group_expanded(self, key: str, expanded: bool) -> None:
+        model: NodesTableModel = self.model()
+        collapsed = model.collapsed_groups()
+        if (key not in collapsed) == expanded:
+            return
+        model.set_collapsed_groups(collapsed - {key} if expanded else collapsed | {key})
+        self.group_toggled.emit(key, expanded)
+
+    def toggle_group(self, key: str) -> None:
+        self.set_group_expanded(key, not self.is_group_expanded(key))
+
+    def set_all_groups_expanded(self, expanded: bool) -> None:
+        model: NodesTableModel = self.model()
+        keys = model.group_keys()
+        changed = [key for key in keys if self.is_group_expanded(key) != expanded]
+        model.set_collapsed_groups(set() if expanded else set(keys))
+        for key in changed:
+            self.group_toggled.emit(key, expanded)
+
+    def expandAll(self) -> None:
+        self.set_all_groups_expanded(True)
+
+    def collapseAll(self) -> None:
+        self.set_all_groups_expanded(False)
+
+    def keyPressEvent(self, event) -> None:
         index = self.currentIndex()
         key = event.key()
-        if index.isValid() and not event.modifiers():
-            group = index if index.data(GROUP_KEY_ROLE) else None
-            if group is None and key == Qt.Key.Key_Left:
-                parent = index.internalPointer().parent
-                if parent is not None:
-                    group = self.model().index(parent.row, 0)
-                    self.selectionModel().setCurrentIndex(group, QItemSelectionModel.SelectionFlag.NoUpdate)
-                    self.scrollTo(group)
-                    return
-            if group is not None and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Space):
-                expanded = not self.isExpanded(group) if key == Qt.Key.Key_Space else key == Qt.Key.Key_Right
-                self.setExpanded(group, expanded)
+        model: NodesTableModel = self.model()
+        item = model.row_at(index.row()) if index.isValid() else None
+        if (item is not None and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and not event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier):
+            # Enter: заголовок группы — свернуть/развернуть, сервер — подключить.
+            if item.is_group:
+                self.toggle_group(item.key)
+            else:
+                self.node_activated.emit(item.node.id)
+            return
+        if item is not None and not event.modifiers():
+            if item.is_group and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Space):
+                expanded = not self.is_group_expanded(item.key) if key == Qt.Key.Key_Space else key == Qt.Key.Key_Right
+                self.set_group_expanded(item.key, expanded)
                 return
+            if not item.is_group and key == Qt.Key.Key_Left:
+                # Влево с сервера — на заголовок его группы.
+                for row in range(index.row() - 1, -1, -1):
+                    if model.row_at(row).is_group:
+                        group_index = model.index(row, 0)
+                        self.selectionModel().setCurrentIndex(group_index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                        self.scrollTo(group_index)
+                        return
         super().keyPressEvent(event)
 
-    def select_index(self, index):
+    def select_row(self, row: int) -> None:
+        index = self.model().index(row, 0)
         if not index.isValid():
             return
-        group = index.internalPointer().parent
-        if group is not None:
-            self.expand(self.model().index(group.row, 0))
-        self.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
-        self.updateSelectedRows()
-
-    def paintEvent(self, event):
-        theme = (isDarkTheme(), themeColor().rgba(), self.font().toString())
-        if theme != getattr(self, "_paint_theme", None):
-            self._paint_theme = theme
-            if self.model() is not None:
-                self.model().clear_display_cache()
-        header = self.header()
-        columns = [header.logicalIndex(i) for i in range(header.count()) if not header.isSectionHidden(header.logicalIndex(i))]
-        self._row_edges = (columns[0], columns[-1]) if columns else None
-        super().paintEvent(event)
-        painter = QPainter(self.viewport())
-        base = 255 if isDarkTheme() else 0
-        painter.setPen(QColor(base, base, base, 20))
-        for col in columns[:-1]:
-            x = header.sectionViewportPosition(col) + header.sectionSize(col) - 1
-            painter.drawLine(x, 0, x, self.viewport().height())
-        # Paint borders only for visible rows, never scan the server catalogue.
-        y = 0
-        while y < self.viewport().height():
-            row = self.rowAt(y)
-            if row < 0:
-                break
-            top, height = self.rowViewportPosition(row), self.rowHeight(row)
-            if self.model().index(row, 0).data(NODE_ID_ROLE):
-                border = QColor(base, base, base, 20)
-                width = self.viewport().width()-7
-                painter.fillRect(QRect(3, top+1, width, 1), border)
-                painter.fillRect(QRect(3, top+height-2, width, 1), border)
-                painter.fillRect(QRect(3, top+2, 1, height-4), border)
-                painter.fillRect(QRect(3+width-1, top+2, 1, height-4), border)
-            y = max(y+1, top+height)
-        painter.end()
+        self._parked_keys.clear()
+        self.selectionModel().setCurrentIndex(
+            index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows
+        )
+        self.scrollTo(index)

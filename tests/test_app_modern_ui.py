@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch, Mock, MagicMock
 
 from PyQt6.QtCore import QRect, QPersistentModelIndex, Qt, QTimer, QEventLoop
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QWidget
 _APP = QApplication.instance() or QApplication([])
 
@@ -16,51 +17,96 @@ from xray_fluent.profiles.models import Node, AppSettings, Subscription
 from xray_fluent.profiles.geoip import CountryDatabase, endpoint_hosts
 from xray_fluent.network.country_resolver import CountryResolver
 from xray_fluent.ui.nodes_page import NodesPage
-from xray_fluent.ui.nodes_group_model import GROUP_KEY_ROLE
-from xray_fluent.ui.nodes_table_model import NODE_ID_ROLE, COL_PING
+from xray_fluent.ui.nodes_table_model import GROUP_KEY_ROLE, NODE_ID_ROLE, COL_PING
 from xray_fluent.ui.window_geometry import fitted_geometry
 from xray_fluent.ui.deferred_page import DeferredPage
 from xray_fluent.application.startup_service import StartupWorker
 
 
+# Одна страница на модуль: массовое создание/удаление полных страниц в одном
+# процессе роняет Windows-прогон (см. tests/test_app_detail_pages.py).
+_shared_page: NodesPage | None = None
+
+# Окно троттлинга пересортировки по метрикам (300 мс) плюс запас.
+_AFTER_RELAYOUT_WINDOW_MS = 400
+
+
+def _nodes_page() -> NodesPage:
+    global _shared_page
+    if _shared_page is None:
+        _shared_page = NodesPage()
+    page = _shared_page
+    page._table_model._relayout_timer.stop()
+    page.set_subscriptions([])
+    page.apply_view_settings(AppSettings())
+    page._clear_filters()
+    page.table.clearSelection()
+    page.set_active_node(None)
+    page.set_nodes([])
+    for timer in (page._column_layout_timer, page._viewport_layout_timer, page._search_timer,
+                  page._ping_batch_timer, page._speed_progress_timer):
+        timer.stop()
+    return page
+
+
 class GroupedServersTests(unittest.TestCase):
     def setUp(self):
-        self.page = NodesPage()
-        self.addCleanup(self.page.deleteLater)
+        self.page = _nodes_page()
+
+    def _connect(self, signal, slot):
+        signal.connect(slot)
+        self.addCleanup(signal.disconnect, slot)
 
     def test_duplicate_subscription_names_still_have_distinct_groups(self):
         self.page.set_subscriptions([Subscription(id="one", name="Provider", url=""), Subscription(id="two", name="Provider", url="")])
         self.page.set_nodes([Node(id="a", subscription_id="one"), Node(id="b", subscription_id="two"), Node(id="c")])
-        model = self.page._group_model
-        self.assertEqual(len(model.group_indexes()), 3)
-        keys = {index.data(GROUP_KEY_ROLE) for index in model.group_indexes()}
+        model = self.page._table_model
+        self.assertEqual(len(model.group_keys()), 3)
+        keys = {model.index(row, 0).data(GROUP_KEY_ROLE) for row in range(model.rowCount())} - {None}
         self.assertEqual(keys, {"source:one", "source:two", "source:local"})
 
     def test_persistent_selection_and_expansion_survive_metric_sort(self):
         nodes = [Node(id="a", name="A", ping_ms=10), Node(id="b", name="B", ping_ms=20)]
         self.page.set_nodes(nodes, "a")
-        model = self.page._group_model
-        group = model.index(0, 0)
-        persistent = QPersistentModelIndex(model.index(1, 0))
-        self.page._proxy.set_sort_key("ping")
-        self.page.table.collapse(group)
+        model = self.page._table_model
+        self.page._table_model.set_sort("ping", False)
+        persistent = QPersistentModelIndex(model.index(model.row_of_node("a"), 0))
         resets = []
-        model.modelReset.connect(lambda: resets.append(True))
+        self._connect(model.modelReset, lambda: resets.append(True))
+
+        # Пересортировка по пингу — перенос строк без reset: персистентный
+        # индекс и выделение едут вместе с сервером.
         nodes[0].ping_ms = 90
-        self.page._table_model.refresh_ping("a")
+        self.page._table_model.finish_ping_batch({"a"})
+        QTest.qWait(_AFTER_RELAYOUT_WINDOW_MS)
         self.assertEqual(persistent.data(NODE_ID_ROLE), "a")
+        self.assertEqual(persistent.row(), 2)
         self.assertEqual(self.page._selected_ids(), {"a"})
-        self.assertFalse(self.page.table.isExpanded(model.index(0, 0)))
         self.assertEqual(resets, [])
+
+        # Свёрнутая группа не разворачивается от пересортировки, а выделение
+        # внутри неё не теряется.
+        self.page.table.set_group_expanded("source:local", False)
+        resets.clear()
+        nodes[0].ping_ms = 5
+        self.page._table_model.finish_ping_batch({"a"})
+        QTest.qWait(_AFTER_RELAYOUT_WINDOW_MS)
+        self.assertEqual(resets, [])
+        self.assertFalse(self.page.table.is_group_expanded("source:local"))
+        self.assertEqual(self.page._selected_ids(), {"a"})
+        self.page.table.set_group_expanded("source:local", True)
+        self.assertEqual(model.row_of_node("a"), 1)
+        self.assertEqual(self.page._selected_ids(), {"a"})
 
     def test_favorites_filter_and_settings_roundtrip(self):
         nodes = [Node(id="a", is_favorite=True), Node(id="b")]
         self.page.set_nodes(nodes)
         self.page.favorites_filter.setChecked(True)
-        self.assertEqual(self.page._proxy.rowCount(), 1)
+        self.assertEqual(self.page._table_model.visible_node_count(), 1)
+        self.assertEqual(self.page._table_model.visible_node_ids(), ["a"])
         prefs=[]
-        self.page.view_prefs_changed.connect(prefs.append)
-        self.page.table.header().resizeSection(0, 480)
+        self._connect(self.page.view_prefs_changed, prefs.append)
+        self.page.table.horizontalHeader().resizeSection(0, 480)
         self.page._emit_view_prefs()
         restored = AppSettings.from_dict(prefs[-1])
         self.assertTrue(restored.nodes_favorites_only)
@@ -70,13 +116,20 @@ class GroupedServersTests(unittest.TestCase):
     def test_large_list_point_update_does_not_reset_or_resize(self):
         nodes=[Node(id=str(i), name=f"Server {i}", subscription_id=str(i%20)) for i in range(10000)]
         self.page.set_nodes(nodes)
-        model=self.page._group_model
-        self.assertEqual(len(model.group_indexes()),20)
-        resets=[]
-        model.modelReset.connect(lambda:resets.append(True))
-        self.page._table_model.refresh_ping('5000')
+        model=self.page._table_model
+        self.assertEqual(len(model.group_keys()),20)
+        resets, layouts, changes = [], [], []
+        self._connect(model.modelReset, lambda: resets.append(True))
+        self._connect(model.layoutChanged, lambda *args: layouts.append(True))
+        self._connect(model.dataChanged, lambda top, bottom, roles=None: changes.append((top.row(), bottom.row())))
+        nodes[5000].ping_ms = 42
+        self.page._table_model.finish_ping_batch({'5000'})
+        QTest.qWait(_AFTER_RELAYOUT_WINDOW_MS)
         self.assertEqual(resets,[])
-        self.assertEqual(self.page.table.header().sectionSize(0),360)
+        self.assertEqual(layouts,[])
+        row = model.row_of_node('5000')
+        self.assertEqual(changes, [(row, row)])
+        self.assertEqual(self.page.table.horizontalHeader().sectionSize(0),360)
 
 
 class OfflineCountryTests(unittest.TestCase):

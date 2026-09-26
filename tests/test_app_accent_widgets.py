@@ -17,8 +17,9 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QRect, Qt
+from PyQt6.QtGui import QColor, QImage, QPainter
+from PyQt6.QtWidgets import QStyle, QStyleOptionViewItem
 from PyQt6.QtWidgets import QApplication
 
 _existing = QApplication.instance()
@@ -33,8 +34,9 @@ from qfluentwidgets import qconfig, setTheme, setThemeColor, themeColor
 
 from xray_fluent.profiles.models import AppSettings, Node, SecuritySettings
 from xray_fluent.ui import theme
-from xray_fluent.ui.nodes_table_delegate import NodesActivityDelegate
-from xray_fluent.ui.nodes_table_model import COL_NAME, NodesTableModel
+from xray_fluent.ui.nodes_page import NodesPage
+from xray_fluent.ui.nodes_table_model import COL_TYPE
+from xray_fluent.ui.nodes_view import NodesDelegate
 from xray_fluent.ui.settings_page import SettingsPage
 from xray_fluent.ui.traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 from xray_fluent.ui.zapret_page import ZapretPage
@@ -55,38 +57,83 @@ class _AccentRestoreMixin(unittest.TestCase):
         QApplication.processEvents()
 
 
+# Одна страница серверов на модуль (урок Windows-гейта: не создавать и не
+# удалять полные страницы пачкой в одном процессе).
+_shared_nodes_page: NodesPage | None = None
+
+
+def _nodes_page() -> NodesPage:
+    global _shared_nodes_page
+    if _shared_nodes_page is None:
+        _shared_nodes_page = NodesPage()
+    return _shared_nodes_page
+
+
 class NodesDelegateActiveFillTest(_AccentRestoreMixin):
     """AC5: soft accent fill for the active node row."""
 
     def setUp(self) -> None:
         super().setUp()
-        self.model = NodesTableModel()
+        self.page = _nodes_page()
         self.nodes = [
             Node(name="a", server="1.1.1.1", port=443, scheme="vless"),
             Node(name="b", server="2.2.2.2", port=443, scheme="vless"),
         ]
-        self.model.set_nodes(self.nodes)
-        self.model.set_active_node_id(self.nodes[0].id)
+        self.page.set_nodes(self.nodes)
+        self.page.set_active_node(self.nodes[0].id)
+        self.model = self.page._table_model
+        self.delegate = self.page.table.itemDelegate()
+
+    def tearDown(self) -> None:
+        self.page.set_active_node(None)
+        super().tearDown()
+
+    def _fill_pixel(self, node: Node) -> QColor:
+        """Цвет заливки, которую делегат рисует в средней колонке строки."""
+        index = self.model.index(self.model.row_of_node(node.id), COL_TYPE)
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 120, 28)
+        option.state = QStyle.StateFlag.State_Enabled
+        image = QImage(120, 28, QImage.Format.Format_ARGB32)
+        image.fill(0)
+        painter = QPainter(image)
+        self.delegate.paint(painter, option, index)
+        painter.end()
+        return image.pixelColor(3, 14)  # левее центрированного текста
+
+    def test_delegate_is_the_custom_row_painter(self) -> None:
+        self.assertIsInstance(self.delegate, NodesDelegate)
 
     def test_active_row_fill_matches_accent_soft_bg(self) -> None:
-        index = self.model.index(0, COL_NAME)
-        fill = NodesActivityDelegate.row_fill_color(index)
-        self.assertIsNotNone(fill)
+        fill = self.delegate.palette().active
         self.assertEqual(fill.getRgb(), theme.accent_soft_bg().getRgb())
         self.assertEqual(fill.alpha(), 38)
+        pixel = self._fill_pixel(self.nodes[0])
+        accent = theme.accent_color()
+        self.assertLessEqual(abs(pixel.alpha() - 38), 2)
+        for got, want in zip(pixel.getRgb()[:3], accent.getRgb()[:3]):
+            self.assertLessEqual(abs(got - want), 8)
 
-    def test_inactive_row_has_no_fill(self) -> None:
-        index = self.model.index(1, COL_NAME)
-        self.assertIsNone(NodesActivityDelegate.row_fill_color(index))
+    def test_inactive_row_is_not_painted_with_the_accent(self) -> None:
+        active = self._fill_pixel(self.nodes[0])
+        inactive = self._fill_pixel(self.nodes[1])
+        self.assertNotEqual(inactive.getRgb(), active.getRgb())
+        self.assertLess(inactive.alpha(), active.alpha())
 
     def test_fill_follows_accent_change(self) -> None:
-        index = self.model.index(0, COL_NAME)
+        # Палитра делегата сбрасывается подпиской на смену акцента — без
+        # ручного invalidate().
         setThemeColor("#123456")
-        before = NodesActivityDelegate.row_fill_color(index).getRgb()
+        before = self.delegate.palette().active.getRgb()
+        self.assertEqual(before[:3], (0x12, 0x34, 0x56))
         setThemeColor("#654321")
-        after = NodesActivityDelegate.row_fill_color(index).getRgb()
+        after = self.delegate.palette().active.getRgb()
         self.assertNotEqual(before, after)
         self.assertEqual(after[:3], (0x65, 0x43, 0x21))
+        self.assertEqual(after[3], 38)
+        pixel = self._fill_pixel(self.nodes[0])
+        for got, want in zip(pixel.getRgb()[:3], (0x65, 0x43, 0x21)):
+            self.assertLessEqual(abs(got - want), 8)
 
 
 class TrafficGraphAccentRepaintTest(_AccentRestoreMixin):
@@ -123,19 +170,13 @@ class NodesPageAccentRepaintTest(_AccentRestoreMixin):
     """AC6: the nodes table viewport repaints when only the accent changes."""
 
     def test_nodes_view_repaints_on_accent_change(self) -> None:
-        from xray_fluent.ui.nodes_page import NodesPage
-
-        page = NodesPage()
-        try:
-            setThemeColor("#336699")
+        page = _nodes_page()
+        setThemeColor("#336699")
+        QApplication.processEvents()
+        with mock.patch.object(page.table.viewport(), "update") as update:
+            setThemeColor("#663399")
             QApplication.processEvents()
-            with mock.patch.object(page.table.viewport(), "update") as update:
-                setThemeColor("#663399")
-                QApplication.processEvents()
-                update.assert_called()
-        finally:
-            page.deleteLater()
-            QApplication.processEvents()
+            update.assert_called()
 
 
 def _preset(name: str) -> PresetInfo:
