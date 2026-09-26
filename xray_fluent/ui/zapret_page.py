@@ -545,6 +545,14 @@ class ZapretPage(StackedSection):
         self.preset_list.setVerticalScrollMode(ListWidget.ScrollMode.ScrollPerItem)
         self.preset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         root.addWidget(self.preset_list, 1)
+        self.empty_label = CaptionLabel(
+            "Пресетов пока нет. Нажмите «+», чтобы создать пресет, или кнопку с папкой, "
+            "чтобы импортировать готовый из файла.",
+            list_page,
+        )
+        self.empty_label.setWordWrap(True)
+        self.empty_label.hide()
+        root.insertWidget(root.indexOf(self.preset_list), self.empty_label)
 
         self.hint_label = CaptionLabel(
             "winws2 работает независимо от VPN и требует прав администратора. "
@@ -695,6 +703,7 @@ class ZapretPage(StackedSection):
                 select_row = row
         self.preset_list.blockSignals(False)
         self.count_label.setText(f"{len(self._presets)}")
+        self.empty_label.setVisible(not self._presets)
         if select_row >= 0:
             self.preset_list.setCurrentRow(select_row)
 

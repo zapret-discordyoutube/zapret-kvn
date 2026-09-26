@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
-from PyQt6.QtGui import QBrush
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
@@ -38,9 +39,10 @@ from ..diagnostics.connection_message import connection_message
 from ..profiles.models import AppSettings, Node, RoutingSettings
 from ..platform.windows.proxy_manager import SystemProxyState
 from .base_page import ScrollablePage
+from .connection_orb import CONNECTED, CONNECTING, ERROR, IDLE, ConnectionOrb
 from .detail_page import DetailPage, StackedSection
 from .privacy import masked_endpoint, node_name_text
-from .theme import success_color
+from .theme import error_color, graph_down_color, graph_up_color, on_theme_or_accent_changed, success_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 
 
@@ -103,6 +105,7 @@ class DashboardPage(StackedSection):
         self._down_history: deque[float] = deque(maxlen=300)
         self._up_history: deque[float] = deque(maxlen=300)
         self._last_process_stats: list | None = None
+        self._connected_since: float | None = None
         self._grid_narrow = False
         self._in_grid_relayout = False
 
@@ -133,9 +136,16 @@ class DashboardPage(StackedSection):
 
         # ── Connection card ───────────────────────────────────
         self.connection_card = CardWidget(self)
-        connection_layout = QVBoxLayout(self.connection_card)
-        connection_layout.setContentsMargins(18, 16, 18, 16)
+        hero_layout = QHBoxLayout(self.connection_card)
+        hero_layout.setContentsMargins(14, 14, 18, 14)
+        hero_layout.setSpacing(16)
+        # Эмблема состояния; центральный диск — та же кнопка, что toggle_btn.
+        self.connection_orb = ConnectionOrb(self.connection_card, diameter=144)
+        self.connection_orb.clicked.connect(self._on_orb_clicked)
+        hero_layout.addWidget(self.connection_orb, 0, Qt.AlignmentFlag.AlignVCenter)
+        connection_layout = QVBoxLayout()
         connection_layout.setSpacing(6)
+        hero_layout.addLayout(connection_layout, 1)
         connection_layout.addWidget(StrongBodyLabel("Подключение", self.connection_card))
         self.connection_state_label = SubtitleLabel("Ожидание", self.connection_card)
         self.connection_state_label.setWordWrap(True)
@@ -147,9 +157,13 @@ class DashboardPage(StackedSection):
         self.connection_status_label = CaptionLabel("Прокси остановлен", self.connection_card)
         self.connection_target_label = CaptionLabel("Активный профиль не выбран", self.connection_card)
         self.connection_target_label.setWordWrap(True)
+        self.connection_uptime_label = CaptionLabel("", self.connection_card)
+        self.connection_uptime_label.setWordWrap(True)
+        self.connection_uptime_label.hide()
         connection_layout.addWidget(self.connection_state_label)
         connection_layout.addWidget(self.connection_engine_label)
         connection_layout.addWidget(self.connection_ports_label)
+        connection_layout.addWidget(self.connection_uptime_label)
 
         # Toggle button inside connection card
         self.toggle_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Запустить прокси", self.connection_card)
@@ -184,18 +198,34 @@ class DashboardPage(StackedSection):
         traffic_layout.setContentsMargins(18, 16, 18, 16)
         traffic_layout.setSpacing(6)
         traffic_layout.addWidget(StrongBodyLabel("Трафик", self.traffic_card))
-        self.traffic_down_label = BodyLabel("Загрузка: 0 B/s", self.traffic_card)
-        self.traffic_up_label = BodyLabel("Выгрузка: 0 B/s", self.traffic_card)
-        self.traffic_rtt_label = BodyLabel("RTT: --", self.traffic_card)
+        # Плитки «подпись + крупное значение»; цветные точки у загрузки и
+        # отдачи заменяют легенду графика.
+        self.traffic_down_label = SubtitleLabel("0 B/s", self.traffic_card)
+        self.traffic_up_label = SubtitleLabel("0 B/s", self.traffic_card)
+        self.traffic_rtt_label = SubtitleLabel("--", self.traffic_card)
+        self.traffic_peak_label = SubtitleLabel("0 B/s", self.traffic_card)
+        self._traffic_down_caption = CaptionLabel("● Загрузка", self.traffic_card)
+        self._traffic_up_caption = CaptionLabel("● Отдача", self.traffic_card)
+        metrics = QHBoxLayout()
+        metrics.setSpacing(12)
+        for caption, value in (
+            (self._traffic_down_caption, self.traffic_down_label),
+            (self._traffic_up_caption, self.traffic_up_label),
+            (CaptionLabel("Пинг", self.traffic_card), self.traffic_rtt_label),
+            (CaptionLabel("Пик за сессию", self.traffic_card), self.traffic_peak_label),
+        ):
+            tile = QVBoxLayout()
+            tile.setSpacing(0)
+            tile.addWidget(caption)
+            tile.addWidget(value)
+            metrics.addLayout(tile, 1)
+        self._color_traffic_captions()
+        on_theme_or_accent_changed(self._color_traffic_captions)
+        on_theme_or_accent_changed(self._color_state_title)
         self.traffic_graph = TrafficGraphWidget(self.traffic_card)
         self.traffic_graph.clicked.connect(self._show_traffic_page)
-        self.traffic_peak_label = CaptionLabel("Пик: 0 B/s", self.traffic_card)
-        metrics = QHBoxLayout()
-        for label in (self.traffic_down_label, self.traffic_up_label, self.traffic_rtt_label):
-            metrics.addWidget(label, 1)
         traffic_layout.addLayout(metrics)
         traffic_layout.addWidget(self.traffic_graph, 1)
-        traffic_layout.addWidget(self.traffic_peak_label)
 
         _col_tooltips = [
             "Имя исполняемого файла приложения",
@@ -401,6 +431,10 @@ class DashboardPage(StackedSection):
         self._refresh_dashboard()
 
     def set_connection(self, connected: bool) -> None:
+        if connected and not self._connected:
+            self._connected_since = time.monotonic()
+        elif not connected:
+            self._connected_since = None
         self._connected = connected
         if not connected:
             self._last_down_bps = 0.0
@@ -551,8 +585,52 @@ class DashboardPage(StackedSection):
         self.connection_status_label.setText("Загрузка данных…" if self._initializing else status_text)
         self.connection_target_label.setText(self._selected_node_summary())
         self.toggle_btn.setText("Подготовка…" if self._initializing else self._toggle_action_text())
-        self.toggle_btn.setIcon(FIF.PAUSE_BOLD if self._connected else FIF.PLAY_SOLID)
+        icon = FIF.PAUSE_BOLD if self._connected else FIF.PLAY_SOLID
+        if icon is not getattr(self, "_toggle_icon", None):
+            self._toggle_icon = icon
+            self.toggle_btn.setIcon(icon)
         self.summary_label.setText(self._summary_text())
+        orb_state = self._orb_state()
+        self.connection_orb.set_state(orb_state)
+        self.connection_orb.setToolTip(self._toggle_action_text())
+        if orb_state != getattr(self, "_title_state", None):
+            self._title_state = orb_state
+            self._color_state_title()
+        uptime = self._uptime_text()
+        self.connection_uptime_label.setText(uptime)
+        self.connection_uptime_label.setVisible(bool(uptime))
+
+    def _color_state_title(self, *_args) -> None:
+        """Заголовок состояния в цвет сферы: зелёный — есть защита, красный — ошибка."""
+        state = getattr(self, "_title_state", IDLE)
+        if state == CONNECTED:
+            color = success_color()
+            self.connection_state_label.setTextColor(color, color)
+        elif state == ERROR:
+            color = error_color()
+            self.connection_state_label.setTextColor(color, color)
+        else:
+            self.connection_state_label.setTextColor(QColor(0, 0, 0), QColor(255, 255, 255))
+
+    def _orb_state(self) -> str:
+        if self._initializing or self._transition_busy or self._connection_phase == "starting":
+            return CONNECTING
+        if self._connection_phase == "error":
+            return ERROR
+        if self._connected:
+            return CONNECTED
+        return IDLE
+
+    def _uptime_text(self) -> str:
+        if not self._connected or self._connected_since is None:
+            return ""
+        seconds = int(time.monotonic() - self._connected_since)
+        hours, rest = divmod(seconds, 3600)
+        return f"В сети {hours:d}:{rest // 60:02d}:{rest % 60:02d}"
+
+    def _on_orb_clicked(self) -> None:
+        if self.toggle_btn.isEnabled():
+            self.toggle_connection_requested.emit()
 
     def _refresh_profile_card(self) -> None:
         selected = self._selected_node
@@ -570,10 +648,15 @@ class DashboardPage(StackedSection):
         self.profile_latency_label.setText(f"Задержка: {_format_latency(self._effective_latency())}")
 
     def _refresh_traffic_card(self) -> None:
-        self.traffic_down_label.setText(f"Загрузка: {_format_speed(self._last_down_bps)}")
-        self.traffic_up_label.setText(f"Выгрузка: {_format_speed(self._last_up_bps)}")
-        self.traffic_rtt_label.setText(f"RTT: {_format_latency(self._effective_latency())}")
-        self.traffic_peak_label.setText(f"Пик: {_format_speed(self._peak_bps)}")
+        self.traffic_down_label.setText(_format_speed(self._last_down_bps))
+        self.traffic_up_label.setText(_format_speed(self._last_up_bps))
+        self.traffic_rtt_label.setText(_format_latency(self._effective_latency()))
+        self.traffic_peak_label.setText(_format_speed(self._peak_bps))
+
+    def _color_traffic_captions(self, *_args) -> None:
+        for caption, color in ((self._traffic_down_caption, graph_down_color()),
+                               (self._traffic_up_caption, graph_up_color())):
+            caption.setTextColor(color, color)
 
     def _refresh_routing_card(self) -> None:
         if not self._settings.tun_mode:
@@ -755,12 +838,12 @@ class DashboardPage(StackedSection):
 
     def _connection_texts(self) -> tuple[str, str]:
         if self._connection_phase == "starting":
-            return "Запуск", self._connection_message
+            return "Подключение…", self._connection_message
         if self._connection_phase == "error":
             return "Ошибка", self._connection_message
         if self._connection_phase == "running" or self._connected:
             return "Подключено", self._connection_message or self._default_connection_message()
-        return "Ожидание", self._connection_message or self._default_connection_message()
+        return "Не подключено", self._connection_message or self._default_connection_message()
 
     def _toggle_action_text(self) -> str:
         if self._settings.tun_mode:
@@ -842,6 +925,8 @@ class DashboardPage(StackedSection):
         )
         busy = self._initializing or self._transition_busy or self._connection_phase == "starting"
         self.toggle_btn.setEnabled(has_profiles and not busy)
+        self.connection_orb.setEnabled(has_profiles and not busy)
+        self.connection_orb.set_state(self._orb_state())
         self.tun_switch.setEnabled(not busy)
         self.mode_combo.setVisible(self._is_tun2socks_mode())
         self.mode_combo.setEnabled(not busy and self._is_tun2socks_mode())

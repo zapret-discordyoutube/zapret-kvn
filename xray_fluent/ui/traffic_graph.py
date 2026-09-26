@@ -44,8 +44,8 @@ class TrafficGraphWidget(QWidget):
         self._max_points = max_points
         self._down_data: deque[float] = deque(maxlen=max_points)
         self._up_data: deque[float] = deque(maxlen=max_points)
-        self.setMinimumHeight(80)
-        self.setMaximumHeight(120)
+        self.setMinimumHeight(96)
+        self.setMaximumHeight(150)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Нажмите для подробного графика")
         on_theme_or_accent_changed(self._on_theme_changed)
@@ -210,19 +210,9 @@ def _draw_graph(
     _draw_line(painter, graph_x, graph_y, graph_w, graph_h, down_data, max_val, color_down, compact)
     _draw_line(painter, graph_x, graph_y, graph_w, graph_h, up_data, max_val, color_up, compact)
 
-    # legend
-    if compact:
-        font = QFont()
-        font.setPixelSize(9)
-        painter.setFont(font)
-        lx = graph_x + 4
-        ly = graph_y + 2
-
-        painter.setPen(color_down)
-        painter.drawText(QPointF(lx, ly + 9), "↓ Загрузка")
-        painter.setPen(color_up)
-        painter.drawText(QPointF(lx + 64, ly + 9), "↑ Выгрузка")
-    else:
+    # legend: в компактном графике её роль играют цветные метки плиток
+    # «Загрузка»/«Отдача» над графиком — текст поверх линий не рисуем.
+    if not compact:
         font = QFont()
         font.setPixelSize(11)
         painter.setFont(font)
@@ -268,11 +258,10 @@ def _draw_line(
     fill_color.setAlpha(5)
     gradient.setColorAt(1.0, fill_color)
 
-    fill_path = QPainterPath()
-    fill_path.moveTo(QPointF(points[0].x(), gy + gh))
-    for pt in points:
-        fill_path.lineTo(pt)
+    line_path = _smooth_path(points)
+    fill_path = QPainterPath(line_path)
     fill_path.lineTo(QPointF(points[-1].x(), gy + gh))
+    fill_path.lineTo(QPointF(points[0].x(), gy + gh))
     fill_path.closeSubpath()
 
     painter.setPen(Qt.PenStyle.NoPen)
@@ -285,8 +274,18 @@ def _draw_line(
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
 
-    line_path = QPainterPath()
-    line_path.moveTo(points[0])
-    for pt in points[1:]:
-        line_path.lineTo(pt)
     painter.drawPath(line_path)
+
+
+def _smooth_path(points: list[QPointF]) -> QPainterPath:
+    """Плавная кривая через точки без «выбросов».
+
+    Контрольные точки кубики стоят на середине отрезка по X и на высоте
+    своих концов, поэтому кривая не выходит за значения соседних точек
+    (скорость не рисуется отрицательной и не завышает пики).
+    """
+    path = QPainterPath(points[0])
+    for previous, point in zip(points, points[1:]):
+        middle = (previous.x() + point.x()) / 2
+        path.cubicTo(QPointF(middle, previous.y()), QPointF(middle, point.y()), point)
+    return path

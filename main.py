@@ -286,6 +286,9 @@ def main() -> int:
     from xray_fluent.application.startup_service import StartupLoader
 
     app = QApplication(sys.argv)
+    from xray_fluent.ui.fluent_fixes import install_translations
+
+    install_translations(app)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     tray_available = QSystemTrayIcon.isSystemTrayAvailable()

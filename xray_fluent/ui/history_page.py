@@ -6,6 +6,7 @@ from qfluentwidgets import qconfig
 from PyQt6.QtWidgets import QHBoxLayout, QHeaderView, QTableWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
+    CaptionLabel,
     ComboBox,
     FluentIcon as FIF,
     PushButton,
@@ -55,24 +56,19 @@ class HistoryPage(ScrollablePage):
         summary_row = QHBoxLayout()
         summary_row.setSpacing(16)
 
+        # Три одинаковые плитки «подпись над крупным значением», чтобы цифры
+        # стояли на одной линии.
         self._total_down_label = TitleLabel("0 B", container)
         self._total_up_label = TitleLabel("0 B", container)
-        self._session_count_label = BodyLabel("0 сессий", container)
-
-        down_col = QVBoxLayout()
-        down_col.addWidget(BodyLabel("Загрузка", container))
-        down_col.addWidget(self._total_down_label)
-        summary_row.addLayout(down_col)
-
-        up_col = QVBoxLayout()
-        up_col.addWidget(BodyLabel("Отдача", container))
-        up_col.addWidget(self._total_up_label)
-        summary_row.addLayout(up_col)
-
-        count_col = QVBoxLayout()
-        count_col.addWidget(BodyLabel("Сессий", container))
-        count_col.addWidget(self._session_count_label)
-        summary_row.addLayout(count_col)
+        self._session_count_label = TitleLabel("0", container)
+        for caption, value in (("Загрузка", self._total_down_label), ("Отдача", self._total_up_label),
+                               ("Сессий", self._session_count_label)):
+            column = QVBoxLayout()
+            column.setSpacing(0)
+            column.addWidget(CaptionLabel(caption, container))
+            column.addWidget(value)
+            summary_row.addLayout(column)
+            summary_row.addSpacing(16)
 
         summary_row.addStretch()
         root.addLayout(summary_row)
@@ -159,7 +155,7 @@ class HistoryPage(ScrollablePage):
         total_down = sum(s.total_download for s in sessions)
         self._total_down_label.setText(_fmt_bytes(total_down))
         self._total_up_label.setText(_fmt_bytes(total_up))
-        self._session_count_label.setText(f"{len(sessions)} сессий")
+        self._session_count_label.setText(str(len(sessions)))
 
         # Sessions table
         self._sessions_table.setRowCount(len(sessions))

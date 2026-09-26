@@ -98,5 +98,19 @@ class SwitchSliderTests(unittest.TestCase):
             card.deleteLater()
 
 
+class SwitchTranslationTests(unittest.TestCase):
+    def test_setting_card_switch_is_russian(self) -> None:
+        from xray_fluent.ui.fluent_fixes import install_translations
+
+        install_translations(app)
+        card = SwitchSettingCard(FIF.GLOBE, "Тест")
+        try:
+            self.assertEqual(card.switchButton.text, "Выкл")
+            card.setChecked(True)
+            self.assertEqual(card.switchButton.text, "Вкл")
+        finally:
+            card.deleteLater()
+
+
 if __name__ == "__main__":
     unittest.main()

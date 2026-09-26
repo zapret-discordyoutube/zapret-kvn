@@ -7,7 +7,26 @@
 
 from __future__ import annotations
 
+from PyQt6.QtCore import QCoreApplication, QTranslator
+
 _installed = False
+_translator: QTranslator | None = None
+
+# qfluentwidgets подписывает переключатели через self.tr('On'/'Off') — без
+# перевода в настройках и подписках стояло английское «On/Off», а на панели
+# русское «Вкл/Выкл».
+_SWITCH_TEXTS = {"On": "Вкл", "Off": "Выкл"}
+_SWITCH_CONTEXTS = frozenset({"SwitchButton", "SwitchSettingCard"})
+
+
+class _FluentRussianTranslator(QTranslator):
+    def translate(self, context, source_text, disambiguation=None, n=-1):
+        if context in _SWITCH_CONTEXTS:
+            text = _SWITCH_TEXTS.get(source_text)
+            if text is not None:
+                return text
+        return ""  # пустая строка — «перевода нет», Qt оставит исходный текст
+
 
 _SLIDER_OFF_X = 5.0
 _SLIDER_ON_X = 25.0
@@ -32,6 +51,14 @@ def _toggle_slider(self) -> None:
     animation.setStartValue(float(self.getSliderX()))
     animation.setEndValue(target)
     animation.start()
+
+
+def install_translations(app: QCoreApplication) -> None:
+    """Русские подписи стандартных виджетов qfluentwidgets (до создания окон)."""
+    global _translator
+    if _translator is None:
+        _translator = _FluentRussianTranslator(app)
+        app.installTranslator(_translator)
 
 
 def install() -> None:
