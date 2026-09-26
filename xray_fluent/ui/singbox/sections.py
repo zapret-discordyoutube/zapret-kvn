@@ -37,7 +37,8 @@ from ..detail_page import DetailPage
 from ..qt_lifecycle import dispose_later
 from qfluentwidgets import FluentIcon as FIF
 
-from .art import ArtCanvas, DnsArt, KindBadge, OutboundHubArt, RuleScanArt, RuleSetArt, TunnelArt
+from .art import ArtCanvas, KindBadge
+from .guide import help_link, open_guide
 from .fields import FieldEditor, FormContext, create_editor
 from .form import SchemaForm
 from .lists import AddOption, NavStack, ObjectList, RowInfo, section_header, unique_tag
@@ -272,10 +273,8 @@ class Section(QWidget):
 
     key = ""
     title = ""
-    hint = ""
     icon = FIF.FILTER
     tone = PROXY
-    art_class: type[ArtCanvas] | None = None
 
     def __init__(self, session: SingboxSession, parent: QWidget | None = None, schema: SingboxSchema | None = None):
         super().__init__(parent)
@@ -292,45 +291,38 @@ class Section(QWidget):
         self.body: QWidget = self.root.body
         self._active = False
         self._stale = True
-        self.art: ArtCanvas | None = None
         self.root.body_layout.addWidget(self._make_header())
         session.document_replaced.connect(self._on_document_replaced)
-        session.state_changed.connect(self._refresh_art)
 
     def _make_header(self) -> QWidget:
-        """Title, hint and the section's live illustration (built once)."""
+        """Title and the «how does it work» link (built once).
+
+        Explanations and the live illustration live in the guide dialog, so
+        the page itself shows only the data.
+        """
         header = QWidget(self.root.body)
         header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         row = QHBoxLayout(header)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(16)
-        column = QVBoxLayout()
-        column.setSpacing(6)
-        title_row = QHBoxLayout()
-        title_row.setSpacing(10)
+        row.setSpacing(10)
         badge = KindBadge(header, size=32)
         badge.set_visual(Visual(self.icon, self.tone), vivid=True)
-        title_row.addWidget(badge)
-        title_row.addWidget(SubtitleLabel(self.title, header))
-        title_row.addStretch(1)
-        column.addLayout(title_row)
-        if self.hint:
-            hint = CaptionLabel(self.hint, header)
-            hint.setWordWrap(True)
-            column.addWidget(hint)
-        column.addStretch(1)
-        row.addLayout(column, 3)
-        if self.art_class is not None:
-            self.art = self.art_class(header)
-            row.addWidget(self.art, 2)
+        row.addWidget(badge)
+        row.addWidget(SubtitleLabel(self.title, header))
+        row.addStretch(1)
+        self.help_link = help_link(header)
+        self.help_link.clicked.connect(self.open_guide)
+        row.addWidget(self.help_link)
         return header
 
-    def _refresh_art(self) -> None:
-        if self.art is not None and self.session.document is not None:
-            self.refresh_art(self.art)
+    def open_guide(self):
+        """Explain the section to a newcomer; the illustration shows this config."""
+        self.flush()
+        feed = self.refresh_art if self.session.document is not None else None
+        return open_guide(self.key, self, feed)
 
     def refresh_art(self, art: ArtCanvas) -> None:
-        """Feed the illustration with the user's config (override)."""
+        """Feed the guide illustration with the user's config (override)."""
 
     @property
     def scroll_area(self):
@@ -399,7 +391,6 @@ class Section(QWidget):
             return
         self.build(layout)
         layout.addStretch(1)
-        self._refresh_art()
 
     def build(self, layout: QVBoxLayout) -> None:
         raise NotImplementedError
@@ -550,11 +541,6 @@ class RulesSection(Section):
     key = "rules"
     title = "Правила"
     icon = FIF.FILTER
-    art_class = RuleScanArt
-    hint = (
-        "Правила проверяются сверху вниз, срабатывает первое подошедшее. "
-        "Это native route.rules ядра sing-box: одинаково для TUN и системного прокси."
-    )
 
     def build(self, layout: QVBoxLayout) -> None:
         node = self.schema.definition("Rule")
@@ -577,7 +563,7 @@ class RulesSection(Section):
             item_label=lambda _rule, index: f"Правило {index + 1}",
             check=_rule_condition_check,
         )
-        layout.addWidget(section_header("Если ничего не подошло", "Куда отправить остальной трафик (route.final).", self.body))
+        layout.addWidget(section_header("Если ничего не подошло", self.body))
         route = _LazyObject(self.document, "route")
         final_shape = self.schema.fields(self.schema.section("route"), route.value)["final"].shape
         editor = create_editor(self.ctx(), route.value, "final", final_shape, self.body)
@@ -599,11 +585,6 @@ class RuleSetsSection(Section):
     title = "Наборы правил"
     icon = FIF.LIBRARY
     tone = DNS
-    art_class = RuleSetArt
-    hint = (
-        "Наборы (route.rule_set) подключают готовые списки доменов и адресов: локальные .srs/.json, "
-        "загружаемые по URL или встроенные. Относительные пути считаются от папки core."
-    )
 
     def build(self, layout: QVBoxLayout) -> None:
         node = self.schema.definition("RuleSet")
@@ -658,15 +639,10 @@ class DnsSection(Section):
     title = "DNS"
     icon = FIF.GLOBE
     tone = DNS
-    art_class = DnsArt
-    hint = (
-        "Native секция dns: серверы, правила выбора сервера и общие параметры. "
-        "Приложение её больше не перезаписывает; вернуть стоковый вариант можно на странице «Обзор»."
-    )
 
     def build(self, layout: QVBoxLayout) -> None:
         self.add_object_form(layout, "dns", "dns", hidden=("servers", "rules"))
-        layout.addWidget(section_header("Серверы", "Порядок не важен; сервер выбирают правила и «final».", self.body))
+        layout.addWidget(section_header("Серверы", self.body))
         server_node = self.schema.definition("DNSServer")
 
         def new_server(kind: str) -> dict:
@@ -696,7 +672,7 @@ class DnsSection(Section):
             note=lambda item: app_owned_note("dns.servers", item),
             can_remove=self.reference_warning("сервер", "dns.servers"),
         )
-        layout.addWidget(section_header("Правила DNS", "Проверяются сверху вниз; выбирают сервер или ответ.", self.body))
+        layout.addWidget(section_header("Правила DNS", self.body))
         rule_node = self.schema.definition("DNSRule")
 
         def new_rule() -> dict:
@@ -729,11 +705,6 @@ class OutboundsSection(Section):
     key = "outbounds"
     title = "Исходящие"
     icon = FIF.SEND
-    art_class = OutboundHubArt
-    hint = (
-        "Куда правила отправляют трафик. Outbound с тегом proxy — место, куда при запуске подставляется "
-        "выбранный сервер; остальные (direct, block, selector, urltest, …) полностью ваши."
-    )
 
     def build(self, layout: QVBoxLayout) -> None:
         node = self.schema.array_item("outbounds")
@@ -768,14 +739,7 @@ class OutboundsSection(Section):
             can_remove=self.reference_warning("outbound", "outbounds"),
         )
         endpoint_node = self.schema.array_item("endpoints")
-        layout.addWidget(
-            section_header(
-                "Endpoints",
-                "WireGuard, WARP, Tailscale и другие endpoints. Приложение допускает один WireGuard endpoint "
-                "без outbound proxy (AmneziaWG).",
-                self.body,
-            )
-        )
+        layout.addWidget(section_header("Endpoints", self.body))
 
         def new_endpoint(kind: str) -> dict:
             return {"type": kind, "tag": unique_tag(kind, section_items(self.document, "endpoints"))}
@@ -809,18 +773,9 @@ class SystemSection(Section):
     title = "Система"
     icon = FIF.DEVELOPER_TOOLS
     tone = SPECIAL
-    art_class = TunnelArt
-    hint = "Входящие (TUN), общие параметры маршрутизации, журнал ядра и остальные секции конфига."
 
     def build(self, layout: QVBoxLayout) -> None:
-        layout.addWidget(
-            section_header(
-                "Входящие",
-                "Для режима TUN нужен inbound типа tun. Входящие socks/http/mixed приложение при запуске "
-                "заменяет своими портами системного прокси.",
-                self.body,
-            )
-        )
+        layout.addWidget(section_header("Входящие", self.body))
         node = self.schema.array_item("inbounds")
 
         def new_inbound(kind: str) -> dict:
@@ -847,20 +802,13 @@ class SystemSection(Section):
             note=lambda item: app_owned_note("inbounds", item),
             can_remove=self.reference_warning("inbound"),
         )
-        layout.addWidget(section_header("Маршрутизация: общие параметры", "route.* кроме правил и наборов.", self.body))
+        layout.addWidget(section_header("Маршрутизация: общие параметры", self.body))
         self.add_object_form(layout, "route", "route", hidden=("rules", "rule_set", "final"))
-        layout.addWidget(section_header("Журнал ядра", "Приложение читает журнал из вывода ядра: файл и отключение скроют ошибки.", self.body))
+        layout.addWidget(section_header("Журнал ядра", self.body))
         self.add_object_form(layout, "log", "log")
-        layout.addWidget(
-            section_header(
-                "Experimental",
-                "cache_file хранит кэш наборов и DNS. Адрес Clash API приложение назначает само при запуске; "
-                "секрет Clash API не поддерживается (перестанут работать метрики и переключение).",
-                self.body,
-            )
-        )
+        layout.addWidget(section_header("Experimental", self.body))
         self.add_object_form(layout, "experimental", "experimental")
-        layout.addWidget(section_header("Прочие секции", "Остальные секции верхнего уровня, которые знает ядро.", self.body))
+        layout.addWidget(section_header("Прочие секции", self.body))
         rest = SchemaForm(
             self.ctx(),
             self.schema.document,

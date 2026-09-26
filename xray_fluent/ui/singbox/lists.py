@@ -347,14 +347,11 @@ class NavStack(PopUpAniStackedWidget):
         return len(self._pages)
 
 
-def section_header(title: str, hint: str, parent: QWidget) -> QWidget:
+def section_header(title: str, parent: QWidget) -> QWidget:
+    """Subsection title; explanations live in the section guide dialog."""
     host = QWidget(parent)
     layout = QVBoxLayout(host)
     layout.setContentsMargins(0, 6, 0, 0)
     layout.setSpacing(2)
     layout.addWidget(StrongBodyLabel(title, host))
-    if hint:
-        label = CaptionLabel(hint, host)
-        label.setWordWrap(True)
-        layout.addWidget(label)
     return host

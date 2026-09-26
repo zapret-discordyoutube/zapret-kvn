@@ -50,6 +50,26 @@ def _section(page: ConfigsPage, key: str):
     return page._sections[key]
 
 
+def _guide(open_guide):
+    """Open a guide the way the link does and keep it for the module.
+
+    The dialog stays open (hidden mask) instead of being destroyed mid-run:
+    deleting widgets mid-run crashes on Windows, see test_app_detail_pages.
+    """
+    from xray_fluent.ui.singbox.guide import GuideDialog
+
+    before = set(map(id, _shared.setdefault("guides", [])))
+    result = open_guide()
+    dialog = result if isinstance(result, GuideDialog) else None
+    if dialog is None:
+        page = _shared["page"]
+        dialog = next(d for d in page.findChildren(GuideDialog) if id(d) not in before)
+    dialog.finished.disconnect()
+    dialog.hide()
+    _shared["guides"].append(dialog)
+    return dialog
+
+
 def _pump() -> None:
     for _ in range(3):
         QCoreApplication.processEvents()
@@ -264,22 +284,72 @@ class RoutingPageTests(unittest.TestCase):
             self.assertIs(rules.nav.currentWidget(), rules.root)
         _pump()
 
-    def test_rows_show_badges_and_art_follows_edits(self) -> None:
-        from xray_fluent.ui.singbox.art import KindBadge
+    def test_rows_show_badges_and_guide_art_shows_the_config(self) -> None:
+        from xray_fluent.ui.singbox.art import KindBadge, RouteMapArt, RuleScanArt
 
         page = _page()
         rules = _section(page, "rules")
         badges = [b for b in rules.rules.findChildren(KindBadge) if b.isVisibleTo(rules.rules)]
         self.assertEqual(len(badges), len(rules.rules._items()))
-        self.assertEqual(len(rules.art._visuals), min(8, len(rules.rules._items())))
+        scan = _guide(rules.open_guide)
+        self.assertIsInstance(scan.art, RuleScanArt)
+        self.assertEqual(len(scan.art._visuals), min(8, len(rules.rules._items())))
         page.show_section("overview")
-        self.assertEqual(page.overview.route_map._counts, (2, 5, 2))
+        route_map = _guide(page.overview.open_guide)
+        self.assertIsInstance(route_map.art, RouteMapArt)
+        self.assertEqual(route_map.art._counts, (2, 5, 2))
         page.session.document["route"]["rules"].append({"domain": ["x.org"], "action": "reject"})
         page.session.mark_edited()
-        self.assertEqual(page.overview.route_map._counts, (2, 5, 3))
+        self.assertEqual(_guide(page.overview.open_guide).art._counts, (2, 5, 3))
         self.assertTrue(page.dirty_dot.isVisibleTo(page))
         page.session.revert()
         self.assertFalse(page.dirty_dot.isVisibleTo(page))
+
+    def test_every_page_has_only_a_link_and_the_guide_explains_it(self) -> None:
+        from qfluentwidgets import CaptionLabel
+
+        from xray_fluent.ui.configs_page import SECTIONS
+        from xray_fluent.ui.singbox.art import ArtCanvas
+        from xray_fluent.ui.singbox.guide import ART_CLASSES, GUIDES, LINK_LABEL, LINK_TEXT, GuideDialog
+
+        page = _page()
+        self.assertEqual(set(GUIDES), {key for key, _title, _icon in SECTIONS})
+        self.assertEqual(set(ART_CLASSES), set(GUIDES))
+        for key, _title, _icon in SECTIONS:
+            _section(page, key)
+            widget = page._sections[key]
+            link = widget.help_link
+            self.assertEqual(link.text(), LINK_LABEL)
+            self.assertEqual(link.toolTip(), LINK_TEXT)
+            self.assertTrue(link.isVisibleTo(widget), key)
+            # Explanations and animations live only in the guide dialog.
+            self.assertEqual(widget.findChildren(ArtCanvas), [], key)
+            if key != "overview":  # the overview body shows file/stock captions
+                header = link.parentWidget()
+                captions = [c.text() for c in header.findChildren(CaptionLabel) if c.isVisibleTo(header)]
+                self.assertEqual(captions, [], key)
+            dialog = _guide(widget.open_guide if hasattr(widget, "open_guide") else link.click)
+            self.assertIsInstance(dialog, GuideDialog)
+            self.assertEqual(dialog.key, key)
+            self.assertIsInstance(dialog.art, ART_CLASSES[key])
+            self.assertGreater(len(dialog.text()), 300, key)
+            self.assertFalse(dialog.cancelButton.isVisibleTo(dialog))
+            self.assertLessEqual(dialog.widget.width(), max(360, page.window().width() - 2 * dialog.MARGIN) + 1)
+
+    def test_guide_closes_and_is_disposed(self) -> None:
+        from PyQt6 import sip
+
+        page = _page()
+        rules = _section(page, "rules")
+        dialog = rules.open_guide()
+        self.assertFalse(dialog.isHidden())
+        dialog.yesButton.click()
+        for _ in range(40):
+            QTest.qWait(10)
+            if sip.isdeleted(dialog):
+                break
+        self.assertTrue(sip.isdeleted(dialog))
+        self.assertEqual(page.current_section(), "rules")
 
     def test_reference_counting(self) -> None:
         document = json.loads(TEMPLATE_TEXT)

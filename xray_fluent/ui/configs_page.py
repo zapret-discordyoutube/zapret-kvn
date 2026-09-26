@@ -42,7 +42,8 @@ from .singbox.sections import (
     RulesSection,
     SystemSection,
 )
-from .singbox.art import JsonArt, KindBadge, PulseDot, RouteMapArt
+from .singbox.art import KindBadge, PulseDot
+from .singbox.guide import help_link, open_guide
 from .singbox.lists import popup_menu
 from .singbox.session import SingboxSession
 from .singbox.visuals import PROXY, Visual, rule_outcomes
@@ -97,17 +98,10 @@ class _OverviewPanel(ScrollablePage):
         title_row.addWidget(badge)
         title_row.addWidget(SubtitleLabel("Маршрутизация sing-box", self.body))
         title_row.addStretch(1)
+        self.help_link = help_link(self.body)
+        self.help_link.clicked.connect(self.open_guide)
+        title_row.addWidget(self.help_link)
         root.addLayout(title_row)
-        self.route_map = RouteMapArt(self.body)
-        root.addWidget(self.route_map)
-        intro = CaptionLabel(
-            "Все разделы редактируют один native JSON ядра sing-box: маршрутизация и DNS работают "
-            "одинаково в TUN и в системном прокси. Обновление приложения ваши правки не перезаписывает: "
-            "разделы, которые вы не меняли, сами следуют за новым стоковым шаблоном.",
-            self.body,
-        )
-        intro.setWordWrap(True)
-        root.addWidget(intro)
 
         selectors = QHBoxLayout()
         selectors.setSpacing(8)
@@ -167,9 +161,13 @@ class _OverviewPanel(ScrollablePage):
 
     # -- state ------------------------------------------------------------------
 
+    def open_guide(self):
+        """Explain routing to a newcomer; the map shows this config's rules."""
+        document = self.session.document
+        feed = (lambda art: art.set_counts(*rule_outcomes(document))) if document is not None else None
+        return open_guide("overview", self, feed)
+
     def refresh_state(self) -> None:
-        if self.session.document is not None:
-            self.route_map.set_counts(*rule_outcomes(self.session.document))
         path = self.session.path.as_posix() if self.session.path else "--"
         self.file_label.setText(f"Файл: {path}{' *' if self.session.is_dirty() else ''}")
         if self.session.document is None:
@@ -345,16 +343,10 @@ class _JsonPanel(ScrollablePage):
         title_row.addWidget(badge)
         title_row.addWidget(SubtitleLabel("JSON", self.body))
         title_row.addStretch(1)
-        title_row.addWidget(JsonArt(self.body), 1)
+        self.help_link = help_link(self.body)
+        self.help_link.clicked.connect(lambda: open_guide("json", self))
+        title_row.addWidget(self.help_link)
         root.addLayout(title_row)
-        hint = CaptionLabel(
-            "Полный текст конфига. Правки здесь и в разделах — одно и то же; разделы обновятся, "
-            "когда вы уйдёте с этой страницы. Если в outbounds есть тег proxy, при запуске туда "
-            "подставляется выбранный сервер.",
-            self.body,
-        )
-        hint.setWordWrap(True)
-        root.addWidget(hint)
         self.editor = PlainTextEdit(self.body)
         self.editor.setPlaceholderText("Raw sing-box.json")
         font = QFont("Consolas", 10)
