@@ -8,16 +8,16 @@ winws2). Прогрев заранее резолвит ``proxy_protection_serve
 Гарантии (A7):
 - наполняется ТОЛЬКО ``_proxy_resolution_cache`` через ``cache_proxy_resolution``;
 - ``_set_protected_proxy_ips`` не вызывается, winws2 не перезапускается;
-- GUI-поток не блокируется (батч уходит одним заданием в воркер-пул);
+- GUI-поток не блокируется (батч уходит одним заданием в свой поток,
+  отдельный от пула шагов переходов);
 - ошибки резолва глотаются молча (максимум — итоговая строка в логе).
 """
 
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Callable, Iterable
-
-from ..platform.windows.subprocess_utils import _SUBPROCESS_EXECUTOR
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -25,6 +25,11 @@ if TYPE_CHECKING:
 
 #: Троттлинг батча: пауза между резолвами, чтобы не монополизировать воркер и DNS.
 PREWARM_THROTTLE_SEC = 0.05
+
+#: Собственный поток прогрева: батч резолвов пула может идти десятки секунд и
+#: не должен занимать общий пул шагов переходов (`run_in_worker`), иначе
+#: пробы и control-plane следующего переключения встают в очередь за DNS.
+_PREWARM_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xray_fluent_dns_prewarm")
 
 
 def collect_prewarm_servers(controller: AppController) -> list[str]:
@@ -94,7 +99,9 @@ def start_proxy_dns_prewarm(
         return False
     resolve = controller.zapret._resolve_server_ips
     cache = controller.zapret.cache_proxy_resolution
-    log = controller._log
+    # Строка лога уходит в GUI-поток сигналом (запись журнала не из воркера).
+    background_log = getattr(controller, "_background_log", None)
+    log = background_log.emit if background_log is not None else controller._log
     total = len(servers)
 
     def _job() -> None:
@@ -104,5 +111,5 @@ def start_proxy_dns_prewarm(
         except Exception:
             pass
 
-    (submit or _SUBPROCESS_EXECUTOR.submit)(_job)
+    (submit or _PREWARM_EXECUTOR.submit)(_job)
     return True
