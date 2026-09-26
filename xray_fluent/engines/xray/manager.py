@@ -70,6 +70,18 @@ class XrayManager(QObject):
     def last_exit_expected(self) -> bool:
         return self._last_exit_expected
 
+    @property
+    def process_alive(self) -> bool:
+        """A spawned process exists, even if readiness was never confirmed."""
+        return self._process.state() != QProcess.ProcessState.NotRunning
+
+    def request_stop(self, expected: bool = True) -> None:
+        """Close admission now without waiting (signal handlers)."""
+        if self._process.state() == QProcess.ProcessState.NotRunning:
+            return
+        self._stop_requested = expected
+        self._process.kill()
+
     def start(self, xray_path: str, config: dict[str, Any]) -> bool:
         # Холодный совместимый путь (connect/reconnect, sing-box sidecar, тесты):
         # выполняет те же шаги синхронно. Горячие переходы (hot-swap) используют

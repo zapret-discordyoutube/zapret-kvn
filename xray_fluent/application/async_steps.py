@@ -25,7 +25,9 @@ runs, socket probes, file reads) are shipped to the worker pool.
 
 from __future__ import annotations
 
-from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+import inspect
+import time
+from concurrent.futures import Executor, Future, TimeoutError as FutureTimeoutError
 from typing import Any, Callable, Generator
 
 from PyQt6.QtCore import QObject, QProcess, Qt, QTimer, pyqtSignal
@@ -45,6 +47,16 @@ TransitionSteps = Generator["TransitionStep", Any, Any]
 # report(value, error) — exactly one call, may come from any thread.
 StepReport = Callable[[Any, BaseException | None], None]
 
+#: Upper bound for one worker step.  Every blocking callable shipped to a
+#: worker has its own, much shorter timeout (subprocess 3-15 s, sockets < 7 s,
+#: WinAPI); this deadline only guarantees that a wedged call can never keep a
+#: transition (or the synchronous shutdown driver) waiting forever.
+WORKER_STEP_DEADLINE_MS = 60_000
+
+
+class StepDeadlineExceeded(TimeoutError):
+    """A step did not complete before its hard deadline."""
+
 
 class TransitionStep:
     """One awaitable unit yielded by a transition generator."""
@@ -62,41 +74,84 @@ class TransitionStep:
 
 
 class RunInWorkerStep(TransitionStep):
-    """Run ``fn`` on the shared ``_SUBPROCESS_EXECUTOR``; result returns to the GUI thread."""
+    """Run ``fn`` in a worker pool; the result returns to the GUI thread.
 
-    def __init__(self, fn: Callable[[], Any]):
+    The default pool is the shared ``_SUBPROCESS_EXECUTOR``.  Work that must
+    keep a strict order (system proxy writes) passes its own single-thread
+    executor.  ``fn`` must be a pure callable: it must not touch QObjects or
+    controller state and must not use the pumped helpers of
+    ``subprocess_utils`` (they would submit a nested job into the same pool).
+    """
+
+    def __init__(
+        self,
+        fn: Callable[[], Any],
+        executor: Executor | None = None,
+        *,
+        deadline_ms: int = WORKER_STEP_DEADLINE_MS,
+    ):
         self._fn = fn
+        self._executor = executor
+        self._deadline_ms = max(1, int(deadline_ms))
         self._future: Future[Any] | None = None
+        self._timer: QTimer | None = None
         self._cancelled = False
+        self._reported = False
+
+    def _pool(self) -> Executor:
+        return self._executor if self._executor is not None else _SUBPROCESS_EXECUTOR
 
     def start(self, report: StepReport) -> None:
-        future = _SUBPROCESS_EXECUTOR.submit(self._fn)
+        future = self._pool().submit(self._fn)
         self._future = future
 
         def _on_done(done: Future[Any]) -> None:
-            if self._cancelled or done.cancelled():
+            if self._cancelled or self._reported or done.cancelled():
                 return
+            self._reported = True
             error = done.exception()
             if error is not None:
                 report(None, error)
             else:
                 report(done.result(), None)
 
+        # Hard deadline: a wedged worker call fails the step instead of
+        # parking the transition forever (the late result is ignored).
+        timer = QTimer()
+        timer.setSingleShot(True)
+
+        def _on_deadline() -> None:
+            if self._cancelled or self._reported:
+                return
+            self._reported = True
+            future.cancel()
+            report(None, StepDeadlineExceeded(f"worker step exceeded {self._deadline_ms} ms"))
+
+        timer.timeout.connect(_on_deadline)
+        self._timer = timer
+        timer.start(self._deadline_ms)
         future.add_done_callback(_on_done)
 
     def cancel(self) -> None:
         self._cancelled = True
+        if self._timer is not None:
+            self._timer.stop()
         if self._future is not None:
             self._future.cancel()
 
     def run_blocking(self) -> Any:
-        # Cold-path compatibility only: preserves the historical
-        # run_text_pumped behaviour (worker thread + event pumping).
-        future = _SUBPROCESS_EXECUTOR.submit(self._fn)
+        # Cold-path compatibility only (shutdown, tests): preserves the
+        # historical run_text_pumped behaviour (worker thread + event pumping),
+        # bounded by the same hard deadline as the asynchronous path.
+        future = self._pool().submit(self._fn)
+        deadline = time.monotonic() + self._deadline_ms / 1000.0
         while True:
             try:
                 return future.result(timeout=0.05)
             except FutureTimeoutError:
+                if time.monotonic() >= deadline:
+                    future.cancel()
+                    raise StepDeadlineExceeded(f"worker step exceeded {self._deadline_ms} ms") from None
                 pump_qt_events()
 
 
@@ -219,9 +274,14 @@ class WaitProcessStartedStep(WaitProcessFinishedStep):
         return wait_for_qprocess_started(self._process, self._timeout_ms)
 
 
-def run_in_worker(fn: Callable[[], Any]) -> RunInWorkerStep:
-    """Awaitable step: execute ``fn`` in the shared worker pool."""
-    return RunInWorkerStep(fn)
+def run_in_worker(
+    fn: Callable[[], Any],
+    *,
+    executor: Executor | None = None,
+    deadline_ms: int = WORKER_STEP_DEADLINE_MS,
+) -> RunInWorkerStep:
+    """Awaitable step: execute ``fn`` in a worker pool (shared by default)."""
+    return RunInWorkerStep(fn, executor, deadline_ms=deadline_ms)
 
 
 def sleep_ms(ms: int) -> SleepStep:
@@ -376,17 +436,22 @@ class TransitionRunner(QObject):
             callback(self)
 
 
-def run_steps_blocking(generator: TransitionSteps) -> Any:
+def run_steps_blocking(generator: TransitionSteps, *, max_steps: int = 100_000) -> Any:
     """Synchronous driver for cold compatibility wrappers.
 
-    Executes each yielded step with the historical pumped-wait behaviour so
-    legacy synchronous call sites (shutdown, sing-box native TUN, connect
-    fallback) keep working unchanged.  Hot transition paths must go through
-    :class:`TransitionRunner` instead.
+    Executes each yielded step with the historical pumped-wait behaviour.
+    Only application shutdown and tests may use it: hot transition paths go
+    through :class:`TransitionRunner`.
+
+    Guards (a wrong argument must fail fast, never spin): ``generator`` must be
+    a real generator, every yielded object must be a :class:`TransitionStep`,
+    and the number of steps is bounded.  Each step has its own deadline.
     """
+    if not inspect.isgenerator(generator):
+        raise TypeError(f"run_steps_blocking needs a generator, got {type(generator)!r}")
     value: Any = None
     error: BaseException | None = None
-    while True:
+    for _ in range(max(1, int(max_steps))):
         try:
             if error is not None:
                 step = generator.throw(error)
@@ -394,8 +459,13 @@ def run_steps_blocking(generator: TransitionSteps) -> Any:
                 step = generator.send(value)
         except StopIteration as stop:
             return stop.value
+        if not isinstance(step, TransitionStep):
+            generator.close()
+            raise TypeError(f"Transition generator must yield TransitionStep, got {type(step)!r}")
         value, error = None, None
         try:
             value = step.run_blocking()
         except BaseException as exc:  # noqa: BLE001 — delivered via generator.throw
             error = exc
+    generator.close()
+    raise RuntimeError(f"run_steps_blocking exceeded {max_steps} steps")

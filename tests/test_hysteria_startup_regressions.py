@@ -74,7 +74,7 @@ class HysteriaStartupRegressions(unittest.TestCase):
         with patch.object(manager._process, 'state', return_value=QProcess.ProcessState.Running), \
              patch('xray_fluent.engines.hysteria.manager.ThreadPoolExecutor', return_value=executor), \
              patch('xray_fluent.engines.hysteria.manager.time.monotonic', side_effect=lambda: clock[0]), \
-             patch('xray_fluent.engines.hysteria.manager.sleep_with_events', side_effect=cancel):
+             patch('xray_fluent.application.async_steps.sleep_with_events', side_effect=cancel):
             self.assertFalse(manager._wait_until_remote_ready(11809, username='u', password='p'))
         self.assertEqual(executor.submit.call_count, 3)
         manager.deleteLater()

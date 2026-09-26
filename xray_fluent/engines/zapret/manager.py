@@ -15,7 +15,14 @@ from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import BASE_DIR
 from ...profiles.models import ZapretTargetSettings
-from ...platform.windows.subprocess_utils import decode_output, kill_processes_by_path, sleep_with_events
+from ...application.async_steps import (
+    TransitionRunner,
+    TransitionSteps,
+    run_in_worker,
+    sleep_ms,
+    wait_process_finished,
+)
+from ...platform.windows.subprocess_utils import decode_output, kill_processes_by_path
 from .blobs import blob_arguments, lua_init_arguments, unresolved_blob_names
 from .target import (
     ResolvedZapretEndpoint,
@@ -31,6 +38,20 @@ log = logging.getLogger(__name__)
 ZAPRET_DIR = BASE_DIR / "zapret"
 WINWS2_EXE = ZAPRET_DIR / "exe" / "winws2.exe"
 WINWS_EXE = ZAPRET_DIR / "exe" / "winws.exe"
+
+
+def _kill_orphaned_blocking() -> list[str]:
+    """Worker-only: kill orphaned winws.exe / winws2.exe of this installation."""
+    killed: list[str] = []
+    if os.name != "nt":
+        return killed
+    for exe_name, exe_path in (("winws2.exe", WINWS2_EXE), ("winws.exe", WINWS_EXE)):
+        try:
+            if kill_processes_by_path(exe_name, exe_path, timeout=5, pump=False):
+                killed.append(exe_name)
+        except Exception:
+            pass
+    return killed
 PRESETS_DIR = ZAPRET_DIR / "presets"
 
 #: Preset applied when the user never picked one; falls back to any preset on disk.
@@ -106,6 +127,8 @@ class ZapretManager(QObject):
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(3000)
         self._health_timer.timeout.connect(self._check_health)
+        self._start_generation = 0
+        self._start_runner: TransitionRunner | None = None
 
     # ── public API ──────────────────────────────────────────────
 
@@ -501,6 +524,7 @@ class ZapretManager(QObject):
         restart_in_flight = bool(
             self._pending_restart_preset
             or self._proxy_protection_pending_generation
+            or self._start_runner is not None
         )
         if (self.running and self._current_preset) or restart_in_flight:
             self._proxy_protection_pending_generation = generation
@@ -701,28 +725,68 @@ class ZapretManager(QObject):
                          arg_count=arg_count, file_path=target)
 
     def start(self, preset_name: str) -> None:
+        """Start winws2 without blocking the GUI thread.
+
+        The old process is killed immediately; waiting for its exit (WinDivert
+        handles), the orphan scan (PowerShell) and the driver grace pause run
+        as steps of a manager-owned TransitionRunner. ``started`` (and the
+        target-profile generation) stays the only readiness proof.
+        """
         # A pending-restart marker only protects the gap before this launch.
-        # Clear it once QProcess.start() is being attempted so a crash of the
+        # Clear it once the launch is being attempted so a crash of the
         # replacement process cannot recursively schedule an unbounded restart.
         self._pending_restart_preset = ""
+        previous = None
         if self._process is not None and self._process.state() != QProcess.ProcessState.NotRunning:
+            previous = self._process
             self.stop(preserve_pending=True)
+        self._start_generation += 1
+        generation = self._start_generation
+        runner = TransitionRunner(
+            self._start_steps(preset_name, previous),
+            is_current=lambda: generation == self._start_generation,
+            on_finished=self._on_start_runner_finished,
+            parent=self,
+        )
+        self._start_runner = runner
+        runner.start()
 
-        killed = self._kill_orphaned()
+    def _on_start_runner_finished(self, runner: TransitionRunner) -> None:
+        if self._start_runner is runner:
+            self._start_runner = None
+        runner.deleteLater()
+        if runner.error is not None:
+            log.exception("zapret start failed", exc_info=runner.error)
+            self.error.emit(f"Не удалось запустить winws2.exe: {runner.error}")
+            self._fail_pending_proxy_protection("start_failed")
+
+    @property
+    def start_in_flight(self) -> bool:
+        return self._start_runner is not None
+
+    def _start_steps(self, preset_name: str, previous: QProcess | None) -> TransitionSteps:
+        if previous is not None:
+            # WinDivert releases its handles only when the old process exits.
+            yield wait_process_finished(previous, 5000)
+
+        killed = yield run_in_worker(_kill_orphaned_blocking)
         for name in killed:
             self.log_line.emit(f"[zapret] Завершён сторонний процесс: {name}")
+        if killed:
+            # Let the WinDivert driver release its handles (timer, not a GUI sleep).
+            yield sleep_ms(1000)
 
         exe = WINWS2_EXE
         if not exe.exists():
             self.error.emit(f"winws2.exe не найден: {exe}")
             self._fail_pending_proxy_protection("missing_executable")
-            return
+            return False
 
         preset = self.preset_path(preset_name)
         if not preset.exists():
             self.error.emit(f"Пресет не найден: {preset}")
             self._fail_pending_proxy_protection("missing_preset")
-            return
+            return False
 
         # Parse preset and pass args directly (winws2 @file can't handle spaces in path)
         args = self._with_target_profile(
@@ -733,7 +797,7 @@ class ZapretManager(QObject):
         if not args:
             self.error.emit(f"Пресет пустой: {preset_name}")
             self._fail_pending_proxy_protection("empty_preset")
-            return
+            return False
 
         self._current_preset = preset_name
         self._start_args = args
@@ -751,6 +815,7 @@ class ZapretManager(QObject):
         log.info("zapret start: %s [%s] (%d args)", exe.name, preset_name, len(args))
         self.log_line.emit(f"[zapret] Запуск: {preset_name} ({len(args)} аргументов)")
         self._process.start()
+        return True
 
     def _on_started(self) -> None:
         self._health_timer.start()
@@ -775,15 +840,26 @@ class ZapretManager(QObject):
             self._fail_pending_proxy_protection("start_failed")
             self.stopped.emit()
 
-    def stop(self, *, preserve_pending: bool = False) -> None:
+    def stop(self, *, preserve_pending: bool = False, wait: bool = False) -> None:
         """Stop winws2; a manual stop fails any readiness waiter.
 
         ``preserve_pending`` is used only by :meth:`start` while replacing an
         already running process.  In that narrow case the next ``started``
         signal remains the readiness proof for the same generation.
+
+        The process is killed without waiting: it is detached from this
+        manager at once (its late signals cannot be mistaken for a newer
+        process) and deletes itself after exiting.  ``wait=True`` keeps the
+        historical blocking wait for application shutdown only.
         """
         self._pending_restart_preset = ""
         self._health_timer.stop()
+        if not preserve_pending:
+            # A manual stop also cancels a launch that is still in its steps.
+            self._start_generation += 1
+            runner = self._start_runner
+            if runner is not None:
+                runner.cancel()
         process = self._process
         if process is None:
             if not preserve_pending:
@@ -793,8 +869,17 @@ class ZapretManager(QObject):
         if process.state() != QProcess.ProcessState.NotRunning:
             log.info("zapret stop")
             self._stop_expected = True
+            try:
+                process.disconnect()
+            except (TypeError, RuntimeError):
+                pass
             process.kill()
-            process.waitForFinished(5000)
+            if wait:
+                process.waitForFinished(5000)
+            if process.state() != QProcess.ProcessState.NotRunning:
+                process.finished.connect(process.deleteLater)
+            else:
+                process.deleteLater()
 
         if self._process is process:
             self._process = None
@@ -806,24 +891,6 @@ class ZapretManager(QObject):
             self._fail_pending_proxy_protection("stopped")
 
     # ── internals ───────────────────────────────────────────────
-
-    @staticmethod
-    def _kill_orphaned() -> list[str]:
-        """Kill any orphaned winws.exe / winws2.exe processes."""
-        killed: list[str] = []
-        if os.name != "nt":
-            return killed
-        for exe_name, exe_path in (("winws2.exe", WINWS2_EXE), ("winws.exe", WINWS_EXE)):
-            try:
-                if kill_processes_by_path(exe_name, exe_path, timeout=5):
-                    killed.append(exe_name)
-            except Exception:
-                pass
-        if killed:
-            # Let the WinDivert driver release its handles without freezing the
-            # GUI: pump Qt events every 100ms instead of a blind time.sleep(1).
-            sleep_with_events(1.0, step_sec=0.1)
-        return killed
 
     @staticmethod
     def _exit_code_hint(code: int) -> str:

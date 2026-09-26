@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
+
+from tests.step_fakes import steps_via
 from concurrent.futures import Future
 from unittest.mock import patch
 
@@ -169,7 +172,10 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
         self.assertTrue(manager._chrome_fallback_used)
         self.assertEqual(single_shot.call_count, 1)
         callback = single_shot.call_args.args[1]
-        with patch.object(manager, "start", return_value=True) as start:
+        # Повтор идёт шагами start_steps() в собственном TransitionRunner
+        # менеджера, без вложенного синхронного start().
+        start = Mock(return_value=True)
+        with patch.object(manager, "start_steps", steps_via(start)):
             callback()
 
         self.assertFalse(manager._chrome_fallback_pending)
@@ -236,7 +242,8 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
         self.assertEqual(states, [])
         self.assertEqual(errors, [])
         self.assertIsNotNone(manager._compatibility_config)
-        with patch.object(manager, "start", return_value=True) as start:
+        start = Mock(return_value=True)
+        with patch.object(manager, "start_steps", steps_via(start)):
             manager._run_chrome_parrot_fallback(11)
         self.assertEqual(start.call_count, 1)
 
@@ -256,7 +263,7 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
             manager._running = False
             return False
 
-        with patch.object(manager, "start", side_effect=failed_start):
+        with patch.object(manager, "start_steps", steps_via(Mock(side_effect=failed_start))):
             manager._run_chrome_parrot_fallback(5)
 
         self.assertEqual(states, [False])
@@ -355,7 +362,7 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
             patch.object(manager._process, "state", return_value=QProcess.ProcessState.Running),
             patch.object(manager, "_probe_remote_endpoint", side_effect=OSError("SOCKS CONNECT rejected")) as probe,
             patch("xray_fluent.engines.hysteria.manager.ThreadPoolExecutor", CompletedProbes),
-            patch("xray_fluent.engines.hysteria.manager.sleep_with_events", side_effect=process_events),
+            patch("xray_fluent.application.async_steps.sleep_with_events", side_effect=process_events),
             patch("xray_fluent.engines.hysteria.manager.time.monotonic", side_effect=lambda: clock[0]),
         ):
             self.assertFalse(manager._wait_until_remote_ready(11809, username="", password="", timeout=0.5))

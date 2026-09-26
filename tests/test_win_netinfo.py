@@ -266,7 +266,7 @@ class SingBoxTunProbeTests(unittest.TestCase):
         with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
             "xray_fluent.platform.windows.win_netinfo.any_adapter_name_contains", return_value=False
         ) as fast_mock, patch(
-            "xray_fluent.engines.singbox.manager.run_text_pumped"
+            "xray_fluent.engines.singbox.manager.run_text"
         ) as netsh_mock:
             self.assertEqual(SingBoxManager._probe_tun_adapter_gone(), (True, True))
 
@@ -279,7 +279,7 @@ class SingBoxTunProbeTests(unittest.TestCase):
             "xray_fluent.platform.windows.win_netinfo.any_adapter_name_contains",
             side_effect=win_netinfo.WinNetInfoError("boom"),
         ), patch(
-            "xray_fluent.engines.singbox.manager.run_text_pumped", return_value=completed
+            "xray_fluent.engines.singbox.manager.run_text", return_value=completed
         ) as netsh_mock:
             self.assertEqual(SingBoxManager._probe_tun_adapter_gone(), (True, False))
 
@@ -288,7 +288,7 @@ class SingBoxTunProbeTests(unittest.TestCase):
     def test_tun_gone_netsh_still_lists_adapter(self) -> None:
         completed = Mock(returncode=0, stdout=b"xftun0\n", stderr=b"")
         with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=False), patch(
-            "xray_fluent.engines.singbox.manager.run_text_pumped", return_value=completed
+            "xray_fluent.engines.singbox.manager.run_text", return_value=completed
         ):
             self.assertEqual(SingBoxManager._probe_tun_adapter_gone(), (False, False))
 

@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, build_opener, ProxyHandler
 
+from ...application.async_steps import TransitionSteps, run_in_worker, sleep_ms
 from ...constants import PROXY_HOST
 
 
@@ -128,3 +129,38 @@ def select_outbound_when_ready(
         if remaining <= 0:
             return False, last_error
         wait(min(STARTUP_RETRY_DELAY_SEC, remaining))
+
+
+def select_outbound_when_ready_steps(
+    api_port: int,
+    selector_tag: str,
+    outbound_tag: str,
+    *,
+    timeout_sec: float = STARTUP_READY_TIMEOUT_SEC,
+) -> TransitionSteps:
+    """Step version of :func:`select_outbound_when_ready` for transitions.
+
+    Each loopback PUT runs in the worker pool; the pause between attempts is
+    a timer step, so the GUI thread never waits on the Clash API.
+    """
+
+    request, problem = _selector_request(api_port, selector_tag, outbound_tag)
+    if request is None:
+        return False, problem
+
+    deadline = time.monotonic() + max(0.05, float(timeout_sec))
+    last_error = ""
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, last_error or "Clash API sing-box не стал доступен вовремя"
+        attempt_timeout = min(STARTUP_REQUEST_TIMEOUT_SEC, remaining)
+        ok, last_error, retryable = yield run_in_worker(
+            lambda: _send_selector_request(request, attempt_timeout)
+        )
+        if ok or not retryable:
+            return ok, last_error
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, last_error
+        yield sleep_ms(int(min(STARTUP_RETRY_DELAY_SEC, remaining) * 1000))

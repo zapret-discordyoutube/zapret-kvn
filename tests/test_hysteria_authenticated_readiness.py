@@ -41,7 +41,7 @@ class AuthenticatedReadinessTests(unittest.TestCase):
             self.manager._emit_process_line(CONNECTED)
         with patch('xray_fluent.engines.hysteria.manager.ThreadPoolExecutor', return_value=executor), \
              patch('xray_fluent.engines.hysteria.manager.time.monotonic', side_effect=lambda: clock[0]), \
-             patch('xray_fluent.engines.hysteria.manager.sleep_with_events', side_effect=pump):
+             patch('xray_fluent.application.async_steps.sleep_with_events', side_effect=pump):
             self.assertTrue(self.manager._wait_until_remote_ready(11809, username='u', password='p'))
         self.assertLess(clock[0], 0.2, 'an authenticated connection must not wait for probe timeouts')
         self.assertEqual(len(pending), 3)

@@ -7,16 +7,24 @@ import json
 import os
 import time
 
-from PyQt6.QtCore import QObject, QProcess, pyqtSignal
+from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import AMNEZIA_PATH_DEFAULT
 from ...diagnostics.export import capture_runtime_config
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log
-from ...platform.windows.subprocess_utils import sleep_with_events, wait_for_qprocess_finished, wait_for_qprocess_started
+from ...application.async_steps import (
+    TransitionSteps,
+    run_in_worker,
+    run_steps_blocking,
+    sleep_ms,
+    wait_process_finished,
+    wait_process_started,
+)
+from ...platform.windows.subprocess_utils import sleep_with_events
 from ...platform.windows import win_netinfo
 from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 from ..health_check import BackgroundHealthCheck
-from ..sidecar import wait_for_loopback_relay
+from ..sidecar import wait_for_loopback_relay_steps
 
 
 PROBES = HTTPS_ENDPOINTS
@@ -70,6 +78,34 @@ def physical_network(dest_ipv4: str | None = None, *, attempts: int = 5, retry_d
     raise OSError("Physical interface for Amnezia UDP transport not found" + detail)
 
 
+def physical_network_steps(
+    dest_ipv4: str | None = None, *, attempts: int = 5, retry_delay: float = 0.3
+) -> TransitionSteps:
+    """Step version of :func:`physical_network`: WinAPI lookups in the worker pool."""
+    if os.name != "nt":
+        return {"interface_index": 0, "bootstrap_dns": []}
+    target = dest_ipv4 or win_netinfo._DEFAULT_PROBE_DESTINATION
+
+    def resolve():
+        try:
+            return win_netinfo.resolve_physical_uplink(target), None
+        except win_netinfo.WinNetInfoError as exc:
+            return None, exc
+
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        resolved, error = yield run_in_worker(resolve)
+        if error is not None:
+            last_error = error
+        if resolved is not None:
+            index, bootstrap_dns = resolved
+            return {"interface_index": index, "bootstrap_dns": bootstrap_dns}
+        if attempt + 1 < max(1, attempts):
+            yield sleep_ms(int(retry_delay * 1000))
+    detail = f" ({last_error})" if last_error is not None else ""
+    raise OSError("Physical interface for Amnezia UDP transport not found" + detail)
+
+
 class AmneziaManager(QObject):
     log_received = pyqtSignal(str)
     error = pyqtSignal(str)
@@ -111,8 +147,20 @@ class AmneziaManager(QObject):
         self.error.emit(message)
         self.failure.emit(core_failure("amnezia", stage, clean, **self._identity))
 
+    @property
+    def process_alive(self) -> bool:
+        """A spawned process exists, even if readiness was never confirmed."""
+        return self._process.state() != QProcess.ProcessState.NotRunning
+
     def start(self, config: dict, relay_port: int, *, context=None, session_generation=0, target_generation=0, is_current=None) -> bool:
-        if not self.stop():
+        # Синхронный драйвер тех же шагов — только для shutdown/тестов.
+        return bool(run_steps_blocking(self.start_steps(
+            config, relay_port, context=context, session_generation=session_generation,
+            target_generation=target_generation, is_current=is_current)))
+
+    def start_steps(self, config: dict, relay_port: int, *, context=None, session_generation=0, target_generation=0,
+                    is_current=None) -> TransitionSteps:
+        if not (yield from self.stop_steps()):
             return False
         self._expected = self._failed = self._relay_ready = False
         self._is_current = is_current
@@ -123,7 +171,7 @@ class AmneziaManager(QObject):
                               target_id=context.ref if context else "")
         payload = deepcopy(config)
         try:
-            payload.update(physical_network(_first_peer_ipv4(payload)))
+            payload.update((yield from physical_network_steps(_first_peer_ipv4(payload))))
             if self._cancelled():
                 return False
             payload.update(session_generation=session_generation, target_generation=target_generation,
@@ -134,7 +182,7 @@ class AmneziaManager(QObject):
             self._process.setProgram(str(AMNEZIA_PATH_DEFAULT))
             self._process.setArguments([])
             self._process.start()
-            if not wait_for_qprocess_started(self._process, 5000):
+            if not (yield wait_process_started(self._process, 5000)):
                 raise OSError(self._process.errorString())
             encoded = json.dumps(payload, separators=(",", ":")).encode() + b"\n"
             if len(encoded) > 1024 * 1024 or self._process.write(encoded) != len(encoded):
@@ -143,9 +191,9 @@ class AmneziaManager(QObject):
             while not self._relay_ready and time.monotonic() < deadline and not self._failed and not self._cancelled():
                 if self._process.state() == QProcess.ProcessState.NotRunning:
                     break
-                sleep_with_events(0.025)
+                yield sleep_ms(25)
             if self._cancelled():
-                self.stop()
+                yield from self.stop_steps()
                 return False
             if not self._relay_ready or self._failed:
                 raise OSError("Amnezia local relay did not become ready")
@@ -153,22 +201,22 @@ class AmneziaManager(QObject):
             # accepts a connection before firing the handshake probe, matching
             # the Hysteria contract. relay_ready already fired, so this is an
             # immediate confirmation that tolerates a brief bind delay.
-            if not wait_for_loopback_relay(
+            if not (yield from wait_for_loopback_relay_steps(
                 relay_port,
                 should_continue=lambda: not self._failed and not self._cancelled()
                 and self._process.state() != QProcess.ProcessState.NotRunning,
-            ):
+            )):
                 if self._cancelled():
-                    self.stop()
+                    yield from self.stop_steps()
                     return False
                 raise OSError("Amnezia local relay is not accepting loopback connections")
-            if not self._ready(relay_port, payload):
-                self.stop()
+            if not (yield from self._ready_steps(relay_port, payload)):
+                yield from self.stop_steps()
                 return False
         except (OSError, ValueError, KeyError) as exc:
             if not self._failed:
                 self._report("startup", str(exc))
-            self.stop()
+            yield from self.stop_steps()
             return False
         self._running = True
         self.state_changed.emit(True)
@@ -234,6 +282,9 @@ class AmneziaManager(QObject):
             self._start_front_health(config)
 
     def _ready(self, port: int, config: dict) -> bool:
+        return bool(run_steps_blocking(self._ready_steps(port, config)))
+
+    def _ready_steps(self, port: int, config: dict) -> TransitionSteps:
         if self._failed or self._cancelled() or self._process.state() == QProcess.ProcessState.NotRunning:
             return False
         deadline = time.monotonic() + 20
@@ -252,7 +303,7 @@ class AmneziaManager(QObject):
                     self._monitor_transport_health(executor, futures)
                     transferred = True
                     return True
-                sleep_with_events(0.025)
+                yield sleep_ms(25)
             if not self._failed and not self._cancelled():
                 failures = []
                 for future, host in futures.items():
@@ -330,13 +381,35 @@ class AmneziaManager(QObject):
         self.stopped.emit(exit_code)
 
     def stop(self, expected: bool = True) -> bool:
+        # Синхронный драйвер — shutdown и тесты; переходы используют stop_steps().
+        return bool(run_steps_blocking(self.stop_steps(expected=expected)))
+
+    def request_stop(self, expected: bool = True) -> None:
+        """Close admission now without waiting (signal handlers).
+
+        stdin is closed for a graceful exit; a still-running core is killed
+        after the same 1.5 s grace the blocking stop allows.
+        """
+        self._cancel_health()
+        self._expected = expected
+        if self._process.state() == QProcess.ProcessState.NotRunning:
+            self._running = False
+            return
+        self._process.closeWriteChannel()
+        QTimer.singleShot(1500, self._kill_if_running)
+
+    def _kill_if_running(self) -> None:
+        if self._process.state() != QProcess.ProcessState.NotRunning:
+            self._process.kill()
+
+    def stop_steps(self, expected: bool = True) -> TransitionSteps:
         self._cancel_health()
         self._expected = expected
         if self._process.state() != QProcess.ProcessState.NotRunning:
             self._process.closeWriteChannel()
-            if not wait_for_qprocess_finished(self._process, 1500):
+            if not (yield wait_process_finished(self._process, 1500)):
                 self._process.kill()
-                if not wait_for_qprocess_finished(self._process, 1500):
+                if not (yield wait_process_finished(self._process, 1500)):
                     return False
         self._running = False
         return True

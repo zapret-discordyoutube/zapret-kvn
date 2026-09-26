@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from PyQt6.QtCore import QCoreApplication, QProcess
 
 from xray_fluent.application.async_steps import TransitionRunner
+from tests.step_fakes import drive, steps_via
 from xray_fluent.engines.singbox.manager import SingBoxManager
 from xray_fluent.engines.xray.manager import XrayManager
 
@@ -229,6 +230,8 @@ class XrayStopStepsAsyncTests(unittest.TestCase):
 
 
 class SingBoxStopTests(unittest.TestCase):
+    # stop() — синхронный драйвер stop_steps() (только shutdown/тесты); ожидания
+    # выхода процесса — шаги WaitProcessFinishedStep, не waitForFinished в GUI.
     def test_stop_grace_is_at_most_500ms_before_kill(self) -> None:
         manager = SingBoxManager()
         fake = Mock()
@@ -236,7 +239,7 @@ class SingBoxStopTests(unittest.TestCase):
         manager._process = fake
 
         with patch(
-            "xray_fluent.engines.singbox.manager.wait_for_qprocess_finished",
+            "xray_fluent.application.async_steps.wait_for_qprocess_finished",
             side_effect=[False, True],
         ) as wait_mock:
             self.assertTrue(manager.stop())
@@ -252,14 +255,28 @@ class SingBoxStopTests(unittest.TestCase):
         fake.state.side_effect = [_RUNNING, _NOT_RUNNING]
         manager._process = fake
         manager._uses_tun = True
+        released_mock = Mock()
 
         with patch(
-            "xray_fluent.engines.singbox.manager.wait_for_qprocess_finished",
+            "xray_fluent.application.async_steps.wait_for_qprocess_finished",
             return_value=True,
-        ), patch.object(SingBoxManager, "_wait_tun_released") as released_mock:
+        ), patch.object(SingBoxManager, "_wait_tun_released_steps", staticmethod(steps_via(released_mock))):
             self.assertTrue(manager.stop())
 
         released_mock.assert_called_once_with()
+
+    def test_request_stop_kills_without_waiting(self) -> None:
+        manager = SingBoxManager()
+        fake = Mock()
+        fake.state.return_value = _RUNNING
+        manager._process = fake
+
+        with patch("xray_fluent.application.async_steps.wait_for_qprocess_finished") as wait_mock:
+            manager.request_stop(expected=True)
+
+        fake.kill.assert_called_once_with()
+        wait_mock.assert_not_called()
+        self.assertTrue(manager._stop_requested)
 
 
 class SingBoxTunReadinessTests(unittest.TestCase):
@@ -268,19 +285,18 @@ class SingBoxTunReadinessTests(unittest.TestCase):
         fake = Mock()
         fake.state.return_value = _RUNNING
         manager._process = fake
+        sleeps: list[int] = []
 
         with patch("xray_fluent.engines.singbox.manager.os.name", "nt"), patch.object(
             manager, "_probe_tun_interface_has_ipv4", return_value=(False, False)
         ) as probe_mock, patch(
             "xray_fluent.engines.singbox.manager.time.monotonic",
             side_effect=[10.0, 10.0, 11.0],
-        ), patch(
-            "xray_fluent.engines.singbox.manager.sleep_with_events"
-        ) as sleep_mock:
-            self.assertFalse(manager._wait_until_tun_ready("xftun0", max_wait=1.0))
+        ):
+            self.assertFalse(drive(manager._wait_until_tun_ready_steps("xftun0", max_wait=1.0), sleeps=sleeps))
 
         probe_mock.assert_called_once_with("xftun0")
-        sleep_mock.assert_called_once_with(0.25)
+        self.assertEqual(sleeps, [250])
 
 
 class SingBoxProxyReadinessTests(unittest.TestCase):
@@ -310,6 +326,7 @@ class SingBoxProxyReadinessTests(unittest.TestCase):
         fake.state.return_value = _RUNNING
         manager._process = fake
         http_attempts = 0
+        sleeps: list[int] = []
 
         def probe(_port: int, role: str) -> bool:
             nonlocal http_attempts
@@ -321,17 +338,13 @@ class SingBoxProxyReadinessTests(unittest.TestCase):
         with patch(
             "xray_fluent.engines.singbox.manager.probe_listener_role",
             side_effect=probe,
-        ) as probe_mock, patch(
-            "xray_fluent.engines.singbox.manager.sleep_with_events"
-        ) as sleep_mock:
+        ) as probe_mock:
             self.assertTrue(
-                manager._wait_until_proxy_ready(
-                    self._config(),
-                    max_wait=1.0,
-                )
+                drive(manager._wait_until_proxy_ready_steps(self._config(), max_wait=1.0), sleeps=sleeps)
             )
 
-        self.assertEqual(sleep_mock.call_count, 2)
+        # Пауза между пробами — таймерный шаг, сами пробы — в воркере.
+        self.assertEqual(sleeps, [100, 100])
         self.assertIn(unittest.mock.call(1390, "SOCKS"), probe_mock.call_args_list)
         self.assertIn(unittest.mock.call(1391, "HTTP"), probe_mock.call_args_list)
         self.assertIn(unittest.mock.call(19090, "Clash API"), probe_mock.call_args_list)
@@ -341,7 +354,8 @@ class SingBoxProxyReadinessTests(unittest.TestCase):
         fake = Mock()
         fake.state.return_value = _RUNNING
         manager._process = fake
-        manager.stop = Mock(return_value=True)
+        stop_mock = Mock(return_value=True)
+        manager.stop_steps = steps_via(stop_mock)
         errors: list[str] = []
         manager.error.connect(errors.append)
 
@@ -349,16 +363,30 @@ class SingBoxProxyReadinessTests(unittest.TestCase):
             "xray_fluent.engines.singbox.manager.probe_listener_role",
             return_value=False,
         ):
-            self.assertFalse(
-                manager._wait_until_proxy_ready(
-                    self._config(),
-                    max_wait=0.0,
-                )
-            )
+            self.assertFalse(drive(manager._wait_until_proxy_ready_steps(self._config(), max_wait=0.0)))
 
-        manager.stop.assert_called_once_with(expected=True)
+        stop_mock.assert_called_once_with(expected=True)
         self.assertTrue(manager.last_start_failure_retryable)
         self.assertTrue(any("SOCKS 1390" in message for message in errors))
+
+    def test_superseded_start_stops_without_reporting_failure(self) -> None:
+        manager = SingBoxManager()
+        fake = Mock()
+        fake.state.return_value = _RUNNING
+        manager._process = fake
+        stop_mock = Mock(return_value=True)
+        manager.stop_steps = steps_via(stop_mock)
+        errors: list[str] = []
+        manager.error.connect(errors.append)
+
+        with patch("xray_fluent.engines.singbox.manager.probe_listener_role") as probe_mock:
+            self.assertFalse(
+                drive(manager._wait_until_proxy_ready_steps(self._config(), should_continue=lambda: False))
+            )
+
+        probe_mock.assert_not_called()
+        stop_mock.assert_called_once_with(expected=True)
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":

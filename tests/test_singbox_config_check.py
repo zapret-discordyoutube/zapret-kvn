@@ -14,16 +14,20 @@ class SingboxConfigCheckTests(unittest.TestCase):
         config = Path("C:/ZapretKVN/data/runtime/singbox_config.json")
         completed = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
 
+        # check_config выполняется в worker-пуле: без прокачки Qt-событий.
         with patch(
-            "xray_fluent.platform.windows.subprocess_utils.run_text_pumped",
+            "xray_fluent.platform.windows.subprocess_utils.run_text",
             return_value=completed,
-        ) as run_mock:
+        ) as run_mock, patch(
+            "xray_fluent.platform.windows.subprocess_utils.run_text_pumped",
+        ) as pumped_mock:
             self.assertEqual(check_config(exe, config), (True, ""))
 
         self.assertEqual(
             run_mock.call_args.args[0],
             [str(exe), "check", "-D", str(exe.parent), "-c", str(config)],
         )
+        pumped_mock.assert_not_called()
 
 
 if __name__ == "__main__":

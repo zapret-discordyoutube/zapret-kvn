@@ -9,6 +9,7 @@ from xray_fluent.application.controller import AppController
 from xray_fluent.application.node_runtime_service import start_country_ip_resolution, on_countries_resolved
 from xray_fluent.engines.amnezia.manager import AmneziaManager
 from xray_fluent.profiles.models import Node
+from tests.step_fakes import drive
 
 
 class ReadinessTests(unittest.TestCase):
@@ -33,9 +34,10 @@ class ReadinessTests(unittest.TestCase):
         executor = Mock()
         executor.submit.side_effect = submit
         with patch('xray_fluent.engines.amnezia.manager.ThreadPoolExecutor', return_value=executor), \
-             patch('xray_fluent.engines.amnezia.manager.time.monotonic', side_effect=lambda: elapsed[0]), \
-             patch('xray_fluent.engines.amnezia.manager.sleep_with_events', side_effect=sleep):
-            result = AmneziaManager._ready(manager, 1234, {'username': 'test', 'password': 'test'})
+             patch('xray_fluent.engines.amnezia.manager.time.monotonic', side_effect=lambda: elapsed[0]):
+            # Ожидание рукопожатия — таймерные шаги (без сна GUI-потока).
+            result = drive(AmneziaManager._ready_steps(manager, 1234, {'username': 'test', 'password': 'test'}),
+                           on_sleep=sleep)
         if result:
             executor.shutdown.assert_not_called()
             manager._monitor_transport_health.assert_called_once()

@@ -7,31 +7,51 @@ import json
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
+
+from ...application.async_steps import (
+    TransitionRunner,
+    TransitionSteps,
+    run_in_worker,
+    run_steps_blocking,
+    sleep_ms,
+    wait_process_finished,
+    wait_process_started,
+)
 
 from ...constants import HYSTERIA_CONFIG_FILE, HYSTERIA_PATH_DEFAULT, PROXY_HOST, RUNTIME_DIR
 from ...diagnostics.export import capture_runtime_config
 from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 from ..health_check import BackgroundHealthCheck
-from ..sidecar import wait_for_loopback_relay
+from ..sidecar import wait_for_loopback_relay_steps
 from .runtime_contract import (
     SECURITY_FAILURES,
     HysteriaFailureCode,
     classify_hysteria_failure,
 )
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log, strip_terminal_controls
-from ...platform.windows.subprocess_utils import (
-    decode_output,
-    kill_processes_by_path,
-    sleep_with_events,
-    wait_for_qprocess_finished,
-    wait_for_qprocess_started,
-)
+from ...platform.windows.subprocess_utils import decode_output, kill_processes_by_path
 
 
 _FUNCTIONAL_HTTPS_ENDPOINTS = HTTPS_ENDPOINTS
+
+# start_steps(): the in-flight attempt saw a Chrome-parrot TLS rejection and
+# must be repeated once with disableChromeParrot (no nested start()).
+_RETRY_WITHOUT_CHROME_PARROT = object()
+
+
+def _still_wanted(should_continue: Callable[[], bool] | None) -> bool:
+    return should_continue is None or bool(should_continue())
+
+
+def _kill_orphaned_blocking(exe: Path) -> bool:
+    """Worker-only: kill an orphaned hysteria.exe of this installation."""
+    try:
+        return bool(kill_processes_by_path(exe.name, exe, timeout=5, pump=False))
+    except Exception:
+        return False
 
 
 class HysteriaManager(QObject):
@@ -80,6 +100,8 @@ class HysteriaManager(QObject):
         self._remote_authenticated = False
         self.stats: dict[str, Any] = {}
         self._health = BackgroundHealthCheck(self)
+        self._start_depth = 0
+        self._fallback_runner: TransitionRunner | None = None
         # A crash can leave a short-lived config behind. It is never reusable:
         # every start writes a fresh one, so remove stale secrets immediately.
         self._cleanup_config()
@@ -97,6 +119,11 @@ class HysteriaManager(QObject):
     def last_failure_code(self) -> HysteriaFailureCode | None:
         return self._last_failure_code
 
+    @property
+    def process_alive(self) -> bool:
+        """A spawned process exists, even if readiness was never confirmed."""
+        return self._process.state() != QProcess.ProcessState.NotRunning
+
     def start(
         self,
         config: dict[str, Any],
@@ -108,7 +135,92 @@ class HysteriaManager(QObject):
         verify_remote: bool = True,
         _compatibility_retry: bool = False,
     ) -> bool:
-        if not _compatibility_retry:
+        # Синхронный драйвер тех же шагов — только для shutdown/тестов.
+        return bool(
+            run_steps_blocking(
+                self.start_steps(
+                    config,
+                    relay_port,
+                    context=context,
+                    process_generation=process_generation,
+                    allow_parallel=allow_parallel,
+                    verify_remote=verify_remote,
+                    _compatibility_retry=_compatibility_retry,
+                )
+            )
+        )
+
+    def start_steps(
+        self,
+        config: dict[str, Any],
+        relay_port: int,
+        *,
+        context: RuntimeNodeIdentity | None = None,
+        process_generation: int = 0,
+        allow_parallel: bool = False,
+        verify_remote: bool = True,
+        should_continue: Callable[[], bool] | None = None,
+        _compatibility_retry: bool = False,
+    ) -> TransitionSteps:
+        """Start the sidecar; all waits are steps, probes run in workers.
+
+        A Chrome-parrot compatibility retry requested while this start is in
+        flight is performed here, inline, instead of re-entering ``start``.
+        """
+        self._start_depth += 1
+        try:
+            started = yield from self._start_attempt_steps(
+                config,
+                relay_port,
+                context=context,
+                process_generation=process_generation,
+                allow_parallel=allow_parallel,
+                verify_remote=verify_remote,
+                should_continue=should_continue,
+                compatibility_retry=_compatibility_retry,
+            )
+            while started is _RETRY_WITHOUT_CHROME_PARROT:
+                retry_config = self._chrome_fallback_config()
+                if retry_config is None:
+                    return False
+                self._chrome_fallback_pending = False
+                self._chrome_fallback_in_progress = True
+                try:
+                    started = yield from self._start_attempt_steps(
+                        retry_config,
+                        relay_port,
+                        context=context,
+                        process_generation=self._process_generation,
+                        allow_parallel=self._compatibility_allow_parallel,
+                        verify_remote=self._compatibility_verify_remote,
+                        should_continue=should_continue,
+                        compatibility_retry=True,
+                    )
+                finally:
+                    self._chrome_fallback_in_progress = False
+                if started is False:
+                    self._emit_error(
+                        "Не удалось повторно запустить Hysteria2 в режиме совместимости сертификата.",
+                        stage="compatibility_retry",
+                    )
+                    self._clear_compatibility_state()
+            return bool(started)
+        finally:
+            self._start_depth -= 1
+
+    def _start_attempt_steps(
+        self,
+        config: dict[str, Any],
+        relay_port: int,
+        *,
+        context: RuntimeNodeIdentity | None,
+        process_generation: int,
+        allow_parallel: bool,
+        verify_remote: bool,
+        should_continue: Callable[[], bool] | None,
+        compatibility_retry: bool,
+    ) -> TransitionSteps:
+        if not compatibility_retry:
             self._compatibility_generation += 1
             self._chrome_fallback_pending = False
             self._chrome_fallback_used = False
@@ -147,7 +259,7 @@ class HysteriaManager(QObject):
         # connection that is only about to start.
         if self._process.state() != QProcess.ProcessState.NotRunning:
             self._failure_reported = False
-            if not self.stop(expected=True, _preserve_compatibility=True):
+            if not (yield from self.stop_steps(expected=True, _preserve_compatibility=True)):
                 self._emit_error(
                     "Не удалось остановить предыдущий процесс Hysteria",
                     stage="stop_previous",
@@ -159,8 +271,13 @@ class HysteriaManager(QObject):
             self.state_changed.emit(False)
 
         self._begin_attempt(context, config)
+        attempt_generation = self._compatibility_generation
         if not allow_parallel:
-            self._kill_orphaned(exe)
+            killed = yield run_in_worker(lambda: _kill_orphaned_blocking(exe))
+            if killed:
+                yield sleep_ms(500)
+            if attempt_generation != self._compatibility_generation or not _still_wanted(should_continue):
+                return False
         self._cleanup_config()
         temporary = self._config_path.with_suffix(".json.tmp")
         try:
@@ -195,7 +312,7 @@ class HysteriaManager(QObject):
             ]
         )
         self._process.start()
-        if not wait_for_qprocess_started(self._process, 4000):
+        if not (yield wait_process_started(self._process, 4000)):
             self._starting = False
             self._cleanup_config()
             self._emit_error(
@@ -205,9 +322,19 @@ class HysteriaManager(QObject):
             self._clear_compatibility_state()
             return False
 
-        if not self._wait_until_relay_ready(relay_port):
+        relay_ready = yield from self._wait_until_relay_ready_steps(
+            relay_port, should_continue=should_continue
+        )
+        if self._chrome_fallback_pending and attempt_generation == self._compatibility_generation:
+            return _RETRY_WITHOUT_CHROME_PARROT
+        if not relay_ready:
+            if attempt_generation != self._compatibility_generation or not _still_wanted(should_continue):
+                self._starting = False
+                if self._process.state() != QProcess.ProcessState.NotRunning:
+                    yield from self.stop_steps(expected=True, _preserve_compatibility=True)
+                return False
             details = self._last_output_lines[-1] if self._last_output_lines else "локальный SOCKS не открылся"
-            self.stop(expected=True)
+            yield from self.stop_steps(expected=True)
             self._starting = False
             self._emit_error(f"Hysteria sidecar не запустился: {details}", stage="wait_ready")
             return False
@@ -220,27 +347,35 @@ class HysteriaManager(QObject):
         socks = config.get("socks5")
         socks = socks if isinstance(socks, dict) else {}
         readiness_generation = self._compatibility_generation
-        if verify_remote and not self._wait_until_remote_ready(
-            relay_port,
-            username=str(socks.get("username") or ""),
-            password=str(socks.get("password") or ""),
-        ):
-            if readiness_generation != self._compatibility_generation:
-                return False
-            details = self._last_output_lines[-1] if self._last_output_lines else "HTTPS probe через relay не завершился"
-            remote_failure = self._last_failure_code is not None
-            self.stop(expected=True)
-            self._starting = False
-            self._emit_error(
-                ("Соединение Hysteria с сервером не установлено: " if remote_failure
-                 else "Проверка HTTPS через Hysteria не завершилась: ") + details,
-                stage="remote_handshake" if remote_failure else "functional_ready",
-                code=self._last_failure_code
-                or classify_hysteria_failure(details)
-                or HysteriaFailureCode.TARGET_NETWORK_TIMEOUT,
-            )
-            return False
         if verify_remote:
+            remote_ready = yield from self._wait_until_remote_ready_steps(
+                relay_port,
+                username=str(socks.get("username") or ""),
+                password=str(socks.get("password") or ""),
+                should_continue=should_continue,
+            )
+            if self._chrome_fallback_pending and readiness_generation == self._compatibility_generation:
+                return _RETRY_WITHOUT_CHROME_PARROT
+            if not remote_ready:
+                if readiness_generation != self._compatibility_generation:
+                    return False
+                if not _still_wanted(should_continue):
+                    self._starting = False
+                    yield from self.stop_steps(expected=True, _preserve_compatibility=True)
+                    return False
+                details = self._last_output_lines[-1] if self._last_output_lines else "HTTPS probe через relay не завершился"
+                remote_failure = self._last_failure_code is not None
+                yield from self.stop_steps(expected=True)
+                self._starting = False
+                self._emit_error(
+                    ("Соединение Hysteria с сервером не установлено: " if remote_failure
+                     else "Проверка HTTPS через Hysteria не завершилась: ") + details,
+                    stage="remote_handshake" if remote_failure else "functional_ready",
+                    code=self._last_failure_code
+                    or classify_hysteria_failure(details)
+                    or HysteriaFailureCode.TARGET_NETWORK_TIMEOUT,
+                )
+                return False
             self._emit_log(
                 "functional readiness completed in "
                 f"{int((time.monotonic() - self._attempt_started_at) * 1000)} ms",
@@ -270,6 +405,24 @@ class HysteriaManager(QObject):
         self._secret_values = self._collect_secret_values(config)
 
     def stop(self, expected: bool = True, *, _preserve_compatibility: bool = False) -> bool:
+        # Синхронный драйвер — shutdown и тесты; переходы используют stop_steps().
+        return bool(
+            run_steps_blocking(
+                self.stop_steps(expected=expected, _preserve_compatibility=_preserve_compatibility)
+            )
+        )
+
+    def request_stop(self, expected: bool = True) -> None:
+        """Close admission now without waiting (signal handlers)."""
+        self._cancel_health()
+        self._clear_compatibility_state()
+        self._cleanup_config()
+        if self._process.state() == QProcess.ProcessState.NotRunning:
+            return
+        self._stop_requested = expected
+        self._process.kill()
+
+    def stop_steps(self, expected: bool = True, *, _preserve_compatibility: bool = False) -> TransitionSteps:
         self._cancel_health()
         if not _preserve_compatibility:
             self._clear_compatibility_state()
@@ -284,7 +437,7 @@ class HysteriaManager(QObject):
 
         self._stop_requested = expected
         self._process.kill()
-        if not wait_for_qprocess_finished(self._process, 2000):
+        if not (yield wait_process_finished(self._process, 2000)):
             self._stop_requested = False
             self._emit_error("Не удалось вовремя остановить процесс Hysteria", stage="stop")
             return False
@@ -292,13 +445,28 @@ class HysteriaManager(QObject):
         return True
 
     def _wait_until_relay_ready(self, relay_port: int, timeout: float = 10.0) -> bool:
+        return bool(run_steps_blocking(self._wait_until_relay_ready_steps(relay_port, timeout=timeout)))
+
+    def _wait_until_relay_ready_steps(
+        self,
+        relay_port: int,
+        timeout: float = 10.0,
+        *,
+        should_continue: Callable[[], bool] | None = None,
+    ) -> TransitionSteps:
         # Shared sidecar seam: the loopback SOCKS listener must accept a TCP
         # connection before the sing-box front can dial it.
-        return wait_for_loopback_relay(
+        generation = self._compatibility_generation
+        return (yield from wait_for_loopback_relay_steps(
             relay_port,
             timeout=timeout,
-            should_continue=lambda: self._process.state() != QProcess.ProcessState.NotRunning,
-        )
+            should_continue=lambda: (
+                self._process.state() != QProcess.ProcessState.NotRunning
+                and generation == self._compatibility_generation
+                and not self._chrome_fallback_pending
+                and _still_wanted(should_continue)
+            ),
+        ))
 
     def _wait_until_remote_ready(
         self,
@@ -308,20 +476,43 @@ class HysteriaManager(QObject):
         password: str,
         timeout: float = 15.0,
     ) -> bool:
+        return bool(
+            run_steps_blocking(
+                self._wait_until_remote_ready_steps(
+                    relay_port, username=username, password=password, timeout=timeout
+                )
+            )
+        )
+
+    def _wait_until_remote_ready_steps(
+        self,
+        relay_port: int,
+        *,
+        username: str,
+        password: str,
+        timeout: float = 15.0,
+        should_continue: Callable[[], bool] | None = None,
+    ) -> TransitionSteps:
         """Prove HTTPS egress without making one external provider authoritative."""
 
         deadline = time.monotonic() + timeout
         generation = self._compatibility_generation
         failures: dict[str, str] = {}
         attempts = 0
-        while time.monotonic() < deadline and attempts < 3:
-            attempts += 1
-            if (
+
+        def abandoned() -> bool:
+            return (
                 self._stop_requested
                 or generation != self._compatibility_generation
                 or self._process.state() == QProcess.ProcessState.NotRunning
                 or self._last_failure_code in SECURITY_FAILURES
-            ):
+                or self._chrome_fallback_pending
+                or not _still_wanted(should_continue)
+            )
+
+        while time.monotonic() < deadline and attempts < 3:
+            attempts += 1
+            if abandoned():
                 return False
             probe_timeout = min(4.0, max(0.2, deadline - time.monotonic()))
             executor = ThreadPoolExecutor(
@@ -341,12 +532,7 @@ class HysteriaManager(QObject):
             }
             succeeded: tuple[str, str, str] | None = None
             while futures and time.monotonic() < deadline:
-                if (
-                    self._stop_requested
-                    or generation != self._compatibility_generation
-                    or self._process.state() == QProcess.ProcessState.NotRunning
-                    or self._last_failure_code in SECURITY_FAILURES
-                ):
+                if abandoned():
                     executor.shutdown(wait=False, cancel_futures=True)
                     return False
                 if self._remote_authenticated:
@@ -362,7 +548,7 @@ class HysteriaManager(QObject):
                     failures[endpoint[1]] = f"{type(error).__name__}: {error}"
                 if succeeded is not None:
                     break
-                sleep_with_events(0.05)
+                yield sleep_ms(50)
             if (succeeded is None and self._remote_authenticated and generation == self._compatibility_generation
                     and self._last_failure_code not in SECURITY_FAILURES
                     and self._process.state() != QProcess.ProcessState.NotRunning
@@ -379,7 +565,7 @@ class HysteriaManager(QObject):
                     stage="functional_ready",
                 )
                 return True
-            sleep_with_events(0.1)
+            yield sleep_ms(100)
         if failures:
             summary = "; ".join(
                 f"{host}={detail}" for host, detail in sorted(failures.items())
@@ -467,16 +653,6 @@ class HysteriaManager(QObject):
     ) -> None:
         probe_https(relay_port, username=username, password=password,
                     endpoint=endpoint, timeout=timeout)
-
-    @staticmethod
-    def _kill_orphaned(exe: Path) -> None:
-        if os.name != "nt":
-            return
-        try:
-            if kill_processes_by_path(exe.name, exe, timeout=5):
-                sleep_with_events(0.5)
-        except Exception:
-            pass
 
     def _cleanup_config(self) -> None:
         try:
@@ -677,8 +853,23 @@ class HysteriaManager(QObject):
         )
         QTimer.singleShot(0, lambda: self._run_chrome_parrot_fallback(generation))
 
+    def _chrome_fallback_config(self) -> dict[str, Any] | None:
+        if self._compatibility_config is None or self._compatibility_relay_port <= 0:
+            return None
+        config = deepcopy(self._compatibility_config)
+        quic = config.get("quic")
+        if not isinstance(quic, dict):
+            quic = {}
+            config["quic"] = quic
+        quic["disableChromeParrot"] = True
+        return config
+
     def _run_chrome_parrot_fallback(self, generation: int) -> None:
         if generation != self._compatibility_generation:
+            return
+        if self._start_depth > 0:
+            # A start is in flight: its readiness loop sees the pending flag
+            # and performs the retry inline (no nested start on one QProcess).
             return
         self._chrome_fallback_pending = False
         if (
@@ -688,18 +879,15 @@ class HysteriaManager(QObject):
         ):
             return
 
-        config = deepcopy(self._compatibility_config)
-        quic = config.get("quic")
-        if not isinstance(quic, dict):
-            quic = {}
-            config["quic"] = quic
-        quic["disableChromeParrot"] = True
+        config = self._chrome_fallback_config()
+        if config is None:
+            return
         relay_port = self._compatibility_relay_port
         context = self._compatibility_context
         self._chrome_fallback_in_progress = True
         self._suppress_state_change = True
-        try:
-            started = self.start(
+        runner = TransitionRunner(
+            self.start_steps(
                 config,
                 relay_port,
                 context=context,
@@ -707,10 +895,25 @@ class HysteriaManager(QObject):
                 allow_parallel=self._compatibility_allow_parallel,
                 verify_remote=self._compatibility_verify_remote,
                 _compatibility_retry=True,
-            )
-        finally:
-            self._suppress_state_change = False
-            self._chrome_fallback_in_progress = False
+            ),
+            # stop()/новый start() сбрасывают поколение совместимости —
+            # тогда повтор закрывается на ближайшем шаге.
+            is_current=lambda: generation == self._compatibility_generation,
+            on_finished=self._on_chrome_parrot_fallback_finished,
+            parent=self,
+        )
+        self._fallback_runner = runner
+        runner.start()
+
+    def _on_chrome_parrot_fallback_finished(self, runner: TransitionRunner) -> None:
+        if self._fallback_runner is runner:
+            self._fallback_runner = None
+        runner.deleteLater()
+        self._suppress_state_change = False
+        self._chrome_fallback_in_progress = False
+        started = bool(runner.result) and runner.error is None and not runner.cancelled
+        if runner.cancelled:
+            return
         if not started:
             if not self._running:
                 self.state_changed.emit(False)

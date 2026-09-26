@@ -61,14 +61,19 @@ def _location(path: str, field: str) -> str:
 
 
 def check_config(exe: Path, config_path: Path, *, timeout: float = 15.0) -> tuple[bool, str]:
-    """Спросить ядро, годится ли конфигурация. Возвращает (ок, объяснение)."""
+    """Спросить ядро, годится ли конфигурация. Возвращает (ок, объяснение).
 
-    from ...platform.windows.subprocess_utils import result_output_text, run_text_pumped
+    Блокирующий вызов: выполняется только в worker-пуле (SingBoxManager
+    отдаёт его в ``run_in_worker``), поэтому без прокачки Qt-событий.
+    """
+
+    from ...platform.windows.subprocess_utils import CREATE_NO_WINDOW, result_output_text, run_text
 
     try:
-        result = run_text_pumped(
+        result = run_text(
             [str(exe), "check", "-D", str(exe.parent), "-c", str(config_path)],
             timeout=timeout,
+            creationflags=CREATE_NO_WINDOW or None,
         )
     except Exception as exc:  # ядро может отсутствовать или не запуститься
         return True, f"Проверка конфигурации не выполнена: {type(exc).__name__}: {exc}"

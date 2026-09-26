@@ -13,6 +13,6 @@ detection, failure taxonomy, recovery policy) deliberately stay in each engine.
 
 from __future__ import annotations
 
-from .readiness import wait_for_loopback_relay
+from .readiness import probe_loopback_relay, wait_for_loopback_relay, wait_for_loopback_relay_steps
 
-__all__ = ["wait_for_loopback_relay"]
+__all__ = ["probe_loopback_relay", "wait_for_loopback_relay", "wait_for_loopback_relay_steps"]
