@@ -1,0 +1,287 @@
+Zapret KVN: кэш поиска процесса-владельца соединения в sing-box на Windows.
+
+Что делает. Без патча sing-box при правилах process_name/process_path на каждое
+новое соединение запрашивает у Windows всю системную таблицу TCP/UDP
+(GetExtendedTcpTable/Udp) и перебирает её целиком. При десятках тысяч строк и
+сотне соединений в секунду это давало 20-27 ядер CPU и сотни потоков. Патч
+держит сырую таблицу не дольше pidTableSnapshotTTL (500 мс), общий для всех
+промахов запрос таблицы (single-flight, не чаще раза в pidTableMinRefreshInterval = 10 мс) и
+тот же линейный перебор, что winiphlpapi.FindPid: первое совпадение, для UDP —
+точный адрес или unspecified с тем же портом. «Не найдено» не кэшируется.
+Затрагивает только common/process на Windows; Android (libbox) не меняется.
+
+Сборка. scripts/build_singbox_front.py накладывает патч только на тот
+searcher_windows.go, чей git blob указан в index-строке ниже (git diff
+--full-index), копирует core-patches/singbox_process_lookup_test.go и
+гоняет go test ./common/process -run ^TestZapret. sha256 патча пишется в
+sing-box.build.json (process_lookup_patch_sha256).
+
+Обновление ядра.
+1. Сборка падает «upstream изменил поиск процесса» — upstream поменял
+   searcher_windows.go. Проверьте, не исправлен ли поиск в upstream
+   (SagerNet/sing: winiphlpapi FindSocketOwner/nsiGetTCPConnection — ключевой
+   поиск TCP без перебора таблицы, dev 4ca3bebe; SagerNet/sing-box
+   v1.15.0-alpha.8 и ветка testing 9680a09). Если исправлен — удалите патч,
+   тест и строки в build_singbox_front.py. Если нет — перенесите изменения
+   на новый файл и пересоздайте патч через git diff --full-index.
+2. Сборка падает «патч, вероятно, устарел» — в исходниках появился
+   upstream-признак (UPSTREAM_OWNER_LOOKUP_MARKERS). Сравните поведение
+   (эксперимент C: 100 соединений/с при ~40 тыс. строк таблицы) и удалите
+   патч, если upstream даёт то же.
+
+diff --git a/common/process/searcher_windows.go b/common/process/searcher_windows.go
+index f011765705450e2c5150406f6573c3f4418ef021..8ebe20dc114b0d4eb8a09b45f1684f5200342c91 100644
+--- a/common/process/searcher_windows.go
++++ b/common/process/searcher_windows.go
+@@ -7,6 +7,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	E "github.com/sagernet/sing/common/exceptions"
++	N "github.com/sagernet/sing/common/network"
+ 	"github.com/sagernet/sing/common/winiphlpapi"
+ 
+ 	"golang.org/x/sys/windows"
+@@ -14,14 +15,32 @@ import (
+ 
+ var _ Searcher = (*windowsSearcher)(nil)
+ 
+-type windowsSearcher struct{}
++type windowsSearcher struct {
++	tcp4 *pidTableCache[winiphlpapi.MibTcpRowOwnerPid]
++	tcp6 *pidTableCache[winiphlpapi.MibTcp6RowOwnerPid]
++	udp4 *pidTableCache[winiphlpapi.MibUdpRowOwnerPid]
++	udp6 *pidTableCache[winiphlpapi.MibUdp6RowOwnerPid]
++}
+ 
+ func NewSearcher(_ Config) (Searcher, error) {
+ 	err := initWin32API()
+ 	if err != nil {
+ 		return nil, E.Cause(err, "init win32 api")
+ 	}
+-	return &windowsSearcher{}, nil
++	return &windowsSearcher{
++		tcp4: newPidTableCache(winiphlpapi.GetExtendedTcpTable, func(row winiphlpapi.MibTcpRowOwnerPid, source netip.AddrPort) bool {
++			return pidRowMatchesTCP(netip.AddrPortFrom(winiphlpapi.DwordToAddr(row.DwLocalAddr), winiphlpapi.DwordToPort(row.DwLocalPort)), source)
++		}, func(row winiphlpapi.MibTcpRowOwnerPid) uint32 { return row.DwOwningPid }),
++		tcp6: newPidTableCache(winiphlpapi.GetExtendedTcp6Table, func(row winiphlpapi.MibTcp6RowOwnerPid, source netip.AddrPort) bool {
++			return pidRowMatchesTCP(netip.AddrPortFrom(netip.AddrFrom16(row.UcLocalAddr), winiphlpapi.DwordToPort(row.DwLocalPort)), source)
++		}, func(row winiphlpapi.MibTcp6RowOwnerPid) uint32 { return row.DwOwningPid }),
++		udp4: newPidTableCache(winiphlpapi.GetExtendedUdpTable, func(row winiphlpapi.MibUdpRowOwnerPid, source netip.AddrPort) bool {
++			return pidRowMatchesUDP(netip.AddrPortFrom(winiphlpapi.DwordToAddr(row.DwLocalAddr), winiphlpapi.DwordToPort(row.DwLocalPort)), source, netip.IPv4Unspecified())
++		}, func(row winiphlpapi.MibUdpRowOwnerPid) uint32 { return row.DwOwningPid }),
++		udp6: newPidTableCache(winiphlpapi.GetExtendedUdp6Table, func(row winiphlpapi.MibUdp6RowOwnerPid, source netip.AddrPort) bool {
++			return pidRowMatchesUDP(netip.AddrPortFrom(netip.AddrFrom16(row.UcLocalAddr), winiphlpapi.DwordToPort(row.DwLocalPort)), source, netip.IPv6Unspecified())
++		}, func(row winiphlpapi.MibUdp6RowOwnerPid) uint32 { return row.DwOwningPid }),
++	}, nil
+ }
+ 
+ func initWin32API() error {
+@@ -35,8 +54,38 @@ func (s *windowsSearcher) Close() error {
+ 	return nil
+ }
+ 
++// findPid keeps winiphlpapi.FindPid semantics on a briefly cached raw table.
++func (s *windowsSearcher) findPid(network string, source netip.AddrPort) (uint32, error) {
++	var (
++		pid   uint32
++		found bool
++		err   error
++	)
++	switch N.NetworkName(network) {
++	case N.NetworkTCP:
++		if source.Addr().Is4() {
++			pid, found, err = s.tcp4.find(source)
++		} else {
++			pid, found, err = s.tcp6.find(source)
++		}
++	case N.NetworkUDP:
++		if source.Addr().Is4() {
++			pid, found, err = s.udp4.find(source)
++		} else {
++			pid, found, err = s.udp6.find(source)
++		}
++	}
++	if err != nil {
++		return 0, err
++	}
++	if !found {
++		return 0, E.New("process not found for ", source)
++	}
++	return pid, nil
++}
++
+ func (s *windowsSearcher) FindProcessInfo(ctx context.Context, network string, source netip.AddrPort, destination netip.AddrPort) (*adapter.ConnectionOwner, error) {
+-	pid, err := winiphlpapi.FindPid(network, source)
++	pid, err := s.findPid(network, source)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/common/process/zapret_pid_table_cache.go b/common/process/zapret_pid_table_cache.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..96b5b6a62492e9adcf8ef611d914b62a459908ce
+--- /dev/null
++++ b/common/process/zapret_pid_table_cache.go
+@@ -0,0 +1,163 @@
++package process
++
++// zapret-kvn: Windows connection-owner lookup used to fetch the whole system
++// TCP/UDP table for every new connection and scan it linearly. With tens of
++// thousands of rows and many new connections per second the searcher burned
++// many cores and piled up OS threads. The cache below keeps the raw table for
++// a short time and lets concurrent misses share one fetch. The scan itself is
++// unchanged: rows are matched in table order and the first match wins.
++
++import (
++	"fmt"
++	"net/netip"
++	"sync"
++	"time"
++)
++
++const (
++	// A cached raw table answers hits only while it is this young. It bounds
++	// the window in which a reused ephemeral port could be attributed to the
++	// process that owned it before.
++	pidTableSnapshotTTL = 500 * time.Millisecond
++	// Minimum spacing between two table fetches. Misses arriving meanwhile
++	// wait for the next shared fetch, so a new connection may wait up to this
++	// long for its owner lookup. It caps fetches at 100/s per table when the
++	// table is small; with a large table one fetch already takes longer, so a
++	// longer interval saved no CPU in the win10 A/B (0/10/25/50 ms) and only
++	// added latency.
++	pidTableMinRefreshInterval = 10 * time.Millisecond
++)
++
++// pidRowMatchesTCP is the original winiphlpapi.FindPid predicate for TCP rows.
++func pidRowMatchesTCP(local netip.AddrPort, source netip.AddrPort) bool {
++	return source == local
++}
++
++// pidRowMatchesUDP is the original winiphlpapi.FindPid predicate for UDP rows
++// on Windows: the exact local address, or an unspecified (wildcard) local
++// address bound to the same port.
++func pidRowMatchesUDP(local netip.AddrPort, source netip.AddrPort, unspecified netip.Addr) bool {
++	return source == local || local.Addr() == unspecified && source.Port() == local.Port()
++}
++
++type pidTableFetch[R any] struct {
++	done      chan struct{}
++	startedAt time.Time
++	err       error
++}
++
++type pidTableCache[R any] struct {
++	fetch      func() ([]R, error)
++	match      func(row R, source netip.AddrPort) bool
++	owner      func(row R) uint32
++	now        func() time.Time
++	sleep      func(time.Duration)
++	ttl        time.Duration
++	minRefresh time.Duration
++
++	access    sync.Mutex
++	rows      []R
++	rowsAt    time.Time
++	hasRows   bool
++	inflight  *pidTableFetch[R]
++	lastFetch time.Time
++}
++
++func newPidTableCache[R any](fetch func() ([]R, error), match func(R, netip.AddrPort) bool, owner func(R) uint32) *pidTableCache[R] {
++	return &pidTableCache[R]{
++		fetch:      fetch,
++		match:      match,
++		owner:      owner,
++		now:        time.Now,
++		sleep:      time.Sleep,
++		ttl:        pidTableSnapshotTTL,
++		minRefresh: pidTableMinRefreshInterval,
++	}
++}
++
++func (c *pidTableCache[R]) scan(rows []R, source netip.AddrPort) (uint32, bool) {
++	for _, row := range rows {
++		if c.match(row, source) {
++			return c.owner(row), true
++		}
++	}
++	return 0, false
++}
++
++// find returns the owning pid of source. A miss is never cached: when the
++// available table was fetched before this lookup started, one refreshed table
++// (shared with every concurrent waiter) is scanned again.
++func (c *pidTableCache[R]) find(source netip.AddrPort) (uint32, bool, error) {
++	start := c.now()
++	c.access.Lock()
++	rows, rowsAt, hasRows := c.rows, c.rowsAt, c.hasRows
++	c.access.Unlock()
++	if hasRows && start.Sub(rowsAt) <= c.ttl {
++		if pid, found := c.scan(rows, source); found {
++			return pid, true, nil
++		}
++		if !rowsAt.Before(start) {
++			return 0, false, nil
++		}
++	}
++	rows, err := c.refresh(start)
++	if err != nil {
++		return 0, false, err
++	}
++	pid, found := c.scan(rows, source)
++	return pid, found, nil
++}
++
++func (c *pidTableCache[R]) fetchOnce() (rows []R, err error) {
++	// A panicking fetch must still release the waiters of this refresh.
++	defer func() {
++		if recovered := recover(); recovered != nil {
++			rows, err = nil, fmt.Errorf("process table fetch panic: %v", recovered)
++		}
++	}()
++	return c.fetch()
++}
++
++// refresh returns a table whose fetch began no earlier than start.
++func (c *pidTableCache[R]) refresh(start time.Time) ([]R, error) {
++	c.access.Lock()
++	for {
++		if c.hasRows && !c.rowsAt.Before(start) {
++			rows := c.rows
++			c.access.Unlock()
++			return rows, nil
++		}
++		if call := c.inflight; call != nil {
++			c.access.Unlock()
++			<-call.done
++			if call.err != nil && !call.startedAt.Before(start) {
++				return nil, call.err
++			}
++			c.access.Lock()
++			continue
++		}
++		call := &pidTableFetch[R]{done: make(chan struct{})}
++		c.inflight = call
++		wait := c.minRefresh - c.now().Sub(c.lastFetch)
++		c.access.Unlock()
++		if wait > 0 {
++			c.sleep(wait)
++		}
++		c.access.Lock()
++		call.startedAt = c.now()
++		c.lastFetch = call.startedAt
++		c.access.Unlock()
++		rows, err := c.fetchOnce()
++		c.access.Lock()
++		call.err = err
++		if err == nil {
++			c.rows, c.rowsAt, c.hasRows = rows, call.startedAt, true
++		}
++		c.inflight = nil
++		close(call.done)
++		if err != nil {
++			c.access.Unlock()
++			return nil, err
++		}
++	}
++}
