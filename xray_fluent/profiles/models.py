@@ -512,6 +512,9 @@ class AppSettings:
     auto_switch_threshold_kbps: int = 50
     auto_switch_delay_sec: int = 30
     auto_switch_cooldown_sec: int = 60
+    # «Умная проверка»: уход с медленного сервера только при реальном спросе
+    # и после контрольного замера (application/smart_switch_service.py).
+    auto_switch_low_speed_enabled: bool = True
     # Rotation: periodic exit-node switching inside a pool (xray balancer override)
     rotation_enabled: bool = False
     rotation_mode: str = "random"  # random | sequential
@@ -578,6 +581,7 @@ class AppSettings:
             "auto_switch_threshold_kbps": self.auto_switch_threshold_kbps,
             "auto_switch_delay_sec": self.auto_switch_delay_sec,
             "auto_switch_cooldown_sec": self.auto_switch_cooldown_sec,
+            "auto_switch_low_speed_enabled": self.auto_switch_low_speed_enabled,
             "rotation_enabled": self.rotation_enabled,
             "rotation_mode": self.rotation_mode,
             "rotation_interval_sec": self.rotation_interval_sec,
@@ -649,6 +653,7 @@ class AppSettings:
             auto_switch_threshold_kbps=int(data.get("auto_switch_threshold_kbps") or 50),
             auto_switch_delay_sec=int(data.get("auto_switch_delay_sec") or 30),
             auto_switch_cooldown_sec=int(data.get("auto_switch_cooldown_sec") or 60),
+            auto_switch_low_speed_enabled=bool(data.get("auto_switch_low_speed_enabled", True)),
             rotation_enabled=bool(data.get("rotation_enabled", False)),
             rotation_mode=str(data.get("rotation_mode") or "random"),
             rotation_interval_sec=int(data.get("rotation_interval_sec") or 600),

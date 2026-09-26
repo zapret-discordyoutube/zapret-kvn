@@ -115,6 +115,7 @@ class LiveMetricsValidityTests(unittest.TestCase):
             _metrics_worker=worker,
             live_metrics_updated=SimpleNamespace(emit=payloads.append),
             _check_auto_switch=Mock(),
+            _check_smart_switch=Mock(),
         )
 
         on_live_metrics(
@@ -133,6 +134,32 @@ class LiveMetricsValidityTests(unittest.TestCase):
             traffic_valid=False,
         )
         self.assertIsNone(payloads[0]["down_bps"])
+        controller._check_smart_switch.assert_called_once_with(
+            0.0,
+            traffic_valid=False,
+            demand=None,
+        )
+
+    def test_proxy_demand_is_forwarded_to_smart_switch(self) -> None:
+        worker = SimpleNamespace(pings_active_node=lambda: False)
+        controller = SimpleNamespace(
+            _metrics_worker=worker,
+            live_metrics_updated=SimpleNamespace(emit=lambda payload: None),
+            _check_auto_switch=Mock(),
+            _check_smart_switch=Mock(),
+        )
+        demand = {"active": 2, "growing": 1, "down_bps": 4096.0}
+
+        on_live_metrics(
+            controller,
+            {"down_bps": 5000.0, "traffic_valid": True, "latency_ms": None, "proxy_demand": demand},
+        )
+
+        controller._check_smart_switch.assert_called_once_with(
+            5000.0,
+            traffic_valid=True,
+            demand=demand,
+        )
 
 
 if __name__ == "__main__":

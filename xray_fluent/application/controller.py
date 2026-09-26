@@ -75,6 +75,14 @@ from .auto_switch_service import (
     begin_auto_switch_warmup,
     transport_kind_for_node,
 )
+from .smart_switch_service import (
+    SmartSwitchState,
+    cancel_smart_check,
+    check_smart_switch as check_smart_switch_operation,
+    on_candidate_result as on_smart_candidate_result_operation,
+    on_candidates_done as on_smart_candidates_done_operation,
+    on_current_probe_measured as on_smart_probe_measured_operation,
+)
 from ..diagnostics.runtime_errors import RuntimeErrorJournal, core_failure, is_core_error_line
 from ..engines.hysteria.runtime_contract import (
     AUTOMATIC_SWITCH_FAILURES,
@@ -434,6 +442,8 @@ class AppController(QObject):
         self._auto_switch_manual_hold: bool = False
         self._auto_switch_warmup_until: float = 0.0
         self._auto_switch_health_node_id: str | None = None
+        # «Умная проверка» низкой скорости (application/smart_switch_service.py).
+        self._smart_switch = SmartSwitchState()
         self._active_session: ActiveSessionSnapshot | None = None
         self._desired_connected = False
         self._transition_active = False
@@ -3869,6 +3879,8 @@ class AppController(QObject):
             old_auto_switch_enabled,
             settings.auto_switch_enabled,
         )
+        if not (settings.auto_switch_enabled and settings.auto_switch_low_speed_enabled):
+            cancel_smart_check(self, "авто-переключение при низкой скорости выключено")
 
         if old_rotation != self._rotation_settings_signature(settings):
             # Смена интервала/режима не трогает конфиг — достаточно перепланировать таймер.
@@ -4160,6 +4172,39 @@ class AppController(QObject):
 
     def _get_next_node_for_auto_switch(self) -> Node | None:
         return get_next_node_for_auto_switch_operation(self)
+
+    def _check_smart_switch(
+        self,
+        down_bps: float,
+        *,
+        traffic_valid: bool = True,
+        demand: dict[str, object] | None = None,
+    ) -> None:
+        check_smart_switch_operation(
+            self,
+            down_bps,
+            traffic_valid=traffic_valid,
+            demand=demand,
+        )
+
+    # Слоты воркеров умной проверки: связь сигнал→метод QObject идёт очередью
+    # Qt, поэтому решение и set_selected_node выполняются в GUI-потоке.
+    def _on_smart_probe_measured(self, bps: object) -> None:
+        on_smart_probe_measured_operation(
+            self, self.sender(), float(bps) if isinstance(bps, (int, float)) else None,
+        )
+
+    def _on_smart_candidate_result(self, node_id: str, speed_mbps: object, is_alive: bool) -> None:
+        on_smart_candidate_result_operation(
+            self,
+            self.sender(),
+            node_id,
+            float(speed_mbps) if isinstance(speed_mbps, (int, float)) else None,
+            is_alive,
+        )
+
+    def _on_smart_candidates_done(self) -> None:
+        on_smart_candidates_done_operation(self, self.sender())
 
     def _on_xray_update_worker_done(self, result: XrayCoreUpdateResult) -> None:
         on_xray_update_worker_done_operation(self, result)

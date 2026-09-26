@@ -8,6 +8,7 @@ from ..constants import DEFAULT_HTTP_PORT, XRAY_PATH_DEFAULT
 from ..profiles.path_utils import resolve_configured_path
 from ..network.ping_worker import PingWorker, apply_ping_measurement
 from ..network.speed_test_worker import SpeedTestWorker
+from .smart_switch_service import cancel_smart_check
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -46,6 +47,9 @@ def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None
     if controller._speed_worker and controller._speed_worker.isRunning():
         controller.status.emit("info", "Тест скорости уже выполняется. Остановите его перед новым запуском.")
         return False
+    # Ручной тест важнее фоновой проверки авто-переключения: её замеры
+    # конкурировали бы за канал (порты у них разные, ждать не нужно).
+    cancel_smart_check(controller, "запущен тест скорости")
 
     resolved = resolve_configured_path(
         controller.state.settings.xray_path,

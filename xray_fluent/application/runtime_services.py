@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from ..constants import SINGBOX_CLASH_API_PORT
 from .async_steps import TransitionSteps, run_steps_blocking
 from .auto_switch_service import transport_kind_for_node
+from .smart_switch_service import cancel_smart_check, shutdown_smart_check
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -109,6 +110,7 @@ def cleanup_connection_runtime_state(
         reset_cooldown=reset_auto_switch_cooldown,
         reset_cycle=reset_auto_switch_cycle,
     )
+    cancel_smart_check(controller, "подключение остановлено")
     if end_traffic_session:
         controller._traffic_history.end_session()
     from ..platform.windows.process_traffic_collector import reset_connection_tracking
@@ -245,6 +247,7 @@ def on_core_state_changed(controller: AppController, _running: bool) -> None:
                     "latency_ms": None,
                     "probe_kind": "none",
                     "probe_valid": None,
+                    "proxy_demand": None,
                 }
             )
             if not controller._disconnecting:
@@ -273,6 +276,14 @@ def on_live_metrics(controller: AppController, payload: dict[str, object]) -> No
     if worker is not None and worker.pings_active_node():
         link_alive = payload.get("latency_ms") is not None
     controller._check_auto_switch(down_bps, link_alive, traffic_valid=traffic_valid)
+    # «Умная проверка» низкой скорости: подозрение только при реальном спросе
+    # (проксируемые соединения качают), решение — после контрольного замера.
+    demand = payload.get("proxy_demand")
+    controller._check_smart_switch(
+        down_bps,
+        traffic_valid=traffic_valid,
+        demand=demand if isinstance(demand, dict) else None,
+    )
     process_stats = payload.get("process_stats")
     if process_stats:
         stats_dict = {}
@@ -319,6 +330,7 @@ def shutdown(controller: AppController) -> None:
     if controller._speed_worker and controller._speed_worker.isRunning():
         controller._speed_worker.cancel()
         controller._speed_worker.wait(20000)
+    shutdown_smart_check(controller)
     if controller._xray_update_worker and controller._xray_update_worker.isRunning():
         controller._xray_update_worker.wait(1000)
 
