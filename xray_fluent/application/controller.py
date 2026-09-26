@@ -444,6 +444,7 @@ class AppController(QObject):
         self._auto_switch_health_node_id: str | None = None
         # «Умная проверка» низкой скорости (application/smart_switch_service.py).
         self._smart_switch = SmartSwitchState()
+        self._smart_switch_manual_at: float = 0.0  # monotonic ts ручного выбора сервера
         self._active_session: ActiveSessionSnapshot | None = None
         self._desired_connected = False
         self._transition_active = False
@@ -3749,6 +3750,7 @@ class AppController(QObject):
             # the manual-selection hold.  A threshold/cooldown edit alone must
             # not silently override a manually chosen server.
             self._auto_switch_manual_hold = False
+            self._smart_switch_manual_at = 0.0
             self._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
             if self.connected:
                 begin_auto_switch_warmup(self, self.selected_node)

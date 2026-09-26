@@ -282,9 +282,68 @@ class GateTests(SmartSwitchTestBase):
         self.controller._ping_worker = SimpleNamespace(isRunning=lambda: True)
         self.assert_never_probes()
 
-    def test_manual_hold(self) -> None:
+    def test_manual_selection_blocks_smart_switch_for_exactly_30_minutes(self) -> None:
+        hold = smart.SMART_SWITCH_MANUAL_HOLD_SEC
+        self.assertEqual(hold, 30 * 60.0)
+        # Ручной выбор ставит и бессрочную фиксацию для отказов, и 30-минутную для умной проверки.
         self.controller._auto_switch_manual_hold = True
-        self.assert_never_probes()
+        smart.note_manual_selection(self.controller, now=1000.0)
+        # Всё окно фиксации — спрос при низкой скорости не приводит к замеру.
+        self.feed(1000.0, int(hold) - 1)
+        self.assertEqual(self.probes, [])
+        self.assertEqual(smart.gate_reason(self.controller, 1000.0 + hold - 0.5), "сервер выбран вручную")
+        self.assertIsNone(smart.gate_reason(self.controller, 1000.0 + hold))
+        # Сразу после 30 мин проверка снова работает (20 с подозрения).
+        self.feed(1000.0 + hold, 21)
+        self.assertEqual(len(self.probes), 1)
+
+    def test_manual_selection_via_node_service_starts_smart_hold(self) -> None:
+        from xray_fluent.application import node_service
+
+        controller = SimpleNamespace(
+            state=SimpleNamespace(nodes=self.controller.state.nodes, selected_node_id="n0"),
+            _active_session=None,
+            connected=False,
+            _desired_connected=False,
+            selected_node=None,
+            selection_changed=_Recorder(),
+            schedule_save=lambda: None,
+            _reset_auto_switch_state=lambda **kwargs: None,
+        )
+        with patch.object(smart.time, "monotonic", return_value=4242.0):
+            node_service.set_selected_node(controller, "n2")
+        self.assertTrue(controller._auto_switch_manual_hold)
+        self.assertEqual(controller._smart_switch_manual_at, 4242.0)
+
+        auto = SimpleNamespace(
+            state=SimpleNamespace(nodes=self.controller.state.nodes, selected_node_id="n2"),
+            _active_session=None,
+            connected=False,
+            _desired_connected=False,
+            selected_node=None,
+            selection_changed=_Recorder(),
+            schedule_save=lambda: None,
+            _reset_auto_switch_state=lambda **kwargs: None,
+        )
+        node_service.set_selected_node(auto, "n3", reset_auto_switch=False)
+        self.assertFalse(hasattr(auto, "_smart_switch_manual_at"))
+
+    def test_dead_link_manual_hold_is_unchanged(self) -> None:
+        # Переключение при отказе по-прежнему держит ручной выбор бессрочно.
+        from xray_fluent.application.auto_switch_service import check_auto_switch
+
+        controller = self.controller
+        controller._auto_switch_manual_hold = True
+        smart.note_manual_selection(controller, now=0.0)  # умная фиксация давно истекла
+        controller._auto_switch_exhausted = False
+        controller._auto_switch_link_down_since = 0.0
+        controller._auto_switch_cycle_attempts = 0
+        controller._auto_switch_transitioning = False
+        controller.auto_switch_triggered = _Recorder()
+        for _ in range(40):
+            check_auto_switch(controller, 0.0, False)
+        self.assertEqual(controller.selected, [])
+        self.assertEqual(controller._auto_switch_link_down_since, 0.0)
 
     def test_warmup_after_server_change(self) -> None:
         self.controller._auto_switch_warmup_until = 5000.0

@@ -27,7 +27,7 @@
 ``SMART_SWITCH_MAX_PER_HOUR`` переключений в час.  Ничего не делается во время
 переходов, теста скорости и пакетного пинга, при выключенном авто-переключении
 (главный переключатель) или выключенной настройке «Переключать при низкой
-скорости», а также при ручном удержании сервера.
+скорости», а также ``SMART_SWITCH_MANUAL_HOLD_SEC`` после ручного выбора сервера.
 
 Все сетевые замеры — в QThread-воркерах; на GUI-поток приходят только их
 сигналы (связь с методами контроллера — очередь Qt).
@@ -78,6 +78,11 @@ SMART_SWITCH_PROBE_URL = SPEED_TEST_DEFAULT_URL
 # скорости (19100/19101).
 SMART_SWITCH_TEMP_SOCKS_PORT = 19102
 SMART_SWITCH_TEMP_HTTP_PORT = 19103
+# Ручной выбор сервера фиксирует его для УМНОГО переключения на это время, потом
+# проверка снова работает.  Бессрочную фиксацию (_auto_switch_manual_hold) до
+# повторного включения авто-переключения соблюдают только переключения при
+# отказе (мёртвый линк, отказ Hysteria).
+SMART_SWITCH_MANUAL_HOLD_SEC = 30 * 60.0
 # Страховка: проверка (замер текущего + до 3 кандидатов) укладывается в ~30 с;
 # если сигнал воркера так и не пришёл, через этот срок состояние сбрасывается.
 SMART_SWITCH_CHECK_DEADLINE_SEC = 120.0
@@ -245,6 +250,12 @@ def _kbps(bps: float | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def note_manual_selection(controller: AppController, now: float | None = None) -> None:
+    """Ручной выбор сервера: умное переключение не трогает его SMART_SWITCH_MANUAL_HOLD_SEC."""
+
+    controller._smart_switch_manual_at = time.monotonic() if now is None else now
+
+
 def smart_state(controller: AppController) -> SmartSwitchState:
     state = getattr(controller, "_smart_switch", None)
     if state is None:
@@ -272,7 +283,8 @@ def gate_reason(controller: AppController, now: float) -> str | None:
         return "нет устойчивого подключения"
     if _transition_in_progress(controller):
         return "идёт переход подключения"
-    if getattr(controller, "_auto_switch_manual_hold", False):
+    manual_at = float(getattr(controller, "_smart_switch_manual_at", 0.0) or 0.0)
+    if manual_at and now - manual_at < SMART_SWITCH_MANUAL_HOLD_SEC:
         return "сервер выбран вручную"
     if len(controller.state.nodes) < 2:
         return "нет других серверов"

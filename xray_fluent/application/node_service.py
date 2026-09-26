@@ -6,6 +6,7 @@ from PyQt6.QtCore import QTimer
 
 from ..profiles.geoip import normalize_country
 from ..importer.link_parser import parse_links_text, validate_node_outbound
+from .smart_switch_service import note_manual_selection
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -173,6 +174,7 @@ def set_selected_node(controller: AppController, node_id: str, *, reset_auto_swi
         if reset_auto_switch:
             controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
             controller._auto_switch_manual_hold = True
+            note_manual_selection(controller)
         controller._desired_connected = True
         controller._request_transition("transport node switched")
         return
@@ -183,9 +185,12 @@ def set_selected_node(controller: AppController, node_id: str, *, reset_auto_swi
         # Ручной выбор сбрасывает cooldown/cycle авто-переключения; сам
         # auto_switch_service выбирает ноду с reset_auto_switch=False, чтобы
         # не обнулять свой учёт анти-дребезга (П4/A6).  Заодно ручной выбор
-        # фиксирует сервер до явного повторного включения авто-переключения.
+        # фиксирует сервер до явного повторного включения авто-переключения
+        # (для переключения при отказе); умное переключение при низкой
+        # скорости держит ручной выбор SMART_SWITCH_MANUAL_HOLD_SEC.
         controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
         controller._auto_switch_manual_hold = True
+        note_manual_selection(controller)
     controller.selection_changed.emit(controller.selected_node)
     controller.schedule_save()
     if controller.connected or controller._desired_connected:
