@@ -32,6 +32,7 @@ from qfluentwidgets import (
 from ..singbox_config import catalog
 from ..singbox_config.document import differing_sections
 from .adaptive_buttons import AdaptiveButtonRow
+from .elided_label import ElidedCaptionLabel
 from .motion import reduced_motion
 from .base_page import BODY_MARGINS, ScrollablePage
 from .singbox.sections import (
@@ -406,9 +407,9 @@ class ConfigsPage(QWidget):
         bar.setSpacing(8)
         self.dirty_dot = PulseDot(self)
         bar.addWidget(self.dirty_dot)
-        self.state_label = CaptionLabel("", self)
-        self.state_label.setWordWrap(True)
-        self.state_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # Одна строка: на узком окне сокращается многоточием, полный текст —
+        # в подсказке (раньше переносилась на две строки и раздувала панель).
+        self.state_label = ElidedCaptionLabel("", self)
         bar.addWidget(self.state_label, 1)
         self.revert_btn = PushButton(FIF.CANCEL, "Отменить изменения", self)
         self.validate_btn = PushButton(FIF.ACCEPT, "Проверить", self)
