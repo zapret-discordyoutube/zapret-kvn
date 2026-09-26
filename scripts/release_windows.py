@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,8 @@ CORE_LOCK_PATH = ROOT / "scripts" / "core-lock.windows-x64.json"
 CORE_RESOLVER_PATH = ROOT / "scripts" / "resolve_core_versions.py"
 STATE_PATH = ROOT / ".git" / "zapret-kvn-release-state.json"
 LAST_RESULT_PATH = ROOT / ".git" / "zapret-kvn-release-last.json"
+# Versions whose release was cancelled before any tag or Release existed.
+ABANDONED_PATH = ROOT / ".git" / "zapret-kvn-release-abandoned.json"
 WINDOWS_HOST = os.getenv("ZAPRETKVN_WINDOWS_REMOTE_HOST", "win10")
 WINDOWS_ROOT = os.getenv(
     "ZAPRETKVN_WINDOWS_RELEASE_ROOT",
@@ -261,6 +264,35 @@ def validate_next_stable_version(latest_tag: str, requested: str | None) -> str:
             f"({patch_version}) or explicit next minor ({next_minor(latest_tag)}), not {version}"
         )
     return version
+
+
+def abandoned_versions() -> dict[str, Any]:
+    if not ABANDONED_PATH.is_file():
+        return {}
+    return dict(read_json(ABANDONED_PATH).get("versions", {}))
+
+
+def release_base(latest_tag: str) -> str:
+    """Version the next stable follows: the latest tag or a cancelled unpublished one.
+
+    A cancelled release already pushed its ``release: prepare`` commit, so
+    APP_VERSION is ahead of the latest tag. The base walks from the latest tag
+    through consecutive versions cancelled with ``--abandon`` and must end at
+    APP_VERSION; nothing else may be skipped.
+    """
+    abandoned = abandoned_versions()
+    base = latest_tag
+    while True:
+        following = [v for v in (next_patch(base), next_minor(base)) if v in abandoned]
+        if not following:
+            break
+        base = f"v{following[0]}"
+    if current_app_version() != base.removeprefix("v"):
+        raise ReleaseError(
+            "APP_VERSION must match the latest stable before a fresh release"
+            " (or a release cancelled with --abandon)"
+        )
+    return base
 
 
 def current_app_version() -> str:
@@ -821,10 +853,7 @@ def publish_telegram(version: str, changes: list[str]) -> None:
 
 
 def preflight(version: str | None, changes: list[str], telegram: bool) -> str:
-    latest = latest_stable_tag()
-    version = validate_next_stable_version(latest, version)
-    if current_app_version() != latest.removeprefix("v"):
-        raise ReleaseError("APP_VERSION must match the latest stable before a fresh release")
+    version = validate_next_stable_version(release_base(latest_stable_tag()), version)
     refresh_stable_core_lock(write=False)
     refresh_stable_geoip_lock(write=False)
     Forgejo.load()
@@ -860,11 +889,7 @@ def load_or_create_state(args: argparse.Namespace, changes: list[str]) -> dict[s
             log(f"resuming v{state['version']} from {state.get('phase', 'start')}")
             return state
     tag = latest_stable_tag()
-    version = validate_next_stable_version(tag, args.version)
-    if current_app_version() != tag.removeprefix("v"):
-        raise ReleaseError(
-            "APP_VERSION must match the latest stable before a fresh release"
-        )
+    version = validate_next_stable_version(release_base(tag), args.version)
     if not changes:
         raise ReleaseError("at least one --change or --changes value is required")
     state = {
@@ -879,7 +904,49 @@ def load_or_create_state(args: argparse.Namespace, changes: list[str]) -> dict[s
     return state
 
 
+def abandon(version: str, forgejo: Forgejo | None = None) -> dict[str, Any]:
+    """Cancel the active release before anything immutable was published.
+
+    Allowed only while no tag and no Forgejo Release exist for the version;
+    the state is archived, never deleted, and the version is recorded so the
+    next fresh release may follow it.
+    """
+    version = version_text(parse_version(version))
+    if not STATE_PATH.is_file():
+        raise ReleaseError("no active release to abandon")
+    state = read_json(STATE_PATH)
+    if state.get("version") != version:
+        raise ReleaseError(f"the active release is v{state.get('version')}, not v{version}")
+    if phase_done(state, "tag_pushed"):
+        raise ReleaseError(
+            f"v{version} already reached {state.get('phase')}; publish a correction under the next patch instead"
+        )
+    tag = f"v{version}"
+    if subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"], cwd=ROOT,
+                      capture_output=True).returncode == 0:
+        raise ReleaseError(f"tag {tag} exists locally; a tagged release cannot be abandoned")
+    if output(["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"]):
+        raise ReleaseError(f"tag {tag} exists on origin; a tagged release cannot be abandoned")
+    if (forgejo or Forgejo.load()).release_by_tag(version) is not None:
+        raise ReleaseError(f"Forgejo already has a Release for {tag}; it cannot be abandoned")
+    record = {
+        "phase": state.get("phase") or "start",
+        "commit": state.get("commit", ""),
+        "previous_tag": state.get("previous_tag", ""),
+        "abandoned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    versions = abandoned_versions()
+    versions[version] = record
+    atomic_json(ABANDONED_PATH, {"versions": versions})
+    os.replace(STATE_PATH, STATE_PATH.with_name(f"zapret-kvn-release-abandoned-v{version}.json"))
+    result = {"status": "abandoned", "version": version, **record}
+    log(json.dumps(result, ensure_ascii=False))
+    return result
+
+
 def execute(args: argparse.Namespace) -> dict[str, Any]:
+    if args.abandon:
+        return abandon(args.abandon)
     changes = normalize_changes(
         (args.change or []) + ([args.changes] if args.changes else []),
         allow_empty=not args.preflight,
@@ -1042,6 +1109,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-telegram",
         action="store_true",
         help="publish Forgejo stable but do not send the installer to Telegram",
+    )
+    parser.add_argument(
+        "--abandon",
+        metavar="VERSION",
+        help="cancel the active release of VERSION before its tag exists; the next release follows it",
     )
     parser.add_argument(
         "--preflight",

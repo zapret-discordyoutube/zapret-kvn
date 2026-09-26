@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -191,6 +192,82 @@ class ReleaseStateTests(unittest.TestCase):
                 "0.4.95",
                 "a" * 40,
             )
+
+
+class ReleaseAbandonTests(unittest.TestCase):
+    """A cancelled unpublished release is skipped only through --abandon."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        self.state_path = root / "state.json"
+        self.abandoned_path = root / "abandoned.json"
+        for name, value in (("STATE_PATH", self.state_path), ("ABANDONED_PATH", self.abandoned_path)):
+            patcher = patch.object(release_windows, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    class _Forgejo:
+        def __init__(self, release=None) -> None:
+            self.release = release
+
+        def release_by_tag(self, _version):
+            return self.release
+
+    def _state(self, phase: str, version: str = "0.7.6") -> None:
+        release_windows.atomic_json(
+            self.state_path,
+            {"version": version, "phase": phase, "commit": "abc", "previous_tag": "v0.7.5", "changes": ["x"]},
+        )
+
+    def _abandon(self, version: str = "0.7.6", *, tag: bool = False, remote: str = "", release=None):
+        def fake_run(args, **_kwargs):
+            return subprocess.CompletedProcess(args, 0 if tag else 1)
+
+        with (
+            patch.object(release_windows.subprocess, "run", side_effect=fake_run),
+            patch.object(release_windows, "output", return_value=remote),
+        ):
+            return release_windows.abandon(version, self._Forgejo(release))
+
+    def test_abandon_archives_state_and_records_version(self) -> None:
+        self._state("dev_verified")
+        result = self._abandon()
+        self.assertEqual(result["status"], "abandoned")
+        self.assertFalse(self.state_path.exists())
+        self.assertTrue(self.state_path.with_name("zapret-kvn-release-abandoned-v0.7.6.json").is_file())
+        self.assertEqual(release_windows.abandoned_versions()["0.7.6"]["phase"], "dev_verified")
+
+    def test_abandon_refuses_tagged_or_published_or_other_versions(self) -> None:
+        self._state("tag_pushed")
+        with self.assertRaisesRegex(release_windows.ReleaseError, "correction"):
+            self._abandon()
+        self._state("assets_verified")
+        with self.assertRaisesRegex(release_windows.ReleaseError, "locally"):
+            self._abandon(tag=True)
+        with self.assertRaisesRegex(release_windows.ReleaseError, "origin"):
+            self._abandon(remote="abc refs/tags/v0.7.6")
+        with self.assertRaisesRegex(release_windows.ReleaseError, "Forgejo"):
+            self._abandon(release={"id": 1})
+        with self.assertRaisesRegex(release_windows.ReleaseError, "not v0.7.7"):
+            self._abandon("0.7.7")
+        self.assertTrue(self.state_path.exists())
+        self.assertEqual(release_windows.abandoned_versions(), {})
+
+    def test_next_release_follows_only_abandoned_versions(self) -> None:
+        with patch.object(release_windows, "current_app_version", return_value="0.7.5"):
+            self.assertEqual(release_windows.release_base("v0.7.5"), "v0.7.5")
+        with patch.object(release_windows, "current_app_version", return_value="0.7.6"):
+            with self.assertRaisesRegex(release_windows.ReleaseError, "abandon"):
+                release_windows.release_base("v0.7.5")
+        release_windows.atomic_json(self.abandoned_path, {"versions": {"0.7.6": {}, "0.7.7": {}}})
+        with patch.object(release_windows, "current_app_version", return_value="0.7.7"):
+            base = release_windows.release_base("v0.7.5")
+        self.assertEqual(base, "v0.7.7")
+        self.assertEqual(release_windows.validate_next_stable_version(base, "0.7.8"), "0.7.8")
+        with self.assertRaises(release_windows.ReleaseError):
+            release_windows.validate_next_stable_version(base, "0.7.9")
 
 
 class AppVersionTests(unittest.TestCase):

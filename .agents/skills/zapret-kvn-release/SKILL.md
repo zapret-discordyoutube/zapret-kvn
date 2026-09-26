@@ -64,6 +64,24 @@ or Release asset; publish a correction under the next patch. Use manual commands
 only when the runner itself is proven defective, fix the runner, test it, and
 resume through it.
 
+## Cancel an unpublished release
+
+When the user cancels a running release, stop the runner and any remaining
+gate processes on `win10`, then run:
+
+```bash
+python3 scripts/release_windows.py --abandon MAJOR.MINOR.PATCH
+```
+
+It refuses once the tag exists locally or on origin, or a Forgejo Release
+exists; such a release is finished or corrected under the next patch instead.
+On success it archives the state as
+`.git/zapret-kvn-release-abandoned-vX.Y.Z.json` and records the version in
+`.git/zapret-kvn-release-abandoned.json`. The pushed `release: prepare`
+commit stays; the next fresh release follows the cancelled version (e.g.
+cancelled 0.7.6 → next 0.7.7). Its changelog must also cover what the
+cancelled version would have shipped. Never delete the state file by hand.
+
 ## Preserve safety boundaries
 
 - Use the trusted `win10` workspace; Forgejo Actions remain source validation.
