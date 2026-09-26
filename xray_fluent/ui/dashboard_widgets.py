@@ -72,6 +72,8 @@ _PULSE_PERIOD_S = 1.5
 _PATH_SAMPLES = 160
 # Подключено, но трафика нет дольше этого — сцена замирает (покой = без кадров).
 _QUIET_BPS = 1024.0
+# Насколько видны огоньки, проходящие сквозь сферу (1 — как снаружи).
+_THROUGH_ORB_FADE = 0.55
 # Шкала трафика: смесь логарифма (слабый трафик тоже заметен огоньками) и
 # корня (на больших скоростях видна разница); 1.0 — 1 Гбит/с.
 _LEVEL_CAP_BPS = 125_000_000.0
@@ -376,8 +378,8 @@ class ConnectionScene(QWidget):
             left, right = self._endpoints()
             band = QRect(int(left.x() - 44), int(left.y() - 48), int(right.x() - left.x() + 88), 96)
             region = QRegion(band)
-        orb = self.orb.geometry().adjusted(10, 10, -10, -10)
-        return region.subtracted(QRegion(orb, QRegion.RegionType.Ellipse))
+        # Сферу не вычитаем: поток проходит через её центр.
+        return region
 
     def set_orb_diameter(self, diameter: int, padding: int = 36) -> None:
         """Высота сцены идёт за сферой: на маленьком экране сцена ниже."""
@@ -616,9 +618,11 @@ class ConnectionScene(QWidget):
                 if lane == "down":
                     t = 1.0 - t
                 point = self._sample(t)
-                if math.hypot(point.x() - orb_center.x(), point.y() - orb_center.y()) < hide_radius:
-                    continue
                 fade = min(1.0, t * 8, (1.0 - t) * 8)
+                # Через сферу поток идёт насквозь, но приглушённо — значок
+                # питания (дочерний виджет) остаётся поверх и читается.
+                if math.hypot(point.x() - orb_center.x(), point.y() - orb_center.y()) < hide_radius:
+                    fade *= _THROUGH_ORB_FADE
                 dy = -3.2 if lane == "down" else 3.2
                 point = QPointF(point.x(), point.y() + dy)
                 grow = 1.0 + 0.6 * self.load_level()
