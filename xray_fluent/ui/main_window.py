@@ -647,6 +647,7 @@ class MainWindow(FluentWindow):
         self._refresh_tray_tooltip()
 
     def _on_connection_changed(self, connected: bool) -> None:
+        self.dashboard_page.set_active_tun_mode(self.controller.active_tun_mode())
         self.dashboard_page.set_connection(connected)
         if connected and not self.controller.state.settings.tun_mode:
             socks_port, http_port = self.controller.get_effective_proxy_ports()
@@ -664,6 +665,9 @@ class MainWindow(FluentWindow):
         self._refresh_tray_tooltip()
 
     def _on_transition_state_changed(self, busy: bool, _message: str) -> None:
+        # Сначала факт (режим сессии), затем «занято»: иначе выбор плитки
+        # сверился бы с режимом сессии до перехода.
+        self.dashboard_page.set_active_tun_mode(self.controller.active_tun_mode())
         self.dashboard_page.set_transition_busy(busy)
         if self.tray_connect_action is not None:
             self.tray_connect_action.setEnabled(not busy)

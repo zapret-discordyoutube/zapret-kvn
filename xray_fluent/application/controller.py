@@ -810,6 +810,17 @@ class AppController(QObject):
         """
         return self.proxy.query_state()
 
+    def active_tun_mode(self) -> bool | None:
+        """Факт: режим работающей сессии (TUN или прокси); ``None`` — сессии нет.
+
+        Настройка ``tun_mode`` меняется сразу по клику, а сессия — только после
+        перехода; UI сверяет с этим значением выбор пользователя.
+        """
+        session = self._active_session
+        if session is None or not self.connected:
+            return None
+        return bool(session.tun_mode)
+
     def get_effective_proxy_ports(self) -> tuple[int, int]:
         session = self._active_session
         if session is not None and session.socks_port > 0 and session.http_port > 0:

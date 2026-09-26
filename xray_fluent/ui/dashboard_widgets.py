@@ -680,6 +680,8 @@ class ModeTile(QWidget):
     def __init__(self, glyph: str, title: str, description: str, parent: QWidget | None = None):
         super().__init__(parent)
         self._glyph = glyph
+        self._title = title
+        self._applying = False
         self._checked = False
         self._hover = False
         self._selection = 0.0
@@ -715,6 +717,18 @@ class ModeTile(QWidget):
 
     def isChecked(self) -> bool:
         return self._checked
+
+    def is_applying(self) -> bool:
+        return self._applying
+
+    def set_applying(self, applying: bool) -> None:
+        """Выбор принят, но ещё применяется: «…» в заголовке и подсказка."""
+        applying = bool(applying)
+        if applying == self._applying:
+            return
+        self._applying = applying
+        self.title_label.setText(self._title + ("…" if applying else ""))
+        self.setToolTip("Применяется…" if applying else "")
 
     def setChecked(self, checked: bool) -> None:
         checked = bool(checked)

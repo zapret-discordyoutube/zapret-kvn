@@ -210,6 +210,51 @@ class DashboardEffectivePortsWiringTest(unittest.TestCase):
         controller.get_effective_proxy_ports.assert_not_called()
 
 
+class DashboardActiveModeWiringTest(unittest.TestCase):
+    """Плитки сверяют выбор с режимом сессии: он приходит раньше «занято»."""
+
+    def test_transition_state_pushes_session_mode_before_busy(self) -> None:
+        calls = Mock()
+        controller = Mock()
+        controller.active_tun_mode.return_value = True
+        window = SimpleNamespace(dashboard_page=calls, controller=controller, tray_connect_action=None)
+
+        MainWindow._on_transition_state_changed(window, False, "")
+
+        self.assertEqual(
+            [c[0] for c in calls.method_calls],
+            ["set_active_tun_mode", "set_transition_busy"],
+        )
+        calls.set_active_tun_mode.assert_called_once_with(True)
+
+    def test_connection_event_pushes_session_mode(self) -> None:
+        dashboard = Mock()
+        controller = Mock()
+        controller.state.settings.tun_mode = True
+        controller.active_tun_mode.return_value = None
+        window = SimpleNamespace(
+            dashboard_page=dashboard,
+            controller=controller,
+            tray_connect_action=None,
+            _deferred_dashboard_metrics=None,
+            _deferred_process_stats=None,
+            _has_deferred_process_stats=False,
+            _refresh_tray_tooltip=Mock(),
+        )
+
+        MainWindow._on_connection_changed(window, False)
+
+        dashboard.set_active_tun_mode.assert_called_once_with(None)
+
+    def test_controller_reports_mode_of_running_session_only(self) -> None:
+        from xray_fluent.application.controller import AppController
+
+        session = SimpleNamespace(tun_mode=True)
+        self.assertTrue(AppController.active_tun_mode(SimpleNamespace(_active_session=session, connected=True)))
+        self.assertIsNone(AppController.active_tun_mode(SimpleNamespace(_active_session=session, connected=False)))
+        self.assertIsNone(AppController.active_tun_mode(SimpleNamespace(_active_session=None, connected=True)))
+
+
 class DashboardDensityTests(unittest.TestCase):
     """Графика панели плавно следует окну, текст — только две плотности."""
 

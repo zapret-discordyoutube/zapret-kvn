@@ -68,6 +68,9 @@ from .pending_state import PendingValue
 
 #: Ширина области прокрутки, ниже которой карточки встают в одну колонку.
 NARROW_WIDTH = 900
+#: Смена TUN/прокси — полный переход (снятие адаптера ~11 с + запуск), поэтому
+#: выбор плитки ждёт факта дольше, чем запись системного прокси.
+MODE_INTENT_TIMEOUT_S = 60.0
 # Компактная плотность: маленький экран или ноутбук с масштабом 125–150 %.
 COMPACT_HEIGHT = 780
 COMPACT_WIDTH = 980
@@ -175,6 +178,9 @@ class DashboardPage(StackedSection):
         self._grid_narrow = False
         self._compact: bool | None = None
         self._proxy_intent: PendingValue[bool] = PendingValue()
+        # Выбор плитки VPN/Прокси поверх режима работающей сессии.
+        self._tun_intent: PendingValue[bool] = PendingValue(timeout_s=MODE_INTENT_TIMEOUT_S)
+        self._active_tun_mode: bool | None = None
         self._in_grid_relayout = False
         self._title_state = IDLE
 
@@ -758,8 +764,14 @@ class DashboardPage(StackedSection):
 
     def set_transition_busy(self, busy: bool) -> None:
         self._transition_busy = busy
-        self._apply_interaction_state()
+        self._sync_switches()
         self._refresh_dashboard()
+
+    def set_active_tun_mode(self, tun: bool | None) -> None:
+        """Режим работающей сессии (``None`` — сессии нет); приходит после
+        каждого перехода и смены подключения."""
+        self._active_tun_mode = None if tun is None else bool(tun)
+        self._sync_switches()
 
     @staticmethod
     def _format_bytes(b: int) -> str:
@@ -1153,12 +1165,32 @@ class DashboardPage(StackedSection):
         self._on_mode_tile_clicked(False)
 
     def _on_mode_tile_clicked(self, tun: bool) -> None:
-        if tun == bool(self._settings.tun_mode):
+        # Сравниваем с тем, что видит пользователь: если после сбоя плитка
+        # показывает фактический режим, клик по другой — повтор перехода.
+        if tun == self._displayed_tun_mode():
             return
-        # Плитка отзывается сразу; настоящее состояние придёт снимком настроек.
-        self.vpn_tile.setChecked(tun)
-        self.proxy_tile.setChecked(not tun)
+        # Плитка отзывается сразу и не откатывается, пока идёт переход; второй
+        # клик просто меняет цель (координатор сливает запросы в последний).
+        self._tun_intent.request(tun)
+        QTimer.singleShot(int(self._tun_intent.timeout_s * 1000) + 50, self._sync_switches)
+        self._sync_switches()
         self.tun_toggled.emit(tun)
+
+    def _observed_tun_mode(self) -> bool | None:
+        """Факт: режим работающей сессии; без сессии — настройка.
+
+        ``None`` — идёт переход и сессии пока нет: факта ещё нет, и выбор
+        пользователя не должен сниматься на промежуточном шаге.
+        """
+        if self._active_tun_mode is not None:
+            return self._active_tun_mode
+        if self._transition_busy:
+            return None
+        return bool(self._settings.tun_mode)
+
+    def _displayed_tun_mode(self) -> bool:
+        shown = self._tun_intent.display(self._observed_tun_mode())
+        return bool(self._settings.tun_mode) if shown is None else bool(shown)
 
     def _on_proxy_toggled(self, checked: bool) -> None:
         # Показываем выбор сразу; фактический прокси Windows догонит в фоне.
@@ -1180,8 +1212,12 @@ class DashboardPage(StackedSection):
         return proxy_on
 
     def _sync_switches(self) -> None:
-        self.vpn_tile.setChecked(self._settings.tun_mode)
-        self.proxy_tile.setChecked(not self._settings.tun_mode)
+        tun = self._displayed_tun_mode()
+        tun_applying = self._tun_intent.pending
+        self.vpn_tile.setChecked(tun)
+        self.proxy_tile.setChecked(not tun)
+        self.vpn_tile.set_applying(tun_applying and tun)
+        self.proxy_tile.set_applying(tun_applying and not tun)
 
         # Намерение пользователя поверх факта: пока изменение применяется,
         # переключатель не откатывается к старому состоянию реестра.

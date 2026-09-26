@@ -50,6 +50,9 @@ def _shared_page() -> DashboardPage:
 
 
 def _reset(page: DashboardPage) -> None:
+    page._tun_intent.clear()
+    page._proxy_intent.clear()
+    page.set_active_tun_mode(None)
     page.set_transition_busy(False)
     page.set_runtime_status("idle", "")
     page.set_connection(False)
@@ -564,6 +567,99 @@ class SystemProxySwitchIntentTest(unittest.TestCase):
         self.page.set_system_proxy_state(self._registry(enabled=True))
         self.assertTrue(switch.isChecked())
         self.assertEqual(switch.text, "Вкл")
+
+
+class ModeTileIntentTest(unittest.TestCase):
+    """Плитка VPN/Прокси показывает выбор, пока переход применяет его к сессии."""
+
+    def setUp(self) -> None:
+        self.page = _shared_page()
+        _reset(self.page)
+        # Подключено в режиме прокси: сессия — прокси, настройка — прокси.
+        self.page.set_settings_snapshot(AppSettings(tun_mode=False, enable_system_proxy=True))
+        self.page.set_connection(True)
+        self.page.set_active_tun_mode(False)
+        self.emitted: list[bool] = []
+        self.page.tun_toggled.connect(self._on_toggled)
+
+    def tearDown(self) -> None:
+        self.page.tun_toggled.disconnect(self._on_toggled)
+        _reset(self.page)
+
+    def _on_toggled(self, tun: bool) -> None:
+        # Как MainWindow: настройка меняется синхронно, сессия — после перехода.
+        self.emitted.append(tun)
+        self.page.set_settings_snapshot(AppSettings(tun_mode=tun, enable_system_proxy=not tun))
+
+    def _assert_shows(self, tun: bool, *, applying: bool) -> None:
+        self.assertEqual(self.page.vpn_tile.isChecked(), tun)
+        self.assertEqual(self.page.proxy_tile.isChecked(), not tun)
+        chosen = self.page.vpn_tile if tun else self.page.proxy_tile
+        other = self.page.proxy_tile if tun else self.page.vpn_tile
+        self.assertEqual(chosen.title_label.text().endswith("…"), applying)
+        self.assertEqual(chosen.toolTip(), "Применяется…" if applying else "")
+        self.assertFalse(other.is_applying())
+
+    def test_click_shows_intent_until_session_switches(self) -> None:
+        self.page.vpn_tile.clicked.emit()
+        self.assertEqual(self.emitted, [True])
+        self._assert_shows(True, applying=True)
+        # Переход начался, старая сессия ещё жива — откатываться нельзя.
+        self.page.set_active_tun_mode(False)
+        self.page.set_transition_busy(True)
+        self._assert_shows(True, applying=True)
+        # Старая сессия остановлена, новой ещё нет — факта нет, выбор держится.
+        self.page.set_active_tun_mode(None)
+        self.page.set_connection(False)
+        self._assert_shows(True, applying=True)
+        # Промежуточное «не занято» (подготовка Zapret) при живой старой сессии.
+        self.page.set_active_tun_mode(False)
+        self.page.set_transition_busy(False)
+        self._assert_shows(True, applying=True)
+        # TUN-сессия поднялась — обычная подпись.
+        self.page.set_active_tun_mode(True)
+        self.page.set_connection(True)
+        self._assert_shows(True, applying=False)
+        self.assertEqual(self.page.vpn_tile.title_label.text(), "VPN (TUN)")
+
+    def test_intent_times_out_to_the_running_session(self) -> None:
+        self.page.vpn_tile.clicked.emit()
+        self.page._tun_intent._deadline = 0.0  # таймаут истёк
+        self.page.set_active_tun_mode(False)
+        self._assert_shows(False, applying=False)
+        # Плитка показывает факт — клик по VPN снова запрашивает переход.
+        self.page.vpn_tile.clicked.emit()
+        self.assertEqual(self.emitted, [True, True])
+        self._assert_shows(True, applying=True)
+
+    def test_timeout_without_session_falls_back_to_setting(self) -> None:
+        self.page.vpn_tile.clicked.emit()
+        self.page.set_active_tun_mode(None)
+        self.page.set_connection(False)
+        self.page._tun_intent._deadline = 0.0
+        self.page.set_transition_busy(True)
+        # Сессии нет, факта нет — показываем настройку (не «Прокси» из None).
+        self._assert_shows(True, applying=False)
+
+    def test_second_click_retargets_intent(self) -> None:
+        self.page.vpn_tile.clicked.emit()
+        self._assert_shows(True, applying=True)
+        # Второй клик до начала перехода: побеждает последний выбор, и он уже
+        # совпадает с работающей сессией — ждать нечего.
+        self.page.proxy_tile.clicked.emit()
+        self.assertEqual(self.emitted, [True, False])
+        self._assert_shows(False, applying=False)
+        # Устаревшее «VPN» не возвращается, когда переход отработает.
+        self.page.set_transition_busy(True)
+        self.page.set_transition_busy(False)
+        self._assert_shows(False, applying=False)
+
+    def test_disconnected_click_applies_at_once(self) -> None:
+        self.page.set_active_tun_mode(None)
+        self.page.set_connection(False)
+        self.page.vpn_tile.clicked.emit()
+        # Без подключения фактом служит настройка — она уже сменилась.
+        self._assert_shows(True, applying=False)
 
 
 if __name__ == "__main__":
