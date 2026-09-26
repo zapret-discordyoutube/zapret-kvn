@@ -134,6 +134,31 @@ def success_color() -> QColor:
     return _palette_color("success")
 
 
+def _positive_for(accent: QColor, dark: bool) -> QColor:
+    # Акцент читаем на фоне: в тёмной теме тёмный акцент осветляем, в
+    # светлой — слишком светлый затемняем (серый «Графит» тоже остаётся
+    # различимым).
+    if dark:
+        return accent.lighter(140) if accent.lightness() < 140 else QColor(accent)
+    return accent.darker(135) if accent.lightness() > 150 else QColor(accent)
+
+
+def positive_color() -> QColor:
+    """Цвет позитивного статуса — «Подключено», «актуален», живой пинг.
+
+    Берётся от акцента темы, чтобы гамма следовала выбранному цвету;
+    ошибки и предупреждения остаются красными/оранжевыми (``error_color``,
+    ``warning_color``).
+    """
+    return _positive_for(accent_color(), isDarkTheme())
+
+
+def positive_pair() -> tuple[str, str]:
+    """``(light_hex, dark_hex)`` позитивного цвета для ``setCustomStyleSheet``."""
+    accent = accent_color()
+    return _positive_for(accent, False).name(), _positive_for(accent, True).name()
+
+
 def warning_color() -> QColor:
     return _palette_color("warning")
 

@@ -16,14 +16,14 @@ from qfluentwidgets import (
 )
 
 from ..constants import APP_VERSION
-from .theme import token_pair
+from .theme import on_accent_changed, positive_pair, token_pair
 
 _SECTION_TITLE_QSS = "BodyLabel { font-weight: bold; font-size: 16px; }"
 
 
 def _status_qss(token: str, bold: bool) -> tuple[str, str]:
     """Build (light, dark) qss for a status CaptionLabel from a theme token."""
-    light, dark = token_pair(token)
+    light, dark = positive_pair() if token == "positive" else token_pair(token)
     extra = " font-weight: bold;" if bold else ""
     return (
         f"CaptionLabel {{ color: {light};{extra} }}",
@@ -32,8 +32,10 @@ def _status_qss(token: str, bold: bool) -> tuple[str, str]:
 
 
 def _set_status_style(label: CaptionLabel, kind: str) -> None:
+    # Вид запоминается на метке, чтобы при смене акцента перекрасить её.
+    label.setProperty("statusKind", kind)
     if kind == "success":
-        light, dark = _status_qss("success", bold=True)
+        light, dark = _status_qss("positive", bold=True)
     elif kind == "error":
         light, dark = _status_qss("error", bold=True)
     else:
@@ -167,6 +169,12 @@ class UpdatesPage(QWidget):
         self.update_xray_btn.clicked.connect(self.update_xray_requested)
         self.check_singbox_btn.clicked.connect(self.check_singbox_requested)
         self.update_singbox_btn.clicked.connect(self.update_singbox_requested)
+        on_accent_changed(self._restyle_statuses)
+
+    def _restyle_statuses(self, *_args) -> None:
+        """Позитивный цвет идёт от акцента — перекрасить при его смене."""
+        for label in (self._app_status, self._xray_status, self._singbox_status):
+            _set_status_style(label, label.property("statusKind") or "neutral")
 
     # ── Public API ──
 

@@ -46,6 +46,7 @@ from .strategy_picker import CUSTOM_STRATEGY_ID, StrategyPicker
 from .theme import (
     accent_color,
     on_theme_or_accent_changed,
+    positive_pair,
     text_muted_color,
     token_pair,
 )
@@ -63,7 +64,7 @@ _PRESET_ROW_HEIGHT = 32
 
 
 def _status_qss(token: str) -> tuple[str, str]:
-    light, dark = token_pair(token)
+    light, dark = positive_pair() if token == "positive" else token_pair(token)
     return (
         f"BodyLabel {{ color: {light}; }}",
         f"BodyLabel {{ color: {dark}; }}",
@@ -602,6 +603,9 @@ class ZapretPage(StackedSection):
 
     def _on_theme_changed(self, *args) -> None:
         self._reload_list(self.current_preset())
+        if self._running:
+            # «Работает» — позитивный статус, его цвет идёт от акцента.
+            setCustomStyleSheet(self.status_label, *_status_qss("positive"))
 
     # ── Public API ──
 
@@ -614,7 +618,7 @@ class ZapretPage(StackedSection):
         if running:
             self._active_preset = preset_name
             self.status_label.setText(f"Работает: {preset_name}")
-            setCustomStyleSheet(self.status_label, *_status_qss("success"))
+            setCustomStyleSheet(self.status_label, *_status_qss("positive"))
             self.progress.show()
             self.progress.start()
             self.start_btn.setEnabled(False)

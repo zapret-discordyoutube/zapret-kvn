@@ -26,7 +26,7 @@ from .theme import (
     accent_color,
     error_color,
     info_color,
-    success_color,
+    positive_color,
     text_muted_color,
     warning_color,
 )
@@ -49,7 +49,7 @@ def label_color(label: str) -> QColor:
     """Semantic color for a catalog label, resolved through the theme tokens."""
 
     if label == "recommended":
-        return success_color()
+        return positive_color()
     if label == "caution":
         return error_color()
     if label == "experimental":

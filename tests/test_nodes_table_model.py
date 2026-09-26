@@ -4,7 +4,7 @@ from PyQt6.QtCore import QCoreApplication, QItemSelectionModel, QPersistentModel
 from PyQt6.QtTest import QTest
 
 from xray_fluent.profiles.models import Node
-from xray_fluent.ui.theme import error_color, success_color, warning_color
+from xray_fluent.ui.theme import error_color, positive_color, success_color, warning_color
 from xray_fluent.ui.nodes_table_model import (
     ACTIVE_ROLE,
     COL_ADDRESS,
@@ -395,7 +395,7 @@ class NodesTableModelTests(unittest.TestCase):
         index = self.model.index(0, COL_PING)
         brush = index.data(Qt.ItemDataRole.ForegroundRole)
         self.assertIsNotNone(brush)
-        self.assertEqual(brush.color().name(), success_color().name())
+        self.assertEqual(brush.color().name(), positive_color().name())
         self.assertIn("Сервер работает", index.data(Qt.ItemDataRole.ToolTipRole))
 
     def test_ping_cell_is_red_for_dead_node(self) -> None:

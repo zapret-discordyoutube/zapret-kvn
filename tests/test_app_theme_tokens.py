@@ -215,5 +215,41 @@ class SystemThemeListenerSyncTest(unittest.TestCase):
         self.assertTrue(listener.deleted)
 
 
+
+class PositiveColorTests(unittest.TestCase):
+    """Позитивные статусы берут цвет от акцента темы, а не фиксированный зелёный."""
+
+    def setUp(self) -> None:
+        from PyQt6.QtGui import QColor
+        from qfluentwidgets import qconfig, themeColor
+
+        self._saved_mode = qconfig.themeMode.value
+        self._saved_accent = QColor(themeColor())
+
+    def tearDown(self) -> None:
+        from qfluentwidgets import setTheme, setThemeColor
+
+        setTheme(self._saved_mode)
+        setThemeColor(self._saved_accent)
+        theme.reset_applied_theme()
+
+    def test_positive_follows_accent_in_both_themes(self) -> None:
+        for mode in ("dark", "light"):
+            colors = set()
+            for accent, _name in theme.ACCENT_PRESETS:
+                theme.apply_theme(mode, accent, force=True)
+                color = theme.positive_color()
+                colors.add(color.name())
+                light, dark = theme.positive_pair()
+                self.assertEqual(color.name(), dark if mode == "dark" else light)
+            self.assertEqual(len(colors), len(theme.ACCENT_PRESETS), mode)
+
+    def test_positive_is_readable_on_the_background(self) -> None:
+        theme.apply_theme("dark", "#5D5A58", force=True)
+        self.assertGreaterEqual(theme.positive_color().lightness(), 140)
+        theme.apply_theme("light", "#FFFFFF", force=True)
+        self.assertLessEqual(theme.positive_color().lightness(), 200)
+
+
 if __name__ == "__main__":
     unittest.main()

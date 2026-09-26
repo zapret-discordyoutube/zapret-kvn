@@ -23,7 +23,7 @@ from ..profiles.country_flags import get_flag_icon
 from ..profiles.models import Node
 from ..profiles.node_presentation import display_name, node_country
 from .privacy import endpoint_text
-from .theme import error_color, success_color, text_muted_color, warning_color
+from .theme import error_color, positive_color, text_muted_color, warning_color
 
 NODE_ROW_HEIGHT = 28
 
@@ -518,7 +518,7 @@ class NodesTableModel(QAbstractTableModel):
             return text_muted_color() if row.node.is_alive is False else None
         status = self.status(row)
         if status == STATUS_ALIVE:
-            return success_color()
+            return positive_color()
         if status == STATUS_DEGRADED:
             return warning_color()
         if status == STATUS_DEAD:

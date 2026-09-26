@@ -24,7 +24,7 @@ from PyQt6.QtCore import QElapsedTimer, QEvent, QPointF, QRectF, Qt, QTimer, pyq
 from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
-from .theme import accent_color, error_color, on_theme_or_accent_changed, success_color, text_color, text_muted_color
+from .theme import accent_color, error_color, on_theme_or_accent_changed, positive_color, text_color, text_muted_color
 
 IDLE, CONNECTING, CONNECTED, ERROR = "idle", "connecting", "connected", "error"
 _STATES = (IDLE, CONNECTING, CONNECTED, ERROR)
@@ -168,7 +168,7 @@ class ConnectionOrb(QWidget):
 
     def _state_color(self) -> QColor:
         if self._state == CONNECTED:
-            return success_color()
+            return positive_color()
         if self._state == CONNECTING:
             return accent_color()
         if self._state == ERROR:

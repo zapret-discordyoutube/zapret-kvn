@@ -42,7 +42,7 @@ from .base_page import ScrollablePage
 from .connection_orb import CONNECTED, CONNECTING, ERROR, IDLE, ConnectionOrb
 from .detail_page import DetailPage, StackedSection
 from .privacy import masked_endpoint, node_name_text
-from .theme import error_color, graph_down_color, graph_up_color, on_theme_or_accent_changed, success_color
+from .theme import error_color, graph_down_color, graph_up_color, on_theme_or_accent_changed, positive_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 
 
@@ -604,7 +604,7 @@ class DashboardPage(StackedSection):
         """Заголовок состояния в цвет сферы: зелёный — есть защита, красный — ошибка."""
         state = getattr(self, "_title_state", IDLE)
         if state == CONNECTED:
-            color = success_color()
+            color = positive_color()
             self.connection_state_label.setTextColor(color, color)
         elif state == ERROR:
             color = error_color()
@@ -749,7 +749,7 @@ class DashboardPage(StackedSection):
                 self._set_table_text(table, row, 0, ps.exe)
                 self._set_table_text(table, row, 1, speed)
                 vpn_item = self._set_table_text(table, row, 2, self._format_bytes(ps.proxy_bytes))
-                vpn_item.setForeground(success_color() if ps.proxy_bytes > 0 else QBrush())
+                vpn_item.setForeground(positive_color() if ps.proxy_bytes > 0 else QBrush())
                 self._set_table_text(table, row, 3, self._format_bytes(ps.direct_bytes))
                 self._set_table_text(table, row, 4, conn_text)
                 self._set_table_text(table, row, 5, host)
