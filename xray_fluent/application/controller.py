@@ -4116,7 +4116,23 @@ class AppController(QObject):
             # A shared log stream does not prove which pooled target emitted it.
             # Never attribute late output to the currently selected node.
         ))
-        self.runtime_errors_changed.emit(journal.snapshot())
+        self._schedule_runtime_errors_emit()
+
+    def _schedule_runtime_errors_emit(self) -> None:
+        """Снимок журнала в GUI не чаще раза в секунду.
+
+        Шумное ядро пишет ошибки десятками в секунду; копировать и
+        перерисовывать весь журнал на каждую строку незачем.
+        """
+        timer = getattr(self, "_runtime_errors_emit_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(1000)
+            timer.timeout.connect(lambda: self.runtime_errors_changed.emit(self.runtime_errors.snapshot()))
+            self._runtime_errors_emit_timer = timer
+        if not timer.isActive():
+            timer.start()
 
     def _on_singbox_error(self, message: str) -> None:
         self._on_core_error("sing-box", message)

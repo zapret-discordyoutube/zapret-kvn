@@ -15,6 +15,8 @@ class LogsPage(QWidget):
         self._lines: list[str] = []
         self._pending_lines: list[str] = []
         self._error_lines: list[str] = []
+        self._error_records: tuple = ()
+        self._error_lines_stale = False
         self._full_refresh_needed = False
 
         root = QVBoxLayout(self)
@@ -68,13 +70,21 @@ class LogsPage(QWidget):
         self._schedule_full_refresh()
 
     def set_error_records(self, records) -> None:
-        self._error_lines = [
-            f"[{r.failure.component}][{r.failure.stage}] {r.failure.message}\n"
-            f"{r.failure.code}; событий: {r.occurrences}"
-            for r in records
-        ]
+        # Форматируем лениво — только когда открыта вкладка «Ошибки ядер».
+        self._error_records = tuple(records)
+        self._error_lines_stale = True
         if self.errors_btn.isChecked():
             self._schedule_full_refresh()
+
+    def _formatted_error_lines(self) -> list[str]:
+        if getattr(self, "_error_lines_stale", False):
+            self._error_lines = [
+                f"[{r.failure.component}][{r.failure.stage}] {r.failure.message}\n"
+                f"{r.failure.code}; событий: {r.occurrences}"
+                for r in self._error_records
+            ]
+            self._error_lines_stale = False
+        return self._error_lines
 
     def clear_view(self) -> None:
         self._lines = []
@@ -96,7 +106,7 @@ class LogsPage(QWidget):
         if self.errors_btn.isChecked():
             self.log_edit.document().setMaximumBlockCount(0)
             self.log_edit.setPlainText("\n\n".join(
-                line for line in self._error_lines if not query or query in line.lower()
+                line for line in self._formatted_error_lines() if not query or query in line.lower()
             ))
             self._pending_lines.clear()
             self._full_refresh_needed = False

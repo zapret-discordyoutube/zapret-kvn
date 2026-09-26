@@ -62,21 +62,53 @@ class RecordedRuntimeFailure:
     occurrences: int = 1
 
 
-class RuntimeErrorJournal:
-    """Error evidence is independent of the bounded traffic/UI log."""
+# Журнал живёт всю сессию. Без предела каждая строка лога с новым временем,
+# id соединения или портом становилась отдельной записью: у пользователей с
+# «шумным» ядром журнал рос без конца, а весь снимок уходил в GUI на каждую
+# строку — CPU и память росли с аптаймом.
+MAX_JOURNAL_RECORDS = 300
+_VOLATILE_DIGITS = re.compile(r"\d+")
 
-    def __init__(self):
-        self._records: dict[RuntimeFailure, RecordedRuntimeFailure] = {}
+
+def _grouping_key(failure: RuntimeFailure) -> tuple:
+    """Одна запись на «ту же» ошибку: числа (время, id, порты) не различают."""
+    return (
+        failure.component, failure.stage, failure.code, failure.action,
+        failure.session_generation, failure.target_generation, failure.target_id,
+        _VOLATILE_DIGITS.sub("#", failure.message),
+    )
+
+
+class RuntimeErrorJournal:
+    """Error evidence is independent of the bounded traffic/UI log.
+
+    Записи группируются по ``_grouping_key`` (последний исходный текст
+    сохраняется) и ограничены ``MAX_JOURNAL_RECORDS``: при переполнении
+    вытесняется запись, которую дольше всех не видели. Порядок снимка —
+    порядок первого появления.
+    """
+
+    def __init__(self, max_records: int = MAX_JOURNAL_RECORDS):
+        self._records: dict[tuple, RecordedRuntimeFailure] = {}
+        self._max_records = max(1, int(max_records))
         self._lock = RLock()
 
     def record(self, failure: RuntimeFailure) -> None:
         now = time.time()
+        key = _grouping_key(failure)
         with self._lock:
-            previous = self._records.get(failure)
-            self._records[failure] = RecordedRuntimeFailure(
+            previous = self._records.get(key)
+            self._records[key] = RecordedRuntimeFailure(
                 failure, previous.first_seen if previous else now, now,
                 previous.occurrences + 1 if previous else 1,
             )
+            if len(self._records) > self._max_records:
+                stale = min(self._records, key=lambda k: self._records[k].last_seen)
+                del self._records[stale]
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._records)
 
     def snapshot(self) -> tuple[RecordedRuntimeFailure, ...]:
         with self._lock:

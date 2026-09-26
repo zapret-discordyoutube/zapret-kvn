@@ -28,7 +28,10 @@ class ProcessTrafficSnapshot:
 
 
 # Session-scoped state
-_seen_connections: dict[str, set[str]] = {}
+# Владелец каждого ЖИВОГО соединения; запись удаляется, когда соединение
+# закрывается (раньше набор всех id за сессию рос без предела).
+_conn_owner: dict[str, str] = {}
+_conn_total: dict[str, int] = {}  # {exe: число соединений за сессию} — счётчик вместо набора id
 _conn_bytes: dict[str, tuple[int, int]] = {}  # {conn_id: (upload, download)} — last seen per connection
 _proc_closed_bytes: dict[str, tuple[int, int]] = {}  # {exe: (closed_up, closed_down)} — bytes from closed connections
 _prev_proc_total: dict[str, tuple[int, int]] = {}  # {exe: (total_up, total_down)} — for speed calc
@@ -37,7 +40,8 @@ _prev_time: float = 0.0
 
 def reset_connection_tracking() -> None:
     """Call on disconnect to reset session counters."""
-    _seen_connections.clear()
+    _conn_owner.clear()
+    _conn_total.clear()
     _conn_bytes.clear()
     _proc_closed_bytes.clear()
     _prev_proc_total.clear()
@@ -90,9 +94,9 @@ def collect_process_stats(clash_api_port: int = SINGBOX_CLASH_API_PORT) -> list[
         conn_id = conn.get("id", "")
         if conn_id:
             active_conn_ids.add(conn_id)
-            if exe not in _seen_connections:
-                _seen_connections[exe] = set()
-            _seen_connections[exe].add(conn_id)
+            if conn_id not in _conn_owner:
+                _conn_total[exe] = _conn_total.get(exe, 0) + 1
+            _conn_owner[conn_id] = exe
             _conn_bytes[conn_id] = (conn_up, conn_down)
         entry["upload"] += conn_up
         entry["download"] += conn_down
@@ -126,12 +130,10 @@ def collect_process_stats(clash_api_port: int = SINGBOX_CLASH_API_PORT) -> list[
     closed_ids = set(_conn_bytes.keys()) - active_conn_ids
     for cid in closed_ids:
         up, down = _conn_bytes.pop(cid)
-        # Find which exe owned this connection
-        for exe_key, conn_set in _seen_connections.items():
-            if cid in conn_set:
-                prev_closed = _proc_closed_bytes.get(exe_key, (0, 0))
-                _proc_closed_bytes[exe_key] = (prev_closed[0] + up, prev_closed[1] + down)
-                break
+        exe_key = _conn_owner.pop(cid, None)
+        if exe_key is not None:
+            prev_closed = _proc_closed_bytes.get(exe_key, (0, 0))
+            _proc_closed_bytes[exe_key] = (prev_closed[0] + up, prev_closed[1] + down)
 
     # Calculate per-process speed from delta
     import time as _time
@@ -155,7 +157,7 @@ def collect_process_stats(clash_api_port: int = SINGBOX_CLASH_API_PORT) -> list[
         if stats["hosts"]:
             top_host = max(stats["hosts"], key=stats["hosts"].get)
 
-        total_conns = len(_seen_connections.get(exe, set()))
+        total_conns = _conn_total.get(exe, 0)
 
         # Total bytes = active connections + closed connections
         closed_up, closed_down = _proc_closed_bytes.get(exe, (0, 0))

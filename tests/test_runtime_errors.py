@@ -109,18 +109,22 @@ class RuntimeErrorTests(unittest.TestCase):
         self.assertEqual(failure.target_id, '')
 
     def test_journal_export_is_independent_of_traffic_limit(self):
+        # Журнал не обрезается лимитом лога трафика: все РАЗНЫЕ ошибки (в
+        # пределах MAX_JOURNAL_RECORDS) доходят до экспорта, повторы считаются.
+        # Строки, различающиеся только числами (время, id, порты), — одна запись.
         journal = RuntimeErrorJournal()
-        for number in range(2100):
-            journal.record(core_failure('sing-box', 'dial', f'ERROR evidence {number}'))
-        journal.record(core_failure('sing-box', 'dial', 'ERROR evidence 0'))
+        kinds = [f"ERROR evidence {chr(97 + i % 26)}{chr(97 + i // 26)}" for i in range(250)]
+        for kind in kinds:
+            journal.record(core_failure('sing-box', 'dial', kind))
+        journal.record(core_failure('sing-box', 'dial', kinds[0]))
         with tempfile.TemporaryDirectory() as directory:
             path = export_diagnostics(Path(directory) / 'report.zip', AppState(), [],
                                       runtime_errors=journal.snapshot())
             with zipfile.ZipFile(path) as archive:
                 records = json.loads(archive.read('runtime_errors.json'))
-        self.assertEqual(len(records), 2100)
+        self.assertEqual(len(records), 250)
         self.assertEqual(records[0]['occurrences'], 2)
-        self.assertEqual(records[0]['failure']['message'], 'ERROR evidence 0')
+        self.assertEqual(records[0]['failure']['message'], kinds[0])
 
     def test_manager_log_reaches_security_policy_after_ready(self):
         for line, code in (
