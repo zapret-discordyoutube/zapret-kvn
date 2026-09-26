@@ -575,7 +575,19 @@ class MainWindow(FluentWindow):
         subscription = self.controller.get_subscription(subscription_id)
         if subscription is None or subscription.auto_update == enabled:
             return
-        self.controller.update_subscription_definition(subscription_id, {"auto_update": enabled})
+        try:
+            changed = self.controller.update_subscription_definition(subscription_id, {"auto_update": enabled})
+        except Exception as exc:  # noqa: BLE001 — показать ошибку и правду, а не выбор
+            self._show_status("error", str(exc))
+            changed = False
+        else:
+            if not changed:
+                self._show_status("warning", "Подписка сейчас обновляется — повторите позже")
+        if not changed:
+            # Правка не принята (подписка в очереди/обновляется): переключатель
+            # должен вернуться к сохранённому значению сразу, а не при следующей
+            # перерисовке таблицы.
+            self.subscriptions_page.set_data(self.controller.state.subscriptions, self.controller.state.nodes)
 
     def _show_subscription_url(self, subscription_id: str) -> None:
         subscription = self.controller.get_subscription(subscription_id)

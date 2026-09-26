@@ -636,6 +636,11 @@ class SubscriptionsPage(StackedSection):
             self.table.setItem(row, 6, status_item)
             switch = SwitchButton(self.table)
             switch.setChecked(subscription.auto_update)
+            # Пока подписка обновляется, контроллер отклоняет правку определения:
+            # переключатель показал бы непринятый выбор и потом тихо откатился.
+            updating = subscription.id in self._updating
+            switch.setEnabled(not updating)
+            switch.setToolTip("Идёт обновление подписки…" if updating else "")
             switch.checkedChanged.connect(
                 lambda checked, sid=subscription.id: self.auto_update_changed.emit(sid, bool(checked))
             )

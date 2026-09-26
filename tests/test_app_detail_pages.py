@@ -244,6 +244,69 @@ class SubscriptionsPageSubPageTest(unittest.TestCase):
         page.show_root()
 
 
+class SubscriptionAutoUpdateSwitchTest(unittest.TestCase):
+    """Переключатель «Автообновление» в строке не показывает непринятый выбор."""
+
+    def setUp(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from xray_fluent.ui.main_window import MainWindow
+
+        self.page = _subscriptions_page()
+        self.subscription = Subscription(id="s-auto", name="Auto", auto_update=False)
+        self.controller = Mock()
+        self.controller.state.subscriptions = [self.subscription]
+        self.controller.state.nodes = []
+        self.controller.get_subscription.return_value = self.subscription
+        self.window = SimpleNamespace(
+            controller=self.controller,
+            subscriptions_page=self.page,
+            _show_status=Mock(),
+        )
+        self._slot = lambda sid, enabled: MainWindow._set_subscription_auto_update(self.window, sid, enabled)
+        self.page.auto_update_changed.connect(self._slot)
+        self.page.set_data([self.subscription], [])
+
+    def tearDown(self) -> None:
+        self.page.auto_update_changed.disconnect(self._slot)
+        self.page.set_updating(self.subscription.id, False)
+        self.page.set_data([], [])
+
+    def _switch(self):
+        return self.page.table.cellWidget(0, 7)
+
+    def test_switch_is_disabled_while_subscription_updates(self) -> None:
+        self.assertTrue(self._switch().isEnabled())
+        self.page.set_updating(self.subscription.id, True)
+        self.assertFalse(self._switch().isEnabled())
+        self.assertIn("обновление", self._switch().toolTip())
+        self.page.set_updating(self.subscription.id, False)
+        self.assertTrue(self._switch().isEnabled())
+        self.assertEqual(self._switch().toolTip(), "")
+
+    def test_refused_change_snaps_back_to_stored_value(self) -> None:
+        # Подписка стоит в очереди обновлений — контроллер правку не принимает.
+        self.controller.update_subscription_definition.return_value = False
+        self._switch().setChecked(True)
+        self.controller.update_subscription_definition.assert_called_once_with(
+            self.subscription.id, {"auto_update": True}
+        )
+        self.assertFalse(self._switch().isChecked())
+        self.window._show_status.assert_called_once()
+
+    def test_accepted_change_stays(self) -> None:
+        def accept(_sid, updates):
+            self.subscription.auto_update = updates["auto_update"]
+            return True
+
+        self.controller.update_subscription_definition.side_effect = accept
+        self._switch().setChecked(True)
+        self.assertTrue(self._switch().isChecked())
+        self.assertTrue(self.subscription.auto_update)
+        self.window._show_status.assert_not_called()
+
+
 class NoModalFormDialogsLeftTest(unittest.TestCase):
     def test_large_form_dialog_modules_are_gone(self) -> None:
         for name in ("node_edit_dialog", "bulk_edit_dialog"):
