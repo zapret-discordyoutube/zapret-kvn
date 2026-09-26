@@ -243,6 +243,9 @@ from ..network.network_monitor import NetworkMonitor
 from ..platform.windows.proxy_manager import PROXY_EXECUTOR, ProxyManager, SystemProxyState
 from ..platform.windows.security import create_password_hash, get_idle_seconds, verify_password
 from ..diagnostics.runtime_logging import (
+    ServerAddressLogFilter,
+    redact_server_addresses,
+    register_server_nodes,
     RuntimeLogContext,
     RuntimeNodeIdentity,
     contextualize_runtime_log,
@@ -395,7 +398,11 @@ class AppController(QObject):
                 encoding="utf-8",
             )
             handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+            handler.addFilter(ServerAddressLogFilter())
             self._logger.addHandler(handler)
+        # Адреса всех узлов (загрузка, подписки, правка) маскируются в логах
+        # и экспорте как «<сервер node_ref>».
+        self.nodes_changed.connect(register_server_nodes)
 
         self._country_resolver: CountryResolver | None = None
         self._ping_worker: PingWorker | None = None
@@ -4101,6 +4108,7 @@ class AppController(QObject):
 
     def _log(self, line: str) -> None:
         """Send a log line to the UI and write it to the log file."""
+        line = redact_server_addresses(line)
         self.recent_logs.append(line)
         if len(self.recent_logs) > 5000:
             self.recent_logs = self.recent_logs[-5000:]

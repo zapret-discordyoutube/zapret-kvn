@@ -14,6 +14,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import BASE_DIR
+from ...diagnostics.runtime_logging import register_server_aliases
 from ...profiles.models import ZapretTargetSettings
 from ...application.async_steps import (
     TransitionRunner,
@@ -392,6 +393,8 @@ class ZapretManager(QObject):
                 resolved.add(str(ipaddress.ip_address(address)))
             except ValueError:
                 continue
+        # IP известного сервера маскируются в логах так же, как его имя.
+        register_server_aliases(host, resolved)
         return resolved
 
     @classmethod

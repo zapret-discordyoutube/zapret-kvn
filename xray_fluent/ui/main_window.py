@@ -22,6 +22,7 @@ from qfluentwidgets import (
 )
 
 from ..diagnostics.connection_message import connection_message
+from ..diagnostics.runtime_logging import redact_server_addresses
 from ..application.controller import AppController
 from ..application.singbox_editor_check import SingboxEditorCheck
 from ..profiles.storage import PassphraseRequired
@@ -443,7 +444,9 @@ class MainWindow(FluentWindow):
         self.controller.zapret.started.connect(self._on_zapret_started)
         self.controller.zapret.stopped.connect(self._on_zapret_stopped)
         self.controller.zapret.error.connect(self._on_zapret_error)
-        self.controller.zapret.log_line.connect(self.logs_page.append_line)
+        self.controller.zapret.log_line.connect(
+            lambda line: self.logs_page.append_line(redact_server_addresses(line))
+        )
         self.controller.zapret.target_profile_changed.connect(self._on_zapret_target_changed)
         self.controller.transition_state_changed.connect(self._on_zapret_transition_state)
 

@@ -10,7 +10,7 @@ import zipfile
 
 from ..profiles.models import AppState
 from ..constants import APP_VERSION
-from .runtime_logging import redact_runtime_log
+from .runtime_logging import redact_runtime_log, register_server_nodes
 
 
 REDACT_KEYS = {
@@ -114,6 +114,9 @@ def collect_runtime_diagnostics(controller) -> dict:
 def export_diagnostics(zip_path: Path, state: AppState, logs: list[str], *, runtime_errors=(), runtime=None) -> Path:
     zip_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Буфер логов и журнал ошибок маскируются заново текущим реестром:
+    # адрес каждого узла в архиве — «<сервер node_ref>».
+    register_server_nodes(state.nodes)
     safe_state = _redact(state.to_dict())
     meta = {
         "app_version": APP_VERSION,

@@ -46,7 +46,9 @@ class RuntimeLoggingTests(unittest.TestCase):
         )
 
         self.assertIn('node="Pinned Hysteria"', detailed)
-        self.assertIn("endpoint=[2001:db8::1]:443", detailed)
+        self.assertIn(f"node_ref={identity.ref}", detailed)
+        self.assertNotIn("endpoint=", detailed)
+        self.assertNotIn("2001:db8::1", detailed)
         self.assertIn("protocol=hysteria2", detailed)
         self.assertIn("generation=7", detailed)
 
@@ -146,7 +148,8 @@ class HysteriaLifecycleLoggingTests(unittest.TestCase):
         )
 
         self.assertIn('node="Server A"', message)
-        self.assertIn("endpoint=hy.example:443", message)
+        self.assertNotIn("endpoint=", message)
+        self.assertIn("node_ref=", message)
         self.assertNotIn("auth@", message)
         self.assertNotIn("cover-secret", message)
 

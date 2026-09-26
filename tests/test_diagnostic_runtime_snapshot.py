@@ -75,7 +75,7 @@ class DiagnosticRuntimeSnapshotTests(unittest.TestCase):
     def test_controller_export_includes_config_and_session_identity_without_replanning(self):
         snapshot = capture_runtime_config(Path('core/sing-box.exe'), self.config())
         context = RuntimeLogContext('sing-box', 'front', 'proxy', 9,
-                                    selected=RuntimeNodeIdentity('safe-ref', 'AWG', '212.34.145.199:44553', 'awg'))
+                                    selected=RuntimeNodeIdentity('safe-ref', 'AWG', 'awg'))
         controller = SimpleNamespace(
             state=AppState(), recent_logs=['DNS lookup failed'], connected=True,
             runtime_errors=RuntimeErrorJournal(),
