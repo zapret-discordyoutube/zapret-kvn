@@ -10,6 +10,10 @@ DPI и сразу подхватывает цвета темы/акцента.
   спутника на орбитах;
 * ``error``      — кольцо цвета ошибки, без анимации.
 
+Сфера — единственная кнопка подключения на панели: она берёт фокус по Tab,
+срабатывает на Enter и пробел, показывает рамку фокуса и несёт имя действия
+для экранного диктора (``set_action_text``).
+
 Экономия CPU: таймер кадров (``motion.FrameGate``) работает только в
 анимированных состояниях и только пока виджет виден, окно не свёрнуто и в
 Windows не выключена анимация; перерисовывается лишь собственный
@@ -48,7 +52,10 @@ class ConnectionOrb(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._state = IDLE
+        self._key_pressed = False
+        self._keyboard_focus = False
         self._hover = False
         self._pressed = False
         self._clock = QElapsedTimer()
@@ -75,6 +82,12 @@ class ConnectionOrb(QWidget):
         self._state = state
         self._frames.set_interval(_FRAME_MS.get(state))
         self.update()
+
+    def set_action_text(self, text: str) -> None:
+        """Что сделает нажатие: подсказка и имя для экранного диктора."""
+        if text != self.toolTip():
+            self.setToolTip(text)
+            self.setAccessibleName(text)
 
     def is_animating(self) -> bool:
         return self._frames.is_running()
@@ -118,6 +131,51 @@ class ConnectionOrb(QWidget):
                 self.clicked.emit()
             return
         super().mouseReleaseEvent(event)
+
+    # ── Клавиатура: Enter — сразу, пробел — по отпусканию, как у кнопок ──
+
+    _ACTIVATE_KEYS = (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key in self._ACTIVATE_KEYS and not event.isAutoRepeat():
+            if self.isEnabled():
+                self.clicked.emit()
+            return
+        if key == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._key_pressed = self._pressed = True
+            self.update()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Space and self._key_pressed and not event.isAutoRepeat():
+            self._key_pressed = self._pressed = False
+            self.update()
+            if self.isEnabled():
+                self.clicked.emit()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusInEvent(self, event) -> None:
+        self.update()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        self._key_pressed = self._pressed = False
+        self.update()
+        super().focusOutEvent(event)
+
+    def _shows_focus_ring(self) -> bool:
+        # Рамка только при фокусе с клавиатуры: клик мышью её не рисует.
+        return self.hasFocus() and self._keyboard_focus
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Type.FocusIn:
+            self._keyboard_focus = event.reason() in (
+                Qt.FocusReason.TabFocusReason, Qt.FocusReason.BacktabFocusReason, Qt.FocusReason.ShortcutFocusReason,
+            )
+        return super().event(event)
 
     def changeEvent(self, event) -> None:
         if event.type() == QEvent.Type.EnabledChange:
@@ -192,6 +250,12 @@ class ConnectionOrb(QWidget):
         painter.setBrush(fill)
         painter.drawEllipse(center, disc_radius, disc_radius)
         self._paint_power_icon(painter, center, disc_radius, enabled)
+        if self._shows_focus_ring():
+            focus = QPen(text_color(), 2)
+            focus.setStyle(Qt.PenStyle.DotLine)
+            painter.setPen(focus)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, radius * 0.5 + 5, radius * 0.5 + 5)
         painter.end()
 
     @staticmethod

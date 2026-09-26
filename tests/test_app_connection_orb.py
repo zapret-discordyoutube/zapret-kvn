@@ -48,6 +48,30 @@ class ConnectionOrbTests(unittest.TestCase):
         self.orb.set_state(IDLE)
         _spin(10)
 
+    def test_keyboard_activates_only_when_enabled(self) -> None:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+
+        clicks: list[int] = []
+        self.orb.clicked.connect(lambda: clicks.append(1))
+        try:
+            self.assertEqual(self.orb.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+            QTest.keyClick(self.orb, Qt.Key.Key_Return)
+            QTest.keyClick(self.orb, Qt.Key.Key_Space)  # срабатывает по отпусканию
+            self.assertEqual(len(clicks), 2)
+            self.orb.setEnabled(False)
+            QTest.keyClick(self.orb, Qt.Key.Key_Return)
+            QTest.keyClick(self.orb, Qt.Key.Key_Space)
+            self.assertEqual(len(clicks), 2)
+        finally:
+            self.orb.setEnabled(True)
+            self.orb.clicked.disconnect()
+
+    def test_action_text_names_the_button(self) -> None:
+        self.orb.set_action_text("Остановить прокси")
+        self.assertEqual(self.orb.toolTip(), "Остановить прокси")
+        self.assertEqual(self.orb.accessibleName(), "Остановить прокси")
+
     def test_static_states_do_not_run_a_timer(self) -> None:
         for state in (IDLE, ERROR):
             self.orb.set_state(state)

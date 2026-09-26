@@ -26,6 +26,7 @@ from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QBoxLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -43,7 +44,6 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon as FIF,
     IndeterminateProgressBar,
-    PrimaryPushButton,
     PushButton,
     StrongBodyLabel,
     SubtitleLabel,
@@ -88,6 +88,13 @@ def hero_sizes(viewport_height: int) -> tuple[int, int, int]:
     padding = int(18 + (orb - _ORB_MIN) * 0.3)
     graph = int(max(_GRAPH_MIN, min(_GRAPH_MAX, viewport_height * _GRAPH_SHARE)))
     return orb, padding, graph
+
+
+def _proxy_hint(enabled: bool) -> str:
+    """Подпись переключателя «Системный прокси Windows» — что сейчас идёт через туннель."""
+    if enabled:
+        return "Браузеры и большинство программ подхватывают прокси сами"
+    return "Выключен — через туннель идут только программы с ручной настройкой прокси"
 
 
 def _format_speed(value_bps: float) -> str:
@@ -248,41 +255,43 @@ class DashboardPage(StackedSection):
         layout.setContentsMargins(16, 8, 16, 14)
         layout.setSpacing(4)
 
-        # Сцена туннеля; сфера в её центре — кнопка питания.
+        # Слева — состояние текстом, справа — сцена туннеля; сфера в её
+        # центре — единственная кнопка подключения (мышь, Tab + Enter/пробел).
+        # На узком окне сцена встаёт над текстом (_apply_hero_direction).
+        self._hero_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self._hero_layout.setSpacing(16)
+        self._hero_text = QWidget(card)
+        text = QVBoxLayout(self._hero_text)
+        text.setContentsMargins(4, 0, 0, 0)
+        text.setSpacing(4)
+        self._hero_text_layout = text
+        self.connection_state_label = TitleLabel("Не подключено", self._hero_text)
+        self.connection_state_label.setWordWrap(True)
+        self.connection_uptime_label = CaptionLabel("", self._hero_text)
+        self.connection_uptime_label.setWordWrap(True)
+        self.connection_uptime_label.hide()
+        self.connection_status_label = BodyLabel("", self._hero_text)
+        self.connection_status_label.setWordWrap(True)
+        self.logs_btn = PushButton(FIF.DOCUMENT, "Открыть логи", self._hero_text)
+        self.logs_btn.clicked.connect(self.logs_requested)
+        self.logs_btn.hide()
+        text.addStretch(1)
+        text.addWidget(self.connection_state_label)
+        text.addWidget(self.connection_uptime_label)
+        text.addWidget(self.connection_status_label)
+        text.addSpacing(4)
+        text.addWidget(self.logs_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        text.addStretch(1)
+        self._hero_layout.addWidget(self._hero_text, 2)
+
         self.connection_scene = ConnectionScene(card, orb_diameter=_ORB_MAX)
         self.connection_orb = self.connection_scene.orb
         self.connection_orb.clicked.connect(self._on_orb_clicked)
-        layout.addWidget(self.connection_scene)
+        self._hero_layout.addWidget(self.connection_scene, 3)
+        layout.addLayout(self._hero_layout)
+        self._hero_stacked: bool | None = None
+        self._apply_hero_direction(stacked=False)
 
-        center = Qt.AlignmentFlag.AlignHCenter
-        self.connection_state_label = TitleLabel("Не подключено", card)
-        self.connection_state_label.setAlignment(center)
-        self.connection_state_label.setWordWrap(True)
-        self.connection_uptime_label = CaptionLabel("", card)
-        self.connection_uptime_label.setAlignment(center)
-        self.connection_uptime_label.setWordWrap(True)
-        self.connection_uptime_label.hide()
-        self.connection_status_label = BodyLabel("", card)
-        self.connection_status_label.setAlignment(center)
-        self.connection_status_label.setWordWrap(True)
-        layout.addWidget(self.connection_state_label)
-        layout.addWidget(self.connection_uptime_label)
-        layout.addWidget(self.connection_status_label)
-
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
-        buttons.addStretch(1)
-        self.toggle_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Подключить", card)
-        self.toggle_btn.setMinimumWidth(220)
-        self.toggle_btn.clicked.connect(self.toggle_connection_requested)
-        buttons.addWidget(self.toggle_btn)
-        self.logs_btn = PushButton(FIF.DOCUMENT, "Открыть логи", card)
-        self.logs_btn.clicked.connect(self.logs_requested)
-        self.logs_btn.hide()
-        buttons.addWidget(self.logs_btn)
-        buttons.addStretch(1)
-        layout.addSpacing(6)
-        layout.addLayout(buttons)
         self.startup_progress = IndeterminateProgressBar(card)
         self.startup_progress.hide()
         layout.addWidget(self.startup_progress)
@@ -362,9 +371,7 @@ class DashboardPage(StackedSection):
         texts = QVBoxLayout()
         texts.setSpacing(0)
         texts.addWidget(BodyLabel("Системный прокси Windows", self.proxy_options))
-        self.proxy_hint_label = CaptionLabel(
-            "Программы подхватят прокси сами; выключите, чтобы настраивать их вручную", self.proxy_options
-        )
+        self.proxy_hint_label = CaptionLabel(_proxy_hint(False), self.proxy_options)
         self.proxy_hint_label.setWordWrap(True)
         texts.addWidget(self.proxy_hint_label)
         options.addLayout(texts, 1)
@@ -567,13 +574,25 @@ class DashboardPage(StackedSection):
         """
         self.connection_state_label.setFont(getFont(_TITLE_PX[compact], QFont.Weight.DemiBold))
         self._connection_layout.setContentsMargins(*((12, 4, 12, 10) if compact else (16, 8, 16, 14)))
-        self.toggle_btn.setMinimumWidth(180 if compact else 220)
         self.server_flag.set_diameter(32 if compact else 40)
         for tile in (self.vpn_tile, self.proxy_tile):
             tile.set_compact(compact)
         body = self._main_page.body_layout
         body.setContentsMargins(*((16, 12, 16, 12) if compact else BODY_MARGINS))
         body.setSpacing(8 if compact else 12)
+
+    def _apply_hero_direction(self, *, stacked: bool) -> None:
+        """Широко: текст слева, сцена справа. Узко: сцена сверху, текст по центру."""
+        if stacked == self._hero_stacked:
+            return
+        self._hero_stacked = stacked
+        self._hero_layout.setDirection(
+            QBoxLayout.Direction.BottomToTop if stacked else QBoxLayout.Direction.LeftToRight
+        )
+        align = Qt.AlignmentFlag.AlignHCenter if stacked else Qt.AlignmentFlag.AlignLeft
+        for label in (self.connection_state_label, self.connection_uptime_label, self.connection_status_label):
+            label.setAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+        self._hero_text_layout.setAlignment(self.logs_btn, align)
 
     def _update_adaptive_grid(self) -> None:
         """На узком окне (< 900 px) карточки встают в одну колонку.
@@ -591,6 +610,7 @@ class DashboardPage(StackedSection):
             self._compact = compact
             self._apply_density(compact)
         narrow = viewport.width() < NARROW_WIDTH
+        self._apply_hero_direction(stacked=narrow)
         if narrow == self._grid_narrow:
             return
         self._in_grid_relayout = True
@@ -810,16 +830,13 @@ class DashboardPage(StackedSection):
 
     def _refresh_connection_card(self) -> None:
         self.connection_state_label.setText(self._headline())
-        self.connection_status_label.setText(self._status_line())
+        status = self._status_line()
+        self.connection_status_label.setText(status)
+        self.connection_status_label.setVisible(bool(status))
         self.logs_btn.setVisible(self._connection_phase == "error")
-        self.toggle_btn.setText("Подготовка…" if self._initializing else self._toggle_action_text())
-        icon = FIF.PAUSE_BOLD if self._connected else FIF.PLAY_SOLID
-        if icon is not getattr(self, "_toggle_icon", None):
-            self._toggle_icon = icon
-            self.toggle_btn.setIcon(icon)
         orb_state = self._orb_state()
         self.connection_orb.set_state(orb_state)
-        self.connection_orb.setToolTip(self._toggle_action_text())
+        self.connection_orb.set_action_text("Подготовка…" if self._initializing else self._toggle_action_text())
         self.connection_scene.set_state(orb_state)
         if orb_state != self._title_state:
             self._title_state = orb_state
@@ -876,8 +893,8 @@ class DashboardPage(StackedSection):
         return f"В сети {hours:d}:{rest // 60:02d}:{rest % 60:02d}"
 
     def _on_orb_clicked(self) -> None:
-        if self.toggle_btn.isEnabled():
-            self.toggle_connection_requested.emit()
+        # Сфера сама выключена, пока идёт подключение (_apply_interaction_state).
+        self.toggle_connection_requested.emit()
 
     def _refresh_traffic_card(self) -> None:
         self.traffic_down_label.setText(_format_speed(self._last_down_bps))
@@ -1122,12 +1139,8 @@ class DashboardPage(StackedSection):
         if self._connection_phase in {"starting", "error"}:
             text = self._connection_message
         elif self._connected:
-            if self._settings.tun_mode:
-                text = "Весь трафик компьютера идёт через VPN"
-            elif self._settings.enable_system_proxy:
-                text = "Браузеры и программы, использующие системный прокси, идут через туннель"
-            else:
-                text = "Системный прокси выключен — через туннель идут только программы с ручной настройкой прокси"
+            # Что идёт через туннель, говорит карточка «Режим работы».
+            text = ""
         else:
             text = "Нажмите на кнопку питания, чтобы подключиться"
         note = self._system_proxy_note()
@@ -1233,6 +1246,7 @@ class DashboardPage(StackedSection):
         self.proxy_switch.setText(("Вкл" if proxy_on else "Выкл") + ("…" if applying else ""))
         self.proxy_switch.setToolTip("Применяется…" if applying else "")
         self.proxy_switch.blockSignals(False)
+        self.proxy_hint_label.setText(_proxy_hint(proxy_on))
         self._apply_interaction_state()
 
     def _apply_interaction_state(self) -> None:
@@ -1240,7 +1254,6 @@ class DashboardPage(StackedSection):
             self._settings.tun_mode and self._settings.tun_engine in {"singbox", "xray"}
         )
         busy = self._initializing or self._transition_busy or self._connection_phase == "starting"
-        self.toggle_btn.setEnabled(has_profiles and not busy)
         self.connection_orb.setEnabled(has_profiles and not busy)
         self.connection_orb.set_state(self._orb_state())
         self.vpn_tile.setEnabled(not busy)

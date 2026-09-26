@@ -154,6 +154,35 @@ class DashboardHonestStatusTest(unittest.TestCase):
                 self.assertEqual(self.page.connection_state_label.text(), title)
                 self.page.set_connection(False)
 
+    def test_orb_is_the_only_connect_control_and_names_the_action(self) -> None:
+        self.assertFalse(hasattr(self.page, "toggle_btn"))
+        self.page.set_settings_snapshot(AppSettings(tun_mode=False, enable_system_proxy=False))
+        self.page.set_connection(True)
+        self.page._do_refresh_dashboard()
+        self.assertEqual(self.page.connection_orb.toolTip(), "Остановить прокси")
+        # Что идёт через туннель, говорит подпись переключателя прокси, не шапка.
+        self.assertTrue(self.page.connection_status_label.isHidden())
+        self.assertIn("ручной настройкой", self.page.proxy_hint_label.text())
+        self.page.set_settings_snapshot(AppSettings(tun_mode=False, enable_system_proxy=True))
+        self.page._proxy_intent.request(True)
+        self.page._do_refresh_dashboard()
+        self.assertIn("подхватывают прокси сами", self.page.proxy_hint_label.text())
+
+    def test_hero_text_left_of_scene_and_stacked_when_narrow(self) -> None:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QBoxLayout
+
+        page = self.page
+        page._apply_hero_direction(stacked=False)
+        self.assertEqual(page._hero_layout.direction(), QBoxLayout.Direction.LeftToRight)
+        self.assertEqual(page._hero_layout.itemAt(0).widget(), page._hero_text)
+        self.assertEqual(page._hero_layout.itemAt(1).widget(), page.connection_scene)
+        page._apply_hero_direction(stacked=True)
+        self.assertEqual(page._hero_layout.direction(), QBoxLayout.Direction.BottomToTop)
+        self.assertTrue(page.connection_state_label.alignment() & Qt.AlignmentFlag.AlignHCenter)
+        page._apply_hero_direction(stacked=False)
+        self.assertTrue(page.connection_state_label.alignment() & Qt.AlignmentFlag.AlignLeft)
+
     def test_idle_invites_to_connect(self) -> None:
         self.page._do_refresh_dashboard()
         self.assertEqual(self.page.connection_state_label.text(), "Не подключено")
@@ -191,7 +220,7 @@ class ModeTilesTest(unittest.TestCase):
         self.page.set_transition_busy(True)
         self.assertFalse(self.page.vpn_tile.isEnabled())
         self.assertFalse(self.page.proxy_tile.isEnabled())
-        self.assertFalse(self.page.toggle_btn.isEnabled())
+        self.assertFalse(self.page.connection_orb.isEnabled())
 
 
 class ProcessesAndServerTest(unittest.TestCase):
