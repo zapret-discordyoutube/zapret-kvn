@@ -48,6 +48,8 @@ class SingboxCoreRelease:
 
 @dataclass(slots=True)
 class SingboxCoreUpdateResult:
+    # Те же значения, что у XrayCoreUpdateResult: "up_to_date" | "available" |
+    # "updated" | "error" — страница «Обновления» красит их одинаково.
     status: str
     message: str
     current_version: str = ""
@@ -211,7 +213,7 @@ def check_and_update_core(
 
     if not is_newer(release.version, current):
         return SingboxCoreUpdateResult(
-            status="ok",
+            status="up_to_date",
             message=f"sing-box Extended актуален ({current or release.version})",
             current_version=current,
             latest_version=release.version,
@@ -219,7 +221,7 @@ def check_and_update_core(
 
     if not apply_update:
         return SingboxCoreUpdateResult(
-            status="update-available",
+            status="available",
             message=f"Доступна версия {release.version}",
             current_version=current,
             latest_version=release.version,
@@ -239,7 +241,7 @@ def check_and_update_core(
             )
 
     return SingboxCoreUpdateResult(
-        status="ok",
+        status="updated",
         message=f"sing-box Extended обновлён до {release.version}",
         current_version=installed_version(exe) or release.version,
         latest_version=release.version,

@@ -437,5 +437,37 @@ class UpdateNotificationTests(unittest.TestCase):
         newer._show_update_available_dialog.assert_called_once()
 
 
+class CoreUpdateStatusColorTests(unittest.TestCase):
+    """«Актуален» у sing-box зелёный, как у Xray (раньше был серым)."""
+
+    def _window(self):
+        page = SimpleNamespace(
+            set_singbox_error=Mock(), set_singbox_success=Mock(),
+            set_singbox_status=Mock(), set_singbox_version=Mock(),
+        )
+        return SimpleNamespace(updates_page=page, logs_page=SimpleNamespace(append_line=Mock()))
+
+    def test_up_to_date_and_updated_are_success(self) -> None:
+        from xray_fluent.engines.singbox.core_updater import SingboxCoreUpdateResult
+
+        for status in ("up_to_date", "updated"):
+            window = self._window()
+            MainWindow._on_singbox_update_result(
+                window, SingboxCoreUpdateResult(status=status, message="m", current_version="1.14.1-extended-2.7.2")
+            )
+            window.updates_page.set_singbox_success.assert_called_once_with("m")
+            window.updates_page.set_singbox_status.assert_not_called()
+
+    def test_available_stays_neutral_and_error_is_error(self) -> None:
+        from xray_fluent.engines.singbox.core_updater import SingboxCoreUpdateResult
+
+        window = self._window()
+        MainWindow._on_singbox_update_result(window, SingboxCoreUpdateResult(status="available", message="a"))
+        window.updates_page.set_singbox_status.assert_called_once_with("a")
+        window = self._window()
+        MainWindow._on_singbox_update_result(window, SingboxCoreUpdateResult(status="error", message="e"))
+        window.updates_page.set_singbox_error.assert_called_once_with("e")
+
+
 if __name__ == "__main__":
     unittest.main()

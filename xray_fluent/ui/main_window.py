@@ -1544,7 +1544,7 @@ class MainWindow(FluentWindow):
         self.logs_page.append_line(f"[singbox-core-update] {result.status}: {result.message}")
         if result.status == "error":
             self.updates_page.set_singbox_error(result.message)
-        elif result.updated:
+        elif result.status in {"updated", "up_to_date"}:
             self.updates_page.set_singbox_success(result.message)
         else:
             self.updates_page.set_singbox_status(result.message)
