@@ -1,10 +1,9 @@
 """Dead-link detection in the auto-switch service.
 
-A dead TCP server produces down_bps == 0, which the speed-drop path reads as
-"user is idle" and can never act on. These tests pin the new trigger: the
-metrics worker's TCP-ping verdict (link_alive) switches away from a node
-whose pings keep failing while no payload traffic flows, while UDP/QUIC
-protocols explicitly avoid that verdict.
+Auto-switch leaves a server only when it is dead: the metrics worker's
+TCP-ping verdict (link_alive) switches away from a node whose pings keep
+failing while no payload traffic flows. A slow but working server is never
+switched, and UDP/QUIC protocols explicitly avoid the TCP verdict.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from unittest.mock import patch
 from xray_fluent.application import auto_switch_service
 from xray_fluent.application.auto_switch_service import (
     AUTO_SWITCH_DEAD_LINK_SEC,
-    AUTO_SWITCH_HYSTERIA_LOW_SEC,
     check_auto_switch,
 )
 from xray_fluent.profiles.models import AppSettings, Node
@@ -50,10 +48,7 @@ class FakeController:
         self.connected = True
         self._switching = False
         self._reconnecting = False
-        self._auto_switch_low_since = 0.0
         self._auto_switch_last_switch = 0.0
-        self._auto_switch_high_ticks = 0
-        self._auto_switch_active_download = False
         self._auto_switch_cycle_attempts = 0
         self._auto_switch_exhausted = False
         self._auto_switch_transitioning = False
@@ -177,18 +172,16 @@ class DeadLinkTriggerTests(unittest.TestCase):
         _tick(controller, 100.0 + AUTO_SWITCH_DEAD_LINK_SEC + 1, link_alive=False)
         self.assertEqual(controller.selected, [])
 
-    def test_speed_drop_path_still_works(self) -> None:
+    def test_speed_drop_on_a_live_server_never_switches(self) -> None:
+        # A finished download followed by a trickle of traffic is not a dead
+        # server: this used to read as degradation and drop a healthy node.
         controller = FakeController()
-        # Arm active download: 10 ticks above threshold.
         for i in range(10):
             _tick(controller, 100.0 + i, down_bps=200 * 1024.0, link_alive=True)
-        self.assertTrue(controller._auto_switch_active_download)
-        # Sustained narrow-band slowdown for delay_sec.
-        _tick(controller, 111.0, down_bps=10 * 1024.0, link_alive=True)
-        delay = controller.state.settings.auto_switch_delay_sec
-        _tick(controller, 111.0 + delay + 1, down_bps=10 * 1024.0, link_alive=True)
-        self.assertEqual(len(controller.selected), 1)
-        self.assertTrue(any("KB/s" in line for line in controller.logs))
+        for i in range(0, 600, 5):
+            _tick(controller, 111.0 + i, down_bps=10 * 1024.0, link_alive=True)
+        self.assertEqual(controller.selected, [])
+        self.assertEqual(controller.auto_switch_triggered.calls, [])
 
     def test_hysteria_tcp_failure_never_uses_dead_link_fallback(self) -> None:
         controller = _hysteria_controller()
@@ -214,33 +207,17 @@ class DeadLinkTriggerTests(unittest.TestCase):
         self.assertEqual(controller.selected, [])
         self.assertEqual(controller._auto_switch_link_down_since, 0.0)
 
-    def test_hysteria_requires_confirmed_activity_and_sixty_second_degradation(self) -> None:
+    def test_hysteria_slow_traffic_never_switches(self) -> None:
         controller = _hysteria_controller()
-        controller.state.settings.auto_switch_delay_sec = 1
         controller.state.settings.auto_switch_cooldown_sec = 1
         base = 1000.0
 
         for offset in range(10):
             _tick(controller, base + offset, down_bps=200 * 1024.0, link_alive=False)
-        self.assertTrue(controller._auto_switch_active_download)
+        for offset in range(0, 600, 5):
+            _tick(controller, base + 10 + offset, down_bps=10 * 1024.0, link_alive=False)
 
-        low_start = base + 10
-        _tick(controller, low_start, down_bps=10 * 1024.0, link_alive=False)
-        _tick(
-            controller,
-            low_start + AUTO_SWITCH_HYSTERIA_LOW_SEC - 1,
-            down_bps=10 * 1024.0,
-            link_alive=False,
-        )
         self.assertEqual(controller.selected, [])
-
-        _tick(
-            controller,
-            low_start + AUTO_SWITCH_HYSTERIA_LOW_SEC + 1,
-            down_bps=10 * 1024.0,
-            link_alive=False,
-        )
-        self.assertEqual(len(controller.selected), 1)
 
     def test_manual_hold_and_transition_guard_block_switch(self) -> None:
         controller = FakeController()

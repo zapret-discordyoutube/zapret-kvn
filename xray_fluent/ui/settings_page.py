@@ -257,19 +257,9 @@ class SettingsPage(ScrollablePage):
         auto_switch_group = SettingCardGroup("Авто-переключение", container)
 
         self.auto_switch_card = SwitchSettingCard(
-            FIF.SYNC, "Авто-переключение при падении скорости",
-            "Автоматически переключаться на другой сервер при низкой скорости",
+            FIF.SYNC, "Авто-переключение при отказе сервера",
+            "Переключаться на другой сервер, только если текущий перестал отвечать",
             parent=auto_switch_group,
-        )
-        self.auto_switch_threshold_card = _SpinCard(
-            FIF.SPEED_HIGH, "Порог скорости (КБ/с)",
-            "Минимальная скорость загрузки для срабатывания",
-            min_val=1, max_val=10000, parent=auto_switch_group,
-        )
-        self.auto_switch_delay_card = _SpinCard(
-            FIF.STOP_WATCH, "Задержка (секунды)",
-            "Время ожидания перед переключением",
-            min_val=5, max_val=300, parent=auto_switch_group,
         )
         self.auto_switch_cooldown_card = _SpinCard(
             FIF.HISTORY, "Кулдаун (секунды)",
@@ -278,8 +268,6 @@ class SettingsPage(ScrollablePage):
         )
 
         auto_switch_group.addSettingCard(self.auto_switch_card)
-        auto_switch_group.addSettingCard(self.auto_switch_threshold_card)
-        auto_switch_group.addSettingCard(self.auto_switch_delay_card)
         auto_switch_group.addSettingCard(self.auto_switch_cooldown_card)
         root.addWidget(auto_switch_group)
 
@@ -562,8 +550,6 @@ class SettingsPage(ScrollablePage):
         self.xray_auto_update_card.checkedChanged.connect(self._auto_save)
 
         self.auto_switch_card.checkedChanged.connect(self._auto_save)
-        self.auto_switch_threshold_card.spin.valueChanged.connect(self._auto_save)
-        self.auto_switch_delay_card.spin.valueChanged.connect(self._auto_save)
         self.auto_switch_cooldown_card.spin.valueChanged.connect(self._auto_save)
 
         self.rotation_card.checkedChanged.connect(self._auto_save)
@@ -621,8 +607,6 @@ class SettingsPage(ScrollablePage):
         self.xray_auto_update_card.setChecked(settings.xray_auto_update)
 
         self.auto_switch_card.setChecked(settings.auto_switch_enabled)
-        self.auto_switch_threshold_card.spin.setValue(settings.auto_switch_threshold_kbps)
-        self.auto_switch_delay_card.spin.setValue(settings.auto_switch_delay_sec)
         self.auto_switch_cooldown_card.spin.setValue(settings.auto_switch_cooldown_sec)
 
         self.rotation_card.setChecked(settings.rotation_enabled)
@@ -726,8 +710,6 @@ class SettingsPage(ScrollablePage):
         data.allow_updates = self.allow_updates_card.isChecked()
         data.xray_auto_update = self.xray_auto_update_card.isChecked()
         data.auto_switch_enabled = self.auto_switch_card.isChecked()
-        data.auto_switch_threshold_kbps = int(self.auto_switch_threshold_card.spin.value())
-        data.auto_switch_delay_sec = int(self.auto_switch_delay_card.spin.value())
         data.auto_switch_cooldown_sec = int(self.auto_switch_cooldown_card.spin.value())
         data.rotation_enabled = self.rotation_card.isChecked()
         data.rotation_mode = str(self.rotation_mode_card.combo.currentData() or "random")

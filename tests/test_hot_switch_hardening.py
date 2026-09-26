@@ -550,8 +550,6 @@ class AutoSwitchController:
     def __init__(self, nodes, *, hot_switch_result: bool):
         settings = AppSettings()
         settings.auto_switch_enabled = True
-        settings.auto_switch_threshold_kbps = 50
-        settings.auto_switch_delay_sec = 1
         settings.auto_switch_cooldown_sec = 30
         self.state = SimpleNamespace(
             settings=settings,
@@ -563,10 +561,9 @@ class AutoSwitchController:
         self._desired_connected = True
         self._switching = False
         self._reconnecting = False
-        self._auto_switch_low_since = time.monotonic() - 5.0
+        # Активный сервер уже дольше порога не отвечает на TCP-пинг.
+        self._auto_switch_link_down_since = time.monotonic() - 20.0
         self._auto_switch_last_switch = 0.0
-        self._auto_switch_high_ticks = 0
-        self._auto_switch_active_download = True
         self._auto_switch_cycle_attempts = 0
         self._auto_switch_exhausted = False
         self._auto_switch_transitioning = False
@@ -616,7 +613,7 @@ class AutoSwitchSinglePathTests(unittest.TestCase):
         nodes = self._nodes()
         controller = AutoSwitchController(nodes, hot_switch_result=True)
 
-        check_auto_switch(controller, down_bps=2048.0)
+        check_auto_switch(controller, down_bps=0.0, link_alive=False)
 
         self.assertEqual(controller.state.selected_node_id, nodes[1].id)
         self.assertEqual(controller.hot_switch_calls, 1)  # горячий путь
@@ -626,7 +623,7 @@ class AutoSwitchSinglePathTests(unittest.TestCase):
         nodes = self._nodes()
         controller = AutoSwitchController(nodes, hot_switch_result=False)
 
-        check_auto_switch(controller, down_bps=2048.0)
+        check_auto_switch(controller, down_bps=0.0, link_alive=False)
 
         self.assertEqual(controller.hot_switch_calls, 1)
         self.assertEqual(controller.transitions, ["node switched"])
@@ -635,7 +632,7 @@ class AutoSwitchSinglePathTests(unittest.TestCase):
         nodes = self._nodes()
         controller = AutoSwitchController(nodes, hot_switch_result=True)
 
-        check_auto_switch(controller, down_bps=2048.0)
+        check_auto_switch(controller, down_bps=0.0, link_alive=False)
 
         # AC12: ровно одна эмиссия selection_changed и один schedule_save.
         self.assertEqual(len(controller.selection_emissions), 1)

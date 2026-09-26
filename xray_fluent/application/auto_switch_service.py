@@ -8,22 +8,19 @@ if TYPE_CHECKING:
     from ..profiles.models import Node
 
 
-AUTO_SWITCH_HIGH_TICKS_REQUIRED = 10
+# Auto-switch leaves a server only when it is dead, never because traffic got
+# slower: after a download ends, the speed naturally falls to a trickle and a
+# speed threshold would read that as degradation and drop a healthy server.
+# Traffic below this rate counts as "no payload flowing" for the dead-link check.
 AUTO_SWITCH_IDLE_BPS = 1024.0
 # Hysteria/TUIC use UDP/QUIC.  A TCP connect to their server port is not a
 # functional health check for the tunnel and must not be used as a dead-link
-# verdict.
+# verdict; a dead Hysteria server is handled by the Hysteria failure observer.
 UDP_NATIVE_TYPES = frozenset({"hysteria", "hysteria2", "tuic", "wireguard"})
 AUTO_SWITCH_WARMUP_SEC = 20.0
 AUTO_SWITCH_UDP_WARMUP_SEC = 45.0
-AUTO_SWITCH_HYSTERIA_LOW_SEC = 60.0
-AUTO_SWITCH_HYSTERIA_COOLDOWN_SEC = 300.0
-AUTO_SWITCH_HYSTERIA_LOW_RATIO = 0.5
-# A dead server produces down_bps == 0, which the speed path reads as "user
-# is idle" — so a full outage can never trigger the speed-drop switch. The
-# metrics worker TCP-pings the active node every ~3s; this many seconds of
+# The metrics worker TCP-pings the active node every ~3s; this many seconds of
 # continuously failing pings with no payload traffic mean a TCP link is dead.
-# UDP/QUIC nodes are deliberately excluded from this path below.
 AUTO_SWITCH_DEAD_LINK_SEC = 15.0
 
 
@@ -53,12 +50,6 @@ def transport_kind_for_node(node: Node | None) -> str:
     return "tcp"
 
 
-def is_hysteria_node(node: Node | None) -> bool:
-    outbound = node.outbound if node is not None and isinstance(node.outbound, dict) else {}
-    native_type = str(outbound.get("type") or "").strip().lower()
-    return native_type in {"hysteria", "hysteria2", "tuic"}
-
-
 def begin_auto_switch_warmup(controller: AppController, node: Node | None = None) -> None:
     """Start a fresh health observation window for a newly active node.
 
@@ -70,10 +61,7 @@ def begin_auto_switch_warmup(controller: AppController, node: Node | None = None
     warmup = AUTO_SWITCH_UDP_WARMUP_SEC if transport_kind_for_node(node) == "udp" else AUTO_SWITCH_WARMUP_SEC
     controller._auto_switch_warmup_until = now + warmup
     controller._auto_switch_health_node_id = getattr(node, "id", None)
-    controller._auto_switch_low_since = 0.0
     controller._auto_switch_link_down_since = 0.0
-    controller._auto_switch_high_ticks = 0
-    controller._auto_switch_active_download = False
 
 
 def _transition_in_progress(controller: AppController) -> bool:
@@ -97,10 +85,11 @@ def check_auto_switch(
     *,
     traffic_valid: bool = True,
 ) -> None:
-    """React to live metrics: speed drops and dead links.
+    """Switch away from the active server only when it is dead.
 
     ``link_alive`` is the last TCP-ping verdict for the active node:
     True/False when the worker probes it, None when no probe is configured.
+    A slow but working server is never switched.
     """
     settings = controller.state.settings
     if not settings.auto_switch_enabled:
@@ -120,92 +109,32 @@ def check_auto_switch(
     if now < float(getattr(controller, "_auto_switch_warmup_until", 0.0) or 0.0):
         return
 
-    # A failed stats/API read is not an idle sample.  Keep confirmed activity
-    # (it may resume after one missing read), but force a fresh low-speed window
-    # and never let an observability gap trigger a switch.
+    # A failed stats/API read is not an idle sample: never let an
+    # observability gap count towards a dead-link verdict.
     if not traffic_valid:
-        controller._auto_switch_low_since = 0.0
         controller._auto_switch_link_down_since = 0.0
-        controller._auto_switch_high_ticks = 0
         return
 
     node = getattr(controller, "selected_node", None)
-    is_udp = transport_kind_for_node(node) == "udp"
-    is_hysteria = is_hysteria_node(node)
-
     # TCP reachability is intentionally not a dead-link verdict for Hysteria,
     # TUIC, WireGuard, or any other UDP/QUIC transport.
-    if not is_udp and link_alive is False and down_bps < AUTO_SWITCH_IDLE_BPS:
-        if controller._auto_switch_link_down_since == 0.0:
-            controller._auto_switch_link_down_since = now
-            return
-        down_duration = now - controller._auto_switch_link_down_since
-        if down_duration < AUTO_SWITCH_DEAD_LINK_SEC:
-            return
-        if now - controller._auto_switch_last_switch < settings.auto_switch_cooldown_sec:
-            return
+    if transport_kind_for_node(node) == "udp" or link_alive is not False or down_bps >= AUTO_SWITCH_IDLE_BPS:
         controller._auto_switch_link_down_since = 0.0
-        _execute_auto_switch(
-            controller,
-            now,
-            f"[auto-switch] active server unreachable for {down_duration:.0f}s → switching",
-        )
+        return
+
+    if controller._auto_switch_link_down_since == 0.0:
+        controller._auto_switch_link_down_since = now
+        return
+    down_duration = now - controller._auto_switch_link_down_since
+    if down_duration < AUTO_SWITCH_DEAD_LINK_SEC:
+        return
+    if now - controller._auto_switch_last_switch < settings.auto_switch_cooldown_sec:
         return
     controller._auto_switch_link_down_since = 0.0
-
-    threshold_bps = settings.auto_switch_threshold_kbps * 1024.0
-    low_threshold_bps = threshold_bps
-    low_delay_sec = float(settings.auto_switch_delay_sec)
-    cooldown_sec = float(settings.auto_switch_cooldown_sec)
-    if is_hysteria:
-        # Hysteria traffic is bursty.  Require a real degradation band below
-        # half of the configured active-download threshold and hold it for a
-        # full minute before considering a switch.
-        low_threshold_bps = max(AUTO_SWITCH_IDLE_BPS, threshold_bps * AUTO_SWITCH_HYSTERIA_LOW_RATIO)
-        low_delay_sec = max(low_delay_sec, AUTO_SWITCH_HYSTERIA_LOW_SEC)
-        cooldown_sec = max(cooldown_sec, AUTO_SWITCH_HYSTERIA_COOLDOWN_SEC)
-
-    if down_bps >= threshold_bps:
-        controller._auto_switch_high_ticks += 1
-        if controller._auto_switch_high_ticks >= AUTO_SWITCH_HIGH_TICKS_REQUIRED:
-            controller._auto_switch_active_download = True
-        controller._auto_switch_low_since = 0.0
-        return
-
-    if not controller._auto_switch_active_download:
-        controller._auto_switch_high_ticks = 0
-        return
-
-    if down_bps < AUTO_SWITCH_IDLE_BPS:
-        controller._auto_switch_low_since = 0.0
-        controller._auto_switch_high_ticks = 0
-        controller._auto_switch_active_download = False
-        return
-
-    controller._auto_switch_high_ticks = 0
-
-    # A value between the high and low thresholds is neither healthy enough to
-    # confirm recovery nor bad enough to start a degradation window.
-    if down_bps >= low_threshold_bps:
-        controller._auto_switch_low_since = 0.0
-        return
-
-    if controller._auto_switch_low_since == 0.0:
-        controller._auto_switch_low_since = now
-        return
-
-    low_duration = now - controller._auto_switch_low_since
-    if low_duration < low_delay_sec:
-        return
-
-    if now - controller._auto_switch_last_switch < cooldown_sec:
-        return
-
     _execute_auto_switch(
         controller,
         now,
-        f"[auto-switch] speed {down_bps / 1024:.0f} KB/s < {settings.auto_switch_threshold_kbps} KB/s "
-        f"for {low_duration:.0f}s → switching",
+        f"[auto-switch] active server unreachable for {down_duration:.0f}s → switching",
     )
 
 
@@ -214,22 +143,16 @@ def _execute_auto_switch(controller: AppController, now: float, log_message: str
     max_attempts = max(1, len(controller.state.nodes) - 1)
     if controller._auto_switch_cycle_attempts >= max_attempts:
         controller._auto_switch_exhausted = True
-        controller._auto_switch_low_since = 0.0
-        controller._auto_switch_active_download = False
         controller.status.emit("warning", "Автопереключение остановлено: все серверы уже проверены")
         controller._log("[auto-switch] exhausted all nodes for current session")
         return
 
     next_node = get_next_node_for_auto_switch(controller)
     if not next_node:
-        controller._auto_switch_low_since = 0.0
         controller._log("[auto-switch] no eligible node for current session")
         return
 
-    controller._auto_switch_low_since = 0.0
     controller._auto_switch_last_switch = now
-    controller._auto_switch_active_download = False
-    controller._auto_switch_high_ticks = 0
     controller._auto_switch_cycle_attempts += 1
     controller._auto_switch_transitioning = True
     controller._log(f"{log_message} to {next_node.name}")

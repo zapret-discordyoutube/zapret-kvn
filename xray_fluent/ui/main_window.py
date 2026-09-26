@@ -699,7 +699,7 @@ class MainWindow(FluentWindow):
     def _on_auto_switch(self, node_name: str) -> None:
         InfoBar.warning(
             "Авто-переключение",
-            f"Скорость упала. Переключение на {node_name}...",
+            f"Сервер не отвечает. Переключение на {node_name}...",
             position=InfoBarPosition.TOP_RIGHT,
             duration=30000,
             parent=self,
