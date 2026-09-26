@@ -61,11 +61,42 @@ def install_translations(app: QCoreApplication) -> None:
         app.installTranslator(_translator)
 
 
+def _icon_only_paint(original):
+    """``PushButton`` в режиме «только значок»: значок строго по центру.
+
+    Оригинал сдвигает значок влево под подпись (x = 12 + ...), поэтому у
+    кнопки без текста он съезжал и обрезался. Режим включает
+    ``adaptive_buttons`` атрибутом ``_zk_icon_only``.
+    """
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QPainter
+    from PyQt6.QtWidgets import QPushButton
+
+    def paintEvent(self, event):
+        if not getattr(self, "_zk_icon_only", False):
+            return original(self, event)
+        QPushButton.paintEvent(self, event)
+        if self.icon().isNull():
+            return
+        painter = QPainter(self)
+        painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        if not self.isEnabled():
+            painter.setOpacity(0.3628)
+        elif self.isPressed:
+            painter.setOpacity(0.786)
+        w, h = self.iconSize().width(), self.iconSize().height()
+        self._drawIcon(self._icon, painter, QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h))
+
+    return paintEvent
+
+
 def install() -> None:
     global _installed
     if _installed:
         return
+    from qfluentwidgets import PushButton
     from qfluentwidgets.components.widgets.switch_button import Indicator
 
     Indicator._toggleSlider = _toggle_slider
+    PushButton.paintEvent = _icon_only_paint(PushButton.paintEvent)
     _installed = True

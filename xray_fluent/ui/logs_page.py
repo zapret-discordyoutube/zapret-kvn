@@ -3,6 +3,8 @@ from __future__ import annotations
 from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, PlainTextEdit, PrimaryPushButton, PushButton, SearchLineEdit, SubtitleLabel
+from qfluentwidgets import FluentIcon as FIF
+from .adaptive_buttons import AdaptiveButtonRow
 
 
 class LogsPage(QWidget):
@@ -28,16 +30,18 @@ class LogsPage(QWidget):
         toolbar = QHBoxLayout()
         self.search = SearchLineEdit(self)
         self.search.setPlaceholderText("Фильтр логов")
-        self.clear_btn = PushButton("Очистить", self)
-        self.export_btn = PrimaryPushButton("Экспорт диагностики", self)
+        self.clear_btn = PushButton(FIF.BROOM, "Очистить", self)
+        self.export_btn = PrimaryPushButton(FIF.SHARE, "Экспорт диагностики", self)
 
         toolbar.addWidget(self.search, 1)
-        self.errors_btn = PushButton("Ошибки ядер", self)
+        self.errors_btn = PushButton(FIF.INFO, "Ошибки ядер", self)
         self.errors_btn.setCheckable(True)
         toolbar.addWidget(self.errors_btn)
         toolbar.addWidget(self.clear_btn)
         toolbar.addWidget(self.export_btn)
         root.addLayout(toolbar)
+        # Не хватает места — подписи уходят в подсказки, остаются значки.
+        self._toolbar_fit = AdaptiveButtonRow(toolbar, [self.export_btn, self.errors_btn, self.clear_btn])
 
         root.addWidget(BodyLabel("Логи работы", self))
         self.log_edit = PlainTextEdit(self)

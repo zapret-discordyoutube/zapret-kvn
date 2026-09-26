@@ -5,6 +5,7 @@ from pathlib import Path
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -18,6 +19,7 @@ from qfluentwidgets import (
 )
 
 from .base_page import ScrollablePage
+from .adaptive_buttons import AdaptiveButtonRow
 
 
 def _expand_horizontally(widget) -> None:
@@ -90,11 +92,11 @@ class _RawConfigEditor(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
-        self.open_btn = PushButton("Импорт шаблона", self)
-        self.reset_btn = PushButton("Сбросить к шаблону", self)
-        self.save_btn = PushButton("Сохранить", self)
-        self.validate_btn = PushButton("Проверить JSON", self)
-        self.apply_btn = PrimaryPushButton("Применить", self)
+        self.open_btn = PushButton(FIF.FOLDER, "Импорт шаблона", self)
+        self.reset_btn = PushButton(FIF.RETURN, "Сбросить к шаблону", self)
+        self.save_btn = PushButton(FIF.SAVE, "Сохранить", self)
+        self.validate_btn = PushButton(FIF.ACCEPT, "Проверить JSON", self)
+        self.apply_btn = PrimaryPushButton(FIF.PLAY, "Применить", self)
         toolbar.addWidget(self.open_btn)
         toolbar.addWidget(self.reset_btn)
         toolbar.addWidget(self.save_btn)
@@ -102,6 +104,10 @@ class _RawConfigEditor(QWidget):
         toolbar.addStretch(1)
         toolbar.addWidget(self.apply_btn)
         root.addLayout(toolbar)
+        # Не хватает места — подписи уходят в подсказки, остаются значки.
+        self._toolbar_fit = AdaptiveButtonRow(
+            toolbar, [self.apply_btn, self.save_btn, self.validate_btn, self.open_btn, self.reset_btn]
+        )
 
         self.editor = PlainTextEdit(self)
         self.editor.setPlaceholderText(f"Raw {title}.json")

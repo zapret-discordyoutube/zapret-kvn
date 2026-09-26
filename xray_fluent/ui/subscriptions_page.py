@@ -53,6 +53,7 @@ from ..importer.subscription_parser import validate_filter_patterns
 from .detail_page import DetailPage, StackedSection
 from .fluent_dialog import FluentDialog
 from .theme import accent_color, on_accent_changed
+from .adaptive_buttons import AdaptiveButtonRow
 
 
 class ScreenRegionSelector(QWidget):
@@ -545,9 +546,9 @@ class SubscriptionsPage(StackedSection):
         self.update_btn.setToolTip("Обновить выбранную")
         # Кнопка читала подписку и ничего не применяла, поэтому свежие серверы
         # оставались только в отчёте — со стороны это выглядело потерей серверов.
-        self.check_btn = PushButton("Проверить и обновить", self)
+        self.check_btn = PushButton(FIF.UPDATE, "Проверить и обновить", self)
         self.check_btn.setToolTip("Загрузить подписку и применить изменения")
-        self.force_update_btn = PushButton("Полностью обновить без кэша", self)
+        self.force_update_btn = PushButton(FIF.CLOUD_DOWNLOAD, "Полностью обновить без кэша", self)
         self.force_update_btn.setToolTip(
             "Один раз загрузить полное тело без ETag и Last-Modified"
         )
@@ -565,6 +566,8 @@ class SubscriptionsPage(StackedSection):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         root.addLayout(toolbar)
+        # Не хватает места — длинные подписи уходят в подсказки, остаются значки.
+        self._toolbar_fit = AdaptiveButtonRow(toolbar, [self.check_btn, self.force_update_btn])
 
         self.table = TableWidget(self)
         self.table.setColumnCount(8)

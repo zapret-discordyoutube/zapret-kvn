@@ -37,7 +37,6 @@ from PyQt6.QtWidgets import (
 )
 from qfluentwidgets.common.font import getFont
 from qfluentwidgets import (
-    ToolButton,
     BodyLabel,
     CaptionLabel,
     CardWidget,
@@ -64,6 +63,7 @@ from .detail_page import DetailPage, StackedSection
 from .privacy import masked_endpoint, node_name_text
 from .theme import error_color, graph_down_color, graph_up_color, on_theme_or_accent_changed, positive_color
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
+from .adaptive_buttons import AdaptiveButtonRow
 
 #: Ширина области прокрутки, ниже которой карточки встают в одну колонку.
 NARROW_WIDTH = 900
@@ -315,18 +315,8 @@ class DashboardPage(StackedSection):
         self.servers_btn = PushButton(FIF.MENU, "Все серверы", self.server_row)
         self.servers_btn.clicked.connect(self.servers_requested)
         row.addWidget(self.servers_btn)
-        # На узком окне вместо кнопок с подписью — отдельные кнопки-значки:
-        # у PushButton без текста значок смещён и обрезается.
-        self.next_server_icon_btn = ToolButton(FIF.SYNC, self.server_row)
-        self.next_server_icon_btn.setToolTip("Следующий сервер")
-        self.next_server_icon_btn.clicked.connect(self.next_node_requested)
-        self.next_server_icon_btn.hide()
-        row.addWidget(self.next_server_icon_btn)
-        self.servers_icon_btn = ToolButton(FIF.MENU, self.server_row)
-        self.servers_icon_btn.setToolTip("Все серверы")
-        self.servers_icon_btn.clicked.connect(self.servers_requested)
-        self.servers_icon_btn.hide()
-        row.addWidget(self.servers_icon_btn)
+        # Не хватает места — подписи кнопок уходят в подсказки, остаются значки.
+        self._server_buttons_fit = AdaptiveButtonRow(row, [self.servers_btn, self.next_server_btn])
         layout.addWidget(self.server_row)
 
     def _build_mode_card(self, container: QWidget) -> None:
@@ -593,11 +583,6 @@ class DashboardPage(StackedSection):
             self._compact = compact
             self._apply_density(compact)
         narrow = viewport.width() < NARROW_WIDTH
-        # На узком окне кнопки сервера — только значки (с подсказками).
-        self.next_server_btn.setVisible(not narrow)
-        self.servers_btn.setVisible(not narrow)
-        self.next_server_icon_btn.setVisible(narrow)
-        self.servers_icon_btn.setVisible(narrow)
         if narrow == self._grid_narrow:
             return
         self._in_grid_relayout = True
@@ -1203,7 +1188,6 @@ class DashboardPage(StackedSection):
         self.vpn_tile.setEnabled(not busy)
         self.proxy_tile.setEnabled(not busy)
         self.next_server_btn.setEnabled(self._node_count > 1 and not busy)
-        self.next_server_icon_btn.setEnabled(self._node_count > 1 and not busy)
         self.mode_combo.setVisible(self._is_tun2socks_mode())
         self.mode_combo.setEnabled(not busy and self._is_tun2socks_mode())
         self.proxy_switch.setEnabled(not busy and not self._settings.tun_mode)
