@@ -3,24 +3,30 @@
 A transition is written as a plain Python generator that yields
 :class:`TransitionStep` objects.  Two drivers execute such generators:
 
-- :class:`TransitionRunner` — the asynchronous driver.  It subscribes to the
-  completion of each yielded step and resumes the generator in the GUI thread
-  through a queued Qt signal, so the Qt event loop keeps running between steps
-  (no ``processEvents``/``waitForFinished`` re-entrancy).  Before every resume
-  the runner re-checks an ``is_current`` predicate (the controller's
-  ``_transition_generation``); a stale transition is cancelled by closing the
-  generator, which runs its ``finally`` blocks and keeps state consistent.
-- :func:`run_steps_blocking` — the legacy synchronous driver used by the cold
-  compatibility wrappers (shutdown, non-migrated connect paths).  It executes
-  each step with the historical pumped-wait primitives so old call sites keep
-  their exact behaviour.
+- :class:`TransitionRunner` — the asynchronous driver used by every
+  connection transition (connect, disconnect, reconnect, server switch,
+  proxy/TUN changes) and by manager-owned background runs (Zapret start,
+  Hysteria compatibility retry).  It subscribes to the completion of each
+  yielded step and resumes the generator in the GUI thread through a queued
+  Qt signal, so the Qt event loop keeps running between steps (no
+  ``processEvents``/``waitForFinished`` re-entrancy).  An optional
+  ``is_current`` predicate closes a stale generator before its next resume;
+  the connection coordinator does not use it — its generators check the
+  transition generation themselves and clean up explicitly.
+- :func:`run_steps_blocking` — the synchronous driver for application
+  shutdown and unit tests only.  It executes each step with the historical
+  pumped-wait primitives and fails fast on anything that is not a generator
+  yielding steps.
+
+Every waiting step has a deadline: process waits and sleeps by construction,
+worker steps by ``WORKER_STEP_DEADLINE_MS``.
 
 Steps deliver worker exceptions into the generator via ``throw()`` so the
 existing ``try/except/finally`` blocks of migrated operations (rollback,
 cleanup, ``connection_changed`` in ``finally``) keep working unchanged.
 
 QProcess objects never leave the GUI thread: only pure callables (subprocess
-runs, socket probes, file reads) are shipped to the worker pool.
+runs, socket probes, file writes, WinAPI calls) are shipped to worker pools.
 """
 
 from __future__ import annotations

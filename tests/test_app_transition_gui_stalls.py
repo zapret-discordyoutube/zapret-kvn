@@ -151,6 +151,32 @@ def _slow_balancer(xray_path, api_port, balancer_tag, outbound_tag, *, pump=True
     return True, ""
 
 
+def _slow_relay_probe(port, *, host="127.0.0.1", connect_timeout=0.15) -> bool:
+    time.sleep(0.15)
+    return True
+
+
+def _slow_remote_probe(self, relay_port, *, username, password, endpoint, timeout) -> None:
+    time.sleep(PROBE_DELAY)
+
+
+def _slow_https_probe(port, *, username, password, endpoint, timeout) -> None:
+    time.sleep(PROBE_DELAY)
+
+
+_AWG_STUB = """#!/usr/bin/env python3
+import json, sys, time
+config = json.loads(sys.stdin.readline())
+ident = {key: config.get(key) for key in ("session_generation", "target_generation", "target_ref")}
+def emit(stage, **fields):
+    print(json.dumps({"stage": stage, **ident, **fields}), flush=True)
+emit("relay_ready")
+time.sleep(0.2)
+emit("stats", peers=[{"last_handshake_time_sec": 1}])
+sys.stdin.read()
+"""
+
+
 def _slow_resolve_target(spec):
     time.sleep(DNS_DELAY)
     return ResolvedZapretEndpoint(spec, ("203.0.113.10",))
@@ -188,6 +214,18 @@ class TransitionGuiStallTests(unittest.TestCase):
         xray_stub = cls.tmp / "xray"
         shutil.copy(stub, xray_stub)
         xray_stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        hysteria_stub = cls.tmp / "hysteria"
+        shutil.copy(stub, hysteria_stub)
+        hysteria_stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        winws_stub = cls.tmp / "winws2"
+        shutil.copy(stub, winws_stub)
+        winws_stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        awg_stub = cls.tmp / "zapret-amnezia"
+        awg_stub.write_text(_AWG_STUB, encoding="utf-8")
+        awg_stub.chmod(awg_stub.stat().st_mode | stat.S_IEXEC)
+        presets = cls.tmp / "presets"
+        presets.mkdir()
+        (presets / "Default.txt").write_text("--wf-tcp-out=443\n--filter-tcp=443\n", encoding="utf-8")
         cls.stub = stub
 
         cls.pump_calls = 0
@@ -213,6 +251,18 @@ class TransitionGuiStallTests(unittest.TestCase):
             patch("xray_fluent.engines.xray.manager.probe_listener_role", _slow_probe),
             patch("xray_fluent.application.controller.apply_balancer_override", _slow_balancer),
             patch("xray_fluent.application.connection_service._is_admin", lambda: True),
+            patch("xray_fluent.engines.hysteria.manager.HYSTERIA_PATH_DEFAULT", hysteria_stub),
+            patch("xray_fluent.engines.hysteria.manager.HYSTERIA_CONFIG_FILE", cls.tmp / "hysteria_config.json"),
+            patch("xray_fluent.engines.hysteria.manager.RUNTIME_DIR", cls.tmp),
+            patch("xray_fluent.engines.hysteria.manager.kill_processes_by_path", _slow_kill_orphans),
+            patch("xray_fluent.engines.hysteria.manager.HysteriaManager._probe_remote_endpoint", _slow_remote_probe),
+            patch("xray_fluent.engines.sidecar.readiness.probe_loopback_relay", _slow_relay_probe),
+            patch("xray_fluent.engines.amnezia.manager.AMNEZIA_PATH_DEFAULT", awg_stub),
+            patch("xray_fluent.engines.amnezia.manager.probe_https", _slow_https_probe),
+            patch("xray_fluent.engines.zapret.manager.WINWS2_EXE", winws_stub),
+            patch("xray_fluent.engines.zapret.manager.ZAPRET_DIR", cls.tmp),
+            patch("xray_fluent.engines.zapret.manager.PRESETS_DIR", presets),
+            patch("xray_fluent.engines.zapret.manager.kill_processes_by_path", _slow_kill_orphans),
             patch.object(subprocess_utils, "run_text", _slow_run_text),
             patch("xray_fluent.engines.singbox.selector_api._send_selector_request", _slow_selector),
             patch.object(runtime_services, "start_metrics_worker", lambda controller: None),
@@ -249,11 +299,27 @@ class TransitionGuiStallTests(unittest.TestCase):
                 "?type=tcp&security=tls&sni=three.example#three"
             ),
         ]
+        cls.sidecar_nodes = [
+            parse_single(
+                "hy2://secret@198.51.100.20:443/?insecure=1&pinSHA256="
+                + "a" * 64
+                + "#hysteria"
+            ),
+            parse_single(
+                '{"type": "wireguard", "tag": "awg", "address": ["10.0.0.2/32"], '
+                '"private_key": "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=", '
+                '"peers": [{"address": "198.51.100.7", "port": 51820, '
+                '"public_key": "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=", '
+                '"allowed_ips": ["0.0.0.0/0"]}]}'
+            ),
+        ]
         for index, node in enumerate(cls.nodes):
             node.sort_order = index
 
         state = AppState()
-        state.nodes = list(cls.nodes)
+        state.nodes = list(cls.nodes) + list(cls.sidecar_nodes)
+        for index, node in enumerate(state.nodes):
+            node.sort_order = index
         state.selected_node_id = cls.nodes[0].id
         state.settings.enable_system_proxy = True
         state.settings.tun_mode = False
@@ -278,6 +344,7 @@ class TransitionGuiStallTests(unittest.TestCase):
                 _spin_until(lambda: cls._idle(), 20_000)
             for manager in (controller.singbox, controller.xray, controller.hysteria, controller.amnezia):
                 manager.stop()
+            controller.zapret.stop(wait=True)
         finally:
             cls.watchdog.stop()
             for patcher in reversed(cls.patchers):
@@ -409,6 +476,61 @@ class TransitionGuiStallTests(unittest.TestCase):
         self._measure(toggle_twice, until=lambda: not controller._desired_connected and not controller.connected)
         self.assertFalse(controller.singbox.is_running)
         self.assertFalse(controller.proxy.query_state().enabled)
+
+    def test_3_sidecars_and_zapret_protection_do_not_stall_gui(self) -> None:
+        controller = self.controller
+        native_a, native_b, _hybrid = self.nodes
+        hysteria, awg = self.sidecar_nodes
+        if controller.connected or controller._desired_connected:
+            controller._desired_connected = False
+            controller._request_transition("reset")
+            self.assertTrue(_spin_until(lambda: not controller.connected and self._idle()))
+        controller.state.selected_node_id = hysteria.id
+
+        # Hysteria2: official core behind the sing-box front
+        self._measure(
+            controller.toggle_connection,
+            until=lambda: self._connected_to(hysteria) and controller.hysteria.is_running,
+        )
+        # AWG/WireGuard: replacement sidecar prepared before the front cut-over
+        self._measure(
+            lambda: controller.set_selected_node(awg.id),
+            until=lambda: self._connected_to(awg) and controller.amnezia.is_running,
+        )
+        self.assertFalse(controller.hysteria.is_running)
+        self._measure(
+            controller.toggle_connection,
+            until=lambda: not controller.connected and not controller.amnezia.is_running,
+        )
+
+        # Zapret-protected TCP targets: winws2 start, stop before DNS and the
+        # pass-profile restart are coordinator steps, not GUI-thread waits.
+        settings = controller.state.settings
+        settings.zapret_target.tcp_proxy_enabled = True
+        settings.zapret_preset = "Default"
+        controller.zapret.set_target_settings(settings.zapret_target)
+        controller.state.selected_node_id = native_a.id
+        try:
+            self._measure(
+                controller.toggle_connection,
+                until=lambda: self._connected_to(native_a) and controller.zapret.running,
+            )
+            first_winws = controller.zapret._process
+            self._measure(
+                lambda: controller.set_selected_node(native_b.id),
+                until=lambda: self._connected_to(native_b)
+                and controller.zapret.running
+                and controller.zapret._process is not first_winws,
+            )
+            self._measure(
+                controller.toggle_connection,
+                until=lambda: not controller.connected and not controller.singbox.is_running,
+            )
+        finally:
+            settings.zapret_target.tcp_proxy_enabled = False
+            controller.zapret.set_target_settings(settings.zapret_target)
+            controller.zapret.stop()
+            _spin_until(lambda: controller.zapret._start_runner is None, 5_000)
 
 
 if __name__ == "__main__":

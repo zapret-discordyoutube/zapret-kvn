@@ -49,6 +49,13 @@ def run_text(
     return subprocess.run(command, **kwargs)
 
 
+# Pumped helpers below (pump_qt_events, sleep_with_events, wait_for_qprocess_*,
+# wait_for_future_with_events, run_text_pumped) re-enter the Qt event loop.
+# Connection transitions never use them: they run as async_steps generators.
+# Remaining callers are the synchronous shutdown driver (run_steps_blocking),
+# version probes on settings pages and the legacy Xray TUN route manager.
+
+
 def pump_qt_events() -> None:
     try:
         from PyQt6.QtCore import QThread
