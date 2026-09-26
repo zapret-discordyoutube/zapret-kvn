@@ -12,7 +12,9 @@
    подозрения.
 2. Контрольный замер текущего сервера — короткая ограниченная загрузка через
    работающий локальный прокси (``ActiveProxySpeedProbeWorker``, вне GUI-потока).
-   Скорость не ниже порога — ложная тревога, пауза ``SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC``.
+   Скорость не ниже порога — ложная тревога, пауза ``SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC``;
+   ни байта не пришло — результат неясен (не дошёл сам замер), та же пауза без
+   переключения: отказ по адресу назначения не повод менять сервер.
 3. Сервер подтверждённо медленный — до ``SMART_SWITCH_MAX_CANDIDATES`` кандидатов
    меряются штатным ``SpeedTestWorker`` (временный xray на своих портах, активное
    подключение не трогается).  Переключение — только если лучший кандидат не
@@ -337,6 +339,9 @@ def _start_current_probe(controller: AppController, state: SmartSwitchState, now
         controller._log("[auto-switch] замер невозможен: нет локального HTTP-прокси — проверка отложена")
         state.cooldown_until = now + SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC
         return
+    # В TUN — обычным соединением, которое уводит сам TUN (как ConnectivityTestWorker):
+    # наличие HTTP-inbound в TUN-сессии не гарантировано.
+    probe_port = None if tun_mode else http_port
     state.generation += 1
     state.phase = PHASE_PROBE_CURRENT
     state.phase_started_at = now
@@ -344,7 +349,7 @@ def _start_current_probe(controller: AppController, state: SmartSwitchState, now
     state.current_bps = 0.0
     state.results = {}
     state.candidate_ids = []
-    worker = create_probe_worker(http_port if http_port > 0 else None)
+    worker = create_probe_worker(probe_port)
     state.probe_worker = worker
     _track_worker(state, worker)
     worker.measured.connect(controller._on_smart_probe_measured)
@@ -388,20 +393,26 @@ def on_current_probe_measured(
         return
     node = controller.selected_node
     name = node.name if node is not None else str(state.node_id)
-    if bps is not None and bps >= SMART_SWITCH_THRESHOLD_BPS:
+    if bps is None:
+        # Ни байта: скорее всего, не дошёл сам замер (inbound, блокировка или
+        # маршрут до тестового файла), а не сервер медленный.  Отказ по одному
+        # адресу назначения никогда не повод уходить с сервера
+        # (destination-scope): мёртвый сервер — забота детектора мёртвого линка.
+        controller._log(
+            f"[auto-switch] замер {name} не удался (данные не пришли) — результат неясен, "
+            f"остаёмся; повтор не раньше чем через {SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC / 60:.0f} мин"
+        )
+        _finish(state, now, cooldown=True)
+        return
+    if bps >= SMART_SWITCH_THRESHOLD_BPS:
         controller._log(
             f"[auto-switch] замер {name}: {_kbps(bps)} ≥ порога {_kbps(SMART_SWITCH_THRESHOLD_BPS)} — "
             f"ложная тревога, повтор не раньше чем через {SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC / 60:.0f} мин"
         )
         _finish(state, now, cooldown=True)
         return
-    # Замер не удался совсем (ни байта за отведённое время) — сервер не отдаёт
-    # данные, считаем скорость нулевой; решение всё равно за замером кандидатов.
-    state.current_bps = float(bps or 0.0)
-    controller._log(
-        f"[auto-switch] замер {name}: {_kbps(bps) if bps is not None else 'данные не пришли'} — "
-        f"сервер подтверждённо медленный"
-    )
+    state.current_bps = float(bps)
+    controller._log(f"[auto-switch] замер {name}: {_kbps(bps)} — сервер подтверждённо медленный")
     candidates = select_candidates(
         controller.state.nodes,
         state.node_id,

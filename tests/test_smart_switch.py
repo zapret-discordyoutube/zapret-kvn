@@ -245,8 +245,8 @@ class SuspicionTests(SmartSwitchTestBase):
         self.feed(1017.0, 15)
         self.assertEqual(self.probes, [])
 
-    def test_tun_mode_without_http_port_probes_directly(self) -> None:
-        self.controller._active_session = SimpleNamespace(http_port=0, tun_mode=True)
+    def test_tun_mode_probes_directly_through_tun(self) -> None:
+        self.controller._active_session = SimpleNamespace(http_port=10809, tun_mode=True)
         self.suspect()
         self.assertIsNone(self.probes[0].http_port)
 
@@ -337,11 +337,15 @@ class ProbeDecisionTests(SmartSwitchTestBase):
         self.assertTrue(smart.is_slow_marked(self.state, "n0", now + 21))
         self.assertTrue(any(line.startswith("[auto-switch] решение: переключение") for line in self.controller.logs))
 
-    def test_failed_current_probe_counts_as_zero_speed(self) -> None:
+    def test_failed_current_probe_is_inconclusive(self) -> None:
+        # Ни байта через текущий сервер — не доказательство медленности
+        # (destination-scope): кандидатов не меряем, не переключаемся.
         now = self.suspect()
         on_current_probe_measured(self.controller, self.probes[0], None, now=now)
-        self.run_candidates(now + 20, {"n1": 0.5})
-        self.assertEqual(self.controller.selected, [("n1", False)])
+        self.assertEqual(self.candidate_workers, [])
+        self.assertEqual(self.controller.selected, [])
+        self.assertEqual(self.state.phase, PHASE_IDLE)
+        self.assertGreater(self.state.cooldown_until, now)
 
     def test_candidate_not_twice_as_fast_does_not_switch(self) -> None:
         now = self.suspect()
