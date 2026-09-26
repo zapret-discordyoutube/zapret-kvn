@@ -8,9 +8,9 @@ import sys
 import time
 import logging
 
-from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtCore import QPoint, QTimer, QUrl
 from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QGuiApplication, QIcon
-from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QSystemTrayIcon, QWidget
 from qfluentwidgets import (
     FluentIcon as FIF,
     FluentWindow,
@@ -231,10 +231,14 @@ class MainWindow(FluentWindow):
     def _create_navigation(self) -> None:
         self.navigationInterface.setMinimumExpandWidth(1100)
         self.navigationInterface.setExpandWidth(200)
-        self.addSubInterface(self.dashboard_page, FIF.SPEED_HIGH, "Панель")
-        self.addSubInterface(self.nodes_page, FIF.LINK, "Серверы")
-        self.addSubInterface(self.subscriptions_page, FIF.CLOUD, "Подписки")
-        routing_item = self.addSubInterface(self.configs_page, FIF.IOT, "Маршрутизация")
+        # Основные пункты — в прокручиваемой области панели: верхняя (TOP) не
+        # прокручивается, и на низком окне раскрытая «Маршрутизация» наезжала
+        # на пункты под ней.
+        scroll = NavigationItemPosition.SCROLL
+        self.addSubInterface(self.dashboard_page, FIF.SPEED_HIGH, "Панель", scroll)
+        self.addSubInterface(self.nodes_page, FIF.LINK, "Серверы", scroll)
+        self.addSubInterface(self.subscriptions_page, FIF.CLOUD, "Подписки", scroll)
+        routing_item = self.addSubInterface(self.configs_page, FIF.IOT, "Маршрутизация", scroll)
         routing_item.clicked.connect(lambda *_args: self._open_routing_section("overview"))
         for key, title, icon in ROUTING_SECTIONS:
             if key == "overview":
@@ -247,15 +251,35 @@ class MainWindow(FluentWindow):
                 tooltip=title,
                 parentRouteKey=self.configs_page.objectName(),
             )
-        self.addSubInterface(self.zapret_page, FIF.COMMAND_PROMPT, "Zapret")
-        self.addSubInterface(self.logs_page, FIF.DOCUMENT, "Логи")
-        self.addSubInterface(self.history_page, FIF.HISTORY, "История")
+        # Раскрытые подпункты не должны оставаться за нижним краем панели.
+        routing_item.expandAni.finished.connect(lambda: self._reveal_nav_item(routing_item))
+        self.addSubInterface(self.zapret_page, FIF.COMMAND_PROMPT, "Zapret", scroll)
+        self.addSubInterface(self.logs_page, FIF.DOCUMENT, "Логи", scroll)
+        self.addSubInterface(self.history_page, FIF.HISTORY, "История", scroll)
         self.addSubInterface(self.about_page, FIF.INFO, "О проекте", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.updates_page, FIF.UPDATE, "Обновления", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.settings_page, FIF.SETTING, "Настройки", NavigationItemPosition.BOTTOM)
         # Подключаемся после внутреннего toggle() панели — к моменту вызова
         # слота режим уже выбран.
         self.navigationInterface.panel.menuButton.clicked.connect(self._on_nav_menu_clicked)
+
+    def _reveal_nav_item(self, item: QWidget) -> None:
+        """Докрутить панель к раскрытым подпунктам, не пряча сам пункт.
+
+        ``ensureWidgetVisible`` для пункта выше окна прокрутки уводит его
+        заголовок за верхний край — считаем прокрутку сами.
+        """
+        if not getattr(item, "isExpanded", False):
+            return
+        area = self.navigationInterface.panel.scrollArea
+        bar = area.verticalScrollBar()
+        top = item.mapTo(area.widget(), QPoint(0, 0)).y()
+        bottom = top + item.height()
+        visible = area.viewport().height()
+        if top < bar.value():
+            bar.setValue(top)
+        elif bottom > bar.value() + visible:
+            bar.setValue(min(top, bottom - visible))
 
     def _open_routing_section(self, key: str) -> None:
         """Подпункт «Маршрутизации»: одна страница-контейнер, свой раздел внутри."""
