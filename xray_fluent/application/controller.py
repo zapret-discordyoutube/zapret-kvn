@@ -2164,6 +2164,54 @@ class AppController(QObject):
         self._desired_connected = True
         on_stopped()
 
+    def _run_coordinated_stop(self, reason: str, on_stopped: Callable[[bool], None]) -> bool:
+        """Disconnect as a coordinator-owned step transition, then call back.
+
+        For actions that need the connection fully stopped before they run
+        (Xray core replacement). ``False`` — a transition is in flight; the
+        caller asks the user to retry instead of nesting a stop into it.
+        """
+        if self._transition_active:
+            return False
+        self._log(f"[transition] coordinated stop: {reason}")
+        self._desired_connected = False
+        self._transition_generation += 1
+        self._transition_pending = False
+        if self._transition_timer.isActive():
+            self._transition_timer.stop()
+        self._transition_scheduled = False
+        self._transition_active = True
+        self.transition_state_changed.emit(True, self._transition_status_text("disconnect"))
+        runner = TransitionRunner(
+            self._disconnect_current_steps(),
+            on_finished=lambda finished: self._on_coordinated_stop_finished(finished, on_stopped),
+            parent=self,
+        )
+        self._transition_runner = runner
+        runner.start()
+        return True
+
+    def _on_coordinated_stop_finished(
+        self,
+        runner: TransitionRunner,
+        on_stopped: Callable[[bool], None],
+    ) -> None:
+        if self._transition_runner is runner:
+            self._transition_runner = None
+        runner.deleteLater()
+        self._transition_active = False
+        if runner.cancelled:
+            return
+        if runner.error is not None:
+            self._log(f"[transition] coordinated stop failed with error: {runner.error!r}")
+        try:
+            on_stopped(bool(runner.result) and runner.error is None)
+        finally:
+            if self._transition_pending or self._cleanup_pending or self._needs_transition():
+                self._kick_transition(0)
+            else:
+                self.transition_state_changed.emit(False, "")
+
     def _request_stop(self, reason: str, *, quiet: bool) -> None:
         """Queue a coordinated disconnect (desired state is already False)."""
         self._desired_connected = False

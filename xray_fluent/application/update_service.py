@@ -19,18 +19,33 @@ def run_xray_core_update(controller: AppController, apply_update: bool, silent: 
         return
 
     if apply_update and controller.connected:
-        stopped = controller.disconnect_current()
-        if not stopped:
-            controller._reconnect_after_xray_update = False
-            if silent:
-                controller._log("[core-update] update cancelled: failed to stop active connection")
-            else:
-                controller.status.emit("error", "Не удалось остановить активное подключение перед обновлением Xray")
-            return
-        controller._reconnect_after_xray_update = True
-    else:
-        controller._reconnect_after_xray_update = False
+        # Остановка перед заменой xray.exe — шаг координатора переходов, не
+        # синхронный disconnect_current() в GUI-потоке; воркер обновления
+        # стартует, когда подключение действительно остановлено.
+        def after_stop(stopped: bool) -> None:
+            if not stopped:
+                controller._reconnect_after_xray_update = False
+                if silent:
+                    controller._log("[core-update] update cancelled: failed to stop active connection")
+                else:
+                    controller.status.emit("error", "Не удалось остановить активное подключение перед обновлением Xray")
+                return
+            controller._reconnect_after_xray_update = True
+            _start_update_worker(controller, apply_update, silent)
 
+        if not controller._run_coordinated_stop("core update", after_stop):
+            message = "Дождитесь завершения текущего переключения и повторите обновление Xray"
+            if silent:
+                controller._log(f"[core-update] {message}")
+            else:
+                controller.status.emit("warning", message)
+        return
+
+    controller._reconnect_after_xray_update = False
+    _start_update_worker(controller, apply_update, silent)
+
+
+def _start_update_worker(controller: AppController, apply_update: bool, silent: bool) -> None:
     controller._xray_update_silent = silent
     controller._xray_update_worker = XrayCoreUpdateWorker(
         controller.state.settings.xray_path,

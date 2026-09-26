@@ -185,8 +185,9 @@ def _slow_resolve_target(spec):
 def _windows_only_module_stubs() -> dict[str, types.ModuleType]:
     """win_proc_monitor грузит ctypes.windll при импорте — на POSIX заглушка.
 
-    Ставится через patch.dict(sys.modules) только на время этого класса, чтобы
-    не подменить модуль другим тестам (test_auto_switch_dead_link).
+    Ставится только на время этого класса и снимается точечно (только свои
+    ключи), чтобы не подменить модуль другим тестам (test_auto_switch_dead_link)
+    и не выгрузить модули, впервые импортированные за время класса.
     """
 
     if not _POSIX:
@@ -235,8 +236,10 @@ class TransitionGuiStallTests(unittest.TestCase):
             cls.pump_calls += 1
             original_pump()
 
+        stubs = {name: module for name, module in _windows_only_module_stubs().items() if name not in sys.modules}
+        sys.modules.update(stubs)
+        cls.module_stubs = list(stubs)
         cls.patchers = [
-            patch.dict(sys.modules, _windows_only_module_stubs()),
             patch.object(subprocess_utils, "pump_qt_events", counting_pump),
             patch("xray_fluent.application.async_steps.pump_qt_events", counting_pump),
             patch("xray_fluent.engines.singbox.manager.resolve_configured_path", lambda *a, **k: stub),
@@ -349,6 +352,8 @@ class TransitionGuiStallTests(unittest.TestCase):
             cls.watchdog.stop()
             for patcher in reversed(cls.patchers):
                 patcher.stop()
+            for name in cls.module_stubs:
+                sys.modules.pop(name, None)
             shutil.rmtree(cls.tmp, ignore_errors=True)
 
     @classmethod
@@ -441,6 +446,15 @@ class TransitionGuiStallTests(unittest.TestCase):
             until=lambda: self._connected_to(native_a) and not controller._active_session.tun_mode,
         )
         self.assertTrue(controller.proxy.query_state().is_ours)
+
+        # coordinated stop before an action that needs the connection down
+        # (Xray core update): the callback runs after the step transition.
+        stopped: list[bool] = []
+        self._measure(
+            lambda: self.assertTrue(controller._run_coordinated_stop("test", stopped.append)),
+            until=lambda: stopped == [True] and not controller.connected,
+        )
+        self._measure(controller.toggle_connection, until=lambda: self._connected_to(native_a))
 
         # disconnect
         self._measure(
