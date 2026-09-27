@@ -81,6 +81,7 @@ BLOB_REGISTRY: dict[str, str] = {
     "tls_max": "@bin/tls_clienthello_max_ru.bin",
     "tls_sber": "@bin/tls_clienthello_sberbank_ru.bin",
     "tls_sber_v2": "@bin/tls_clienthello_sberbank_ru_v2.bin",
+    "tls_sochi": "@bin/tls_clienthello_sochi_park.bin",
     "tls_stun": "@bin/stun.bin",
     "tls_vk": "@bin/tls_clienthello_vk_com.bin",
     "tls_vk_kyber": "@bin/tls_clienthello_vk_com_kyber.bin",
