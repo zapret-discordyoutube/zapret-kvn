@@ -29,7 +29,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from ...singbox_config import catalog
+from ...singbox_config import catalog, list_values
 from ..qt_lifecycle import dispose_later
 from .visuals import enum_icon, tag_icon
 from ...singbox_config.document import as_list, store_list, tags
@@ -267,23 +267,49 @@ class ListEditor(_Debounced, FieldEditor):
         self.edit.setFixedHeight(18 * lines + 18)
 
     def _commit(self) -> None:
+        # «2ip.ru, 2ip.io» в одной строке — два домена (list_values): для доменов,
+        # IP и портов запятая и пробел разделяют значения, домены приводятся к
+        # виду ядра. Недопустимое значение не сохраняется — причина под полем.
         item_shape = self.shape.item or self.shape
         items: list = []
-        for line in self.edit.toPlainText().splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        for raw in list_values.split_values(self.name, self.edit.toPlainText()):
+            value, problem = list_values.normalize_value(self.name, raw)
             try:
-                items.append(_convert_scalar(line, item_shape))
+                if problem:
+                    raise ValueError(problem)
+                item = _convert_scalar(value, item_shape)
             except ValueError:
-                self.error.setText(f"Не подходит значение: {line}")
+                self.error.setText(problem or f"Не подходит значение: {raw}")
                 self.error.setVisible(True)
                 return
+            if item not in items:
+                items.append(item)
         self.error.setVisible(False)
         before = json.dumps(self.owner.get(self.name), ensure_ascii=False)
         store_list(self.owner, self.name, items, self.shape)
         if json.dumps(self.owner.get(self.name), ensure_ascii=False) != before:
             self.changed.emit()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt API
+        if event.type() == QEvent.Type.FocusOut:
+            self.flush()
+            self._show_stored()
+        return False
+
+    def flush(self) -> None:
+        super().flush()
+        self._show_stored()
+
+    def _show_stored(self) -> None:
+        """После ввода — по одному сохранённому значению на строку (видно, что вышло)."""
+        if self.error.isVisible():
+            return
+        text = "\n".join(v if isinstance(v, str) else json.dumps(v) for v in as_list(self.value))
+        if text != self.edit.toPlainText().strip():
+            self.edit.blockSignals(True)
+            self.edit.setPlainText(text)
+            self.edit.blockSignals(False)
+            self._fit_height()
 
 
 class ChoiceListEditor(FieldEditor):

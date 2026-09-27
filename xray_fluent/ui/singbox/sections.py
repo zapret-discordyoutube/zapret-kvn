@@ -26,10 +26,11 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
-from ...singbox_config import catalog
+from ...singbox_config import catalog, list_values
 from ...singbox_config.document import (
     LAUNCH_REQUIRED_TAGS,
     app_owned_note,
+    as_list,
     ensure_section_items,
     section_items,
     tags,
@@ -271,6 +272,10 @@ def _rule_condition_check(rule: dict) -> str:
             "Добавьте хотя бы одно условие. Для всего остального трафика используйте "
             "«Если ничего не подошло» на странице правил."
         )
+    for key in sorted(list_values.TOKEN_FIELDS):
+        problems = list_values.value_problems(key, as_list(rule.get(key)))
+        if problems:
+            return f"{catalog.field_label(key)}: {problems[0]}"
     return ""
 
 

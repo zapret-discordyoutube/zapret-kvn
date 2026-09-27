@@ -189,6 +189,30 @@ class RoutingPageTests(unittest.TestCase):
         page.session.revert()
         self.assertFalse(page.is_dirty("singbox"))
 
+    def test_full_form_list_splits_commas_and_rejects_invalid_values(self) -> None:
+        from xray_fluent.ui.singbox.fields import ListEditor, create_editor
+        from xray_fluent.ui.singbox.sections import _rule_condition_check
+
+        page = _page()
+        rules = _section(page, "rules")
+        rule = {"domain_suffix": ["2ip.ru, 2ip.io"], "action": "route", "outbound": "direct"}
+        self.assertIn("несколько значений", _rule_condition_check(rule))
+        shape = rules.schema.fields(rules.schema.definition("Rule"), rule)["domain_suffix"].shape
+        editor = create_editor(rules.ctx(), rule, "domain_suffix", shape, rules.body)
+        _shared.setdefault("editors", []).append(editor)
+        self.assertIsInstance(editor, ListEditor)
+        editor.edit.setPlainText("2ip.ru, 2ip.io")
+        editor.flush()
+        self.assertEqual(rule["domain_suffix"], ["2ip.ru", "2ip.io"])
+        self.assertEqual(editor.edit.toPlainText(), "2ip.ru\n2ip.io")
+        self.assertEqual(_rule_condition_check(rule), "")
+        editor.edit.setPlainText("2ip.ru\nbad domain!")
+        editor.flush()
+        self.assertEqual(rule["domain_suffix"], ["2ip.ru", "2ip.io"])  # недопустимое не сохранено
+        self.assertTrue(editor.error.isVisibleTo(editor))
+        self.assertIn("Не похоже на домен", editor.error.text())
+        editor.hide()
+
     def test_invalid_json_makes_structured_pages_read_only(self) -> None:
         page = _page()
         page.show_section("json")

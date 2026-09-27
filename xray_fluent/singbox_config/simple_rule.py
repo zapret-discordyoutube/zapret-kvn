@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 import ipaddress
 import re
 
+from . import list_values
+
 #: Куда отправить: выход ``route`` или блокировка (``reject`` не зависит от outbound block).
 BLOCK = "__block__"
 #: Служебные правила, которые должны идти до пользовательских (sniff даёт домен).
@@ -45,11 +47,26 @@ class ParsedRule:
 
 
 def _lines(text: str) -> list[str]:
+    """Программы: по строке или через запятую (пробел бывает в имени файла)."""
     values = []
     for raw in text.replace(",", "\n").splitlines():
         value = raw.strip()
         if value and not value.startswith("#"):
             values.append(value)
+    return values
+
+
+def _tokens(text: str) -> list[str]:
+    """Сайты и IP: строки, запятые, «;» и пробелы; «regexp:» — целой строкой."""
+    values = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith(("regexp:", "regex:")):
+            values.append(line)
+        else:
+            values.extend(part for part in re.split(r"[\s,;]+", line) if part)
     return values
 
 
@@ -60,22 +77,14 @@ def _add(fields: dict, key: str, value) -> None:
 
 
 def normalize_domain(value: str) -> str:
-    """``https://www.Пример.рф:443/x`` → ``xn--e1afmkfd.xn--p1ai`` (для сравнения со SNI)."""
-    text = value.strip().lower()
-    text = re.sub(r"^[a-z][a-z0-9+.-]*://", "", text)
-    text = re.split(r"[/?#]", text, maxsplit=1)[0]
-    text = text.rsplit("@", 1)[-1]
-    if text.count(":") == 1:
-        text = text.split(":", 1)[0]
-    text = text.strip(".")
-    if text.startswith("*."):
-        text = text[2:]
+    """``https://www.Пример.рф:443/x`` → ``xn--e1afmkfd.xn--p1ai`` (для сравнения со SNI).
+
+    Как в полной форме (:mod:`list_values`), плюс удобство v2rayN: «www.»
+    отбрасывается — правило и так покрывает все поддомены.
+    """
+    text = list_values.normalize_domain(value)
     if text.startswith("www.") and text.count(".") >= 2:
         text = text[4:]
-    try:
-        text = text.encode("idna").decode("ascii")
-    except UnicodeError:
-        pass
     return text
 
 
@@ -85,7 +94,7 @@ def _rule_set_tag(prefix: str, name: str, rule_sets: set[str]) -> str | None:
 
 
 def parse_sites(text: str, rule_sets: set[str], fields: dict, errors: list[str]) -> None:
-    for value in _lines(text):
+    for value in _tokens(text):
         head, sep, rest = value.partition(":")
         kind = head.strip().lower() if sep else ""
         if kind == "geosite":
@@ -124,7 +133,7 @@ def parse_sites(text: str, rule_sets: set[str], fields: dict, errors: list[str])
 
 
 def parse_ips(text: str, rule_sets: set[str], fields: dict, errors: list[str]) -> None:
-    for value in _lines(text):
+    for value in _tokens(text):
         head, sep, rest = value.partition(":")
         if sep and head.strip().lower() == "geoip":
             name = rest.strip().lower()

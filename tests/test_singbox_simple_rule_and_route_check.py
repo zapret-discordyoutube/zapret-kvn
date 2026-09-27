@@ -82,7 +82,7 @@ class SimpleRuleTests(unittest.TestCase):
         for sites, ips, message in (
             ("", "", "Укажите"),
             ("geosite:nope", "", "geosite-nope"),
-            ("bad domain", "", "Не похоже на адрес"),
+            ("exa!mple.com", "", "Не похоже на адрес"),
             ("", "300.1.1.1", "IP-адрес"),
             ("regexp:(", "", "регулярном"),
         ):
@@ -104,6 +104,43 @@ def _matcher(members: dict[str, set[str]]):
         return any(value == item or value.endswith("." + item) for item in members.get(definition["tag"], ()))
 
     return match
+
+
+class ListValuesTests(unittest.TestCase):
+    """«2ip.ru, 2ip.io» в одной строке — два домена, а не один с запятой."""
+
+    def test_separators_split_only_token_fields(self) -> None:
+        from xray_fluent.singbox_config.list_values import parse_list
+
+        self.assertEqual(parse_list("domain_suffix", "2ip.ru, 2ip.io\nexample.com  ya.ru;vk.com")[0],
+                         ["2ip.ru", "2ip.io", "example.com", "ya.ru", "vk.com"])
+        self.assertEqual(parse_list("ip_cidr", "1.1.1.1, 10.0.0.0/8")[0], ["1.1.1.1", "10.0.0.0/8"])
+        self.assertEqual(parse_list("port", "443, 80")[0], ["443", "80"])
+        # Запятая бывает в regex, пробел — в имени файла.
+        self.assertEqual(parse_list("domain_regex", "^a{2,3}$")[0], ["^a{2,3}$"])
+        self.assertEqual(parse_list("process_name", "Яндекс Музыка.exe")[0], ["Яндекс Музыка.exe"])
+
+    def test_domains_are_normalized_and_invalid_values_rejected(self) -> None:
+        from xray_fluent.singbox_config.list_values import parse_list
+
+        values, problems = parse_list("domain_suffix", "HTTPS://2IP.ru/path .only.sub.com госуслуги.рф")
+        self.assertEqual(values, ["2ip.ru", ".only.sub.com", "xn--c1aapkosapc.xn--p1ai"])
+        self.assertEqual(problems, [])
+        self.assertTrue(parse_list("ip_cidr", "300.1.1.1")[1])
+        self.assertTrue(parse_list("port_range", "1000-2000")[1])
+
+    def test_stored_multi_value_strings_are_reported(self) -> None:
+        from xray_fluent.singbox_config.list_values import value_problems
+
+        self.assertTrue(value_problems("domain_suffix", ["2ip.ru, 2ip.io"]))
+        self.assertEqual(value_problems("domain_suffix", ["2ip.ru"]), [])
+        self.assertEqual(value_problems("domain_regex", ["a, b"]), [])
+
+    def test_simple_form_splits_sites_by_spaces_too(self) -> None:
+        rule = build_rule("direct", "2ip.ru 2ip.io\nregexp:^a{2, 3}$", "1.1.1.1 8.8.8.8", "", SETS).rule
+        self.assertEqual(rule["domain_suffix"], ["2ip.ru", "2ip.io"])
+        self.assertEqual(rule["domain_regex"], ["^a{2, 3}$"])
+        self.assertEqual(rule["ip_cidr"], ["1.1.1.1/32", "8.8.8.8/32"])
 
 
 class RouteExplainTests(unittest.TestCase):
