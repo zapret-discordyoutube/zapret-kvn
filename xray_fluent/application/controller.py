@@ -4068,6 +4068,26 @@ class AppController(QObject):
             return
         self._perform_auto_connect()
 
+    def resume_after_app_update(self, was_connected: bool) -> None:
+        """Первый запуск после автообновления: вернуть состояние до перезапуска.
+
+        Обычное автоподключение смотрит только на настройку и включило бы VPN,
+        который пользователь выключил перед тихим перезапуском.
+        """
+        if not was_connected:
+            self._log("[update] restart after app update: staying disconnected")
+            return
+        if self.locked:
+            return
+        if self.selected_node is None and not self._can_connect_without_selected_node():
+            return
+        self._log("[update] restart after app update: restoring connection")
+        self._desired_connected = True
+        self._request_transition("app update resume")
+
+    def transition_busy(self) -> bool:
+        return bool(self._transition_active or self._transition_pending)
+
     def _perform_auto_connect(self) -> None:
         if not self.state.settings.auto_connect_last or self.locked:
             return

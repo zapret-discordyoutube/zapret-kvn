@@ -30,7 +30,18 @@ from ..profiles.storage import PassphraseRequired
 from ..constants import APP_ICON_PATH, APP_NAME, APP_VERSION, BASE_DIR, LOG_DIR
 from ..profiles.models import AppSettings, Node, RoutingSettings, Subscription, SubscriptionUpdateResult
 from ..importer.subscription_http import mask_subscription_url
-from ..updates.app_updater import AppUpdate, UpdateChecker, UpdateDownloader
+from ..updates.app_updater import (
+    AppUpdate,
+    UpdateChecker,
+    UpdateDownloader,
+    launch_update_script,
+)
+from ..updates.auto_update import (
+    MAX_AUTO_ATTEMPTS,
+    auto_install_block_reason,
+    record_attempt,
+    resolve_startup,
+)
 from ..engines.xray import XrayCoreUpdateResult
 from .dashboard_page import DashboardPage
 from .deferred_page import DeferredPage
@@ -58,6 +69,9 @@ _WINDOW_OWNED_SETTINGS = tuple(
 
 APP_UPDATE_INITIAL_DELAY_MS = 2500
 APP_UPDATE_INTERVAL_MS = 30 * 60 * 1000
+# Скачанное обновление ждёт конца переключения подключения не дольше этого.
+UPDATE_APPLY_MAX_WAIT_S = 120
+UPDATE_APPLY_RETRY_MS = 2000
 
 
 def _runtime_identity_log_line() -> str:
@@ -93,8 +107,8 @@ class MainWindow(FluentWindow):
         self._geometry_applied = False
         self._nav_expanded_pref = False
         self._app_update_scheduler_ready = False
-        self._update_prompt_open = False
-        self._postponed_update_version: str | None = None
+        self._update_background = False
+        self._update_apply_deadline = 0.0
         self._app_update_timer = QTimer(self)
         self._app_update_timer.setSingleShot(True)
         self._app_update_timer.timeout.connect(self._on_app_update_timer_timeout)
@@ -197,7 +211,14 @@ class MainWindow(FluentWindow):
             if action:
                 action.setEnabled(True)
         self.history_page.set_storage(self.controller.traffic_history)
-        self.controller.auto_connect_if_needed()
+        resume = self._resolve_previous_update()
+        if resume is None:
+            self.controller.auto_connect_if_needed()
+        else:
+            # Перезапуск после обновления возвращает ровно то состояние, что
+            # было: выключенный VPN не включается автоподключением, а
+            # включённый — поднимается даже без него.
+            self.controller.resume_after_app_update(resume)
         self._app_update_scheduler_ready = True
         self._sync_app_update_timer(state.settings)
         self._consume_update_error_log()
@@ -1535,99 +1556,61 @@ class MainWindow(FluentWindow):
             self.updates_page.download_btn.clicked.disconnect()
         except TypeError:
             pass
+        # Кнопка на странице — ручной путь в обход лимита автопопыток.
         self.updates_page.download_btn.clicked.connect(
             lambda: self._start_update_download(self._pending_update)
         )
 
-        # A silent check only suppresses routine progress, errors and the
-        # "up to date" message.  A newer version is actionable and must still
-        # be shown to the user — but only once: a background check must not
-        # re-prompt for a version the user already postponed this session.
-        if silent and update.version == self._postponed_update_version:
-            return
-        self._show_update_available_dialog(update, open_updates_page=not silent)
-
-    def _show_update_available_dialog(
-        self,
-        update: AppUpdate,
-        *,
-        open_updates_page: bool,
-    ) -> None:
-        # box.exec() крутит вложенный цикл событий: пока окно открыто, таймер
-        # фоновой проверки или ручная проверка могли открыть второе такое же
-        # окно прямо под первым — «Позже» закрывало верхнее, и казалось, что
-        # кнопка не нажимается. Одновременно показывается только одно окно.
-        if self._update_prompt_open:
-            return
-        self._update_prompt_open = True
-        try:
-            self._run_update_available_dialog(update, open_updates_page=open_updates_page)
-        finally:
-            self._update_prompt_open = False
-
-    def _run_update_available_dialog(
-        self,
-        update: AppUpdate,
-        *,
-        open_updates_page: bool,
-    ) -> None:
-        was_hidden = not self.isVisible()
-        was_minimized = self.isMinimized()
-
-        # qfluentwidgets MessageBox stays hidden when its parent is hidden.
-        # Bring the window forward for the prompt and restore its previous
-        # state when the user postpones the update.
-        if was_minimized:
-            self.showNormal()
-        elif was_hidden:
-            self.show()
-        self.activateWindow()
-        self.raise_()
-
-        if open_updates_page:
-            self.switchTo(self.updates_page)
-
-        from qfluentwidgets import MessageBox
-        box = MessageBox(
-            "Доступно обновление",
-            f"Доступна новая версия v{update.version}.\n"
-            f"Текущая: v{APP_VERSION}\n\n"
-            f"Рекомендуется обновить приложение.\n\n"
-            f"Приложение скачает обновление, закроется и перезапустится автоматически.",
-            self,
-        )
-        box.yesButton.setText("Скачать и установить")
-        box.cancelButton.setText("Позже")
-        if box.exec():
-            self._postponed_update_version = None
+        # Ручная проверка — уже действие пользователя: ставим сразу.
+        if not silent:
             self._start_update_download(update)
             return
 
-        self._postponed_update_version = update.version
-        if was_hidden:
-            self.hide()
-        elif was_minimized:
-            self.showMinimized()
+        # Фоновая проверка ставит обновление сама, без окон. Модальное окно
+        # здесь раньше и давало «вечную» просьбу обновиться: после каждого
+        # отката или перезапуска оно появлялось снова.
+        reason = self._auto_install_block_reason(update)
+        if reason:
+            self.controller._logger.info(
+                "[update] Автоустановка v%s отложена: %s", update.version, reason
+            )
+            self.updates_page.set_app_status(
+                f"Доступна новая версия: v{update.version}. "
+                f"Автоустановка отложена: {reason}"
+            )
+            return
+        self._start_update_download(update, background=True)
 
-    def _start_update_download(self, update: AppUpdate) -> None:
+    def _auto_install_block_reason(self, update: AppUpdate) -> str:
+        if self.controller.state.security.enabled:
+            # После перезапуска приложение ждёт пароль и не подключается —
+            # тихая установка оставила бы пользователя без VPN.
+            return "включена защита паролем, установите вручную"
+        return auto_install_block_reason(update.version, APP_VERSION)
+
+    def _start_update_download(self, update: AppUpdate, *, background: bool = False) -> None:
         if not self.controller.state.settings.allow_updates:
             self.updates_page.show_idle()
             self.updates_page.set_app_status("Установка обновлений отключена в настройках")
-            self._show_status("warning", "Установка обновлений отключена в настройках")
+            if not background:
+                self._show_status("warning", "Установка обновлений отключена в настройках")
+            return
+        downloader = getattr(self, "_update_downloader", None)
+        if downloader is not None and downloader.isRunning():
             return
 
         self._update_in_progress = True
-        self.switchTo(self.updates_page)
+        self._update_background = background
+        if not background:
+            self.switchTo(self.updates_page)
         self.updates_page.show_download_progress(0)
 
         proxy_url = self._active_update_proxy_url()
 
-        restart_in_tray = self._tray_available and not self.isVisible()
-
         self._update_downloader = UpdateDownloader(
             update,
             proxy_url=proxy_url,
-            restart_in_tray=restart_in_tray,
+            restart_in_tray=self._tray_available and not self.isVisible(),
             parent=self,
         )
         self._update_downloader.progress.connect(self.updates_page.show_download_progress)
@@ -1638,22 +1621,81 @@ class MainWindow(FluentWindow):
 
     def _on_update_ready(self) -> None:
         self.updates_page.set_app_status("Обновление загружено. Перезапуск...")
-        self._show_status("success", "Обновление загружено. Перезапуск...")
-        QTimer.singleShot(1500, self._quit_for_update)
+        if not self._update_background:
+            self._show_status("success", "Обновление загружено. Перезапуск...")
+        self._update_apply_deadline = time.monotonic() + UPDATE_APPLY_MAX_WAIT_S
+        QTimer.singleShot(1500, self._apply_downloaded_update)
+
+    def _apply_downloaded_update(self) -> None:
+        if self._quitting:
+            return
+        downloader = self._update_downloader
+        script = getattr(downloader, "script_path", None)
+        if downloader is None or script is None:
+            return
+        # Перезапуск посреди переключения сервера оставил бы ядро в
+        # полусостоянии; ждём конца перехода, но не бесконечно.
+        if (
+            self.controller.transition_busy()
+            and time.monotonic() < self._update_apply_deadline
+        ):
+            QTimer.singleShot(UPDATE_APPLY_RETRY_MS, self._apply_downloaded_update)
+            return
+        reconnect = bool(self.controller.connected or self.controller._desired_connected)
+        try:
+            record_attempt(downloader.update.version, reconnect=reconnect)
+            launch_update_script(script)
+        except Exception as exc:
+            self.controller._logger.exception("[update] Не удалось запустить установку")
+            self._on_update_error(f"Не удалось запустить установку: {exc}")
+            return
+        self.controller._logger.info(
+            "[update] Установка v%s: перезапуск (подключение будет %s)",
+            downloader.update.version,
+            "восстановлено" if reconnect else "выключено",
+        )
+        self._quit_for_update()
 
     def _on_update_error(self, err: str) -> None:
         self._update_in_progress = False
         self.updates_page.show_idle()
         self.updates_page.set_app_error(f"Ошибка: {err}")
+        if self._update_background:
+            # Фоновая попытка не шумит: следующий 30-минутный тик повторит её.
+            self.controller._logger.warning(
+                "[update] Фоновая установка не выполнена: %s", " ".join(str(err).split())
+            )
+            return
         self._show_status("error", err)
 
     def _quit_for_update(self) -> None:
         self._quitting = True
+        self._stop_app_update_timer()
         self._save_geometry()
         self._shutdown_controller()
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    def _resolve_previous_update(self) -> bool | None:
+        """Итог прошлой автоустановки; возвращает, нужно ли вернуть подключение."""
+
+        try:
+            outcome = resolve_startup(APP_VERSION)
+        except Exception:
+            self.controller._logger.exception("[update] Не удалось прочитать запись об обновлении")
+            return None
+        if outcome is None:
+            return None
+        if outcome.updated:
+            self.controller._logger.info("[update] Приложение обновлено до v%s", APP_VERSION)
+            self.updates_page.set_app_status(f"Приложение обновлено до v{APP_VERSION}")
+        else:
+            self.controller._logger.warning(
+                "[update] Установка v%s не удалась (попытка %d из %d)",
+                outcome.version, outcome.attempts, MAX_AUTO_ATTEMPTS,
+            )
+        return outcome.resume
 
     def _consume_update_error_log(self) -> None:
         error_log = LOG_DIR / "update_error.log"

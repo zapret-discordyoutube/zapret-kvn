@@ -264,6 +264,19 @@ def _sync_packaged_templates() -> None:
         _bootstrap_logger.exception("Failed to synchronize packaged templates")
 
 
+def _purge_update_leftovers() -> None:
+    # Выполняется в StartupWorker: удаление сотен мегабайт не должно
+    # задерживать GUI-поток.
+    try:
+        from xray_fluent.updates.auto_update import purge_update_leftovers
+
+        removed = purge_update_leftovers()
+        if removed:
+            _bootstrap_logger.info("Removed %d stale update leftovers", removed)
+    except Exception:
+        _bootstrap_logger.exception("Failed to purge stale update leftovers")
+
+
 def main() -> int:
     _setup_bootstrap_logging()
     _install_exception_hooks()
@@ -297,6 +310,7 @@ def main() -> int:
     def prepare_runtime():
         _recover_system_proxy_from_previous_run()
         _sync_packaged_templates()
+        _purge_update_leftovers()
 
     from xray_fluent.diagnostics.gui_stall_watchdog import install_from_environment
 

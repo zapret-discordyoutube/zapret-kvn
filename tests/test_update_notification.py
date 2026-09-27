@@ -72,32 +72,13 @@ class _FakeUpdatesPage:
         self.download_btn = SimpleNamespace(clicked=_FakeSignal())
         self.available_version = ""
 
+        self.status = ""
+
     def show_update_available(self, version: str) -> None:
         self.available_version = version
 
-
-class _FakeButton:
-    def __init__(self) -> None:
-        self.text = ""
-
-    def setText(self, text: str) -> None:
-        self.text = text
-
-
-class _FakeMessageBox:
-    result = 0
-    last = None
-
-    def __init__(self, title: str, content: str, parent) -> None:
-        self.title = title
-        self.content = content
-        self.parent_was_visible = parent.isVisible()
-        self.yesButton = _FakeButton()
-        self.cancelButton = _FakeButton()
-        type(self).last = self
-
-    def exec(self) -> int:
-        return self.result
+    def set_app_status(self, text: str) -> None:
+        self.status = text
 
 
 class _FakeTimer:
@@ -253,30 +234,58 @@ class UpdateNotificationTests(unittest.TestCase):
         page.set_app_error.assert_not_called()
         window._show_status.assert_not_called()
 
-    def test_silent_automatic_check_still_requests_update_dialog(self) -> None:
-        page = _FakeUpdatesPage()
-        window = SimpleNamespace(
+    def _check_result_window(self, block_reason: str = ""):
+        return SimpleNamespace(
             _update_in_progress=True,
             _pending_update=None,
-            _postponed_update_version=None,
             controller=SimpleNamespace(
-                state=SimpleNamespace(settings=SimpleNamespace(allow_updates=True))
+                state=SimpleNamespace(settings=SimpleNamespace(allow_updates=True)),
+                _logger=Mock(),
             ),
-            updates_page=page,
+            updates_page=_FakeUpdatesPage(),
             _start_update_download=Mock(),
-            _show_update_available_dialog=Mock(),
+            _auto_install_block_reason=Mock(return_value=block_reason),
         )
+
+    def test_silent_check_installs_in_background_without_dialog(self) -> None:
+        window = self._check_result_window()
         update = _update()
 
-        MainWindow._on_update_check_result(window, update, silent=True)
+        with patch("qfluentwidgets.MessageBox") as box:
+            MainWindow._on_update_check_result(window, update, silent=True)
 
+        box.assert_not_called()
         self.assertFalse(window._update_in_progress)
         self.assertIs(window._pending_update, update)
-        self.assertEqual(page.available_version, update.version)
-        window._show_update_available_dialog.assert_called_once_with(
-            update,
-            open_updates_page=False,
+        self.assertEqual(window.updates_page.available_version, update.version)
+        window._start_update_download.assert_called_once_with(update, background=True)
+
+    def test_blocked_auto_install_only_updates_page_status(self) -> None:
+        window = self._check_result_window("установка не удалась уже 3 раза")
+
+        MainWindow._on_update_check_result(window, _update(), silent=True)
+
+        window._start_update_download.assert_not_called()
+        self.assertIn("не удалась уже 3 раза", window.updates_page.status)
+        # Кнопка страницы остаётся ручным путём в обход лимита.
+        window.updates_page.download_btn.clicked.callback()
+        window._start_update_download.assert_called_once_with(window._pending_update)
+
+    def test_manual_check_installs_without_dialog_and_ignores_attempt_limit(self) -> None:
+        window = self._check_result_window("установка не удалась уже 3 раза")
+        update = _update()
+
+        MainWindow._on_update_check_result(window, update, silent=False)
+
+        window._auto_install_block_reason.assert_not_called()
+        window._start_update_download.assert_called_once_with(update)
+
+    def test_password_protection_blocks_silent_restart(self) -> None:
+        window = SimpleNamespace(
+            controller=SimpleNamespace(state=SimpleNamespace(security=SimpleNamespace(enabled=True)))
         )
+        reason = MainWindow._auto_install_block_reason(window, _update())
+        self.assertIn("защита паролем", reason)
 
     def test_silent_up_to_date_check_does_not_repaint_updates_page(self) -> None:
         window = SimpleNamespace(
@@ -323,118 +332,74 @@ class UpdateNotificationTests(unittest.TestCase):
         self.assertTrue(window._update_in_progress)
         window.updates_page.show_up_to_date.assert_not_called()
 
-    def test_hidden_window_is_shown_for_dialog_then_restored_on_later(self) -> None:
-        events: list[str] = []
+    def _apply_window(self, *, busy: bool, deadline_passed: bool = False):
+        downloader = SimpleNamespace(update=_update(), script_path=Path("C:/tmp/_update.ps1"))
+        return SimpleNamespace(
+            _quitting=False,
+            _update_downloader=downloader,
+            _update_apply_deadline=float("-inf") if deadline_passed else float("inf"),
+            controller=SimpleNamespace(
+                transition_busy=Mock(return_value=busy),
+                connected=True,
+                _desired_connected=True,
+                _logger=Mock(),
+            ),
+            _quit_for_update=Mock(),
+            _on_update_error=Mock(),
+            _apply_downloaded_update=Mock(),
+        )
 
-        class Window:
-            updates_page = object()
-            _update_prompt_open = False
-            _postponed_update_version = None
-            _run_update_available_dialog = MainWindow._run_update_available_dialog
+    def test_downloaded_update_waits_for_running_transition(self) -> None:
+        window = self._apply_window(busy=True)
+        with patch("xray_fluent.ui.main_window.QTimer.singleShot") as single_shot, \
+                patch("xray_fluent.ui.main_window.record_attempt") as record, \
+                patch("xray_fluent.ui.main_window.launch_update_script") as launch:
+            MainWindow._apply_downloaded_update(window)
+        single_shot.assert_called_once()
+        record.assert_not_called()
+        launch.assert_not_called()
+        window._quit_for_update.assert_not_called()
 
-            def __init__(self) -> None:
-                self.visible = False
+    def test_downloaded_update_records_attempt_before_launch_then_quits(self) -> None:
+        for busy, deadline_passed in ((False, False), (True, True)):
+            window = self._apply_window(busy=busy, deadline_passed=deadline_passed)
+            order: list[str] = []
+            with patch(
+                "xray_fluent.ui.main_window.record_attempt",
+                side_effect=lambda *a, **k: order.append("record"),
+            ) as record, patch(
+                "xray_fluent.ui.main_window.launch_update_script",
+                side_effect=lambda *a, **k: order.append("launch"),
+            ):
+                MainWindow._apply_downloaded_update(window)
+            self.assertEqual(order, ["record", "launch"])
+            record.assert_called_once_with("0.4.67", reconnect=True)
+            window._quit_for_update.assert_called_once()
 
-            def isVisible(self) -> bool:
-                return self.visible
+    def test_failed_script_launch_keeps_app_running(self) -> None:
+        window = self._apply_window(busy=False)
+        with patch("xray_fluent.ui.main_window.record_attempt"), \
+                patch("xray_fluent.ui.main_window.launch_update_script", side_effect=OSError("denied")):
+            MainWindow._apply_downloaded_update(window)
+        window._quit_for_update.assert_not_called()
+        window._on_update_error.assert_called_once()
 
-            def isMinimized(self) -> bool:
-                return False
+    def test_background_download_error_is_logged_without_toast(self) -> None:
+        window = SimpleNamespace(
+            _update_in_progress=True,
+            _update_background=True,
+            updates_page=SimpleNamespace(show_idle=Mock(), set_app_error=Mock()),
+            controller=SimpleNamespace(_logger=Mock()),
+            _show_status=Mock(),
+        )
+        MainWindow._on_update_error(window, "нет сети")
+        self.assertFalse(window._update_in_progress)
+        window._show_status.assert_not_called()
+        window.controller._logger.warning.assert_called_once()
 
-            def show(self) -> None:
-                events.append("show")
-                self.visible = True
-
-            def showNormal(self) -> None:
-                events.append("showNormal")
-                self.visible = True
-
-            def activateWindow(self) -> None:
-                events.append("activate")
-
-            def raise_(self) -> None:
-                events.append("raise")
-
-            def switchTo(self, page) -> None:
-                events.append("switch")
-
-            def hide(self) -> None:
-                events.append("hide")
-                self.visible = False
-
-            def showMinimized(self) -> None:
-                events.append("minimize")
-
-            def _start_update_download(self, update: AppUpdate) -> None:
-                events.append("download")
-
-        window = Window()
-        _FakeMessageBox.result = 0
-
-        with patch("qfluentwidgets.MessageBox", _FakeMessageBox):
-            MainWindow._show_update_available_dialog(
-                window,
-                _update(),
-                open_updates_page=False,
-            )
-
-        box = _FakeMessageBox.last
-        self.assertIsNotNone(box)
-        self.assertTrue(box.parent_was_visible)
-        self.assertEqual(box.title, "Доступно обновление")
-        self.assertIn("Рекомендуется обновить приложение", box.content)
-        self.assertEqual(box.yesButton.text, "Скачать и установить")
-        self.assertEqual(box.cancelButton.text, "Позже")
-        self.assertEqual(events, ["show", "activate", "raise", "hide"])
-        self.assertFalse(window.visible)
-        self.assertEqual(window._postponed_update_version, "0.4.67")
-        self.assertFalse(window._update_prompt_open)
-
-    def test_second_dialog_is_not_stacked_while_one_is_open(self) -> None:
-        # «Позже иногда не нажимается»: пока box.exec() крутит вложенный цикл,
-        # таймер фоновой проверки открывал второе такое же окно под первым.
-        opened: list[str] = []
-
-        class Window:
-            _update_prompt_open = False
-
-            def _run_update_available_dialog(self, update, *, open_updates_page):
-                opened.append(update.version)
-                # Вложенный цикл окна: фоновая проверка пытается показать ещё одно.
-                MainWindow._show_update_available_dialog(self, update, open_updates_page=False)
-
-        window = Window()
-        MainWindow._show_update_available_dialog(window, _update(), open_updates_page=False)
-        self.assertEqual(opened, ["0.4.67"])
-        self.assertFalse(window._update_prompt_open)
-        # После закрытия окна новое показывается как обычно.
-        MainWindow._show_update_available_dialog(window, _update(), open_updates_page=False)
-        self.assertEqual(len(opened), 2)
-
-    def test_background_check_does_not_reprompt_postponed_version(self) -> None:
-        def make_window(postponed):
-            return SimpleNamespace(
-                _update_in_progress=True,
-                _pending_update=None,
-                _postponed_update_version=postponed,
-                controller=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(allow_updates=True))),
-                updates_page=_FakeUpdatesPage(),
-                _start_update_download=Mock(),
-                _show_update_available_dialog=Mock(),
-            )
-
-        postponed = make_window("0.4.67")
-        MainWindow._on_update_check_result(postponed, _update(), silent=True)
-        postponed._show_update_available_dialog.assert_not_called()
-        self.assertEqual(postponed.updates_page.available_version, "0.4.67")
-
-        manual = make_window("0.4.67")
-        MainWindow._on_update_check_result(manual, _update(), silent=False)
-        manual._show_update_available_dialog.assert_called_once()
-
-        newer = make_window("0.4.66")
-        MainWindow._on_update_check_result(newer, _update(), silent=True)
-        newer._show_update_available_dialog.assert_called_once()
+        window._update_background = False
+        MainWindow._on_update_error(window, "нет сети")
+        window._show_status.assert_called_once_with("error", "нет сети")
 
 
 class CoreUpdateStatusColorTests(unittest.TestCase):

@@ -445,12 +445,13 @@ class SettingsPage(ScrollablePage):
 
         self.check_updates_card = SwitchSettingCard(
             FIF.UPDATE, "Проверять обновления",
-            "Периодически проверять наличие новых версий при запуске",
+            "Проверять новые версии при запуске и каждые 30 минут",
             parent=updates_group,
         )
         self.allow_updates_card = SwitchSettingCard(
             FIF.DOWNLOAD, "Разрешить обновления",
-            "Разрешить загрузку и установку обновлений приложения",
+            "Устанавливать новые версии в фоне: приложение само перезапустится "
+            "и вернёт подключение",
             parent=updates_group,
         )
         self.xray_auto_update_card = SwitchSettingCard(

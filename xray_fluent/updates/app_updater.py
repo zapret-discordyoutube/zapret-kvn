@@ -562,8 +562,27 @@ def _build_update_script(
     ])
 
 
+def launch_update_script(script: Path) -> None:
+    """Запустить скрипт замены файлов; после этого приложение должно выйти."""
+
+    subprocess.Popen(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script),
+        ],
+        creationflags=0x08000000,
+        close_fds=True,
+    )
+
+
 class UpdateDownloader(QThread):
-    """Download and extract update, then launch restart script."""
+    """Download, verify and extract the update, then prepare the restart script."""
 
     progress = pyqtSignal(int)       # percent 0-100
     status = pyqtSignal(str)         # human-readable status message
@@ -581,6 +600,11 @@ class UpdateDownloader(QThread):
         self._update = update
         self._proxy_url = proxy_url
         self._restart_in_tray = restart_in_tray
+        self.script_path: Path | None = None
+
+    @property
+    def update(self) -> AppUpdate:
+        return self._update
 
     # ── download helpers ────────────────────────────────────────
 
@@ -817,22 +841,10 @@ class UpdateDownloader(QThread):
             )
             _write_utf8_bom_text(script, script_text)
 
-            # Launch script and exit
-            subprocess.Popen(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-File",
-                    str(script),
-                ],
-                creationflags=0x08000000,
-                close_fds=True,
-            )
-
+            # Скрипт запускает окно в момент выхода (launch_update_script): он
+            # ждёт завершения процесса не дольше минуты, а приложение может
+            # отложить перезапуск, пока идёт переключение подключения.
+            self.script_path = script
             self.finished_ok.emit()
 
         except Exception as exc:
