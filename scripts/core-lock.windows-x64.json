@@ -69,27 +69,27 @@
     },
     {
       "id": "hysteria",
-      "version": "app/v2.12.2",
+      "version": "app/v2.12.3",
       "kind": "file",
       "archive": "hysteria-windows-amd64.exe",
-      "url": "https://github.com/HyNetworks/hysteria/releases/download/app/v2.12.2/hysteria-windows-amd64.exe",
-      "sha256": "807ae5332a8fefeeff804923e057b6942acceaa11706ac7fa3db42f192c2fde1",
+      "url": "https://github.com/HyNetworks/hysteria/releases/download/app/v2.12.3/hysteria-windows-amd64.exe",
+      "sha256": "31c0fb6a92beac7fc43bef6e8a31ce681eac29d78feef7a5884f2c797bfdba24",
       "files": [
         { "match": "^hysteria-windows-amd64\\.exe$", "target": "hysteria.exe" }
       ],
       "repository": "HyNetworks/hysteria",
       "channel": "stable",
-      "release_tag": "app/v2.12.2",
+      "release_tag": "app/v2.12.3",
       "release_prerelease": false,
       "asset_name": "hysteria-windows-amd64.exe",
-      "asset_size": 23795712
+      "asset_size": 23575040
     },
     {
       "id": "hysteria-license",
-      "version": "app/v2.12.2",
-      "archive": "hysteria-app-v2.12.2.zip",
-      "url": "https://github.com/HyNetworks/hysteria/archive/refs/tags/app/v2.12.2.zip",
-      "sha256": "6772c8250039b08df69c64c65b0cc4ff4f789090cb9ea206f6a0efcb64782a3b",
+      "version": "app/v2.12.3",
+      "archive": "hysteria-app-v2.12.3.zip",
+      "url": "https://github.com/HyNetworks/hysteria/archive/refs/tags/app/v2.12.3.zip",
+      "sha256": "7e1f276ed555dfd62d14c17a41ff4160fe9b332eb7951195445d94ae95b7c3af",
       "files": [
         { "match": "(^|/)app/LICENSE\\.md$", "target": "LICENSE-Hysteria.md" }
       ]

@@ -102,6 +102,14 @@ class AssetVerificationTests(unittest.TestCase):
         no_curl.start()
         self.addCleanup(no_curl.stop)
 
+    def test_hysteria_accepts_only_stable_app_tags(self) -> None:
+        releases = [
+            {"tag_name": "app/v2.12.3", "draft": False, "prerelease": False},
+            {"tag_name": "app/v2.13.0", "draft": False, "prerelease": True},
+            {"tag_name": "v9.9.9", "draft": False, "prerelease": False},
+        ]
+        self.assertEqual(resolver.select_stable_hysteria(releases)["tag_name"], "app/v2.12.3")
+
     def test_exact_asset_rejects_other_windows_variants(self) -> None:
         payload = b"xray archive"
         release = _release(
@@ -304,6 +312,13 @@ class LockUpdateTests(unittest.TestCase):
         xray_payload = b"xray"
         singbox_payload = b"singbox"
         routing_payload = b"routing"
+        hysteria_payload = b"hysteria"
+        license_payload = b"license"
+        hysteria_release = _release(
+            "HyNetworks/hysteria",
+            "app/v2.12.3",
+            [_asset("HyNetworks/hysteria", "app/v2.12.3", "hysteria-windows-amd64.exe", hysteria_payload)],
+        )
         routing_commit = "b" * 40
         xray_release = _release(
             "XTLS/Xray-core",
@@ -329,17 +344,21 @@ class LockUpdateTests(unittest.TestCase):
             patch.object(resolver, "github_latest_release", side_effect=[
                 xray_release,
                 singbox_release,
+                hysteria_release,
             ]),
             patch.object(resolver, "github_branch_commit", return_value=routing_commit),
             patch.object(
                 resolver,
                 "download_and_verify",
-                side_effect=[len(xray_payload), len(singbox_payload)],
+                side_effect=[len(xray_payload), len(singbox_payload), len(hysteria_payload)],
             ),
             patch.object(
                 resolver,
                 "download_and_hash",
-                return_value=(len(routing_payload), hashlib.sha256(routing_payload).hexdigest()),
+                side_effect=[
+                    (len(license_payload), hashlib.sha256(license_payload).hexdigest()),
+                    (len(routing_payload), hashlib.sha256(routing_payload).hexdigest()),
+                ],
             ),
         ):
             candidate = resolver.resolve_lock(current)
@@ -366,6 +385,16 @@ class LockUpdateTests(unittest.TestCase):
             candidate_by_id["runetfreedom-routing-data"]["files"],
             current_by_id["runetfreedom-routing-data"]["files"],
         )
+        self.assertEqual(candidate_by_id["hysteria"]["version"], "app/v2.12.3")
+        self.assertEqual(candidate_by_id["hysteria"]["release_tag"], "app/v2.12.3")
+        self.assertEqual(candidate_by_id["hysteria"]["files"], current_by_id["hysteria"]["files"])
+        self.assertEqual(candidate_by_id["hysteria-license"]["version"], "app/v2.12.3")
+        self.assertEqual(
+            candidate_by_id["hysteria-license"]["url"],
+            "https://github.com/HyNetworks/hysteria/archive/refs/tags/app/v2.12.3.zip",
+        )
+        self.assertEqual(candidate_by_id["hysteria-license"]["sha256"], hashlib.sha256(license_payload).hexdigest())
+        self.assertEqual(candidate_by_id["hysteria-license"]["files"], current_by_id["hysteria-license"]["files"])
         for source_id in ("tun2socks", "wintun"):
             self.assertEqual(candidate_by_id[source_id], current_by_id[source_id])
 

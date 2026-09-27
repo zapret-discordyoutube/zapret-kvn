@@ -3,7 +3,8 @@
 
 The normal Windows build is deliberately lock-driven.  This command is the
 explicit online boundary that may inspect GitHub and refresh Xray, extended
-sing-box, and the runetfreedom release-branch snapshot in
+sing-box, official Hysteria (binary and its license from the same tag), and the
+runetfreedom release-branch snapshot in
 ``scripts/core-lock.windows-x64.json``.  Both ``--check`` and ``--write``
 download the selected archives into private temporary files, verify or record
 their exact digests, and delete those files before returning.  ``--write``
@@ -44,6 +45,8 @@ ARCHIVE_LIMIT = 512 * 1024 * 1024
 XRAY_REPOSITORY = "XTLS/Xray-core"
 XRAY_ASSET_NAME = "Xray-windows-64.zip"
 SINGBOX_REPOSITORY = "shtorm-7/sing-box-extended"
+HYSTERIA_REPOSITORY = "HyNetworks/hysteria"
+HYSTERIA_ASSET_NAME = "hysteria-windows-amd64.exe"
 ROUTING_REPOSITORY = "runetfreedom/russia-v2ray-rules-dat"
 ROUTING_BRANCH = "release"
 AMNEZIA_REPOSITORY = "amnezia-vpn/amneziawg-go"
@@ -53,6 +56,7 @@ _XRAY_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _SINGBOX_TAG_RE = re.compile(
     r"^v(\d+)\.(\d+)\.(\d+)-extended-(\d+)\.(\d+)\.(\d+)$"
 )
+_HYSTERIA_TAG_RE = re.compile(r"^app/v(\d+)\.(\d+)\.(\d+)$")
 _SHA256_RE = re.compile(r"(?i)(?:sha256\s*:\s*)?([0-9a-f]{64})")
 _FILE_MAPPING_RE = re.compile(
     r'\{\n\s+"match": ("(?:\\.|[^"\\])*"),\n'
@@ -161,6 +165,13 @@ def _singbox_version(tag: str) -> tuple[int, int, int, int, int, int] | None:
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
+def _hysteria_version(tag: str) -> tuple[int, int, int] | None:
+    match = _HYSTERIA_TAG_RE.fullmatch(tag)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+
+
 def _stable_release(
     releases: list[dict[str, Any]],
     *,
@@ -200,10 +211,20 @@ def select_stable_singbox(releases: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
+def select_stable_hysteria(releases: list[dict[str, Any]]) -> dict[str, Any]:
+    """Select the highest stable official Hysteria app release (``app/vX.Y.Z``)."""
+
+    return _stable_release(
+        releases,
+        version_parser=_hysteria_version,
+        component="Hysteria",
+    )
+
+
 def _expected_asset_url(repository: str, tag: str, asset_name: str) -> str:
     return (
         f"https://github.com/{repository}/releases/download/"
-        f"{quote(tag, safe='')}/{quote(asset_name, safe='')}"
+        f"{quote(tag, safe='/')}/{quote(asset_name, safe='')}"
     )
 
 
@@ -482,6 +503,17 @@ def amnezia_tag_key(tag: str) -> tuple | None:
     return major, minor, patch, pre is None, suffix
 
 
+def _replace_hysteria_license(source: dict[str, Any], *, tag: str, timeout: float) -> dict[str, Any]:
+    """The license ships from the same immutable tag as the Hysteria binary."""
+
+    archive = f"hysteria-{tag.replace('/', '-')}.zip"
+    url = f"https://github.com/{HYSTERIA_REPOSITORY}/archive/refs/tags/{tag}.zip"
+    _size, digest = download_and_hash(url, timeout=max(timeout, 120.0))
+    updated = copy.deepcopy(source)
+    updated.update({"version": tag, "archive": archive, "url": url, "sha256": digest})
+    return updated
+
+
 def resolve_amnezia_source(current: dict, *, timeout: float = 30.0) -> dict:
     """The official project publishes tags, not necessarily GitHub Releases."""
     tags = []
@@ -562,7 +594,7 @@ def resolve_singbox_build(version: str, *, timeout: float = 30.0) -> dict:
 
 
 def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
-    """Resolve stable cores and one immutable routing-data snapshot."""
+    """Resolve stable cores (sing-box, Xray, Hysteria) and one routing-data snapshot."""
 
     _validate_lock(lock)
     candidate = copy.deepcopy(lock)
@@ -571,6 +603,9 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
     )
     singbox_release = select_stable_singbox(
         [github_latest_release(SINGBOX_REPOSITORY, timeout=timeout)]
+    )
+    hysteria_release = select_stable_hysteria(
+        [github_latest_release(HYSTERIA_REPOSITORY, timeout=timeout)]
     )
     routing_commit = github_branch_commit(
         ROUTING_REPOSITORY,
@@ -597,6 +632,19 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
         asset_name=singbox_asset_name,
         timeout=timeout,
     )
+    hysteria_tag = str(hysteria_release.get("tag_name") or "")
+    replacement_hysteria = _replace_source(
+        _source_by_id(candidate, "hysteria"),
+        release=hysteria_release,
+        repository=HYSTERIA_REPOSITORY,
+        asset_name=HYSTERIA_ASSET_NAME,
+        timeout=timeout,
+    )
+    replacement_hysteria_license = None
+    if any(source.get("id") == "hysteria-license" for source in candidate["sources"]):
+        replacement_hysteria_license = _replace_hysteria_license(
+            _source_by_id(candidate, "hysteria-license"), tag=hysteria_tag, timeout=timeout
+        )
     replacement_routing = _replace_routing_source(
         routing_source,
         commit=routing_commit,
@@ -610,6 +658,10 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
             candidate["sources"][index] = replacement_singbox
         elif source.get("id") == "runetfreedom-routing-data":
             candidate["sources"][index] = replacement_routing
+        elif source.get("id") == "hysteria":
+            candidate["sources"][index] = replacement_hysteria
+        elif source.get("id") == "hysteria-license" and replacement_hysteria_license is not None:
+            candidate["sources"][index] = replacement_hysteria_license
     if "amnezia" in candidate:
         candidate["amnezia"] = resolve_amnezia_source(candidate["amnezia"], timeout=timeout)
     if "singbox_build" in candidate:
