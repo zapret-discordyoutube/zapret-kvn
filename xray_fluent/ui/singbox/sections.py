@@ -10,11 +10,14 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
+    BodyLabel,
     CaptionLabel,
     CardWidget,
+    SearchLineEdit,
+    SimpleCardWidget,
     IconWidget,
     InfoBarIcon,
     PushButton,
@@ -43,6 +46,9 @@ from .fields import FieldEditor, FormContext, create_editor
 from .form import SchemaForm
 from .lists import AddOption, NavStack, ObjectList, RowInfo, section_header, unique_tag
 from .session import SingboxSession
+from .simple_rule_page import SimpleRulePage
+from ...singbox_config.route_explain import RouteVerdict
+from ...singbox_config.simple_rule import insert_index
 from .visuals import (
     DNS,
     NEUTRAL,
@@ -537,13 +543,140 @@ def _type_options(schema: SingboxSchema, node: dict, common: tuple[str, ...], fa
     return options
 
 
+def _target_text(target: str) -> str:
+    if target == "reject":
+        return "Блокировка"
+    return catalog.outbound_label(target).split(" · ", 1)[0]
+
+
+class RouteCheckRow(QWidget):
+    """«Проверить сайт»: строка ввода и результат, который появляется после проверки."""
+
+    check_requested = pyqtSignal(str)
+    open_rule = pyqtSignal(int)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.input = SearchLineEdit(self)
+        self.input.setPlaceholderText("Проверить сайт: куда пойдёт, например 2ip.ru")
+        self.input.searchSignal.connect(lambda _text: self._request())
+        self.input.returnPressed.connect(self._request)
+        row.addWidget(self.input, 1)
+        layout.addLayout(row)
+        self.card = SimpleCardWidget(self)
+        card = QVBoxLayout(self.card)
+        card.setContentsMargins(14, 10, 14, 10)
+        card.setSpacing(4)
+        top = QHBoxLayout()
+        self.headline = StrongBodyLabel("", self.card)
+        self.headline.setWordWrap(True)
+        top.addWidget(self.headline, 1)
+        self.open_btn = PushButton(FIF.EDIT, "Открыть правило", self.card)
+        self.open_btn.clicked.connect(lambda: self.open_rule.emit(self._rule_index))
+        top.addWidget(self.open_btn, 0, Qt.AlignmentFlag.AlignTop)
+        card.addLayout(top)
+        self.details = BodyLabel("", self.card)
+        self.details.setWordWrap(True)
+        card.addWidget(self.details)
+        layout.addWidget(self.card)
+        self.card.hide()
+        self._rule_index = -1
+
+    def _request(self) -> None:
+        host = self.input.text().strip()
+        if host:
+            self.check(host)
+
+    def check(self, host: str) -> None:
+        self.input.setText(host)
+        self.headline.setText(f"Проверяю {host}…")
+        self.details.setText("")
+        self.open_btn.hide()
+        self.card.show()
+        self.check_requested.emit(host)
+
+    def show_result(self, verdict: RouteVerdict | None, error: str, rules: list, *, dirty: bool) -> None:
+        self.card.show()
+        if verdict is None:
+            self.headline.setText("Не удалось проверить")
+            self.details.setText(error)
+            self.open_btn.hide()
+            return
+        self.headline.setText(f"{verdict.host} → {_target_text(verdict.target)}")
+        lines = []
+        if verdict.rule_index is None:
+            lines.append("Ни одно правило не подошло — сработало «Если ничего не подошло».")
+        else:
+            rule = rules[verdict.rule_index] if verdict.rule_index < len(rules) else {}
+            lines.append(f"Правило {verdict.rule_index + 1}: {catalog.match_summary(rule)}")
+        for item in verdict.maybe[:3]:
+            lines.append(f"Правило {item.index + 1} выше может перехватить: {item.reason}.")
+        if verdict.ips:
+            lines.append("Адрес сайта: " + ", ".join(verdict.ips[:3]))
+        lines.extend(verdict.notes)
+        if dirty:
+            lines.append("Учтены несохранённые правки — чтобы они заработали, нажмите «Применить».")
+        self.details.setText("\n".join(lines))
+        self._rule_index = -1 if verdict.rule_index is None else verdict.rule_index
+        self.open_btn.setVisible(verdict.rule_index is not None)
+
+
 class RulesSection(Section):
     key = "rules"
     title = "Правила"
     icon = FIF.FILTER
 
+    #: Сохранить и переподключиться («Добавить и применить» простого правила).
+    apply_requested = pyqtSignal()
+    #: Проверить маршрут сайта по текущему документу.
+    route_check_requested = pyqtSignal(str)
+
+    def open_simple_rule(self) -> SimpleRulePage:
+        root_label = self.title if self.nav.depth == 0 else "Назад"
+        page = SimpleRulePage(
+            self,
+            root_label,
+            outbounds=tags(self.document, "outbound"),
+            rule_sets=set(tags(self.document, "rule_set")),
+            on_add=self._add_simple_rule,
+        )
+        self._on_close.append(None)
+        self.nav.push(page)
+        return page
+
+    def _add_simple_rule(self, rule: dict, apply: bool) -> None:
+        page = self.nav.currentWidget()
+        host = page.first_site() if isinstance(page, SimpleRulePage) else ""
+        items = ensure_section_items(self.document, ("route", "rules"))
+        index = insert_index(items)
+        items.insert(index, rule)
+        self.nav.pop()
+        self.rules.refresh()
+        self.rules.flash_row(index)
+        self.edited()
+        if apply:
+            self.apply_requested.emit()
+        if host:
+            self.check_row.check(host)
+
+    def show_route_result(self, verdict: RouteVerdict | None, error: str, *, dirty: bool) -> None:
+        if self.check_row is not None:
+            rules = section_items(self.document, ("route", "rules"))
+            self.check_row.show_result(verdict, error, rules, dirty=dirty)
+
+    check_row: RouteCheckRow | None = None
+
     def build(self, layout: QVBoxLayout) -> None:
         node = self.schema.definition("Rule")
+        self.check_row = RouteCheckRow(self.body)
+        self.check_row.check_requested.connect(self.route_check_requested)
+        self.check_row.open_rule.connect(lambda index: self.rules.open_requested.emit(index))
+        layout.addWidget(self.check_row)
 
         def new_rule() -> dict:
             return {"action": "route", "outbound": self.default_outbound()}
@@ -557,7 +690,11 @@ class RulesSection(Section):
             node,
             "rule",
             lambda rule, _index: RowInfo(catalog.match_summary(rule), catalog.action_summary(rule), visual=rule_visual(rule)),
-            [AddOption("Правило", new_rule), AddOption("Логическое правило (И / ИЛИ)", new_logical)],
+            [
+                AddOption("Сайты, IP, программы (просто)", run=self.open_simple_rule),
+                AddOption("Правило ядра — все параметры", new_rule),
+                AddOption("Логическое правило (И / ИЛИ)", new_logical),
+            ],
             add_text="Добавить правило",
             empty_text="Правил нет — весь трафик уходит по «Если ничего не подошло».",
             item_label=lambda _rule, index: f"Правило {index + 1}",

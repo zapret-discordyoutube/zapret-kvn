@@ -144,6 +144,48 @@ class RoutingPageTests(unittest.TestCase):
         page.session.revert()
         self.assertFalse(page.is_dirty("singbox"))
 
+    def test_simple_rule_writes_nothing_until_added_and_goes_on_top(self) -> None:
+        from xray_fluent.ui.singbox.simple_rule_page import SimpleRulePage
+
+        page = _page()
+        rules = _section(page, "rules")
+        before = page.session.text()
+        simple = rules.open_simple_rule()
+        self.assertIsInstance(rules.nav.currentWidget(), SimpleRulePage)
+        simple.set_target("direct")
+        simple.editors["sites"].setPlainText("https://www.2ip.ru/\n2ip.io")
+        self.assertEqual(page.session.text(), before)
+        self.assertFalse(page.is_dirty("singbox"))
+        applied: list[str] = []
+        checks: list[tuple[str, str]] = []
+        page.apply_requested.connect(lambda core, text: applied.append(text))
+        page.route_check_requested.connect(lambda host, text: checks.append((host, text)))
+        try:
+            simple._submit(apply=True)
+        finally:
+            page.apply_requested.disconnect()
+            page.route_check_requested.disconnect()
+        _pump()
+        self.assertIs(rules.nav.currentWidget(), rules.root)
+        document = json.loads(page.session.text())
+        self.assertEqual(
+            document["route"]["rules"][2],
+            {"domain_suffix": ["2ip.ru", "2ip.io"], "action": "route", "outbound": "direct"},
+        )
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(json.loads(applied[0])["route"]["rules"][2]["outbound"], "direct")
+        self.assertEqual([host for host, _text in checks], ["https://www.2ip.ru/"])
+
+        from xray_fluent.singbox_config.route_explain import explain_route
+
+        verdict = explain_route(document, "2ip.ru", tun=False, match_set=lambda _d, _v: False)
+        page.show_route_check(verdict)
+        self.assertIn("Напрямую", rules.check_row.headline.text())
+        self.assertIn("Правило 3", rules.check_row.details.text())
+        self.assertIn("Применить", rules.check_row.details.text())
+        page.session.revert()
+        self.assertFalse(page.is_dirty("singbox"))
+
     def test_invalid_json_makes_structured_pages_read_only(self) -> None:
         page = _page()
         page.show_section("json")
@@ -358,8 +400,8 @@ class RoutingPageTests(unittest.TestCase):
 
 
 def _first_option(view):
-    """The «Правило» option of the rules list add menu."""
-    return view.options[0]
+    """The first add option that appends a core object (not «Простое правило»)."""
+    return next(option for option in view.options if option.factory is not None)
 
 
 if __name__ == "__main__":

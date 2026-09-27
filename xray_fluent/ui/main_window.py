@@ -24,6 +24,7 @@ from qfluentwidgets import (
 from ..diagnostics.connection_message import connection_message
 from ..diagnostics.runtime_logging import redact_server_addresses
 from ..application.controller import AppController
+from ..application.route_check import RouteCheck
 from ..application.singbox_editor_check import SingboxEditorCheck
 from ..profiles.storage import PassphraseRequired
 from ..constants import APP_ICON_PATH, APP_NAME, APP_VERSION, BASE_DIR, LOG_DIR
@@ -436,6 +437,7 @@ class MainWindow(FluentWindow):
         self.configs_page.reset_requested.connect(self._reset_core_config_to_template)
         self.configs_page.save_requested.connect(self._save_core_config)
         self.configs_page.validate_requested.connect(self._validate_core_config)
+        self.configs_page.route_check_requested.connect(self._start_route_check)
         self.configs_page.apply_requested.connect(self._apply_core_config)
 
         self.zapret_page.start_requested.connect(self._on_zapret_start)
@@ -1256,6 +1258,20 @@ class MainWindow(FluentWindow):
             self._singbox_editor_check = checker
         self._singbox_editor_check_generation = checker.start(self.controller.state.settings.singbox_path, text)
         self.configs_page.set_status("singbox", "info", "JSON корректен. Проверяю ядром sing-box…")
+
+    def _start_route_check(self, host: str, text: str) -> None:
+        """«Проверить сайт»: маршрут по редактируемому JSON, наборы спрашиваем у ядра — вне GUI-потока."""
+        checker = getattr(self, "_route_check", None)
+        if checker is None:
+            checker = RouteCheck(self)
+            checker.finished.connect(self._on_route_check_finished)
+            self._route_check = checker
+        settings = self.controller.state.settings
+        self._route_check_generation = checker.start(settings.singbox_path, text, host, tun=bool(settings.tun_mode))
+
+    def _on_route_check_finished(self, generation: int, verdict, error: str) -> None:
+        if generation == getattr(self, "_route_check_generation", 0):
+            self.configs_page.show_route_check(verdict, error)
 
     def _on_singbox_editor_check_finished(self, generation: int, level: str, message: str) -> None:
         if generation != getattr(self, "_singbox_editor_check_generation", 0):

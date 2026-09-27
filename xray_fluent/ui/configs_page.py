@@ -383,6 +383,8 @@ class ConfigsPage(QWidget):
     config_selected = pyqtSignal(str, str)
     template_selected = pyqtSignal(str, str)
     section_changed = pyqtSignal(str)
+    #: ``(сайт, текст документа)`` — «Проверить сайт» на странице правил.
+    route_check_requested = pyqtSignal(str, str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -437,6 +439,9 @@ class ConfigsPage(QWidget):
         self.overview.reset_requested.connect(lambda: self.reset_requested.emit("singbox"))
         self.overview.config_selected.connect(lambda value: self.config_selected.emit("singbox", value))
         self.overview.template_selected.connect(lambda value: self.template_selected.emit("singbox", value))
+        rules = self._sections["rules"]
+        rules.apply_requested.connect(lambda: self._emit_with_text(self.apply_requested))
+        rules.route_check_requested.connect(self._request_route_check)
         self.revert_btn.clicked.connect(self._on_revert)
         self.validate_btn.clicked.connect(lambda: self._emit_with_text(self.validate_requested))
         self.save_btn.clicked.connect(lambda: self._emit_with_text(self.save_requested))
@@ -484,6 +489,14 @@ class ConfigsPage(QWidget):
         for key in ("rules", "rule_sets", "dns", "outbounds", "system"):
             areas.append(self._sections[key].scroll_area)
         return areas
+
+    def _request_route_check(self, host: str) -> None:
+        self.flush()
+        self.route_check_requested.emit(host, self.session.text())
+
+    def show_route_check(self, verdict, error: str = "") -> None:
+        """Ответ «Проверить сайт» (из главного окна, после фоновой проверки)."""
+        self._sections["rules"].show_route_result(verdict, error, dirty=self.session.is_dirty())
 
     def _emit_with_text(self, signal) -> None:
         self.flush()

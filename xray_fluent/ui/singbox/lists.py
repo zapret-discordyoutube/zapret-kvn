@@ -75,8 +75,11 @@ class RowInfo:
 @dataclass(frozen=True)
 class AddOption:
     label: str
-    factory: Callable[[], dict]
+    #: Новый объект, который сразу встаёт в конец списка и открывается.
+    factory: Callable[[], dict] | None = None
     submenu: str = ""
+    #: Вместо добавления — своё действие (например, страница «Простое правило»).
+    run: Callable[[], None] | None = None
 
 
 class _Row(CardWidget):
@@ -230,11 +233,17 @@ class ObjectList(QWidget):
             row.show_info(index, self._describe(item if isinstance(item, dict) else {}, index), len(items))
         self._empty.setVisible(not items)
 
+    def flash_row(self, index: int) -> None:
+        self._flash_row(index)
+
     def _flash_row(self, index: int) -> None:
         if 0 <= index < len(self._row_widgets):
             self._row_widgets[index].flash()
 
     def _add(self, option: AddOption) -> None:
+        if option.run is not None:
+            option.run()
+            return
         items = self._ensure_items()
         items.append(option.factory())
         self.refresh()
