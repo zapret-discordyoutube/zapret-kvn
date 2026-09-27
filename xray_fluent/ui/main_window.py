@@ -541,6 +541,30 @@ class MainWindow(FluentWindow):
         finally:
             self._restoring_geometry = False
 
+    # Смена экрана при перетаскивании окна не трогает геометрию: окном в этот
+    # момент владеет цикл перемещения Windows, а логические прямоугольники
+    # экранов с разным масштабом не стыкуются — «подгонка» посреди переноса
+    # выбирала старый экран и возвращала окно обратно. Здесь только снижаем
+    # минимальный размер, чтобы окно поместилось на маленьком экране.
+    def _on_window_screen_changed(self, screen) -> None:
+        if screen is None:
+            return
+        from .window_geometry import MINIMUM_SIZE
+        area = screen.availableGeometry()
+        current = self.minimumSize()
+        self.setMinimumSize(
+            min(current.width(), MINIMUM_SIZE.width(), area.width()),
+            min(current.height(), MINIMUM_SIZE.height(), area.height()),
+        )
+
+    # Разрешение, панель задач или масштаб поменялись у экрана с окном —
+    # подгоняем после того, как Qt обновит геометрию. Чужие экраны не
+    # трогают окно: пересчёт по ним и давал отскок.
+    def _on_screen_geometry_changed(self, screen) -> None:
+        if screen is not self.screen():
+            return
+        QTimer.singleShot(0, self._fit_current_screen)
+
     def _fit_current_screen(self, *_):
         if not self._geometry_persistence_ready or self._restoring_geometry:
             return
@@ -563,10 +587,10 @@ class MainWindow(FluentWindow):
             QTimer.singleShot(0, lambda: logging.getLogger("xray_fluent.bootstrap").info("first_window_ms=%.1f", (time.perf_counter() - self._startup_started) * 1000))
         if not getattr(self, "_screen_signals_connected", False) and self.windowHandle():
             self._screen_signals_connected = True
-            self.windowHandle().screenChanged.connect(self._fit_current_screen)
+            self.windowHandle().screenChanged.connect(self._on_window_screen_changed)
             for screen in QGuiApplication.screens():
-                screen.availableGeometryChanged.connect(self._fit_current_screen)
-                screen.logicalDotsPerInchChanged.connect(self._fit_current_screen)
+                screen.availableGeometryChanged.connect(lambda *_, s=screen: self._on_screen_geometry_changed(s))
+                screen.logicalDotsPerInchChanged.connect(lambda *_, s=screen: self._on_screen_geometry_changed(s))
 
     def _on_countries_changed(self, node_ids) -> None:
         self.nodes_page.update_countries(node_ids)
@@ -1610,7 +1634,7 @@ class MainWindow(FluentWindow):
         self._update_downloader = UpdateDownloader(
             update,
             proxy_url=proxy_url,
-            restart_in_tray=self._tray_available and not self.isVisible(),
+            restart_in_tray=self._restart_update_in_tray(background),
             parent=self,
         )
         self._update_downloader.progress.connect(self.updates_page.show_download_progress)
@@ -1618,6 +1642,18 @@ class MainWindow(FluentWindow):
         self._update_downloader.finished_ok.connect(self._on_update_ready)
         self._update_downloader.error.connect(self._on_update_error)
         self._update_downloader.start()
+
+    def _restart_update_in_tray(self, background: bool) -> bool:
+        if not self._tray_available:
+            return False
+        if not background:
+            return not self.isVisible()
+        # Тихая установка не должна выводить окно поверх чужих программ:
+        # после перезапуска оно показывается, только если пользователь сейчас
+        # в нём и работает. Свёрнутое или фоновое окно уходит в трей.
+        # Только существующий флаг --tray: откат запускает старую сборку с теми
+        # же аргументами, а новый флаг она бы не поняла.
+        return not (self.isVisible() and not self.isMinimized() and self.isActiveWindow())
 
     def _on_update_ready(self) -> None:
         self.updates_page.set_app_status("Обновление загружено. Перезапуск...")

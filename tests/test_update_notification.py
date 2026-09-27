@@ -280,6 +280,29 @@ class UpdateNotificationTests(unittest.TestCase):
         window._auto_install_block_reason.assert_not_called()
         window._start_update_download.assert_called_once_with(update)
 
+    def _restart_window(self, *, visible=True, minimized=False, active=False, tray=True):
+        return SimpleNamespace(
+            _tray_available=tray,
+            isVisible=lambda: visible,
+            isMinimized=lambda: minimized,
+            isActiveWindow=lambda: active,
+        )
+
+    def test_background_restart_shows_window_only_when_user_is_in_it(self) -> None:
+        restart_in_tray = MainWindow._restart_update_in_tray
+        self.assertFalse(restart_in_tray(self._restart_window(active=True), True))
+        # Окно за другими программами или свёрнутое не всплывает поверх всего.
+        self.assertTrue(restart_in_tray(self._restart_window(active=False), True))
+        self.assertTrue(restart_in_tray(self._restart_window(minimized=True, active=True), True))
+        self.assertTrue(restart_in_tray(self._restart_window(visible=False), True))
+        # Без трея окну некуда уйти — показываем как раньше.
+        self.assertFalse(restart_in_tray(self._restart_window(tray=False), True))
+
+    def test_manual_restart_keeps_visible_window(self) -> None:
+        restart_in_tray = MainWindow._restart_update_in_tray
+        self.assertFalse(restart_in_tray(self._restart_window(active=False), False))
+        self.assertTrue(restart_in_tray(self._restart_window(visible=False), False))
+
     def test_password_protection_blocks_silent_restart(self) -> None:
         window = SimpleNamespace(
             controller=SimpleNamespace(state=SimpleNamespace(security=SimpleNamespace(enabled=True)))
