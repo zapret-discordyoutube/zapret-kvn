@@ -401,6 +401,23 @@ class UpdateNotificationTests(unittest.TestCase):
         MainWindow._on_update_error(window, "нет сети")
         window._show_status.assert_called_once_with("error", "нет сети")
 
+    def test_broken_archive_counts_as_attempt_but_network_error_does_not(self) -> None:
+        for permanent in (True, False):
+            window = SimpleNamespace(
+                _update_in_progress=True,
+                _update_background=True,
+                _update_downloader=SimpleNamespace(update=_update(), failure_permanent=permanent),
+                updates_page=SimpleNamespace(show_idle=Mock(), set_app_error=Mock()),
+                controller=SimpleNamespace(_logger=Mock()),
+                _show_status=Mock(),
+            )
+            with patch("xray_fluent.ui.main_window.record_attempt") as record:
+                MainWindow._on_update_error(window, "ошибка")
+            if permanent:
+                record.assert_called_once_with("0.4.67", reconnect=False, restarting=False)
+            else:
+                record.assert_not_called()
+
 
 class CoreUpdateStatusColorTests(unittest.TestCase):
     """«Актуален» у sing-box зелёный, как у Xray (раньше был серым)."""

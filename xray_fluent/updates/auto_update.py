@@ -111,10 +111,17 @@ def record_attempt(
     version: str,
     *,
     reconnect: bool,
+    restarting: bool = True,
     now: float | None = None,
     path: Path = ATTEMPT_FILE,
 ) -> UpdateAttempt:
-    """Записать попытку установки непосредственно перед запуском скрипта."""
+    """Записать попытку установки.
+
+    ``restarting=True`` — непосредственно перед запуском скрипта: следующий
+    старт вернёт подключение. ``False`` — архив отвергнут ещё до установки
+    (битая сумма или содержимое): попытка засчитывается, чтобы неисправный
+    релиз не скачивался каждые полчаса, но перезапуска не было.
+    """
 
     previous = load_attempt(path)
     attempts = previous.attempts + 1 if previous and previous.version == version else 1
@@ -123,6 +130,7 @@ def record_attempt(
         attempts=attempts,
         last_attempt=time.time() if now is None else now,
         reconnect=reconnect,
+        resume_pending=restarting,
     )
     _write_attempt(record, path)
     return record

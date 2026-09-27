@@ -601,6 +601,9 @@ class UpdateDownloader(QThread):
         self._proxy_url = proxy_url
         self._restart_in_tray = restart_in_tray
         self.script_path: Path | None = None
+        # Сбой, который повторится при любой следующей загрузке этого же
+        # архива (контрольная сумма, содержимое). Сетевые ошибки — нет.
+        self.failure_permanent = False
 
     @property
     def update(self) -> AppUpdate:
@@ -802,12 +805,14 @@ class UpdateDownloader(QThread):
             self.status.emit("Проверка архива...")
             expected_hash = _extract_digest(self._update.digest_sha256)
             if not expected_hash:
+                self.failure_permanent = True
                 self.error.emit("У релизного архива отсутствует SHA-256")
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return
 
             real_hash = _sha256_file(zip_path)
             if real_hash.lower() != expected_hash.lower():
+                self.failure_permanent = True
                 self.error.emit("Контрольная сумма архива не совпадает")
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return
@@ -817,12 +822,17 @@ class UpdateDownloader(QThread):
 
             # Extract
             extract_dir = tmp_dir / "extracted"
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(extract_dir)
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    zf.extractall(extract_dir)
+            except zipfile.BadZipFile:
+                self.failure_permanent = True
+                raise
 
             exe_name = "ZapretKVN.exe"
             source_dir = _resolve_extracted_app_dir(extract_dir, exe_name)
             if not (source_dir / exe_name).is_file():
+                self.failure_permanent = True
                 self.error.emit("Архив обновления не содержит ZapretKVN.exe")
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return

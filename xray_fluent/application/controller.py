@@ -4077,6 +4077,10 @@ class AppController(QObject):
         if not was_connected:
             self._log("[update] restart after app update: staying disconnected")
             return
+        if self.state.settings.auto_connect_last:
+            # Обычный путь сохраняет порядок «подключаться после подписок».
+            self.auto_connect_if_needed()
+            return
         if self.locked:
             return
         if self.selected_node is None and not self._can_connect_without_selected_node():

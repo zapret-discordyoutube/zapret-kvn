@@ -71,6 +71,12 @@ class AttemptRecordTests(unittest.TestCase):
         self.assertIsNone(resolve_startup("0.8.1", now=NOW, path=self.path))
         self.assertFalse(self.path.exists())
 
+    def test_rejected_archive_counts_without_resuming_anything(self) -> None:
+        record_attempt("0.8.2", reconnect=False, restarting=False, now=NOW, path=self.path)
+        outcome = resolve_startup("0.8.1", now=NOW + 5, path=self.path)
+        self.assertIsNone(outcome.resume)
+        self.assertEqual(record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path).attempts, 2)
+
     def test_attempts_accumulate_per_version_and_reset_on_new_release(self) -> None:
         record_attempt("0.8.2", reconnect=False, now=NOW, path=self.path)
         self.assertEqual(record_attempt("0.8.2", reconnect=False, now=NOW, path=self.path).attempts, 2)
@@ -146,10 +152,12 @@ class LeftoverPurgeTests(unittest.TestCase):
 
 
 class ResumeAfterUpdateTests(unittest.TestCase):
-    def _controller(self):
+    def _controller(self, auto_connect_last: bool = False):
         from xray_fluent.application.controller import AppController
 
         controller = SimpleNamespace(
+            state=SimpleNamespace(settings=SimpleNamespace(auto_connect_last=auto_connect_last)),
+            auto_connect_if_needed=Mock(),
             locked=False,
             selected_node=object(),
             _desired_connected=False,
@@ -166,9 +174,16 @@ class ResumeAfterUpdateTests(unittest.TestCase):
         controller._request_transition.assert_called_once()
 
     def test_was_disconnected_suppresses_auto_connect(self) -> None:
-        cls, controller = self._controller()
+        cls, controller = self._controller(auto_connect_last=True)
         cls.resume_after_app_update(controller, False)
         self.assertFalse(controller._desired_connected)
+        controller._request_transition.assert_not_called()
+        controller.auto_connect_if_needed.assert_not_called()
+
+    def test_auto_connect_setting_keeps_its_startup_order(self) -> None:
+        cls, controller = self._controller(auto_connect_last=True)
+        cls.resume_after_app_update(controller, True)
+        controller.auto_connect_if_needed.assert_called_once()
         controller._request_transition.assert_not_called()
 
 

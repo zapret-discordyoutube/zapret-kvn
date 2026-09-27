@@ -1660,8 +1660,16 @@ class MainWindow(FluentWindow):
         self._update_in_progress = False
         self.updates_page.show_idle()
         self.updates_page.set_app_error(f"Ошибка: {err}")
+        downloader = getattr(self, "_update_downloader", None)
+        if downloader is not None and getattr(downloader, "failure_permanent", False):
+            # Неисправный архив не исправится повторной загрузкой: такая
+            # попытка идёт в тот же лимит, что и неудачная установка.
+            try:
+                record_attempt(downloader.update.version, reconnect=False, restarting=False)
+            except Exception:
+                self.controller._logger.exception("[update] Не удалось записать попытку обновления")
         if self._update_background:
-            # Фоновая попытка не шумит: следующий 30-минутный тик повторит её.
+            # Фоновая попытка не шумит: сетевую ошибку повторит 30-минутный тик.
             self.controller._logger.warning(
                 "[update] Фоновая установка не выполнена: %s", " ".join(str(err).split())
             )
