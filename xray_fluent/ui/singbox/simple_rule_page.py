@@ -74,7 +74,7 @@ class SimpleRulePage(DetailPage):
             self.editors[key] = editor
         self.hint = CaptionLabel(
             "По одному в строке. Правило сработает, если совпадёт что-нибудь из списков. "
-            "Сайт «2ip.ru» — вместе со всеми поддоменами.",
+            "Сайт «2ip.ru» — вместе со всеми поддоменами, программа — без учёта регистра.",
             self.body,
         )
         self.hint.setWordWrap(True)
@@ -146,7 +146,7 @@ class SimpleRulePage(DetailPage):
         self.apply_btn.setEnabled(ready)
         if ready:
             target = dict(self._targets)[self.target_key()]
-            self.preview.setText(f"{result.summary} → {target}. Правило встанет первым, выше стоковых.")
+            self.preview.setText(f"{result.summary} → {target}. Правило встанет наверх — после служебных и защитных.")
         elif filled:
             self.preview.setText("\n".join(error for error in result.errors if not error.startswith("Укажите")))
         else:

@@ -9,7 +9,11 @@ v2rayN понимается как есть. Результат — обычно
 * ``full:`` — ``domain``, ``keyword:`` — ``domain_keyword``, ``regexp:`` — ``domain_regex``;
 * ``geosite:X`` / ``geoip:X`` — существующий набор ``geosite-X`` / ``geoip-X``;
   ``geoip:private`` — ``ip_is_private``;
-* IP и подсети — ``ip_cidr``; программа с путём — ``process_path``, иначе ``process_name``.
+* слово без точки (``youtube``) — ``domain_keyword``, как простая строка в Xray;
+* IP и подсети — ``ip_cidr``;
+* программа — ``process_path_regex`` без учёта регистра: ядро сравнивает
+  ``process_name`` точно, а в Windows файл может называться ``Telegram.exe``;
+  без расширения дописывается ``.exe``.
 
 В ядре условия разных видов складываются через И (сайт И программа). В форме
 пользователь ждёт «что-нибудь из списка», поэтому сайты/IP и программы
@@ -26,6 +30,10 @@ import re
 BLOCK = "__block__"
 #: Служебные правила, которые должны идти до пользовательских (sniff даёт домен).
 _SERVICE_ACTIONS = ("sniff", "hijack-dns")
+#: Метасимволы регулярных выражений Go (RE2); остальное — буквально.
+_REGEX_META = set("\\.+*?()|[]{}^$")
+_NAME_PATTERN = re.compile(r"^\(\?i\)\(\^\|\[\\\\/\]\)(.+)\$$")
+_PATH_PATTERN = re.compile(r"^\(\?i\)\^(.+)\$$")
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*$")
 
 
@@ -107,7 +115,9 @@ def parse_sites(text: str, rule_sets: set[str], fields: dict, errors: list[str])
                 _add(fields, "domain_regex", rest.strip())
         else:
             domain = normalize_domain(rest if kind == "domain" else value)
-            if _DOMAIN_RE.match(domain):
+            if kind != "domain" and "." not in domain and domain.isascii() and domain.replace("-", "").isalnum():
+                _add(fields, "domain_keyword", domain)
+            elif _DOMAIN_RE.match(domain):
                 _add(fields, "domain_suffix", domain)
             else:
                 errors.append(f"Не похоже на адрес сайта: {value}")
@@ -135,10 +145,36 @@ def parse_ips(text: str, rule_sets: set[str], fields: dict, errors: list[str]) -
             _add(fields, "ip_cidr", str(network))
 
 
+def _regex_escape(text: str) -> str:
+    return "".join("\\" + char if char in _REGEX_META else char for char in text)
+
+
+def _unescape(pattern: str) -> str:
+    return re.sub(r"\\(.)", r"\1", pattern)
+
+
+def process_pattern(value: str) -> str:
+    """Имя или путь программы — регулярное выражение без учёта регистра."""
+    name = value.strip().strip('"')
+    if "\\" in name or "/" in name:
+        return f"(?i)^{_regex_escape(name)}$"
+    if "." not in name:
+        name += ".exe"
+    return f"(?i)(^|[\\\\/]){_regex_escape(name)}$"
+
+
+def process_display(pattern: str) -> str | None:
+    """Обратно в имя или путь для подписи; ``None`` — это не наш шаблон."""
+    for shape in (_NAME_PATTERN, _PATH_PATTERN):
+        match = shape.match(pattern)
+        if match:
+            return _unescape(match.group(1))
+    return None
+
+
 def parse_programs(text: str, fields: dict) -> None:
     for value in _lines(text):
-        name = value.strip().strip('"')
-        _add(fields, "process_path" if ("\\" in name or "/" in name) else "process_name", name)
+        _add(fields, "process_path_regex", process_pattern(value))
 
 
 def _action(target: str) -> dict:
@@ -177,10 +213,12 @@ def _summary(address: dict, process: dict) -> str:
     suffixes = [display_domain(value) for value in address.get("domain_suffix", [])]
     if suffixes:
         parts.append(", ".join(suffixes[:3]) + (f" +{len(suffixes) - 3}" if len(suffixes) > 3 else "") + " и поддомены")
-    for key in ("domain", "domain_keyword", "domain_regex", "rule_set", "ip_cidr", "process_name", "process_path"):
+    for key in ("domain", "domain_keyword", "domain_regex", "rule_set", "ip_cidr", "process_path_regex"):
         values = address.get(key) or process.get(key) or []
         if key == "domain":
             values = [display_domain(value) for value in values]
+        elif key == "process_path_regex":
+            values = [process_display(value) or value for value in values]
         if values:
             parts.append(", ".join(values[:3]) + (f" +{len(values) - 3}" if len(values) > 3 else ""))
     if address.get("ip_is_private"):
@@ -188,16 +226,25 @@ def _summary(address: dict, process: dict) -> str:
     return " или ".join(parts)
 
 
+def _leading(rule) -> bool:
+    """Служебное или защитное правило из начала списка: новое встаёт после него."""
+    if not isinstance(rule, dict):
+        return False
+    action = rule.get("action")
+    return action in _SERVICE_ACTIONS or action == "reject" or rule.get("outbound") == "block"
+
+
 def insert_index(rules: list) -> int:
-    """Куда встаёт новое правило: сразу после служебных sniff/hijack-dns в начале.
+    """Куда встаёт новое правило: после служебных и защитных правил в начале.
 
     Правила проверяются сверху вниз до первого совпадения, поэтому правило
     пользователя должно стоять выше стоковых — иначе его перехватит набор.
+    Но не выше sniff (без него ядро не знает домен) и не выше блоков вроде
+    DoT на 853 и сервисов проверки IP: они защищают, а не маршрутизируют.
     """
     index = 0
     for rule in rules:
-        if isinstance(rule, dict) and rule.get("action") in _SERVICE_ACTIONS:
-            index += 1
-            continue
-        break
+        if not _leading(rule):
+            break
+        index += 1
     return index

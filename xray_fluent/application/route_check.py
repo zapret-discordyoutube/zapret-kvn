@@ -119,6 +119,8 @@ class RouteCheck(QObject):
 
     def _run(self, generation: int, exe: Path | None, text: str, host: str, tun: bool) -> None:
         # Рабочий поток: сигнал доставляется в GUI-поток через очередь.
+        if generation != self._generation:
+            return  # уже запрошена новая проверка — не тратим запуски ядра
         try:
             verdict = self.check_blocking(exe, text, host, tun=tun)
         except Exception as exc:  # ошибка не должна пропасть молча

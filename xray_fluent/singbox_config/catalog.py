@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .document import as_list
+from .simple_rule import process_display
 
 
 FIELD_LABELS: dict[str, str] = {
@@ -333,8 +334,15 @@ def match_summary(rule: dict) -> str:
     parts: list[str] = []
     for key in _SUMMARY_FIELDS:
         values = as_list(rule.get(key))
-        if values:
-            parts.append(f"{_SUMMARY_SHORT[key]}: {_values_text(values)}")
+        if not values:
+            continue
+        label = _SUMMARY_SHORT[key]
+        if key == "process_path_regex":
+            # Шаблоны «простого правила» показываем как имя программы.
+            shown = [process_display(str(value)) for value in values]
+            if all(shown):
+                values, label = shown, "процессы"
+        parts.append(f"{label}: {_values_text(values)}")
     if rule.get("ip_is_private"):
         parts.append("локальные адреса")
     if rule.get("source_ip_is_private"):

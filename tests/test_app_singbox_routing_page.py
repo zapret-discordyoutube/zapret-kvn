@@ -169,11 +169,11 @@ class RoutingPageTests(unittest.TestCase):
         self.assertIs(rules.nav.currentWidget(), rules.root)
         document = json.loads(page.session.text())
         self.assertEqual(
-            document["route"]["rules"][2],
+            document["route"]["rules"][4],
             {"domain_suffix": ["2ip.ru", "2ip.io"], "action": "route", "outbound": "direct"},
         )
         self.assertEqual(len(applied), 1)
-        self.assertEqual(json.loads(applied[0])["route"]["rules"][2]["outbound"], "direct")
+        self.assertEqual(json.loads(applied[0])["route"]["rules"][4]["outbound"], "direct")
         self.assertEqual([host for host, _text in checks], ["https://www.2ip.ru/"])
 
         from xray_fluent.singbox_config.route_explain import explain_route
@@ -181,8 +181,11 @@ class RoutingPageTests(unittest.TestCase):
         verdict = explain_route(document, "2ip.ru", tun=False, match_set=lambda _d, _v: False)
         page.show_route_check(verdict)
         self.assertIn("Напрямую", rules.check_row.headline.text())
-        self.assertIn("Правило 3", rules.check_row.details.text())
+        self.assertIn("Правило 5", rules.check_row.details.text())
         self.assertIn("Применить", rules.check_row.details.text())
+        page.session.mark_saved(None, page.session.text())
+        page.show_route_check(verdict, unapplied=True)
+        self.assertIn("по прежним правилам", rules.check_row.details.text())
         page.session.revert()
         self.assertFalse(page.is_dirty("singbox"))
 

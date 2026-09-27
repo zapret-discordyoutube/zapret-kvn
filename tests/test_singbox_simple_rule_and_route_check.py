@@ -55,7 +55,28 @@ class SimpleRuleTests(unittest.TestCase):
         self.assertEqual(rule["mode"], "or")
         self.assertEqual(rule["action"], "reject")
         self.assertNotIn("outbound", rule)
-        self.assertEqual(rule["rules"][1], {"process_name": ["chrome.exe"], "process_path": ["C:\\Games\\g.exe"]})
+        patterns = rule["rules"][1]["process_path_regex"]
+        self.assertEqual(patterns, ["(?i)(^|[\\\\/])chrome\\.exe$", "(?i)^C:\\\\Games\\\\g\\.exe$"])
+
+    def test_programs_match_without_case_and_get_exe(self) -> None:
+        import re
+
+        from xray_fluent.singbox_config.catalog import match_summary
+        from xray_fluent.singbox_config.simple_rule import process_display, process_pattern
+
+        pattern = process_pattern("telegram")
+        self.assertTrue(re.search(pattern, "C:\\Users\\u\\AppData\\Telegram.exe"))
+        self.assertFalse(re.search(pattern, "C:\\x\\notTelegram.exe"))
+        self.assertEqual(process_display(pattern), "telegram.exe")
+        spaced = process_pattern("Яндекс Музыка.exe")
+        self.assertTrue(re.search(spaced, "D:\\Apps\\ЯНДЕКС МУЗЫКА.EXE"))
+        rule = build_rule("direct", "", "", "telegram", SETS).rule
+        self.assertEqual(match_summary(rule), "процессы: telegram.exe")
+
+    def test_word_without_dot_is_a_keyword(self) -> None:
+        rule = build_rule("proxy", "youtube", "", "", SETS).rule
+        self.assertEqual(rule["domain_keyword"], ["youtube"])
+        self.assertNotIn("domain_suffix", rule)
 
     def test_errors_block_the_rule(self) -> None:
         for sites, ips, message in (
@@ -70,10 +91,12 @@ class SimpleRuleTests(unittest.TestCase):
                 self.assertIsNone(result.rule)
                 self.assertTrue(any(message in error for error in result.errors), result.errors)
 
-    def test_new_rule_goes_after_service_rules(self) -> None:
-        self.assertEqual(insert_index(STOCK["route"]["rules"]), 2)
+    def test_new_rule_goes_after_service_and_protective_rules(self) -> None:
+        # sniff, hijack-dns, блок DoT 853, блок сервисов проверки IP — затем пользовательское.
+        self.assertEqual(insert_index(STOCK["route"]["rules"]), 4)
+        self.assertEqual(STOCK["route"]["rules"][4].get("outbound"), "direct")
         self.assertEqual(insert_index([]), 0)
-        self.assertEqual(insert_index([{"action": "reject"}]), 0)
+        self.assertEqual(insert_index([{"domain": ["a"], "outbound": "direct"}, {"action": "sniff"}]), 0)
 
 
 def _matcher(members: dict[str, set[str]]):

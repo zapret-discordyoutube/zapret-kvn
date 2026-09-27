@@ -494,9 +494,14 @@ class ConfigsPage(QWidget):
         self.flush()
         self.route_check_requested.emit(host, self.session.text())
 
-    def show_route_check(self, verdict, error: str = "") -> None:
-        """Ответ «Проверить сайт» (из главного окна, после фоновой проверки)."""
-        self._sections["rules"].show_route_result(verdict, error, dirty=self.session.is_dirty())
+    def show_route_check(self, verdict, error: str = "", *, unapplied: bool = False) -> None:
+        """Ответ «Проверить сайт» (из главного окна, после фоновой проверки).
+
+        ``unapplied`` — конфиг сохранён, но подключение ещё работает по прежнему.
+        """
+        self._sections["rules"].show_route_result(
+            verdict, error, dirty=self.session.is_dirty(), unapplied=unapplied
+        )
 
     def _emit_with_text(self, signal) -> None:
         self.flush()

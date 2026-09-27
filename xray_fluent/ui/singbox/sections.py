@@ -600,7 +600,9 @@ class RouteCheckRow(QWidget):
         self.card.show()
         self.check_requested.emit(host)
 
-    def show_result(self, verdict: RouteVerdict | None, error: str, rules: list, *, dirty: bool) -> None:
+    def show_result(
+        self, verdict: RouteVerdict | None, error: str, rules: list, *, dirty: bool, unapplied: bool = False
+    ) -> None:
         self.card.show()
         if verdict is None:
             self.headline.setText("Не удалось проверить")
@@ -621,6 +623,8 @@ class RouteCheckRow(QWidget):
         lines.extend(verdict.notes)
         if dirty:
             lines.append("Учтены несохранённые правки — чтобы они заработали, нажмите «Применить».")
+        elif unapplied:
+            lines.append("Конфиг сохранён, но подключение работает по прежним правилам — нажмите «Применить».")
         self.details.setText("\n".join(lines))
         self._rule_index = -1 if verdict.rule_index is None else verdict.rule_index
         self.open_btn.setVisible(verdict.rule_index is not None)
@@ -664,10 +668,12 @@ class RulesSection(Section):
         if host:
             self.check_row.check(host)
 
-    def show_route_result(self, verdict: RouteVerdict | None, error: str, *, dirty: bool) -> None:
+    def show_route_result(
+        self, verdict: RouteVerdict | None, error: str, *, dirty: bool, unapplied: bool = False
+    ) -> None:
         if self.check_row is not None:
             rules = section_items(self.document, ("route", "rules"))
-            self.check_row.show_result(verdict, error, rules, dirty=dirty)
+            self.check_row.show_result(verdict, error, rules, dirty=dirty, unapplied=unapplied)
 
     check_row: RouteCheckRow | None = None
 

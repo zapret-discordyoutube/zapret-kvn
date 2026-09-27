@@ -708,6 +708,8 @@ class MainWindow(FluentWindow):
         self._refresh_tray_tooltip()
 
     def _on_connection_changed(self, connected: bool) -> None:
+        if connected:
+            self._config_saved_unapplied = False  # новая сессия читает сохранённый конфиг
         self.dashboard_page.set_active_tun_mode(self.controller.active_tun_mode())
         self.dashboard_page.set_connection(connected)
         if connected and not self.controller.state.settings.tun_mode:
@@ -1224,8 +1226,13 @@ class MainWindow(FluentWindow):
         self.configs_page.mark_saved(core, path, saved_text)
         if saved_text != text:
             self.configs_page.set_document(core, path, saved_text)
-        self.configs_page.set_status(core, "success", f"Сохранено: {path.name}")
-        self._show_status("success", f"Сохранено: {path.name}")
+        message = f"Сохранено: {path.name}"
+        if self.controller.connected:
+            # Файл на диске новый, а работающее ядро — по старым правилам.
+            self._config_saved_unapplied = True
+            message += ". Работающее подключение — по прежним правилам: нажмите «Применить»."
+        self.configs_page.set_status(core, "success", message)
+        self._show_status("success", message)
 
     def _validate_core_config(self, core: str, text: str) -> None:
         if core == "singbox":
@@ -1271,7 +1278,8 @@ class MainWindow(FluentWindow):
 
     def _on_route_check_finished(self, generation: int, verdict, error: str) -> None:
         if generation == getattr(self, "_route_check_generation", 0):
-            self.configs_page.show_route_check(verdict, error)
+            unapplied = bool(getattr(self, "_config_saved_unapplied", False)) and self.controller.connected
+            self.configs_page.show_route_check(verdict, error, unapplied=unapplied)
 
     def _on_singbox_editor_check_finished(self, generation: int, level: str, message: str) -> None:
         if generation != getattr(self, "_singbox_editor_check_generation", 0):
@@ -1294,6 +1302,7 @@ class MainWindow(FluentWindow):
                 self.configs_page.set_document(core, loaded_path, saved_text)
             else:
                 self.configs_page.mark_saved(core, path, text)
+        self._config_saved_unapplied = False
         level = "info" if "Применяю" in message else "success"
         self.configs_page.set_status(core, level, message)
         self._show_status(level, message.splitlines()[0])
