@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from scripts.check_core_release_freeze import digest, verify
-from scripts.prepare_core_release import android_pin_changes
+from scripts.prepare_core_release import android_hysteria_parity, android_pin_changes
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID = ROOT.parent / "android"
@@ -46,6 +46,38 @@ class CoreReleaseFreezeTests(unittest.TestCase):
             (root / "core-release-freeze.json").write_text(json.dumps(freeze))
             with self.assertRaisesRegex(ValueError, "Android sing-box differs"):
                 verify(root, "android", "v0.5.0")
+
+    def test_receipt_pins_hysteria_on_both_platforms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            core = {"version": "v1.14.1-extended-2.7.2", "commit": "5" * 40}
+            lock = root / "scripts/core-lock.windows-x64.json"
+            amnezia = {"version": "v3.1.1", "module": "m", "toolchain": {"version": "go1.26.8"}}
+            lock.write_text(json.dumps({
+                "amnezia": amnezia, "singbox_build": core,
+                "sources": [{"id": "hysteria", "version": "app/v2.12.2"}],
+            }))
+            freeze = {"schema": 1, "releases": {"windows": "0.5.8", "android": "v0.5.0"},
+                      "amnezia": amnezia,
+                      "singbox": core, "hysteria": {"version": "app/v2.12.3"},
+                      "inputs": {"windows": {}, "android": {}}}
+            (root / "core-release-freeze.json").write_text(json.dumps(freeze))
+            with self.assertRaisesRegex(ValueError, "Windows Hysteria differs"):
+                verify(root, "windows", "0.5.8")
+            (root / "core.properties").write_text(
+                f"CORE_TAG={core['version']}\nCORE_COMMIT={core['commit']}\n"
+                "ANDROID_WIREGUARD_GO=m@v3.1.1\nANDROID_AMNEZIAWG_GO=m@v3.1.1\nGO_VERSION=1.26.8\n"
+                "HYSTERIA_CORE_TAG=app/v2.12.2\n"
+            )
+            with self.assertRaisesRegex(ValueError, "Android Hysteria differs"):
+                verify(root, "android", "v0.5.0")
+            with self.assertRaisesRegex(ValueError, "lags Windows app/v2.12.3"):
+                android_hysteria_parity(root, {"sources": [{"id": "hysteria", "version": "app/v2.12.3"}]})
+            self.assertEqual(
+                android_hysteria_parity(root, {"sources": [{"id": "hysteria", "version": "app/v2.12.2"}]}),
+                "app/v2.12.2",
+            )
 
     @unittest.skipUnless(ANDROID.is_dir(), "paired Android checkout not available")
     def test_android_retarget_preserves_upstream_patch_context(self):

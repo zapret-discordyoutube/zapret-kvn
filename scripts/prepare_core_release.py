@@ -95,6 +95,25 @@ def android_core_changes(android: Path, singbox: dict, changes: dict[Path, str])
         raise ValueError(str(error)) from error
 
 
+def android_hysteria_parity(android: Path, lock: dict) -> str:
+    """Both platforms ship the Windows-selected official Hysteria.
+
+    Android embeds it through core-patches/0003, so a new release cannot be
+    retargeted by rewriting a pin: fail before any write and point at the
+    regeneration procedure instead of freezing a stale Android core.
+    """
+    version = next(item["version"] for item in lock["sources"] if item.get("id") == "hysteria")
+    properties = dict(
+        line.split("=", 1) for line in (android / "core.properties").read_text(encoding="utf-8").splitlines() if "=" in line
+    )
+    if properties.get("HYSTERIA_CORE_TAG") != version:
+        raise ValueError(
+            f"Android Hysteria {properties.get('HYSTERIA_CORE_TAG')} lags Windows {version}: "
+            "regenerate android core-patches (docs/CORE_UPDATE.md) before freezing"
+        )
+    return version
+
+
 def prepare(windows: Path, android: Path, windows_version: str, android_tag: str) -> dict:
     if not re.fullmatch(r"\d+\.\d+\.\d+", windows_version) or not re.fullmatch(r"v\d+\.\d+\.\d+", android_tag):
         raise ValueError("Only exact stable versions can be frozen")
@@ -116,6 +135,7 @@ def prepare(windows: Path, android: Path, windows_version: str, android_tag: str
             raise ValueError(f"Shared platform contract differs: {left}")
     lock_path = windows / "scripts/core-lock.windows-x64.json"
     lock = resolve_lock(json.loads(lock_path.read_text(encoding="utf-8")))
+    hysteria = {"version": android_hysteria_parity(android, lock)}
     changes = android_pin_changes(android, lock["amnezia"])
     singbox = {key: lock["singbox_build"][key] for key in ("version", "commit")}
     android_core_changes(android, lock["singbox_build"], changes)
@@ -138,7 +158,7 @@ def prepare(windows: Path, android: Path, windows_version: str, android_tag: str
             "core.properties", "core-patches/series.sha256", "core-patches/0005-official-amnezia-wg-unified.patch")},
     }
     freeze = {"schema": 1, "releases": releases, "checked_at_utc": datetime.now(timezone.utc).isoformat(),
-              "amnezia": lock["amnezia"], "singbox": singbox, "inputs": inputs}
+              "amnezia": lock["amnezia"], "singbox": singbox, "hysteria": hysteria, "inputs": inputs}
     for root in (windows, android):
         atomic_write_lock(root / "core-release-freeze.json", freeze)
     verify(windows, "windows", windows_version)
@@ -154,4 +174,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     freeze = prepare(ROOT, args.android_root.resolve(), args.windows_version, args.android_tag)
     print(json.dumps({"releases": freeze["releases"], "amnezia": freeze["amnezia"]["version"],
-                      "singbox": freeze["singbox"]["version"]}))
+                      "singbox": freeze["singbox"]["version"], "hysteria": freeze["hysteria"]["version"]}))

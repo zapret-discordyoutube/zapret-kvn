@@ -22,12 +22,18 @@ def verify(root: Path, platform: str, version: str) -> dict:
     pin = freeze["amnezia"]
     # Both platforms ship the one sing-box-extended release selected at freeze time.
     core = freeze["singbox"]
+    # ...and the one official Hysteria release (older receipts predate this pin).
+    hysteria = freeze.get("hysteria")
     if platform == "windows":
         lock = json.loads((root / "scripts/core-lock.windows-x64.json").read_text(encoding="utf-8"))
         if lock["amnezia"] != pin:
             raise ValueError("Windows Amnezia differs from coordinated freeze")
         if {key: lock["singbox_build"][key] for key in ("version", "commit")} != core:
             raise ValueError("Windows sing-box differs from coordinated freeze")
+        if hysteria is not None:
+            source = next((item for item in lock["sources"] if item.get("id") == "hysteria"), {})
+            if source.get("version") != hysteria["version"]:
+                raise ValueError("Windows Hysteria differs from coordinated freeze")
     else:
         properties = dict(line.split("=", 1) for line in (root / "core.properties").read_text().splitlines() if "=" in line)
         if (properties["CORE_TAG"], properties["CORE_COMMIT"]) != (core["version"], core["commit"]):
@@ -37,6 +43,11 @@ def verify(root: Path, platform: str, version: str) -> dict:
             raise ValueError("Android Amnezia differs from coordinated freeze")
         if properties["GO_VERSION"] != pin["toolchain"]["version"].removeprefix("go"):
             raise ValueError("Android and Windows Go toolchains differ")
+        if hysteria is not None and properties.get("HYSTERIA_CORE_TAG") != hysteria["version"]:
+            raise ValueError(
+                "Android Hysteria differs from coordinated freeze: regenerate core-patches/0003 "
+                "for the Windows-selected release (docs/CORE_UPDATE.md)"
+            )
     return freeze
 
 
