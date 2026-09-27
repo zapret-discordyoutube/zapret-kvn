@@ -20,12 +20,18 @@ def verify(root: Path, platform: str, version: str) -> dict:
         if path.resolve().is_relative_to(root.resolve()) is False or digest(path) != expected:
             raise ValueError(f"Frozen core input changed: {name}")
     pin = freeze["amnezia"]
+    # Both platforms ship the one sing-box-extended release selected at freeze time.
+    core = freeze["singbox"]
     if platform == "windows":
         lock = json.loads((root / "scripts/core-lock.windows-x64.json").read_text(encoding="utf-8"))
         if lock["amnezia"] != pin:
             raise ValueError("Windows Amnezia differs from coordinated freeze")
+        if {key: lock["singbox_build"][key] for key in ("version", "commit")} != core:
+            raise ValueError("Windows sing-box differs from coordinated freeze")
     else:
         properties = dict(line.split("=", 1) for line in (root / "core.properties").read_text().splitlines() if "=" in line)
+        if (properties["CORE_TAG"], properties["CORE_COMMIT"]) != (core["version"], core["commit"]):
+            raise ValueError("Android sing-box differs from coordinated freeze")
         expected = f'{pin["module"]}@{pin["version"]}'
         if any(properties.get(key) != expected for key in ("ANDROID_WIREGUARD_GO", "ANDROID_AMNEZIAWG_GO")):
             raise ValueError("Android Amnezia differs from coordinated freeze")

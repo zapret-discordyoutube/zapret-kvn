@@ -9,7 +9,7 @@ from scripts.check_core_release_freeze import digest, verify
 from scripts.prepare_core_release import android_pin_changes
 
 ROOT = Path(__file__).resolve().parents[1]
-ANDROID = ROOT.parent / "ZapretKVN"
+ANDROID = ROOT.parent / "android"
 
 
 class CoreReleaseFreezeTests(unittest.TestCase):
@@ -18,9 +18,10 @@ class CoreReleaseFreezeTests(unittest.TestCase):
             root = Path(directory)
             (root / "scripts").mkdir()
             path = root / "scripts/core-lock.windows-x64.json"
-            path.write_text(json.dumps({"amnezia": {"version": "v3.1.1"}}))
+            core = {"version": "v1.14.1-extended-2.7.2", "commit": "5" * 40}
+            path.write_text(json.dumps({"amnezia": {"version": "v3.1.1"}, "singbox_build": {**core, "zip_sha256": "0" * 64}}))
             freeze = {"schema": 1, "releases": {"windows": "0.5.8"},
-                      "amnezia": {"version": "v3.1.1"},
+                      "amnezia": {"version": "v3.1.1"}, "singbox": core,
                       "inputs": {"windows": {"scripts/core-lock.windows-x64.json": digest(path)}}}
             (root / "core-release-freeze.json").write_text(json.dumps(freeze))
             self.assertEqual(verify(root, "windows", "0.5.8"), freeze)
@@ -29,6 +30,22 @@ class CoreReleaseFreezeTests(unittest.TestCase):
             path.write_text(path.read_text() + "\n")
             with self.assertRaisesRegex(ValueError, "input changed"):
                 verify(root, "windows", "0.5.8")
+
+    def test_receipt_rejects_android_core_other_than_frozen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            properties = root / "core.properties"
+            properties.write_text(
+                "CORE_TAG=v1.14.0-extended-2.7.1\nCORE_COMMIT=" + "4" * 40 + "\n"
+                "ANDROID_WIREGUARD_GO=m@v3.1.1\nANDROID_AMNEZIAWG_GO=m@v3.1.1\nGO_VERSION=1.26.4\n"
+            )
+            freeze = {"schema": 1, "releases": {"android": "v0.5.0"},
+                      "amnezia": {"module": "m", "version": "v3.1.1", "toolchain": {"version": "go1.26.4"}},
+                      "singbox": {"version": "v1.14.1-extended-2.7.2", "commit": "5" * 40},
+                      "inputs": {"android": {"core.properties": digest(properties)}}}
+            (root / "core-release-freeze.json").write_text(json.dumps(freeze))
+            with self.assertRaisesRegex(ValueError, "Android sing-box differs"):
+                verify(root, "android", "v0.5.0")
 
     @unittest.skipUnless(ANDROID.is_dir(), "paired Android checkout not available")
     def test_android_retarget_preserves_upstream_patch_context(self):
