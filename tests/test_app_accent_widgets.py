@@ -39,8 +39,8 @@ from xray_fluent.ui.nodes_table_model import COL_TYPE
 from xray_fluent.ui.nodes_view import NodesDelegate
 from xray_fluent.ui.settings_page import SettingsPage
 from xray_fluent.ui.traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
-from xray_fluent.ui.zapret_page import ZapretPage
-from xray_fluent.engines.zapret.manager import PresetInfo
+from xray_fluent.ui.zapret_page import ZapretPage, ZapretStatus
+from xray_fluent.engines.zapret.presets import PresetInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UI_DIR = REPO_ROOT / "xray_fluent" / "ui"
@@ -204,7 +204,7 @@ class ZapretActivePresetAccentTest(_AccentRestoreMixin):
         super().tearDown()
 
     def _badge(self, row: int) -> str:
-        item = self.page.preset_list.item(row)
+        item = self.page._presets_page.list.item(row)
         return str(item.data(Qt.ItemDataRole.UserRole + 2) or "")
 
     def _row_colors(self, row: int) -> set[tuple[int, int, int]]:
@@ -214,7 +214,7 @@ class ZapretActivePresetAccentTest(_AccentRestoreMixin):
         from PyQt6.QtGui import QImage, QPainter
         from PyQt6.QtWidgets import QStyleOptionViewItem
 
-        view = self.page.preset_list
+        view = self.page._presets_page.list
         index = view.model().index(row, 0)
         option = QStyleOptionViewItem()
         option.rect = QRect(0, 0, 420, 44)
@@ -234,8 +234,8 @@ class ZapretActivePresetAccentTest(_AccentRestoreMixin):
         return colors
 
     def test_active_row_is_badged_and_painted_with_the_accent(self) -> None:
-        self.page.set_running(True, "alpha")
-        self.assertEqual(self._badge(0), "Активен")
+        self.page.set_status(ZapretStatus("running", "alpha"))
+        self.assertEqual(self._badge(0), "Работает")
         accent = theme.accent_color()
         success = theme.success_color()
         colors = self._row_colors(0)
@@ -243,17 +243,17 @@ class ZapretActivePresetAccentTest(_AccentRestoreMixin):
         self.assertNotIn((success.red(), success.green(), success.blue()), colors)
 
     def test_inactive_rows_carry_no_active_badge(self) -> None:
-        self.page.set_running(True, "alpha")
+        self.page.set_status(ZapretStatus("running", "alpha"))
         self.assertEqual(self._badge(1), "")
 
     def test_stopped_state_has_no_row_highlight(self) -> None:
-        self.page.set_running(True, "alpha")
-        self.page.set_running(False)
+        self.page.set_status(ZapretStatus("running", "alpha"))
+        self.page.set_status(ZapretStatus("stopped"))
         self.assertEqual(self._badge(0), "")
 
     def test_accent_change_recolors_active_row(self) -> None:
         setThemeColor("#123456")
-        self.page.set_running(True, "alpha")
+        self.page.set_status(ZapretStatus("running", "alpha"))
         self.assertIn((0x12, 0x34, 0x56), self._row_colors(0))
         setThemeColor("#654321")
         QApplication.processEvents()

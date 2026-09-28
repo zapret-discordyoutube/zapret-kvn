@@ -11,7 +11,8 @@ Spec: .agent/tasks/hot-switch-hardening/spec.md
 - П3/AC9–AC10: кэш xray_outbound_pool и его инвалидация.
 - П4/AC11–AC12: auto-switch через set_selected_node с сохранением учёта
   анти-дребезга.
-- П5/AC13–AC14: фоновый батч-прогрев DNS-кэша zapret без побочных эффектов.
+- П5/AC13–AC14 (прогрев DNS-кэша zapret) сняты вместе с кэшем: правило
+  выбранного сервера всегда строится по свежему DNS (application/server_bypass.py).
 
 Оффскрин: реальные ядра не запускаются (C3/A8); control-plane и резолвер —
 моки; асинхронность управляется вручную (ManualExecutor + processEvents),
@@ -26,7 +27,7 @@ import unittest
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import call, patch
 
 from PyQt6.QtCore import QCoreApplication
 
@@ -35,14 +36,8 @@ from xray_fluent.application import async_steps
 from xray_fluent.application.async_steps import RunInWorkerStep
 from xray_fluent.application.auto_switch_service import check_auto_switch
 from xray_fluent.application.outbound_pool_service import build_xray_outbound_pool
-from xray_fluent.application.zapret_prewarm_service import (
-    collect_prewarm_servers,
-    prewarm_proxy_resolutions,
-    start_proxy_dns_prewarm,
-)
 from xray_fluent.importer.link_parser import parse_single
 from xray_fluent.profiles.models import AppSettings, RoutingSettings
-from xray_fluent.engines.zapret.manager import ZapretManager
 
 _APP = QCoreApplication.instance() or QCoreApplication([])
 
@@ -131,7 +126,7 @@ class SessionCaptureController:
         self._xray_outbound_pool_cache_key = None
         self.connected = True
         self.logs: list[str] = []
-        self.zapret = SimpleNamespace(apply_cached_proxy_node=lambda node: True)
+        self.bypass = SimpleNamespace(ready_for=lambda node: True)
 
     @property
     def selected_node(self):
@@ -251,7 +246,7 @@ class HotSwitchController:
         self._singbox_clash_api_port = 19090
         self._xray_api_port = 19085
         self.xray = SimpleNamespace(_exe_path="xray.exe")
-        self.zapret = SimpleNamespace(apply_cached_proxy_node=lambda node: True)
+        self.bypass = SimpleNamespace(ready_for=lambda node: True)
         self.logs: list[str] = []
         self.transitions: list[str] = []
         self.captured: list[tuple[str, str, int]] = []
@@ -665,128 +660,6 @@ class AutoSwitchSinglePathTests(unittest.TestCase):
 
         self.assertFalse(controller._auto_switch_manual_hold)
         self.assertEqual(controller._auto_switch_cycle_attempts, 0)
-
-
-class FakeZapret:
-    proxy_protection_server = staticmethod(ZapretManager.proxy_protection_server)
-
-    def __init__(self):
-        self._proxy_resolution_cache: dict[str, set[str]] = {}
-        self.protected_calls: list[set[str]] = []
-
-    def cache_proxy_resolution(self, server: str, protected_ips: set[str]) -> None:
-        if server:
-            self._proxy_resolution_cache[server] = set(protected_ips)
-
-    def _set_protected_proxy_ips(self, protected_ips: set[str]) -> None:
-        self.protected_calls.append(set(protected_ips))
-
-    def apply_cached_proxy_node(self, node) -> bool:
-        return ZapretManager.apply_cached_proxy_node(self, node)
-
-    def _resolve_server_ips(self, server: str) -> set[str]:
-        raise AssertionError("resolver must be stubbed per test")
-
-
-class PrewarmController(SessionCaptureController):
-    def __init__(self, nodes):
-        super().__init__(nodes)
-        self.zapret = FakeZapret()
-
-
-class ZapretPrewarmTests(unittest.TestCase):
-    """AC13: батч-прогрев после подключения наполняет только DNS-кэш."""
-
-    def test_prewarm_caches_all_pool_udp_servers(self) -> None:
-        nodes = udp_nodes()  # native UDP-ноды: Xray-пул пуст → фолбэк на state.nodes
-        controller = PrewarmController(nodes)
-        controller.zapret._resolve_server_ips = lambda server: {"192.0.2.7"}
-        submitted: list = []
-
-        enqueued = start_proxy_dns_prewarm(controller, submit=submitted.append)
-
-        self.assertTrue(enqueued)
-        # Не блокирует: до запуска задания кэш пуст, GUI-поток ничего не ждал.
-        self.assertEqual(controller.zapret._proxy_resolution_cache, {})
-        submitted[0]()
-
-        for node in nodes:
-            self.assertTrue(controller.zapret.apply_cached_proxy_node(node))
-        # AC14/A7: прогрев сам не трогал winws2-состояние (protected ips) —
-        # единственные вызовы _set_protected_proxy_ips сделаны apply-проверкой выше.
-        self.assertEqual(len(controller.zapret.protected_calls), 2)
-        self.assertTrue(any("DNS prewarm" in line for line in controller.logs))
-
-    def test_prewarm_populates_cache_only_without_winws2_side_effects(self) -> None:
-        nodes = udp_nodes()
-        controller = PrewarmController(nodes)
-        controller.zapret._resolve_server_ips = lambda server: {"192.0.2.8"}
-
-        start_proxy_dns_prewarm(controller, submit=lambda job: job())
-
-        self.assertEqual(len(controller.zapret._proxy_resolution_cache), 2)
-        self.assertEqual(controller.zapret.protected_calls, [])  # AC14
-
-    def test_non_udp_nodes_are_skipped(self) -> None:
-        nodes = xray_nodes()  # vless/trojan — без UDP proxy protection server
-        controller = PrewarmController(nodes)
-
-        self.assertEqual(collect_prewarm_servers(controller), [])
-        self.assertFalse(start_proxy_dns_prewarm(controller, submit=lambda job: job()))
-
-    def test_already_cached_servers_are_not_resolved_again(self) -> None:
-        nodes = udp_nodes()
-        controller = PrewarmController(nodes)
-        first_server = ZapretManager.proxy_protection_server(nodes[0])
-        controller.zapret._proxy_resolution_cache[first_server] = {"192.0.2.1"}
-
-        servers = collect_prewarm_servers(controller)
-        self.assertEqual(servers, [ZapretManager.proxy_protection_server(nodes[1])])
-
-
-class ZapretPrewarmSafetyTests(unittest.TestCase):
-    """AC14: ошибки резолва — молча; троттлинг между резолвами."""
-
-    def test_resolver_errors_are_swallowed_silently(self) -> None:
-        cached: dict[str, set[str]] = {}
-
-        def resolve(server: str) -> set[str]:
-            if server == "bad.example":
-                raise OSError("dns failure")
-            return {"192.0.2.9"}
-
-        warmed = prewarm_proxy_resolutions(
-            ["bad.example", "good.example"],
-            resolve,
-            lambda server, ips: cached.__setitem__(server, ips),
-            throttle_sec=0.0,
-        )
-
-        self.assertEqual(warmed, 1)
-        self.assertEqual(set(cached), {"good.example"})
-
-    def test_batch_is_throttled_between_resolves(self) -> None:
-        sleeps: list[float] = []
-
-        prewarm_proxy_resolutions(
-            ["a.example", "b.example"],
-            lambda server: set(),
-            lambda server, ips: None,
-            throttle_sec=0.01,
-            sleep=sleeps.append,
-        )
-
-        self.assertEqual(sleeps, [0.01, 0.01])
-
-    def test_prewarm_job_error_does_not_escape(self) -> None:
-        nodes = udp_nodes()
-        controller = PrewarmController(nodes)
-        controller.zapret._resolve_server_ips = Mock(side_effect=OSError("offline"))
-
-        start_proxy_dns_prewarm(controller, submit=lambda job: job())  # не бросает
-
-        self.assertEqual(controller.zapret._proxy_resolution_cache, {})
-        self.assertEqual(controller.zapret.protected_calls, [])
 
 
 if __name__ == "__main__":

@@ -1,218 +1,258 @@
+"""winws2 command line and the revisioned process manager."""
+
 from __future__ import annotations
 
 import socket
 import unittest
-from unittest.mock import PropertyMock, patch
+from unittest.mock import patch
 
-from xray_fluent.importer.link_parser import parse_single
-from xray_fluent.engines.zapret.manager import ZapretManager
+from PyQt6.QtCore import QCoreApplication
+
+from xray_fluent.engines.zapret.blobs import lua_init_arguments
+from xray_fluent.engines.zapret.command import SERVER_PROFILE_NAME, ServerRule, build_arguments
+from xray_fluent.engines.zapret.endpoint import (
+    ResolvedEndpoint,
+    ServerEndpoint,
+    resolve_endpoint,
+    resolve_host,
+)
+from xray_fluent.engines.zapret.manager import ZapretManager, ZapretPlan
+from xray_fluent.engines.zapret.strategies import load_strategy_catalog, pass_strategy
+
+_APP = QCoreApplication.instance() or QCoreApplication([])
 
 
-class ZapretManagerTests(unittest.TestCase):
-    def test_pass_profile_is_inserted_before_original_profiles(self) -> None:
+def _rule(kind: str, ports: tuple[str, ...], ips: tuple[str, ...], strategy) -> ServerRule:
+    return ServerRule(ResolvedEndpoint(ServerEndpoint(kind, ("one.example",), ports), ips), strategy)
+
+
+class ServerRuleArgumentTests(unittest.TestCase):
+    def test_no_rule_leaves_the_preset_untouched(self) -> None:
+        args = ["--wf-tcp-out=443", "--filter-tcp=443", "--lua-desync=pass"]
+        self.assertEqual(build_arguments(args, None), args)
+
+    def test_rule_is_the_first_profile_and_does_not_mutate_the_preset(self) -> None:
+        original = ["--wf-tcp-out=80", "--filter-udp=443", "--lua-desync=pass"]
+        rule = _rule(
+            "tcp", ("443",), ("2001:0db8::7", "203.0.113.7", "203.0.113.7"),
+            load_strategy_catalog("tcp")["alt9"],
+        )
+
+        updated = build_arguments(original, rule)
+
+        self.assertEqual(original, ["--wf-tcp-out=80", "--filter-udp=443", "--lua-desync=pass"])
+        self.assertIn("--wf-tcp-out=80,443", updated)
+        name_index = updated.index(SERVER_PROFILE_NAME)
+        self.assertLess(name_index, updated.index("--filter-udp=443"))
+        self.assertEqual(updated[name_index + 1], "--filter-tcp=443")
+        self.assertEqual(updated[name_index + 2], "--ipset-ip=203.0.113.7,2001:db8::7")
+        self.assertEqual(updated[name_index + 3], rule.strategy.args[0])
+        self.assertEqual(updated[name_index + 3 + len(rule.strategy.args)], "--new")
+
+    def test_pass_rule_is_inserted_before_original_profiles(self) -> None:
         args = [
             "--lua-init=@lua/zapret-lib.lua",
             "--wf-udp-out=443",
             "--filter-udp=443",
             "--new",
             "--filter-tcp=443",
-            "--ipset-exclude-ip=192.0.2.0/24",
             "--new=catch-all",
             "--filter-udp=*",
         ]
-
-        updated = ZapretManager._with_proxy_pass_profile(args, {"203.0.113.7", "2001:db8::7"})
+        rule = _rule("quic", ("8443",), ("203.0.113.7",), pass_strategy("udp"))
 
         self.assertEqual(
-            updated,
+            build_arguments(args, rule),
             [
+                "--lua-init=@lua/zapret-antidpi.lua",
                 "--lua-init=@lua/zapret-lib.lua",
-                "--wf-udp-out=443",
-                "--filter-udp=*",
-                "--ipset-ip=203.0.113.7,2001:db8::7",
+                "--wf-udp-out=443,8443",
+                SERVER_PROFILE_NAME,
+                "--filter-udp=8443",
+                "--ipset-ip=203.0.113.7",
                 "--lua-desync=pass",
                 "--new",
                 "--filter-udp=443",
                 "--new",
                 "--filter-tcp=443",
-                "--ipset-exclude-ip=192.0.2.0/24",
                 "--new=catch-all",
                 "--filter-udp=*",
             ],
         )
 
-    def test_server_resolution_normalizes_and_deduplicates_addresses(self) -> None:
+    def test_tcp_and_udp_capture_filters_are_not_mixed(self) -> None:
+        args = ["--wf-tcp-out=443", "--filter-tcp=443", "--lua-desync=pass"]
+        rule = _rule("quic", ("8443",), ("203.0.113.8",), load_strategy_catalog("udp")["general_bf_32"])
+        updated = build_arguments(args, rule)
+        self.assertIn("--wf-tcp-out=443", updated)
+        self.assertIn("--wf-udp-out=8443", updated)
+        self.assertIn("--filter-udp=8443", updated)
+        self.assertIn("--blob=quic_google:@bin/quic_initial_www_google_com.bin", updated)
+
+    def test_repeated_capture_filters_keep_every_original_port(self) -> None:
+        args = ["--wf-tcp-out=80", "--wf-tcp-out=443,8080", "--filter-tcp=80", "--lua-desync=pass"]
+        rule = _rule("tcp", ("8443",), ("203.0.113.8",), load_strategy_catalog("tcp")["alt9"])
+        captures = [arg for arg in build_arguments(args, rule) if arg.startswith("--wf-tcp-out=")]
+        self.assertEqual(captures, ["--wf-tcp-out=80,443,8080,8443"])
+
+    def test_wildcard_capture_filter_stays_a_wildcard(self) -> None:
+        args = ["--wf-udp-out=*", "--wf-udp-out=443", "--filter-udp=443", "--lua-desync=pass"]
+        rule = _rule("wireguard", ("51820",), ("203.0.113.8",), pass_strategy("udp"))
+        captures = [arg for arg in build_arguments(args, rule) if arg.startswith("--wf-udp-out=")]
+        self.assertEqual(captures, ["--wf-udp-out=*"])
+
+    def test_extension_lua_is_injected_after_the_core_libraries(self) -> None:
+        rule = _rule("tcp", ("443",), ("203.0.113.8",), load_strategy_catalog("tcp")["fakemultisplit_google_ultra"])
+        lua = [arg for arg in build_arguments([], rule) if arg.startswith("--lua-init=")]
+        self.assertEqual(
+            lua,
+            [
+                "--lua-init=@lua/zapret-lib.lua",
+                "--lua-init=@lua/zapret-antidpi.lua",
+                "--lua-init=@lua/fakemultisplit.lua",
+            ],
+        )
+
+    def test_core_only_strategy_gets_no_extension_lua(self) -> None:
+        rule = _rule("tcp", ("443",), ("203.0.113.8",), load_strategy_catalog("tcp")["multisplit_pos1"])
+        lua = [arg for arg in build_arguments([], rule) if arg.startswith("--lua-init=")]
+        self.assertEqual(len(lua), 2)
+
+    def test_every_catalog_strategy_gets_its_lua_and_blobs(self) -> None:
+        for transport, kind in (("tcp", "tcp"), ("udp", "quic")):
+            for entry in load_strategy_catalog(transport).values():
+                with self.subTest(transport=transport, strategy=entry.strategy_id):
+                    updated = build_arguments([], _rule(kind, ("443",), ("203.0.113.8",), entry))
+                    core = updated.index("--lua-init=@lua/zapret-antidpi.lua")
+                    for extension in lua_init_arguments(entry.args):
+                        self.assertGreater(updated.index(extension), core)
+                    for dependency in entry.blob_dependencies:
+                        self.assertTrue(
+                            any(arg.startswith(f"--blob={dependency}:") for arg in updated), dependency,
+                        )
+
+
+class ResolutionTests(unittest.TestCase):
+    def test_host_resolution_normalizes_and_deduplicates(self) -> None:
         answers = [
             (socket.AF_INET, socket.SOCK_DGRAM, 17, "", ("203.0.113.7", 0)),
             (socket.AF_INET, socket.SOCK_DGRAM, 17, "", ("203.0.113.7", 0)),
             (socket.AF_INET6, socket.SOCK_DGRAM, 17, "", ("2001:0db8::7", 0, 0, 0)),
         ]
-        with patch("xray_fluent.engines.zapret.manager.socket.getaddrinfo", return_value=answers):
-            resolved = ZapretManager._resolve_server_ips("proxy.example.com")
-
+        with (
+            patch("xray_fluent.engines.zapret.endpoint.socket.getaddrinfo", return_value=answers),
+            patch("xray_fluent.engines.zapret.endpoint.register_server_aliases") as aliases,
+        ):
+            resolved = resolve_host("proxy.example.com")
         self.assertEqual(resolved, {"203.0.113.7", "2001:db8::7"})
+        # Log redaction learns the IPs before anything can print them.
+        aliases.assert_called_once_with("proxy.example.com", resolved)
 
-    def test_hysteria2_node_protects_resolved_endpoint(self) -> None:
-        manager = ZapretManager()
-        node = parse_single(
-            "hysteria2://secret@203.0.113.7:443/"
-            "?obfs=salamander&obfs-password=cover&sni=cdn.example.com"
-        )
+    def test_literal_ip_needs_no_dns(self) -> None:
+        with patch("xray_fluent.engines.zapret.endpoint.socket.getaddrinfo") as lookup:
+            self.assertEqual(resolve_host("[2001:db8::7]"), {"2001:db8::7"})
+        lookup.assert_not_called()
 
-        resolved = manager.protect_proxy_node(node)
+    def test_every_host_is_resolved_afresh(self) -> None:
+        endpoint = ServerEndpoint("wireguard", ("one.example", "two.example"), ("51820",))
+        with patch(
+            "xray_fluent.engines.zapret.endpoint.resolve_host",
+            side_effect=({"203.0.113.1"}, {"2001:db8::2", "203.0.113.1"}),
+        ) as resolver:
+            result = resolve_endpoint(endpoint)
+        self.assertEqual(resolver.call_count, 2)
+        self.assertEqual(result.ips, ("203.0.113.1", "2001:db8::2"))
 
-        self.assertEqual(resolved, {"203.0.113.7"})
-        self.assertEqual(manager._protected_proxy_ips, {"203.0.113.7"})
+    def test_no_address_is_an_error(self) -> None:
+        endpoint = ServerEndpoint("tcp", ("one.example",), ("443",))
+        with patch("xray_fluent.engines.zapret.endpoint.resolve_host", return_value=set()):
+            with self.assertRaises(OSError):
+                resolve_endpoint(endpoint)
 
-    def test_running_zapret_restarts_after_new_udp_proxy_endpoint(self) -> None:
-        manager = ZapretManager()
-        manager._current_preset = "Default"
-        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
-        with (
-            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
-            patch.object(manager, "_restart_for_proxy_protection") as restart,
-            patch.object(manager, "_arm_proxy_protection_timeout"),
-        ):
-            manager.protect_proxy_node(node)
+class _NoLaunchManager(ZapretManager):
+    """Records launches instead of running the step generator."""
 
-        restart.assert_called_once_with("Default")
+    def __init__(self) -> None:
+        super().__init__()
+        self.launches: list[tuple[ZapretPlan, int]] = []
 
-    def test_running_zapret_is_not_ready_until_replacement_starts(self) -> None:
-        manager = ZapretManager()
-        manager._current_preset = "Default"
-        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
-        ready: list[int] = []
-        manager.proxy_protection_ready.connect(ready.append)
+    def _start_runner(self, plan: ZapretPlan, revision: int) -> None:
+        self.launches.append((plan, revision))
 
-        with (
-            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
-            patch.object(manager, "_restart_for_proxy_protection") as restart,
-            patch.object(manager, "_arm_proxy_protection_timeout"),
-            patch.object(manager._health_timer, "start"),
-        ):
-            self.assertTrue(manager.apply_cached_proxy_node(node))
-            generation = manager.proxy_protection_generation
-            self.assertGreater(generation, 0)
-            self.assertFalse(manager.proxy_protection_is_ready(node))
-            restart.assert_called_once_with("Default")
 
-            manager._on_started()
+class ManagerRevisionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.manager = _NoLaunchManager()
+        self.applied: list[int] = []
+        self.failed: list[tuple[int, str]] = []
+        self.manager.plan_applied.connect(self.applied.append)
+        self.manager.plan_failed.connect(lambda revision, reason: self.failed.append((revision, reason)))
 
-        self.assertTrue(manager.proxy_protection_is_ready(node))
-        self.assertEqual(ready, [generation])
+    def test_apply_is_pending_until_its_own_process_starts(self) -> None:
+        revision = self.manager.apply(ZapretPlan("Default"))
+        self.assertTrue(self.manager.pending)
+        self.assertTrue(self.manager.active)
+        self.manager._on_started(revision)
+        self.assertFalse(self.manager.pending)
+        self.assertEqual(self.applied, [revision])
 
-    def test_stopped_zapret_is_ready_noop_without_restart(self) -> None:
-        manager = ZapretManager()
-        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
+    def test_late_start_of_an_older_revision_proves_nothing(self) -> None:
+        first = self.manager.apply(ZapretPlan("Default"))
+        second = self.manager.apply(ZapretPlan("Default", _rule("tcp", ("443",), ("203.0.113.7",), pass_strategy("tcp"))))
+        self.assertGreater(second, first)
+        self.manager._on_started(first)
+        self.assertEqual(self.applied, [])
+        self.assertTrue(self.manager.pending)
+        self.manager._on_started(second)
+        self.assertEqual(self.applied, [second])
 
-        with (
-            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=False),
-            patch.object(manager, "_restart_for_proxy_protection") as restart,
-        ):
-            self.assertTrue(manager.apply_cached_proxy_node(node))
-            self.assertTrue(manager.proxy_protection_is_ready(node))
+    def test_same_plan_again_is_free(self) -> None:
+        plan = ZapretPlan("Default")
+        revision = self.manager.apply(plan)
+        self.assertEqual(self.manager.apply(plan), revision)
+        self.assertEqual(len(self.manager.launches), 1)
 
-        restart.assert_not_called()
+    def test_timeout_fails_only_the_pending_revision(self) -> None:
+        revision = self.manager.apply(ZapretPlan("Default"))
+        self.manager._on_apply_timeout(revision - 1)
+        self.assertEqual(self.failed, [])
+        self.manager._on_apply_timeout(revision)
+        self.assertEqual(self.failed, [(revision, "timeout")])
+        self.assertFalse(self.manager.pending)
 
-    def test_proxy_protection_timeout_emits_failure_generation(self) -> None:
-        manager = ZapretManager()
-        manager._current_preset = "Default"
-        node = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
-        failed: list[tuple[int, str]] = []
-        manager.proxy_protection_failed.connect(lambda generation, reason: failed.append((generation, reason)))
+    def test_stop_fails_a_pending_request_instead_of_marking_it_ready(self) -> None:
+        stopped: list[bool] = []
+        self.manager.stopped.connect(lambda: stopped.append(True))
+        revision = self.manager.apply(ZapretPlan("Default"))
+        self.manager.stop()
+        self.assertEqual(self.applied, [])
+        self.assertEqual(self.failed, [(revision, "stopped")])
+        self.assertIsNone(self.manager.plan)
+        self.assertFalse(self.manager.active)
+        self.assertEqual(stopped, [True])
 
-        with (
-            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
-            patch.object(manager, "_restart_for_proxy_protection"),
-            patch.object(manager, "_arm_proxy_protection_timeout"),
-        ):
-            self.assertTrue(manager.apply_cached_proxy_node(node))
-            generation = manager.proxy_protection_generation
-            self.assertFalse(manager.proxy_protection_is_ready(node))
+    def test_stop_with_nothing_running_is_silent(self) -> None:
+        stopped: list[bool] = []
+        self.manager.stopped.connect(lambda: stopped.append(True))
+        self.manager.stop()
+        self.assertEqual(stopped, [])
 
-            manager._on_proxy_protection_timeout(generation)
+    def test_launch_failure_reports_error_and_stop(self) -> None:
+        errors: list[str] = []
+        self.manager.error.connect(errors.append)
+        revision = self.manager.apply(ZapretPlan("Default"))
+        self.manager._fail("winws2.exe не найден", "missing_executable")
+        self.assertEqual(errors, ["winws2.exe не найден"])
+        self.assertEqual(self.failed, [(revision, "missing_executable")])
+        self.assertIsNone(self.manager.plan)
 
-            self.assertFalse(manager.proxy_protection_is_ready(node))
-
-        self.assertEqual(failed, [(generation, "timeout")])
-
-    def test_second_endpoint_during_process_start_remains_pending(self) -> None:
-        manager = ZapretManager()
-        manager._current_preset = "Default"
-        first = parse_single("hy2://secret@203.0.113.7:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        second = parse_single("hy2://secret@203.0.113.8:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        manager.cache_proxy_resolution("203.0.113.7", {"203.0.113.7"})
-        manager.cache_proxy_resolution("203.0.113.8", {"203.0.113.8"})
-
-        with (
-            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=True),
-            patch.object(manager, "_restart_for_proxy_protection"),
-            patch.object(manager, "_arm_proxy_protection_timeout"),
-        ):
-            self.assertTrue(manager.apply_cached_proxy_node(first))
-            first_generation = manager.proxy_protection_generation
-
-        # Model the QProcess.Starting gap: start() consumed the restart marker,
-        # the old process is gone, and the replacement has not emitted started.
-        manager._pending_restart_preset = ""
-        with (
-            patch.object(ZapretManager, "running", new_callable=PropertyMock, return_value=False),
-            patch.object(manager, "_arm_proxy_protection_timeout"),
-        ):
-            self.assertTrue(manager.apply_cached_proxy_node(second))
-            second_generation = manager.proxy_protection_generation
-            self.assertGreater(second_generation, first_generation)
-            self.assertFalse(manager.proxy_protection_is_ready(second))
-            self.assertEqual(
-                manager._proxy_protection_pending_generation,
-                second_generation,
-            )
-
-    def test_cached_endpoint_is_applied_without_dns(self) -> None:
-        manager = ZapretManager()
-        node = parse_single("hy2://secret@proxy.example.com:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        manager.cache_proxy_resolution("proxy.example.com", {"203.0.113.7"})
-
-        with patch.object(manager, "_resolve_server_ips") as resolve:
-            applied = manager.apply_cached_proxy_node(node)
-
-        self.assertTrue(applied)
-        resolve.assert_not_called()
-        self.assertEqual(manager._protected_proxy_ips, {"203.0.113.7"})
-
-    def test_uncached_endpoint_never_falls_back_to_gui_thread_dns(self) -> None:
-        manager = ZapretManager()
-        node = parse_single("hy2://secret@proxy.example.com:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-
-        with patch.object(manager, "_resolve_server_ips") as resolve:
-            applied = manager.apply_cached_proxy_node(node)
-
-        self.assertFalse(applied)
-        resolve.assert_not_called()
-
-    def test_new_hysteria2_node_replaces_previous_pass_endpoint(self) -> None:
-        manager = ZapretManager()
-        manager._protected_proxy_ips = {"203.0.113.7"}
-        node = parse_single("hy2://secret@203.0.113.8:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-
-        manager.protect_proxy_node(node)
-
-        self.assertEqual(manager._protected_proxy_ips, {"203.0.113.8"})
-
-    def test_tcp_proxy_node_clears_previous_pass_profile(self) -> None:
-        manager = ZapretManager()
-        manager._protected_proxy_ips = {"203.0.113.7"}
-        node = parse_single("vless://00000000-0000-4000-8000-000000000001@example.com:443")
-
-        with patch.object(manager, "_resolve_server_ips") as resolve:
-            self.assertEqual(manager.protect_proxy_node(node), set())
-
-        resolve.assert_not_called()
-        self.assertEqual(manager._protected_proxy_ips, set())
+    def test_clean_exit_is_a_stop_not_an_error(self) -> None:
+        errors: list[str] = []
+        self.manager.error.connect(errors.append)
+        self.manager.apply(ZapretPlan("Default"))
+        self.manager._fail("", "exited")
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ from qfluentwidgets import FluentIcon as FIF, isDarkTheme
 
 from ..motion import FrameGate
 from ..theme import accent_color, on_theme_or_accent_changed, text_color, text_muted_color
-from .visuals import BLOCK, DIRECT, DNS, NEUTRAL, PROXY, Visual, tone_color
+from .visuals import BLOCK, DIRECT, DNS, NEUTRAL, PROXY, SPECIAL, Visual, tone_color
 
 TAU = math.tau
 
@@ -546,6 +546,65 @@ class TunnelArt(ArtCanvas):
         painter.drawEllipse(center, 14, 14)
         label(painter, QRectF(center.x() - 40, rect.bottom() - 16, 80, 14), "TUN", muted, size=8, bold=True,
               align=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+
+
+class ZapretArt(ArtCanvas):
+    """Zapret: a decoy breaks on the DPI wall, the real packet slips through in halves."""
+
+    CYCLE = 2.6
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent, height=120)
+
+    def paint_art(self, painter: QPainter, rect: QRectF, t: float) -> None:
+        accent = accent_color()
+        wall_color = tone_color(BLOCK)
+        decoy_color = tone_color(SPECIAL)
+        muted = text_muted_color()
+        y = rect.center().y() - 6
+        left = QPointF(rect.left() + 44, y)
+        right = QPointF(rect.right() - 44, y)
+        wall_x = lerp(left.x(), right.x(), 0.5)
+
+        painter.setPen(QPen(with_alpha(muted, 70), 1.2, Qt.PenStyle.DashLine))
+        painter.drawLine(QPointF(left.x() + 22, y), QPointF(right.x() - 22, y))
+        wall = QRectF(wall_x - 5, y - 30, 10, 60)
+        gradient = QLinearGradient(wall.topLeft(), wall.bottomLeft())
+        gradient.setColorAt(0.0, with_alpha(wall_color, 30))
+        gradient.setColorAt(0.5, with_alpha(wall_color, 150))
+        gradient.setColorAt(1.0, with_alpha(wall_color, 30))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(wall, 4, 4)
+
+        for offset in (0.0, 0.5):
+            u = (t / self.CYCLE + offset) % 1.0
+            # The decoy runs ahead, hits the wall and burns out there.
+            if u < 0.45:
+                x = lerp(left.x() + 24, wall_x - 8, ease_in_out(u / 0.45))
+                glow_dot(painter, QPointF(x, y), 3.2, decoy_color, 0.9)
+            elif u < 0.62:
+                fade = (u - 0.45) / 0.17
+                glow_dot(painter, QPointF(wall_x - 8, y), 3.2 + 4 * fade, decoy_color, 0.9 * (1 - fade))
+            # The real packet follows, splits at the wall and passes in halves.
+            v = u - 0.12
+            if 0.0 <= v < 0.42:
+                x = lerp(left.x() + 24, wall_x - 10, ease_in_out(v / 0.42))
+                glow_dot(painter, QPointF(x, y), 3.4, accent)
+            elif 0.42 <= v < 0.86:
+                w = (v - 0.42) / 0.44
+                x = lerp(wall_x - 10, right.x() - 24, ease_in_out(w))
+                spread = 7 * math.sin(math.pi * min(1.0, w * 1.4))
+                for sign in (-1, 1):
+                    glow_dot(painter, QPointF(x, y + sign * spread), 2.4, accent)
+
+        node(painter, left, 20, FIF.IOT, muted)
+        node(painter, right, 20, FIF.VPN, accent, glow=0.6)
+        center = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+        label(painter, QRectF(left.x() - 50, rect.bottom() - 22, 100, 14), "Компьютер", muted, size=8, align=center)
+        label(painter, QRectF(wall_x - 50, rect.bottom() - 22, 100, 14), "DPI провайдера", wall_color, size=8,
+              bold=True, align=center)
+        label(painter, QRectF(right.x() - 50, rect.bottom() - 22, 100, 14), "VPN-сервер", muted, size=8, align=center)
 
 
 class JsonArt(ArtCanvas):

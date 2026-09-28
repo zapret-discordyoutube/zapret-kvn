@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 import re
@@ -432,22 +432,60 @@ def normalize_startup_connect_order(value: Any) -> str:
     return text if text in STARTUP_CONNECT_ORDERS else "immediate"
 
 
+#: Kinds of VPN server Zapret can bypass DPI for, each with its own strategy.
+ZAPRET_SERVER_KINDS: tuple[str, ...] = ("tcp", "quic", "wireguard")
+ZAPRET_DEFAULT_STRATEGIES: dict[str, str] = {
+    "tcp": "alt9",
+    "quic": "general_bf_32",
+    "wireguard": "general_bf_32",
+}
+
+
 @dataclass(slots=True)
 class ZapretTargetSettings:
-    """Policy for the synthetic first winws2 profile.
+    """Per server kind: bypass on/off and the strategy used for it.
 
-    The policy follows the currently selected node.  It deliberately stores
-    strategy choices, not resolved addresses: endpoint DNS is refreshed for
-    every protected connection attempt.
+    The rule follows the currently selected node.  Only choices are stored —
+    never resolved addresses: endpoint DNS is refreshed for every protected
+    connection attempt.
+
+    Until 0.8.3 QUIC and WireGuard shared one ``udp_*`` strategy.  It is still
+    written (as the QUIC choice) so a build rolled back by the updater reads a
+    sane value, and it seeds both UDP kinds when loading an old state.
     """
 
     tcp_proxy_enabled: bool = True
     quic_proxy_enabled: bool = False
     wireguard_enabled: bool = False
-    tcp_strategy_id: str = "alt9"
-    udp_strategy_id: str = ""
+    tcp_strategy_id: str = ZAPRET_DEFAULT_STRATEGIES["tcp"]
+    quic_strategy_id: str = ZAPRET_DEFAULT_STRATEGIES["quic"]
+    wireguard_strategy_id: str = ZAPRET_DEFAULT_STRATEGIES["wireguard"]
     tcp_custom_args: str = ""
-    udp_custom_args: str = ""
+    quic_custom_args: str = ""
+    wireguard_custom_args: str = ""
+
+    def enabled(self, kind: str) -> bool:
+        return bool(getattr(self, _ZAPRET_ENABLED_FIELDS[kind]))
+
+    def strategy_id(self, kind: str) -> str:
+        return getattr(self, f"{kind}_strategy_id") or ZAPRET_DEFAULT_STRATEGIES[kind]
+
+    def custom_args(self, kind: str) -> str:
+        return getattr(self, f"{kind}_custom_args")
+
+    def with_kind(
+        self, kind: str, *, enabled: bool, strategy_id: str, custom_args: str,
+    ) -> "ZapretTargetSettings":
+        """Copy with one kind replaced; the other kinds stay untouched."""
+
+        return replace(
+            self,
+            **{
+                _ZAPRET_ENABLED_FIELDS[kind]: bool(enabled),
+                f"{kind}_strategy_id": strategy_id or ZAPRET_DEFAULT_STRATEGIES[kind],
+                f"{kind}_custom_args": custom_args,
+            },
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -455,23 +493,47 @@ class ZapretTargetSettings:
             "quic_proxy_enabled": self.quic_proxy_enabled,
             "wireguard_enabled": self.wireguard_enabled,
             "tcp_strategy_id": self.tcp_strategy_id,
-            "udp_strategy_id": self.udp_strategy_id,
+            "quic_strategy_id": self.quic_strategy_id,
+            "wireguard_strategy_id": self.wireguard_strategy_id,
             "tcp_custom_args": self.tcp_custom_args,
-            "udp_custom_args": self.udp_custom_args,
+            "quic_custom_args": self.quic_custom_args,
+            "wireguard_custom_args": self.wireguard_custom_args,
+            # Read by builds up to 0.8.3 (one strategy for every UDP server).
+            "udp_strategy_id": self.quic_strategy_id,
+            "udp_custom_args": self.quic_custom_args,
         }
 
     @staticmethod
     def from_dict(data: Any) -> "ZapretTargetSettings":
         payload = data if isinstance(data, dict) else {}
+        legacy_udp_id = str(payload.get("udp_strategy_id") or "")
+        legacy_udp_custom = str(payload.get("udp_custom_args") or "")
+
+        def text(key: str, fallback: str) -> str:
+            return str(payload.get(key) or fallback)
+
         return ZapretTargetSettings(
             tcp_proxy_enabled=bool(payload.get("tcp_proxy_enabled", True)),
             quic_proxy_enabled=bool(payload.get("quic_proxy_enabled", False)),
             wireguard_enabled=bool(payload.get("wireguard_enabled", False)),
-            tcp_strategy_id=str(payload.get("tcp_strategy_id") or "alt9"),
-            udp_strategy_id=str(payload.get("udp_strategy_id") or ""),
-            tcp_custom_args=str(payload.get("tcp_custom_args") or ""),
-            udp_custom_args=str(payload.get("udp_custom_args") or ""),
+            tcp_strategy_id=text("tcp_strategy_id", ZAPRET_DEFAULT_STRATEGIES["tcp"]),
+            quic_strategy_id=text(
+                "quic_strategy_id", legacy_udp_id or ZAPRET_DEFAULT_STRATEGIES["quic"],
+            ),
+            wireguard_strategy_id=text(
+                "wireguard_strategy_id", legacy_udp_id or ZAPRET_DEFAULT_STRATEGIES["wireguard"],
+            ),
+            tcp_custom_args=text("tcp_custom_args", ""),
+            quic_custom_args=text("quic_custom_args", legacy_udp_custom),
+            wireguard_custom_args=text("wireguard_custom_args", legacy_udp_custom),
         )
+
+
+_ZAPRET_ENABLED_FIELDS = {
+    "tcp": "tcp_proxy_enabled",
+    "quic": "quic_proxy_enabled",
+    "wireguard": "wireguard_enabled",
+}
 
 
 @dataclass(slots=True)

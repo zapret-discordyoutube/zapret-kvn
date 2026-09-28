@@ -14,52 +14,25 @@ if TYPE_CHECKING:
     from ..profiles.storage import StateStorage
 
 
-class ProxyProtectionResolver(QThread):
-    """Resolve one proxy endpoint without blocking the Qt event loop."""
+class EndpointResolver(QThread):
+    """Resolve every host of one immutable endpoint without blocking the GUI."""
 
-    resolved = pyqtSignal(int, str, object, object)
+    resolved = pyqtSignal(int, object, object, object)  # generation, endpoint, result, error
 
-    def __init__(
-        self,
-        generation: int,
-        server: str,
-        resolver: Callable[[str], set[str]],
-        parent=None,
-    ) -> None:
+    def __init__(self, generation: int, endpoint, resolver: Callable, parent=None) -> None:
         super().__init__(parent)
         self._generation = generation
-        self._server = server
+        self._endpoint = endpoint
         self._resolver = resolver
 
     def run(self) -> None:
         try:
-            addresses = self._resolver(self._server)
+            result = self._resolver(self._endpoint)
             error: Exception | None = None
         except Exception as exc:  # DNS errors are reported back on the GUI thread
-            addresses = set()
+            result = None
             error = exc
-        self.resolved.emit(self._generation, self._server, addresses, error)
-
-
-class TargetProfileResolver(QThread):
-    """Resolve every host in one immutable selected-server endpoint spec."""
-
-    resolved = pyqtSignal(int, object, object, object)
-
-    def __init__(self, generation: int, spec, resolver: Callable, parent=None) -> None:
-        super().__init__(parent)
-        self._generation = generation
-        self._spec = spec
-        self._resolver = resolver
-
-    def run(self) -> None:
-        try:
-            endpoint = self._resolver(self._spec)
-            error: Exception | None = None
-        except Exception as exc:
-            endpoint = None
-            error = exc
-        self.resolved.emit(self._generation, self._spec, endpoint, error)
+        self.resolved.emit(self._generation, self._endpoint, result, error)
 
 
 class StateWriter(QObject):

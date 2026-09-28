@@ -308,12 +308,9 @@ def shutdown(controller: AppController) -> None:
         if worker.isRunning():
             # Auto mode may perform one 15-second direct attempt and one proxy retry.
             worker.wait(32000)
-    for worker in list(controller._proxy_protection_workers.values()):
+    for worker in controller.bypass.workers():
         if worker.isRunning():
             worker.wait(5000)
-    manual_zapret_worker = controller._manual_zapret_worker
-    if manual_zapret_worker is not None and manual_zapret_worker.isRunning():
-        manual_zapret_worker.wait(5000)
     controller._country_shutdown = True
     if controller._country_resolver and controller._country_resolver.isRunning():
         controller._country_resolver.requestInterruption()
@@ -344,8 +341,7 @@ def shutdown(controller: AppController) -> None:
     if controller.xray.is_running:
         controller.xray.stop()
     controller._xray_tun_routes.cleanup()
-    if controller.zapret.running:
-        controller.zapret.stop(wait=True)
+    controller.zapret.stop(wait=True)
     # Выключаем только наш прокси (или восстанавливаем из бэкапа):
     # чужой/корпоративный прокси при завершении не трогаем. Через ту же
     # FIFO-очередь прокси и с ожиданием: запрос enable, поставленный раньше,

@@ -104,12 +104,12 @@ class MetadataWorker(QThread):
     def run(self):
         from ..engines.xray import get_xray_version
         from ..engines.singbox.core_updater import installed_version
-        from ..engines.zapret.manager import ZapretManager
+        from ..engines.zapret import presets
         result = {"xray": "", "singbox": "", "presets": []}
         for key, call in (
             ("xray", lambda: get_xray_version(self.paths[0]) or ""),
             ("singbox", lambda: installed_version(Path(self.paths[1])) or ""),
-            ("presets", ZapretManager.list_preset_infos),
+            ("presets", presets.list_preset_infos),
         ):
             if self.isInterruptionRequested():
                 return

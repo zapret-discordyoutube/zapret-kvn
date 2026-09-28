@@ -8,6 +8,8 @@ a live search, a label filter and a colored badge per entry.
 
 from __future__ import annotations
 
+from typing import Mapping
+
 from PyQt6.QtCore import QModelIndex, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import QHBoxLayout, QListWidgetItem, QStyleOptionViewItem, QVBoxLayout, QWidget
@@ -21,7 +23,12 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.components.widgets.list_view import ListItemDelegate
 
-from ..engines.zapret.target import STRATEGY_LABELS, STRATEGY_LABEL_TITLES, ZapretStrategyEntry
+from ..engines.zapret.strategies import (
+    CUSTOM_STRATEGY_ID,
+    STRATEGY_LABELS,
+    STRATEGY_LABEL_TITLES,
+    Strategy,
+)
 from .theme import (
     accent_color,
     error_color,
@@ -30,8 +37,6 @@ from .theme import (
     text_muted_color,
     warning_color,
 )
-
-CUSTOM_STRATEGY_ID = "custom"
 
 _ROW_HEIGHT = 30
 _VISIBLE_ROWS = 12
@@ -138,7 +143,7 @@ class StrategyPicker(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self._entries: dict[str, ZapretStrategyEntry] = {}
+        self._entries: dict[str, Strategy] = {}
         self._selected_id = ""
         self._visible_ids: list[str] = []
 
@@ -215,7 +220,7 @@ class StrategyPicker(QWidget):
 
     # ── public API ──
 
-    def set_entries(self, title: str, entries: dict[str, ZapretStrategyEntry]) -> None:
+    def set_entries(self, title: str, entries: Mapping[str, Strategy]) -> None:
         """Load one transport's catalog; the previous selection is kept if present."""
 
         self.title_label.setText(title)
@@ -230,15 +235,15 @@ class StrategyPicker(QWidget):
     def selected_id(self) -> str:
         return self._selected_id
 
-    def selected_entry(self) -> ZapretStrategyEntry | None:
+    def selected_entry(self) -> Strategy | None:
         return self._entries.get(self._selected_id)
 
-    def entries(self) -> dict[str, ZapretStrategyEntry]:
+    def entries(self) -> dict[str, Strategy]:
         return self._entries
 
     # ── internals ──
 
-    def _matches(self, entry: ZapretStrategyEntry, query: str, label: str) -> bool:
+    def _matches(self, entry: Strategy, query: str, label: str) -> bool:
         if label and entry.label != label:
             return False
         return not query or query in entry.search_haystack

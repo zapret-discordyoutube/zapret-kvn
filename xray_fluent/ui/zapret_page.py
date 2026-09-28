@@ -1,99 +1,165 @@
-"""Zapret (DPI bypass) page — compact preset list + selected-server subpage."""
+"""Zapret section: one overview, one page per server kind, the preset list.
+
+Overview (root)
+    Status card — is winws2 running, on which preset, one start/stop button,
+    autostart.  Selected server — what Zapret does with its traffic right now.
+    Three rows — TCP / QUIC / WireGuard servers: bypass on (strategy) or off.
+Kind page
+    Bypass switch and the strategy catalog for that kind; «Применить».
+Presets page
+    The winws2 preset files: create, import, edit, delete, start.
+
+Only titles and data live on these pages; the explanation for newcomers is in
+the «Как это б#&^ь работает?» window (``singbox.guide``, key ``zapret``).
+"""
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QModelIndex, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QModelIndex, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter
 from PyQt6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QListWidgetItem, QStyleOptionViewItem,
-    QVBoxLayout, QWidget,
+    QFileDialog,
+    QHBoxLayout,
+    QListWidgetItem,
+    QSizePolicy,
+    QStyleOptionViewItem,
+    QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import (
+    Action,
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    ComboBox,
     FluentIcon as FIF,
-    IndeterminateProgressBar,
+    IconWidget,
     ListWidget,
+    MessageBox,
     PlainTextEdit,
     PrimaryPushButton,
-    PrimaryToolButton,
+    PushButton,
+    RoundMenu,
     StrongBodyLabel,
     SubtitleLabel,
     SwitchButton,
-    TransparentToolButton,
-    VerticalSeparator,
-    setCustomStyleSheet,
+    TransparentPushButton,
 )
-from qfluentwidgets import RoundMenu, Action
 from qfluentwidgets.components.widgets.list_view import ListItemDelegate
 
-from ..profiles.models import Node, ZapretTargetSettings
-from ..engines.zapret.manager import PresetInfo, ZapretManager
-from ..engines.zapret.target import (
-    ResolvedZapretEndpoint,
-    endpoint_spec_for_node,
+from ..engines.zapret import presets
+from ..engines.zapret.command import ServerRule
+from ..engines.zapret.endpoint import KIND_PROTOCOLS, KIND_TITLES, endpoint_for_node
+from ..engines.zapret.presets import PresetInfo
+from ..engines.zapret.strategies import (
+    CUSTOM_STRATEGY_ID,
+    chosen_strategy,
     load_strategy_catalog,
-    strategy_for_target,
     validate_custom_strategy,
 )
+from ..profiles.models import ZAPRET_SERVER_KINDS, Node, ZapretTargetSettings
+from .base_page import ScrollablePage
 from .detail_page import DetailPage, StackedSection
 from .preset_edit_widget import PresetEditWidget
-from .strategy_picker import CUSTOM_STRATEGY_ID, StrategyPicker
-from .theme import (
-    accent_color,
-    on_theme_or_accent_changed,
-    positive_pair,
-    text_muted_color,
-    token_pair,
-)
+from .singbox.art import KindBadge
+from .singbox.guide import help_link, open_guide
+from .singbox.lists import section_header
+from .singbox.visuals import BLOCK, NEUTRAL, PROXY, SPECIAL, Visual
+from .strategy_picker import StrategyPicker
+from .theme import accent_color, on_theme_or_accent_changed, text_muted_color
 
-#: Fallback strategies so a group can never be enabled without a runnable body.
-DEFAULT_TCP_STRATEGY = "alt9"
-DEFAULT_UDP_STRATEGY = "general_bf_32"
-
-_GROUP_TITLES = {
-    "tcp_proxy": "TCP-прокси",
-    "quic_proxy": "QUIC-прокси",
-    "wireguard": "WireGuard",
-}
+_KIND_ICONS = {"tcp": FIF.CONNECT, "quic": FIF.SPEED_HIGH, "wireguard": FIF.VPN}
 _PRESET_ROW_HEIGHT = 32
 
 
-def _status_qss(token: str) -> tuple[str, str]:
-    light, dark = positive_pair() if token == "positive" else token_pair(token)
-    return (
-        f"BodyLabel {{ color: {light}; }}",
-        f"BodyLabel {{ color: {dark}; }}",
-    )
+@dataclass(frozen=True)
+class ZapretStatus:
+    """What the status card shows: ``stopped`` | ``starting`` | ``running`` | ``error``."""
+
+    state: str = "stopped"
+    preset: str = ""
+    message: str = ""
 
 
-class SelectedServerZapretPage(DetailPage):
-    """Bypass policy for the currently selected VPN endpoint.
+def off_meaning(kind: str) -> str:
+    """What «bypass off» does for a kind — the preset for TCP, hands off for UDP."""
+    return "по пресету" if kind == "tcp" else "не трогать"
 
-    Only the transport the selected server actually uses gets a strategy
-    section: a TCP node never needs the 66-entry UDP catalog on screen, and the
-    page is rebuilt on every visit, so there is nothing to keep in sync.
-    """
 
-    apply_requested = pyqtSignal(object)
+def strategy_title(settings: ZapretTargetSettings, kind: str) -> str:
+    try:
+        return chosen_strategy(settings, kind).name
+    except ValueError:
+        return "стратегия не найдена"
+
+
+def _expanding(widget: QWidget) -> QWidget:
+    widget.setSizePolicy(QSizePolicy.Policy.Expanding, widget.sizePolicy().verticalPolicy())
+    return widget
+
+
+# ── overview rows ────────────────────────────────────────────────────────────
+
+
+class KindRow(CardWidget):
+    """One server kind: badge, title, protocols, current choice and a chevron."""
+
+    def __init__(self, kind: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.kind = kind
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 12, 10)
+        layout.setSpacing(12)
+        self.badge = KindBadge(self)
+        layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        column = QVBoxLayout()
+        column.setSpacing(1)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(BodyLabel(KIND_TITLES[kind], self))
+        self.current_mark = CaptionLabel("выбранный сервер", self)
+        self.current_mark.hide()
+        title_row.addWidget(self.current_mark)
+        title_row.addStretch(1)
+        column.addLayout(title_row)
+        column.addWidget(CaptionLabel(KIND_PROTOCOLS[kind], self))
+        layout.addLayout(column, 1)
+        self.value = BodyLabel("", self)
+        self.value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.value)
+        chevron = IconWidget(FIF.CHEVRON_RIGHT, self)
+        chevron.setFixedSize(12, 12)
+        layout.addWidget(chevron, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def show_state(self, settings: ZapretTargetSettings, current: bool) -> None:
+        enabled = settings.enabled(self.kind)
+        self.badge.set_visual(
+            Visual(_KIND_ICONS[self.kind], PROXY if enabled else NEUTRAL),
+            vivid=enabled and current,
+        )
+        self.value.setText(
+            strategy_title(settings, self.kind) if enabled else f"выкл · {off_meaning(self.kind)}"
+        )
+        self.current_mark.setVisible(current)
+
+
+# ── kind page ────────────────────────────────────────────────────────────────
+
+
+class KindPage(DetailPage):
+    """Bypass switch and strategy for one server kind."""
+
+    apply_requested = pyqtSignal(object)  # ZapretTargetSettings
 
     def __init__(self, parent: QWidget | None = None):
-        super().__init__(
-            "Zapret",
-            "Выбранный сервер",
-            parent,
-            root_key="zapret",
-            page_key="selected-server",
-        )
+        super().__init__("Zapret", KIND_TITLES["tcp"], parent, root_key="zapret", page_key="kind")
+        self.kind = "tcp"
         self._settings = ZapretTargetSettings()
-        self._node: Node | None = None
-        self._resolved: ResolvedZapretEndpoint | None = None
-        self._transport = "tcp"
-        self._group = ""
         self._original: tuple = ()
 
         self.validation_label = CaptionLabel("", self)
@@ -102,320 +168,137 @@ class SelectedServerZapretPage(DetailPage):
         self.add_header_action(self.validation_label)
         self.add_header_action(self.apply_btn)
 
-        # ── server card ──
-        live = CardWidget(self)
-        live_layout = QVBoxLayout(live)
-        live_layout.setContentsMargins(16, 12, 16, 12)
-        live_layout.setSpacing(3)
-        self.live_title = StrongBodyLabel("Сервер не выбран", live)
-        self.live_details = CaptionLabel("—", live)
-        self.live_details.setWordWrap(True)
-        self.live_state = CaptionLabel("Профиль не подготовлен", live)
-        live_layout.addWidget(self.live_title)
-        live_layout.addWidget(self.live_details)
-        live_layout.addWidget(self.live_state)
-        self.content_layout.addWidget(live)
+        switch_card = CardWidget(self)
+        switch_layout = QHBoxLayout(switch_card)
+        switch_layout.setContentsMargins(14, 10, 14, 10)
+        switch_layout.setSpacing(12)
+        self.badge = KindBadge(switch_card)
+        switch_layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        column = QVBoxLayout()
+        column.setSpacing(1)
+        column.addWidget(BodyLabel("Обход DPI до сервера", switch_card))
+        self.protocols_label = CaptionLabel("", switch_card)
+        column.addWidget(self.protocols_label)
+        switch_layout.addLayout(column, 1)
+        self.state_label = CaptionLabel("", switch_card)
+        switch_layout.addWidget(self.state_label)
+        self.switch = SwitchButton(switch_card)
+        # SwitchButton(text) fills only the «off» caption; the state is spelled
+        # out by state_label instead.
+        self.switch.setOnText("")
+        self.switch.setOffText("")
+        switch_layout.addWidget(self.switch)
+        self.content_layout.addWidget(switch_card)
 
-        # ── protocol groups ──
-        groups = CardWidget(self)
-        groups_layout = QVBoxLayout(groups)
-        groups_layout.setContentsMargins(16, 12, 16, 12)
-        groups_layout.setSpacing(6)
-        groups_layout.addWidget(StrongBodyLabel("Для каких серверов включён обход", groups))
-        self.tcp_switch, self._tcp_mark = self._group_row(
-            groups_layout, groups, "TCP-прокси", "VLESS, VMess, Trojan, Shadowsocks, SOCKS, HTTP",
-        )
-        self.quic_switch, self._quic_mark = self._group_row(
-            groups_layout, groups, "QUIC-прокси", "Hysteria, Hysteria2, TUIC, QUIC/KCP",
-        )
-        self.wg_switch, self._wg_mark = self._group_row(
-            groups_layout, groups, "WireGuard", "WireGuard и AmneziaWG",
-        )
-        self.content_layout.addWidget(groups)
-
-        # ── strategy section (single transport) ──
-        strategy_card = CardWidget(self)
-        strategy_layout = QVBoxLayout(strategy_card)
+        self.strategy_card = CardWidget(self)
+        strategy_layout = QVBoxLayout(self.strategy_card)
         strategy_layout.setContentsMargins(16, 12, 16, 12)
         strategy_layout.setSpacing(8)
-        self.strategy_card = strategy_card
-        self.disabled_hint = BodyLabel("", strategy_card)
-        self.disabled_hint.setWordWrap(True)
-        self.disabled_hint.hide()
-        strategy_layout.addWidget(self.disabled_hint)
-        self.picker = StrategyPicker(strategy_card)
+        self.picker = StrategyPicker(self.strategy_card)
         strategy_layout.addWidget(self.picker)
-        self.custom_edit = PlainTextEdit(strategy_card)
+        self.custom_edit = PlainTextEdit(self.strategy_card)
         self.custom_edit.setPlaceholderText("# комментарий\n--lua-desync=...")
-        self.custom_edit.setMaximumHeight(84)
+        self.custom_edit.setMaximumHeight(96)
         self.custom_edit.hide()
         strategy_layout.addWidget(self.custom_edit)
-        self.content_layout.addWidget(strategy_card)
+        self.content_layout.addWidget(self.strategy_card)
         self.content_layout.addStretch(1)
 
-        self.picker.selection_changed.connect(self._on_strategy_selected)
-        self.custom_edit.textChanged.connect(self._on_form_edited)
-        self._load_transport("tcp")
-        self.mark_clean()
+        self.switch.checkedChanged.connect(lambda _checked: self._on_edited())
+        self.picker.selection_changed.connect(lambda _id: self._on_edited())
+        self.custom_edit.textChanged.connect(self._on_edited)
 
-    # ── construction helpers ──
+    # ── public API ──
 
-    def _group_row(
-        self, layout: QVBoxLayout, parent: QWidget, title: str, hint: str,
-    ) -> tuple[SwitchButton, CaptionLabel]:
-        """One switch row whose caption survives being switched on.
+    def open_kind(self, kind: str, settings: ZapretTargetSettings) -> None:
+        """Load one kind's stored choice; this is the page's clean state."""
 
-        ``SwitchButton(text)`` only fills the *off* caption, so an enabled
-        switch used to replace the whole protocol list with the word "On".
+        self.kind = kind
+        self._settings = settings
+        self.set_page_label(KIND_TITLES[kind])
+        self.protocols_label.setText(KIND_PROTOCOLS[kind])
+        transport = "tcp" if kind == "tcp" else "udp"
+        self.picker.set_entries(
+            "TCP-стратегия" if transport == "tcp" else "UDP-стратегия",
+            load_strategy_catalog(transport),
+        )
+        self.picker.set_selected(settings.strategy_id(kind))
+        self.custom_edit.blockSignals(True)
+        self.custom_edit.setPlainText(settings.custom_args(kind))
+        self.custom_edit.blockSignals(False)
+        self.switch.blockSignals(True)
+        self.switch.setChecked(settings.enabled(kind))
+        self.switch.blockSignals(False)
+        self.validation_label.setText("")
+        self._sync()
+        self._original = self._snapshot()
+
+    def set_settings(self, settings: ZapretTargetSettings) -> None:
+        """Stored settings changed elsewhere; unapplied edits on screen win.
+
+        A hidden page only remembers them: ``open_kind`` reloads on the next
+        visit, and rebuilding a ~470-row catalog nobody sees is wasted work.
         """
 
-        row = QWidget(parent)
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(8)
-        text_layout = QVBoxLayout()
-        text_layout.setSpacing(0)
-        text_layout.addWidget(BodyLabel(title, row))
-        hint_label = CaptionLabel(hint, row)
-        text_layout.addWidget(hint_label)
-        row_layout.addLayout(text_layout, 1)
-        mark = CaptionLabel("", row)
-        row_layout.addWidget(mark)
-        switch = SwitchButton(row)
-        switch.setOnText("")
-        switch.setOffText("")
-        row_layout.addWidget(switch)
-        layout.addWidget(row)
-        switch.checkedChanged.connect(lambda _checked: self._on_form_edited())
-        return switch, mark
-
-    # ── transport handling ──
-
-    def _load_transport(self, transport: str) -> None:
-        self._transport = transport if transport in ("tcp", "udp") else "tcp"
-        title = "TCP-стратегия" if self._transport == "tcp" else "UDP-стратегия"
-        self.picker.set_entries(title, load_strategy_catalog(self._transport))
-        self.picker.set_selected(self._settings_strategy_id())
-        self._set_custom_text(
-            self._settings.tcp_custom_args
-            if self._transport == "tcp"
-            else self._settings.udp_custom_args
-        )
-        self._sync_custom_editor()
-        # Rebuilding the form for another node is not an unsaved edit, but the
-        # group switches belong to the user, not to the node: keep their baseline
-        # so real edits still count as dirty across a node switch.  An unapplied
-        # custom body is transport-bound and does not survive the switch.
-        switches = self._original[:3] if self._original else None
-        self.mark_clean()
-        if switches is not None:
-            self._original = switches + self._original[3:]
-
-    def _settings_strategy_id(self) -> str:
-        if self._transport == "tcp":
-            return self._settings.tcp_strategy_id or DEFAULT_TCP_STRATEGY
-        # A UDP node ships with an empty id, so without a default the picker
-        # would open with nothing selected and refuse to apply.
-        return self._settings.udp_strategy_id or DEFAULT_UDP_STRATEGY
-
-    def _set_custom_text(self, text: str) -> None:
-        """Fill the editor programmatically without reporting a user edit."""
-
-        if self.custom_edit.toPlainText() == text:
+        if self.is_dirty() or not self.isVisible():
+            self._settings = settings
             return
-        self.custom_edit.blockSignals(True)
-        self.custom_edit.setPlainText(text)
-        self.custom_edit.blockSignals(False)
-
-    def _sync_custom_editor(self) -> None:
-        is_custom = self.picker.selected_id() == CUSTOM_STRATEGY_ID
-        self.custom_edit.setVisible(is_custom)
-
-    def _on_strategy_selected(self, _strategy_id: str) -> None:
-        self._sync_custom_editor()
-        self._on_form_edited()
-
-    def _on_form_edited(self) -> None:
-        """A fresh edit invalidates whatever the last apply reported."""
-
-        self.validation_label.setText("")
-        self._refresh_summary()
-        self._sync_strategy_section()
-
-    def _group_switch(self, group: str) -> SwitchButton:
-        if group == "tcp_proxy":
-            return self.tcp_switch
-        if group == "quic_proxy":
-            return self.quic_switch
-        return self.wg_switch
-
-    def _sync_strategy_section(self) -> None:
-        """Hide the catalog while the bypass is off — the choice changes nothing."""
-
-        if not self._group:
-            enabled = True
-        else:
-            enabled = self._group_switch(self._group).isChecked()
-        self.picker.setVisible(enabled)
-        self.custom_edit.setVisible(
-            enabled and self.picker.selected_id() == CUSTOM_STRATEGY_ID
-        )
-        self.disabled_hint.setVisible(not enabled)
-        if not enabled:
-            title = _GROUP_TITLES.get(self._group, self._group)
-            self.disabled_hint.setText(
-                f"Обход для этого сервера выключен. Включите «{title}» выше, "
-                "чтобы выбрать стратегию."
-            )
-
-    # ── dirty tracking ──
-
-    def _snapshot(self) -> tuple:
-        return (
-            self.tcp_switch.isChecked(),
-            self.quic_switch.isChecked(),
-            self.wg_switch.isChecked(),
-            self.picker.selected_id(),
-            self.custom_edit.toPlainText(),
-        )
-
-    def mark_clean(self) -> None:
-        self._original = self._snapshot()
+        self.open_kind(self.kind, settings)
 
     def is_dirty(self) -> bool:
         return bool(self._original) and self._snapshot() != self._original
 
-    # ── public API ──
+    # ── internals ──
 
-    def set_settings(self, settings: ZapretTargetSettings, *, force: bool = False) -> None:
-        """Push stored settings into the form.
+    def _snapshot(self) -> tuple:
+        return (self.switch.isChecked(), self.picker.selected_id(), self.custom_edit.toPlainText())
 
-        Any settings change in the app used to reach this page and overwrite
-        edits in progress, so an unapplied form now wins unless forced.
-        """
+    def _on_edited(self) -> None:
+        self.validation_label.setText("")
+        self._sync()
 
-        if self.is_dirty() and not force:
-            # Keep the user's on-screen edits, but still track the stored values:
-            # apply() reads the other transport's fields from here, and a stale
-            # copy would silently roll that transport back.
-            self._settings = replace(settings)
-            return
-        self._settings = replace(settings)
-        self.tcp_switch.setChecked(settings.tcp_proxy_enabled)
-        self.quic_switch.setChecked(settings.quic_proxy_enabled)
-        self.wg_switch.setChecked(settings.wireguard_enabled)
-        self._set_custom_text(
-            settings.tcp_custom_args if self._transport == "tcp" else settings.udp_custom_args
-        )
-        self.picker.set_selected(self._settings_strategy_id())
-        self._sync_custom_editor()
-        self._sync_strategy_section()
-        self.mark_clean()
-
-    def set_target(
-        self,
-        node: Node | None,
-        resolved: ResolvedZapretEndpoint | None = None,
-        state: str = "",
-    ) -> None:
-        self._node = node
-        self._resolved = resolved
-        spec = endpoint_spec_for_node(node)
-        self._group = spec.group if spec else ""
-        if spec is not None and spec.transport != self._transport:
-            self._load_transport(spec.transport)
-        self.live_title.setText(node.name if node else "Сервер не выбран")
-        self._refresh_summary()
-        self.live_state.setText(state or ("Готов" if resolved else "Профиль не подготовлен"))
-        self._mark_active_group()
-        self._sync_strategy_section()
-
-    def _mark_active_group(self) -> None:
-        for group, mark in (
-            ("tcp_proxy", self._tcp_mark),
-            ("quic_proxy", self._quic_mark),
-            ("wireguard", self._wg_mark),
-        ):
-            active = group == self._group
-            mark.setText("этот сервер" if active else "")
-            mark.setVisible(active)
-
-    def _refresh_summary(self) -> None:
-        spec = endpoint_spec_for_node(self._node)
-        if spec is None:
-            self.live_details.setText("Для выбранной ноды точечный профиль не применяется")
-            return
-        resolved = self._resolved
-        ips = ", ".join(resolved.ips) if resolved and resolved.spec == spec else "DNS ещё не выполнен"
-        entry = self.picker.selected_entry()
-        if self.picker.selected_id() == CUSTOM_STRATEGY_ID:
-            strategy_name = "своя стратегия"
-        elif entry is not None:
-            strategy_name = entry.name
-        else:
-            strategy_name = "не выбрана"
-        group_title = _GROUP_TITLES.get(spec.group, spec.group)
-        self.live_details.setText(
-            f"{group_title} · {spec.transport.upper()} · "
-            f"{', '.join(spec.hosts)}:{spec.port_filter}\n"
-            f"IP: {ips} · Стратегия: {strategy_name}"
-        )
-
-    def set_runtime_state(self, text: str) -> None:
-        self.live_state.setText(text or "Профиль не подготовлен")
-        if "сохранен" in text.casefold():
-            self.validation_label.setText("Сохранено")
-
-    # ── apply ──
+    def _sync(self) -> None:
+        enabled = self.switch.isChecked()
+        self.badge.set_visual(Visual(_KIND_ICONS[self.kind], PROXY if enabled else NEUTRAL), vivid=enabled)
+        self.state_label.setText("включён" if enabled else f"выключен · {off_meaning(self.kind)}")
+        self.strategy_card.setVisible(enabled)
+        self.custom_edit.setVisible(enabled and self.picker.selected_id() == CUSTOM_STRATEGY_ID)
 
     def _apply(self) -> None:
         strategy_id = self.picker.selected_id()
-        custom_text = self.custom_edit.toPlainText()
-        if not strategy_id:
-            self.validation_label.setText("Выберите стратегию из каталога")
-            return
-        if strategy_id == CUSTOM_STRATEGY_ID:
-            try:
-                validate_custom_strategy(custom_text)
-            except ValueError as exc:
-                self.validation_label.setText(str(exc))
+        custom = self.custom_edit.toPlainText()
+        if self.switch.isChecked():
+            if not strategy_id:
+                self.validation_label.setText("Выберите стратегию")
                 return
-        settings = self._settings
-        if self._transport == "tcp":
-            tcp_id, udp_id = strategy_id, settings.udp_strategy_id
-            tcp_custom, udp_custom = custom_text, settings.udp_custom_args
-        else:
-            tcp_id, udp_id = settings.tcp_strategy_id or DEFAULT_TCP_STRATEGY, strategy_id
-            tcp_custom, udp_custom = settings.tcp_custom_args, custom_text
-        if (self.quic_switch.isChecked() or self.wg_switch.isChecked()) and not udp_id:
-            # A UDP group without a body used to refuse the whole save; fall back
-            # to the shipped default instead of trapping the user.
-            udp_id = DEFAULT_UDP_STRATEGY
-        updated = ZapretTargetSettings(
-            tcp_proxy_enabled=self.tcp_switch.isChecked(),
-            quic_proxy_enabled=self.quic_switch.isChecked(),
-            wireguard_enabled=self.wg_switch.isChecked(),
-            tcp_strategy_id=tcp_id or DEFAULT_TCP_STRATEGY,
-            udp_strategy_id=udp_id,
-            tcp_custom_args=tcp_custom,
-            udp_custom_args=udp_custom,
+            if strategy_id == CUSTOM_STRATEGY_ID:
+                try:
+                    validate_custom_strategy(custom)
+                except ValueError as exc:
+                    self.validation_label.setText(str(exc))
+                    return
+        updated = self._settings.with_kind(
+            self.kind,
+            enabled=self.switch.isChecked(),
+            strategy_id=strategy_id,
+            custom_args=custom,
         )
-        self._settings = replace(updated)
-        self.validation_label.setText("Применяется…")
-        self.mark_clean()
+        self._settings = updated
+        self._original = self._snapshot()
         self.apply_requested.emit(updated)
 
 
+# ── presets page ─────────────────────────────────────────────────────────────
+
+
 class PresetItemDelegate(ListItemDelegate):
-    """Thin one-line preset row: name, then meta and an "active" badge."""
+    """Thin one-line preset row: name, then meta and an «active» badge."""
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
-        size = super().sizeHint(option, index)
-        return QSize(size.width(), _PRESET_ROW_HEIGHT)
+        return QSize(super().sizeHint(option, index).width(), _PRESET_ROW_HEIGHT)
 
     def initStyleOption(self, option: QStyleOptionViewItem, index: QModelIndex) -> None:
-        # The base delegate re-reads DisplayRole here, so clearing the text in
-        # paint() is too late — both lines are drawn by this delegate instead.
+        # The base delegate re-reads DisplayRole here; the text is drawn below.
         super().initStyleOption(option, index)
         option.text = ""
 
@@ -423,7 +306,6 @@ class PresetItemDelegate(ListItemDelegate):
         name = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         meta = str(index.data(Qt.ItemDataRole.UserRole + 1) or "")
         badge = str(index.data(Qt.ItemDataRole.UserRole + 2) or "")
-
         super().paint(painter, option, index)
 
         painter.save()
@@ -446,7 +328,7 @@ class PresetItemDelegate(ListItemDelegate):
         if meta:
             painter.setFont(small)
             painter.setPen(text_muted_color())
-            width = min(200, painter.fontMetrics().horizontalAdvance(meta) + 8)
+            width = min(260, painter.fontMetrics().horizontalAdvance(meta) + 8)
             rect = QRect(right - width, option.rect.y(), width, option.rect.height())
             painter.drawText(
                 rect,
@@ -454,7 +336,6 @@ class PresetItemDelegate(ListItemDelegate):
                 painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, width),
             )
             right -= width + 8
-
         left = option.rect.left() + 14
         text_width = max(40, right - left)
         painter.setFont(option.font)
@@ -467,275 +348,394 @@ class PresetItemDelegate(ListItemDelegate):
         painter.restore()
 
 
+class PresetsPage(DetailPage):
+    """The preset files; double click edits, the context menu does the rest."""
+
+    edit_requested = pyqtSignal(str)
+    start_requested = pyqtSignal(str)
+    create_requested = pyqtSignal()
+    import_requested = pyqtSignal()
+    delete_requested = pyqtSignal(str)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__("Zapret", "Пресеты", parent, root_key="zapret", page_key="presets")
+        self._presets: list[PresetInfo] = []
+        self._active = ""
+
+        self.import_btn = PushButton(FIF.FOLDER, "Импорт", self)
+        self.import_btn.clicked.connect(lambda: self.import_requested.emit())
+        self.add_header_action(self.import_btn)
+        self.create_btn = PrimaryPushButton(FIF.ADD, "Создать", self)
+        self.create_btn.clicked.connect(lambda: self.create_requested.emit())
+        self.add_header_action(self.create_btn)
+
+        self.empty_label = CaptionLabel("Пресетов нет", self)
+        self.empty_label.hide()
+        self.content_layout.addWidget(self.empty_label)
+        self.list = ListWidget(self)
+        self.list.setItemDelegate(PresetItemDelegate(self.list))
+        self.list.setUniformItemSizes(True)
+        self.list.setVerticalScrollMode(ListWidget.ScrollMode.ScrollPerItem)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.doubleClicked.connect(lambda index: self._emit_for_row(index.row(), self.edit_requested))
+        self.list.customContextMenuRequested.connect(self._on_context_menu)
+        self.content_layout.addWidget(self.list, 1)
+
+    def show_presets(self, infos: list[PresetInfo], active: str) -> None:
+        self._presets = list(infos)
+        self._active = active
+        self.list.clear()
+        for preset in self._presets:
+            item = QListWidgetItem(preset.name)
+            item.setData(Qt.ItemDataRole.UserRole + 1, preset.description or f"{preset.arg_count} арг.")
+            if preset.name == active:
+                item.setData(Qt.ItemDataRole.UserRole + 2, "Работает")
+            item.setSizeHint(QSize(0, _PRESET_ROW_HEIGHT))
+            item.setToolTip(
+                f"{preset.name}\nАргументов: {preset.arg_count}\nИзменён: {_format_date(preset.modified)}"
+            )
+            self.list.addItem(item)
+        self.empty_label.setVisible(not self._presets)
+        # Size the list to its rows: the page itself scrolls.
+        self.list.setFixedHeight(max(1, len(self._presets)) * _PRESET_ROW_HEIGHT + 8)
+
+    def _emit_for_row(self, row: int, signal) -> None:
+        if 0 <= row < len(self._presets):
+            signal.emit(self._presets[row].name)
+
+    def _on_context_menu(self, pos) -> None:
+        item = self.list.itemAt(pos)
+        if item is None:
+            return
+        row = self.list.row(item)
+        self.list.setCurrentRow(row)
+        menu = RoundMenu(parent=self)
+        for text, icon, signal in (
+            ("Изменить", FIF.EDIT, self.edit_requested),
+            ("Запустить", FIF.PLAY, self.start_requested),
+            ("Удалить", FIF.DELETE, self.delete_requested),
+        ):
+            action = Action(icon, text, self)
+            action.triggered.connect(lambda _checked=False, s=signal: self._emit_for_row(row, s))
+            menu.addAction(action)
+        menu.exec(QCursor.pos())
+
+
+def _format_date(iso: str) -> str:
+    try:
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M") if iso else ""
+    except (ValueError, TypeError):
+        return iso
+
+
+# ── section ──────────────────────────────────────────────────────────────────
+
+
 class ZapretPage(StackedSection):
-    start_requested = pyqtSignal(str)   # preset name
+    start_requested = pyqtSignal(str)  # preset name
     stop_requested = pyqtSignal()
-    target_settings_changed = pyqtSignal(object)
+    target_settings_changed = pyqtSignal(object)  # ZapretTargetSettings
+    preset_selected = pyqtSignal(str)
+    autostart_changed = pyqtSignal(bool)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("zapret")
-
         self._presets: list[PresetInfo] = []
-        self._running = False
-        self._active_preset = ""
-        self._target_settings = ZapretTargetSettings()
+        self._selected_preset = ""
+        self._status = ZapretStatus()
+        self._settings = ZapretTargetSettings()
+        self._node: Node | None = None
+        self._rule: ServerRule | None = None
+        self._server_status = ""
+        self._list_key: tuple = ()
 
-        list_page = QWidget()
-        root = QVBoxLayout(list_page)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
-        root.addWidget(SubtitleLabel("Обход блокировок (zapret)", list_page))
+        overview = ScrollablePage()
+        body, root = overview.body, overview.body_layout
 
-        # ── selected-server entry point ──
-        self.target_card = CardWidget(list_page)
-        target_layout = QHBoxLayout(self.target_card)
-        target_layout.setContentsMargins(16, 12, 16, 12)
-        target_text = QVBoxLayout()
-        target_text.setSpacing(3)
-        target_text.addWidget(StrongBodyLabel("Обход выбранного сервера", self.target_card))
-        self.target_summary = CaptionLabel("Сервер не выбран", self.target_card)
-        self.target_summary.setWordWrap(True)
-        target_text.addWidget(self.target_summary)
-        target_layout.addLayout(target_text, 1)
-        self.target_open_btn = PrimaryPushButton(FIF.SETTING, "Настроить", self.target_card)
-        target_layout.addWidget(self.target_open_btn)
-        root.addWidget(self.target_card)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        title_badge = KindBadge(body, size=32)
+        title_badge.set_visual(Visual(FIF.COMMAND_PROMPT, PROXY), vivid=True)
+        title_row.addWidget(title_badge)
+        title_row.addWidget(SubtitleLabel("Zapret", body))
+        title_row.addStretch(1)
+        self.help_link = help_link(body)
+        self.help_link.clicked.connect(lambda: open_guide("zapret", self))
+        title_row.addWidget(self.help_link)
+        root.addLayout(title_row)
 
-        # ── preset toolbar + status on one thin row ──
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(4)
-        toolbar.addWidget(BodyLabel("Пресеты", list_page))
-        self.count_label = CaptionLabel("", list_page)
-        toolbar.addWidget(self.count_label)
-        toolbar.addSpacing(8)
-        self.add_btn = PrimaryToolButton(FIF.ADD, list_page)
-        self.add_btn.setToolTip("Создать новый пресет")
-        toolbar.addWidget(self.add_btn)
-        self.import_btn = TransparentToolButton(FIF.FOLDER, list_page)
-        self.import_btn.setToolTip("Импорт из файла")
-        toolbar.addWidget(self.import_btn)
-        self.delete_btn = TransparentToolButton(FIF.DELETE, list_page)
-        self.delete_btn.setToolTip("Удалить пресет")
-        toolbar.addWidget(self.delete_btn)
-        self.refresh_btn = TransparentToolButton(FIF.SYNC, list_page)
-        self.refresh_btn.setToolTip("Обновить список")
-        toolbar.addWidget(self.refresh_btn)
-        toolbar.addStretch(1)
-        self.status_label = BodyLabel("Остановлен", list_page)
-        toolbar.addWidget(self.status_label)
-        self.progress = IndeterminateProgressBar(list_page)
-        self.progress.setFixedHeight(3)
-        self.progress.setFixedWidth(90)
-        self.progress.hide()
-        toolbar.addWidget(self.progress)
-        toolbar.addWidget(VerticalSeparator(list_page))
-        self.start_btn = TransparentToolButton(FIF.PLAY_SOLID, list_page)
-        self.start_btn.setToolTip("Запустить выбранный пресет")
-        toolbar.addWidget(self.start_btn)
-        self.stop_btn = TransparentToolButton(FIF.PAUSE_BOLD, list_page)
-        self.stop_btn.setToolTip("Остановить zapret")
-        self.stop_btn.setEnabled(False)
-        toolbar.addWidget(self.stop_btn)
-        root.addLayout(toolbar)
+        # ── status card ──
+        status_card = CardWidget(body)
+        status_layout = QVBoxLayout(status_card)
+        status_layout.setContentsMargins(16, 14, 16, 14)
+        status_layout.setSpacing(12)
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        self.status_badge = KindBadge(status_card, size=40)
+        head.addWidget(self.status_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_text = QVBoxLayout()
+        status_text.setSpacing(1)
+        self.status_title = StrongBodyLabel("", status_card)
+        self.status_detail = CaptionLabel("", status_card)
+        self.status_detail.setWordWrap(True)
+        status_text.addWidget(self.status_title)
+        status_text.addWidget(self.status_detail)
+        head.addLayout(status_text, 1)
+        self.toggle_btn = PrimaryPushButton(FIF.PLAY, "Запустить", status_card)
+        self.toggle_btn.clicked.connect(self._on_toggle)
+        head.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_layout.addLayout(head)
 
-        # ── thin preset list ──
-        self.preset_list = ListWidget(list_page)
-        self.preset_list.setItemDelegate(PresetItemDelegate(self.preset_list))
-        self.preset_list.setUniformItemSizes(True)
-        self.preset_list.setVerticalScrollMode(ListWidget.ScrollMode.ScrollPerItem)
-        self.preset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        root.addWidget(self.preset_list, 1)
-        self.empty_label = CaptionLabel(
-            "Пресетов пока нет. Нажмите «+», чтобы создать пресет, или кнопку с папкой, "
-            "чтобы импортировать готовый из файла.",
-            list_page,
-        )
-        self.empty_label.setWordWrap(True)
-        self.empty_label.hide()
-        root.insertWidget(root.indexOf(self.preset_list), self.empty_label)
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
+        preset_row.addWidget(BodyLabel("Пресет", status_card))
+        self.preset_combo = _expanding(ComboBox(status_card))
+        self.preset_combo.setMinimumWidth(220)
+        preset_row.addWidget(self.preset_combo, 1)
+        self.presets_btn = TransparentPushButton(FIF.LIBRARY, "Все пресеты", status_card)
+        preset_row.addWidget(self.presets_btn)
+        status_layout.addLayout(preset_row)
 
-        self.hint_label = CaptionLabel(
-            "winws2 работает независимо от VPN и требует прав администратора. "
-            "Двойной клик — редактирование пресета.",
-            list_page,
-        )
-        self.hint_label.setWordWrap(True)
-        root.addWidget(self.hint_label)
+        autostart_row = QHBoxLayout()
+        autostart_row.addWidget(BodyLabel("Запускать вместе с приложением", status_card))
+        autostart_row.addStretch(1)
+        self.autostart_switch = SwitchButton(status_card)
+        self.autostart_switch.setOnText("")
+        self.autostart_switch.setOffText("")
+        autostart_row.addWidget(self.autostart_switch)
+        status_layout.addLayout(autostart_row)
+        root.addWidget(status_card)
 
-        self.set_root_page(list_page)
+        # ── selected server ──
+        root.addWidget(section_header("Выбранный VPN-сервер", body))
+        server_card = CardWidget(body)
+        server_layout = QHBoxLayout(server_card)
+        server_layout.setContentsMargins(14, 10, 14, 10)
+        server_layout.setSpacing(12)
+        self.server_badge = KindBadge(server_card)
+        server_layout.addWidget(self.server_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        server_text = QVBoxLayout()
+        server_text.setSpacing(1)
+        self.server_title = BodyLabel("Сервер не выбран", server_card)
+        self.server_endpoint = CaptionLabel("", server_card)
+        self.server_endpoint.setWordWrap(True)
+        self.server_rule = CaptionLabel("", server_card)
+        self.server_rule.setWordWrap(True)
+        for label in (self.server_title, self.server_endpoint, self.server_rule):
+            server_text.addWidget(label)
+        server_layout.addLayout(server_text, 1)
+        root.addWidget(server_card)
 
+        # ── server kinds ──
+        root.addWidget(section_header("Обход по видам серверов", body))
+        self.kind_rows = {kind: KindRow(kind, body) for kind in ZAPRET_SERVER_KINDS}
+        for row in self.kind_rows.values():
+            row.clicked.connect(lambda row=row: self._open_kind(row.kind))
+            root.addWidget(row)
+        root.addStretch(1)
+
+        self.set_root_page(overview)
+        self._kind_page = KindPage(self)
+        self.add_sub_page(self._kind_page)
+        self._presets_page = PresetsPage(self)
+        self.add_sub_page(self._presets_page)
         self._editor = PresetEditWidget(self)
         self.add_sub_page(self._editor)
-        self._target_page = SelectedServerZapretPage(self)
-        self.add_sub_page(self._target_page)
+        # The editor is reached from the preset list and returns there.
+        self._editor.back_requested.disconnect(self.show_root)
+        self._editor.back_requested.connect(lambda: self.show_sub_page(self._presets_page))
 
-        self.add_btn.clicked.connect(self._on_create)
-        self.import_btn.clicked.connect(self._on_import)
-        self.delete_btn.clicked.connect(self._on_delete)
-        self.refresh_btn.clicked.connect(self.refresh_presets)
-        self.start_btn.clicked.connect(self._on_start)
-        self.stop_btn.clicked.connect(self._on_stop)
-        self.preset_list.doubleClicked.connect(self._on_double_click)
-        self.preset_list.customContextMenuRequested.connect(self._on_context_menu)
+        self.presets_btn.clicked.connect(lambda: self.show_sub_page(self._presets_page))
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_chosen)
+        self.autostart_switch.checkedChanged.connect(lambda checked: self.autostart_changed.emit(bool(checked)))
+        self._kind_page.apply_requested.connect(self._on_kind_applied)
+        self._presets_page.edit_requested.connect(self._open_editor)
+        self._presets_page.start_requested.connect(self.start_requested)
+        self._presets_page.create_requested.connect(self._on_create)
+        self._presets_page.import_requested.connect(self._on_import)
+        self._presets_page.delete_requested.connect(self._on_delete)
         self._editor.save_requested.connect(self._on_save_preset)
-        self.target_open_btn.clicked.connect(lambda: self.show_sub_page(self._target_page))
-        self._target_page.apply_requested.connect(self.target_settings_changed)
         on_theme_or_accent_changed(self._on_theme_changed)
+        self._render()
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        # The layout has not settled while the resize is still being delivered,
-        # so the row fit is deferred to the end of the event loop turn.
-        QTimer.singleShot(0, self._fit_preset_list)
+    def _on_theme_changed(self, *_args) -> None:
+        # Delegates read the accent at paint time; a repaint picks up a new one.
+        self._presets_page.list.viewport().update()
 
-    def _fit_preset_list(self) -> None:
-        """Show whole preset rows only — a sliced last row reads as a glitch."""
-
-        if not self.preset_list.isVisible():
-            return
-        overhead = self.preset_list.height() - self.preset_list.viewport().height()
-        available = self.preset_list.height() - overhead
-        rows = max(3, available // _PRESET_ROW_HEIGHT)
-        wanted = rows * _PRESET_ROW_HEIGHT + overhead
-        if self.preset_list.maximumHeight() != wanted:
-            self.preset_list.setMaximumHeight(wanted)
-
-    def _on_theme_changed(self, *args) -> None:
-        self._reload_list(self.current_preset())
-        if self._running:
-            # «Работает» — позитивный статус, его цвет идёт от акцента.
-            setCustomStyleSheet(self.status_label, *_status_qss("positive"))
-
-    # ── Public API ──
+    # ── state from the application ──
 
     def set_presets(self, infos: list[PresetInfo], selected: str = "") -> None:
         self._presets = list(infos)
-        self._reload_list(selected)
+        if selected:
+            self._selected_preset = selected
+        self._fill_preset_combo()
+        self._render()
 
-    def set_running(self, running: bool, preset_name: str = "") -> None:
-        self._running = running
-        if running:
-            self._active_preset = preset_name
-            self.status_label.setText(f"Работает: {preset_name}")
-            setCustomStyleSheet(self.status_label, *_status_qss("positive"))
-            self.progress.show()
-            self.progress.start()
-            self.start_btn.setEnabled(False)
-            self.stop_btn.setEnabled(True)
-        else:
-            self._active_preset = ""
-            self.status_label.setText("Остановлен")
-            setCustomStyleSheet(self.status_label, "", "")
-            self.progress.stop()
-            self.progress.hide()
-            self.start_btn.setEnabled(True)
-            self.stop_btn.setEnabled(False)
-        self._reload_list(self.current_preset())
-
-    def set_error(self, message: str) -> None:
-        self.set_running(False)
-        self.status_label.setText(f"Ошибка: {message}")
-        setCustomStyleSheet(self.status_label, *_status_qss("error"))
+    def set_status(self, status: ZapretStatus) -> None:
+        self._status = status
+        if status.preset and status.state in ("running", "starting"):
+            self._selected_preset = status.preset
+        self._fill_preset_combo()  # the «Работает» badge follows the process
+        self._render()
 
     def set_target_settings(self, settings: ZapretTargetSettings) -> None:
-        self._target_settings = replace(settings)
-        self._target_page.set_settings(settings)
+        self._settings = settings
+        self._kind_page.set_settings(settings)
+        self._render()
 
-    def set_target(
-        self,
-        node: Node | None,
-        resolved: ResolvedZapretEndpoint | None = None,
-        state: str = "",
-    ) -> None:
-        self._target_page.set_target(node, resolved, state)
-        spec = endpoint_spec_for_node(node)
-        if spec is None:
-            summary = f"{node.name}: профиль не применяется" if node else "Сервер не выбран"
-        else:
-            ips = ", ".join(resolved.ips) if resolved and resolved.spec == spec else "DNS ожидается"
-            try:
-                strategy = strategy_for_target(self._target_settings, spec)
-                strategy_name = strategy.name if strategy else "обход выключен"
-                if strategy is not None and strategy.strategy_id == "pass":
-                    strategy_name = "обход выключен"
-            except ValueError:
-                strategy_name = "не выбрана"
-            summary = (
-                f"{node.name} · {spec.transport.upper()} {spec.port_filter} · "
-                f"{', '.join(spec.hosts)} · {ips} · {strategy_name}"
-            )
-        if state:
-            summary += f" · {state}"
-        self.target_summary.setText(summary)
+    def set_selected_node(self, node: Node | None) -> None:
+        self._node = node
+        self._render()
 
-    def set_target_runtime_state(self, text: str) -> None:
-        self._target_page.set_runtime_state(text)
+    def set_rule(self, rule: ServerRule | None) -> None:
+        self._rule = rule
+        self._render()
+
+    def set_server_status(self, busy: bool, text: str = "") -> None:
+        """Connection-transition text («DNS выбранного VPN-сервера…»)."""
+        self._server_status = text if busy else ""
+        self._render()
+
+    def set_autostart(self, enabled: bool) -> None:
+        self.autostart_switch.blockSignals(True)
+        self.autostart_switch.setChecked(bool(enabled))
+        self.autostart_switch.blockSignals(False)
 
     def current_preset(self) -> str:
-        row = self.preset_list.currentRow()
-        if 0 <= row < len(self._presets):
-            return self._presets[row].name
-        return ""
+        return self._selected_preset
 
-    def refresh_presets(self) -> None:
-        selected = self.current_preset()
-        self._presets = ZapretManager.list_preset_infos()
-        self._reload_list(selected)
+    # ── rendering ──
 
-    # ── list ──
+    def _render(self) -> None:
+        self._render_status()
+        self._render_server()
+        endpoint = endpoint_for_node(self._node)
+        for kind, row in self.kind_rows.items():
+            row.show_state(self._settings, current=endpoint is not None and endpoint.kind == kind)
 
-    def _reload_list(self, select_name: str = "") -> None:
-        self.preset_list.blockSignals(True)
-        self.preset_list.clear()
-        select_row = -1
-        for row, preset in enumerate(self._presets):
-            item = QListWidgetItem(preset.name)
-            item.setData(
-                Qt.ItemDataRole.UserRole + 1,
-                preset.description or f"{preset.arg_count} арг.",
-            )
-            if self._running and preset.name == self._active_preset:
-                item.setData(Qt.ItemDataRole.UserRole + 2, "Активен")
-            item.setSizeHint(QSize(0, _PRESET_ROW_HEIGHT))
-            item.setToolTip(
-                f"{preset.name}\nАргументов: {preset.arg_count}\n"
-                f"Изменён: {self._format_date(preset.modified)}"
-            )
-            self.preset_list.addItem(item)
-            if preset.name == select_name:
-                select_row = row
-        self.preset_list.blockSignals(False)
-        self.count_label.setText(f"{len(self._presets)}")
-        self.empty_label.setVisible(not self._presets)
-        if select_row >= 0:
-            self.preset_list.setCurrentRow(select_row)
+    def _render_status(self) -> None:
+        status = self._status
+        running = status.state in ("running", "starting")
+        preset = status.preset or self._selected_preset
+        if status.state == "running":
+            visual, title = Visual(FIF.PLAY_SOLID, PROXY), "Zapret работает"
+            detail = f"Пресет «{preset}»"
+        elif status.state == "starting":
+            visual, title = Visual(FIF.SYNC, SPECIAL), "Zapret запускается…"
+            detail = f"Пресет «{preset}»"
+        elif status.state == "error":
+            visual, title = Visual(FIF.CLOSE, BLOCK), "Zapret остановлен из-за ошибки"
+            detail = status.message
+        else:
+            visual, title = Visual(FIF.PAUSE_BOLD, NEUTRAL), "Zapret выключен"
+            endpoint = endpoint_for_node(self._node)
+            if endpoint is not None and self._settings.enabled(endpoint.kind):
+                detail = f"Включится сам при подключении к «{self._node.name}»"
+            else:
+                detail = ""
+        self.status_badge.set_visual(visual, vivid=status.state == "running")
+        self.status_title.setText(title)
+        self.status_detail.setText(detail)
+        self.status_detail.setVisible(bool(detail))
+        self.toggle_btn.setText("Остановить" if running else "Запустить")
+        self.toggle_btn.setIcon(FIF.PAUSE_BOLD if running else FIF.PLAY)
+        self.toggle_btn.setEnabled(running or bool(self._selected_preset))
 
-    @staticmethod
-    def _format_date(iso: str) -> str:
-        if not iso:
-            return ""
-        try:
-            from datetime import datetime
-            dt = datetime.fromisoformat(iso)
-            return dt.strftime("%Y-%m-%d %H:%M")
-        except (ValueError, TypeError):
-            return iso
+    def _render_server(self) -> None:
+        node = self._node
+        endpoint = endpoint_for_node(node)
+        if node is None:
+            self.server_badge.set_visual(Visual(FIF.VPN, NEUTRAL))
+            self.server_title.setText("Сервер не выбран")
+            self.server_endpoint.setText("")
+            self.server_rule.setText("")
+            return
+        self.server_title.setText(node.name)
+        if endpoint is None:
+            self.server_badge.set_visual(Visual(FIF.VPN, NEUTRAL))
+            self.server_endpoint.setText("Этот вид сервера Zapret не обрабатывает")
+            self.server_rule.setText("")
+            return
+        enabled = self._settings.enabled(endpoint.kind)
+        self.server_badge.set_visual(Visual(_KIND_ICONS[endpoint.kind], PROXY if enabled else NEUTRAL))
+        self.server_endpoint.setText(
+            f"{KIND_TITLES[endpoint.kind]} · {endpoint.transport.upper()} {endpoint.port_filter} · "
+            f"{', '.join(endpoint.hosts)}"
+        )
+        if enabled:
+            text = f"Обход: {strategy_title(self._settings, endpoint.kind)}"
+        else:
+            text = f"Обход выключен · {off_meaning(endpoint.kind)}"
+        rule = self._rule
+        if self._server_status:
+            text += f" · {self._server_status}"
+        elif rule is not None and rule.target.endpoint == endpoint and self._status.state == "running":
+            text += f" · работает для {', '.join(rule.target.ips)}"
+        elif enabled:
+            text += " · применится при подключении"
+        self.server_rule.setText(text)
 
-    # ── Handlers ──
+    def _fill_preset_combo(self) -> None:
+        names = [preset.name for preset in self._presets]
+        if self._selected_preset and self._selected_preset not in names:
+            names.insert(0, self._selected_preset)
+        active = self._status.preset if self._status.state in ("running", "starting") else ""
+        key = (tuple(self._presets), self._selected_preset, active)
+        if key == self._list_key:
+            return  # status ticks (every transition step) change nothing here
+        self._list_key = key
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        for name in names:
+            self.preset_combo.addItem(name, userData=name)
+        if self._selected_preset in names:
+            self.preset_combo.setCurrentIndex(names.index(self._selected_preset))
+        else:
+            self.preset_combo.setCurrentIndex(-1)
+        self.preset_combo.blockSignals(False)
+        self._presets_page.show_presets(self._presets, active)
 
-    def _on_start(self) -> None:
-        name = self.current_preset()
-        if name:
+    # ── user actions ──
+
+    def _on_toggle(self) -> None:
+        if self._status.state in ("running", "starting"):
+            self.stop_requested.emit()
+        elif self._selected_preset:
+            self.start_requested.emit(self._selected_preset)
+
+    def _on_preset_chosen(self, index: int) -> None:
+        name = str(self.preset_combo.itemData(index) or "")
+        if not name or name == self._selected_preset:
+            return
+        self._selected_preset = name
+        self.preset_selected.emit(name)
+        if self._status.state in ("running", "starting"):
+            # The combo shows what runs: switching it restarts on that preset.
             self.start_requested.emit(name)
+        self._render()
 
-    def _on_stop(self) -> None:
-        self.stop_requested.emit()
+    def _open_kind(self, kind: str) -> None:
+        self._kind_page.open_kind(kind, self._settings)
+        self.show_sub_page(self._kind_page)
 
-    def _on_double_click(self, index) -> None:
-        row = index.row()
-        if 0 <= row < len(self._presets):
-            self._open_editor(self._presets[row])
+    def _on_kind_applied(self, settings: ZapretTargetSettings) -> None:
+        self._settings = settings
+        self._render()
+        self.show_root()
+        self.target_settings_changed.emit(settings)
+
+    def _reload_presets(self, select: str = "") -> None:
+        self.set_presets(presets.list_preset_infos(), select)
+
+    def _open_editor(self, name: str) -> None:
+        info = next((preset for preset in self._presets if preset.name == name), None)
+        if info is None:
+            return
+        self._editor.set_preset(
+            info.name, info.description, presets.read_preset(info.name), info.created, info.modified,
+        )
+        self.show_sub_page(self._editor)
 
     def _on_create(self) -> None:
         self._editor.set_preset("", "", "")
@@ -747,59 +747,45 @@ class ZapretPage(StackedSection):
         )
         if not path:
             return
-        info = ZapretManager.import_preset(Path(path))
-        if info:
-            self.refresh_presets()
-            self._reload_list(info.name)
-        else:
-            self.status_label.setText("Не удалось импортировать пресет")
-            setCustomStyleSheet(self.status_label, *_status_qss("error"))
+        info = presets.import_preset(Path(path))
+        self._reload_presets()
+        if info is None:
+            MessageBox("Импорт пресета", "Не удалось импортировать файл.", self.window()).exec()
 
-    def _on_delete(self) -> None:
-        name = self.current_preset()
-        if not name:
-            return
-        from qfluentwidgets import MessageBox
+    def _on_delete(self, name: str) -> None:
         box = MessageBox("Удаление пресета", f"Удалить «{name}»?", self.window())
         box.yesButton.setText("Удалить")
         box.cancelButton.setText("Отмена")
-        if box.exec():
-            if self._running and name == self._active_preset:
-                self.stop_requested.emit()
-            ZapretManager.delete_preset(name)
-            self.refresh_presets()
-
-    def _on_save_preset(self, name: str, description: str, content: str) -> None:
-        ZapretManager.save_preset(name, content, description)
-        self.refresh_presets()
-        self._reload_list(name)
-        self.show_root()
-
-    def _open_editor(self, info: PresetInfo) -> None:
-        content = ZapretManager.read_preset(info.name)
-        self._editor.set_preset(info.name, info.description, content,
-                                info.created, info.modified)
-        self.show_sub_page(self._editor)
-
-    def _on_context_menu(self, pos) -> None:
-        item = self.preset_list.itemAt(pos)
-        if item is None:
+        if not box.exec():
             return
-        row = self.preset_list.row(item)
-        if not (0 <= row < len(self._presets)):
-            return
-        preset = self._presets[row]
-        self.preset_list.setCurrentRow(row)
+        if name == self._status.preset and self._status.state in ("running", "starting"):
+            self.stop_requested.emit()
+        presets.delete_preset(name)
+        if name == self._selected_preset:
+            self._selected_preset = ""
+        self._reload_presets()
 
-        menu = RoundMenu(parent=self)
-        edit_action = Action("Редактировать", self)
-        edit_action.triggered.connect(lambda: self._open_editor(preset))
-        menu.addAction(edit_action)
-        start_action = Action("Запустить", self)
-        start_action.triggered.connect(lambda: self.start_requested.emit(preset.name))
-        menu.addAction(start_action)
-        menu.addSeparator()
-        delete_action = Action("Удалить", self)
-        delete_action.triggered.connect(self._on_delete)
-        menu.addAction(delete_action)
-        menu.exec(QCursor.pos())
+    def _on_save_preset(self, original: str, name: str, description: str, content: str) -> None:
+        if name != original and presets.preset_path(name).exists():
+            self._editor.show_error(f"Пресет «{name}» уже есть")
+            return
+        try:
+            if original and name != original:
+                if presets.rename_preset(original, name) is None:
+                    self._editor.show_error("Не удалось переименовать пресет")
+                    return
+                if self._selected_preset == original:
+                    self._selected_preset = name
+                    self.preset_selected.emit(name)
+            presets.save_preset(name, content, description)
+        except OSError as exc:
+            self._editor.show_error(f"Не удалось сохранить: {exc}")
+            return
+        self._editor.mark_saved(name, description, content)
+        running = self._status.state in ("running", "starting")
+        self._reload_presets()
+        self.show_sub_page(self._presets_page)
+        if running and self._status.preset in (original, name):
+            # winws2 reads the file at launch: restart it on what was saved.
+            self._selected_preset = name
+            self.start_requested.emit(name)

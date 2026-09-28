@@ -16,8 +16,9 @@ from xray_fluent.engines.zapret.blobs import (
     missing_blob_files,
     unresolved_blob_names,
 )
-from xray_fluent.engines.zapret.manager import DEFAULT_PRESET_NAME, ZapretManager
-from xray_fluent.engines.zapret.target import load_strategy_catalog
+from xray_fluent.engines.zapret import presets
+from xray_fluent.engines.zapret.presets import DEFAULT_PRESET_NAME
+from xray_fluent.engines.zapret.strategies import load_strategy_catalog
 
 _ROOT = Path(__file__).resolve().parents[1]
 _LUA_DIR = _ROOT / "zapret" / "lua"
@@ -50,9 +51,9 @@ class CatalogVolumeTests(unittest.TestCase):
     def test_cache_is_invalidated_when_a_catalog_file_changes(self) -> None:
         """A shared cache that never expires would freeze edited catalogs."""
 
-        from xray_fluent.engines.zapret import target as zapret_target
+        from xray_fluent.engines.zapret import strategies
 
-        path = zapret_target._CATALOG_ROOT / "tcp.local.txt"
+        path = strategies._CATALOG_ROOT / "tcp.local.txt"
         before = load_strategy_catalog("tcp")
         original = path.read_bytes()
         try:
@@ -70,19 +71,30 @@ class CatalogVolumeTests(unittest.TestCase):
     def test_rejected_entries_are_reported_not_swallowed(self) -> None:
         """A silently vanishing strategy is the failure mode this replaced."""
 
-        from xray_fluent.engines.zapret import target as zapret_target
+        from xray_fluent.engines.zapret import strategies
 
-        path = zapret_target._CATALOG_ROOT / "tcp.local.txt"
+        path = strategies._CATALOG_ROOT / "tcp.local.txt"
         original = path.read_bytes()
         try:
             path.write_bytes(original + b"\n[reject_probe]\nname = reject probe\n--wf-tcp-out=443\n")
-            with self.assertLogs("xray_fluent.engines.zapret.target", level="WARNING") as captured:
+            with self.assertLogs("xray_fluent.engines.zapret.strategies", level="WARNING") as captured:
                 catalog = load_strategy_catalog("tcp")
             self.assertNotIn("reject_probe", catalog)
             self.assertTrue(any("reject_probe" in line for line in captured.output))
         finally:
             path.write_bytes(original)
             load_strategy_catalog("tcp")
+
+    def test_shipped_catalogs_parse_without_rejected_entries(self) -> None:
+        """82 composite strategies (``--payload`` branches) once vanished here."""
+
+        from xray_fluent.engines.zapret import strategies
+
+        for transport in ("tcp", "udp"):
+            with self.subTest(transport=transport):
+                for path in strategies._catalog_paths(transport):
+                    with self.assertNoLogs("xray_fluent.engines.zapret.strategies", level="WARNING"):
+                        strategies._parse_catalog(path, transport)
 
     def test_labels_cover_the_upstream_vocabulary(self) -> None:
         labels = {entry.label for entry in load_strategy_catalog("tcp").values()}
@@ -163,29 +175,26 @@ class LuaExtensionTests(unittest.TestCase):
 
 class DefaultPresetTests(unittest.TestCase):
     def test_default_preset_is_available(self) -> None:
-        self.assertEqual(ZapretManager.default_preset(), DEFAULT_PRESET_NAME)
+        self.assertEqual(presets.default_preset(), DEFAULT_PRESET_NAME)
 
     def test_default_preset_falls_back_to_any_present_preset(self) -> None:
-        real = ZapretManager.preset_path
+        from unittest import mock
+
+        real = presets.preset_path
 
         def only_missing_default(name: str):
             path = real(name)
             return path if name != DEFAULT_PRESET_NAME else Path("/nonexistent/none.txt")
 
-        ZapretManager.preset_path = staticmethod(only_missing_default)
-        try:
-            fallback = ZapretManager.default_preset()
-        finally:
-            ZapretManager.preset_path = staticmethod(real)
+        with mock.patch.object(presets, "preset_path", only_missing_default):
+            fallback = presets.default_preset()
         self.assertTrue(fallback)
         self.assertNotEqual(fallback, DEFAULT_PRESET_NAME)
 
     def test_preset_listing_survives_unreadable_files(self) -> None:
         from unittest import mock
 
-        from xray_fluent.engines.zapret import manager as zapret_manager
-
-        broken = zapret_manager.PRESETS_DIR / "zz-unreadable-probe.txt"
+        broken = presets.PRESETS_DIR / "zz-unreadable-probe.txt"
         broken.write_text("# Preset: probe\n--new\n", encoding="utf-8")
         real_read_text = Path.read_text
 
@@ -198,7 +207,7 @@ class DefaultPresetTests(unittest.TestCase):
 
         try:
             with mock.patch.object(Path, "read_text", refuse_probe):
-                names = {info.name for info in ZapretManager.list_preset_infos()}
+                names = {info.name for info in presets.list_preset_infos()}
         finally:
             broken.unlink()
         self.assertNotIn("zz-unreadable-probe", names)

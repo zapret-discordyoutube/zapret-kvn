@@ -50,7 +50,7 @@ app = _existing or QApplication([])
 from xray_fluent.application import runtime_services
 from xray_fluent.application.controller import AppController
 from xray_fluent.diagnostics.gui_stall_watchdog import GuiStallWatchdog
-from xray_fluent.engines.zapret.target import ResolvedZapretEndpoint
+from xray_fluent.engines.zapret.endpoint import ResolvedEndpoint
 from xray_fluent.importer.link_parser import parse_single
 from xray_fluent.platform.windows import subprocess_utils
 from xray_fluent.platform.windows.proxy_manager import ProxyManager, SystemProxyState
@@ -179,7 +179,7 @@ sys.stdin.read()
 
 def _slow_resolve_target(spec):
     time.sleep(DNS_DELAY)
-    return ResolvedZapretEndpoint(spec, ("203.0.113.10",))
+    return ResolvedEndpoint(spec, ("203.0.113.10",))
 
 
 def _windows_only_module_stubs() -> dict[str, types.ModuleType]:
@@ -264,7 +264,9 @@ class TransitionGuiStallTests(unittest.TestCase):
             patch("xray_fluent.engines.amnezia.manager.probe_https", _slow_https_probe),
             patch("xray_fluent.engines.zapret.manager.WINWS2_EXE", winws_stub),
             patch("xray_fluent.engines.zapret.manager.ZAPRET_DIR", cls.tmp),
-            patch("xray_fluent.engines.zapret.manager.PRESETS_DIR", presets),
+            patch("xray_fluent.engines.zapret.presets.PRESETS_DIR", presets),
+            patch("xray_fluent.application.server_bypass.resolve_endpoint", _slow_resolve_target),
+            patch("xray_fluent.application.server_bypass.ServerBypass.learn_pool_addresses", lambda self: False),
             patch("xray_fluent.engines.zapret.manager.kill_processes_by_path", _slow_kill_orphans),
             patch.object(subprocess_utils, "run_text", _slow_run_text),
             patch("xray_fluent.engines.singbox.selector_api._send_selector_request", _slow_selector),
@@ -281,9 +283,7 @@ class TransitionGuiStallTests(unittest.TestCase):
         controller.schedule_save = lambda: None  # type: ignore[method-assign]
         controller.save = lambda: None  # type: ignore[method-assign]
         controller._start_metrics_worker = lambda: None  # type: ignore[method-assign]
-        controller._start_proxy_dns_prewarm = lambda: None  # type: ignore[method-assign]
         controller.proxy = _FakeWinProxy()
-        controller.zapret.resolve_target = _slow_resolve_target  # type: ignore[method-assign]
 
         cls.sync_disconnects = 0
         real_disconnect = AppController.disconnect_current
@@ -331,7 +331,6 @@ class TransitionGuiStallTests(unittest.TestCase):
         state.settings.auto_switch_enabled = False
         state.settings.zapret_target.tcp_proxy_enabled = False
         controller.state = state
-        controller.zapret.set_target_settings(state.settings.zapret_target)
         controller._invalidate_xray_outbound_pool_cache()
 
         cls.watchdog = GuiStallWatchdog(threshold_ms=STALL_LIMIT_MS)
@@ -363,9 +362,9 @@ class TransitionGuiStallTests(unittest.TestCase):
             not controller._transition_active
             and not controller._transition_pending
             and not controller._transition_timer.isActive()
-            and not controller._proxy_protection_workers
+            and not controller.bypass.workers()
             and controller._hot_switch_runner is None
-            and not controller._proxy_protection_wait_generation
+            and not controller.bypass.waiting
         )
 
     def _measure(self, action, *, until, timeout_ms: int = 20_000) -> float:
@@ -522,7 +521,6 @@ class TransitionGuiStallTests(unittest.TestCase):
         settings = controller.state.settings
         settings.zapret_target.tcp_proxy_enabled = True
         settings.zapret_preset = "Default"
-        controller.zapret.set_target_settings(settings.zapret_target)
         controller.state.selected_node_id = native_a.id
         try:
             self._measure(
@@ -542,9 +540,8 @@ class TransitionGuiStallTests(unittest.TestCase):
             )
         finally:
             settings.zapret_target.tcp_proxy_enabled = False
-            controller.zapret.set_target_settings(settings.zapret_target)
             controller.zapret.stop(wait=True)
-            _spin_until(lambda: controller.zapret._start_runner is None, 5_000)
+            _spin_until(lambda: controller.zapret._runner is None, 5_000)
 
 
 if __name__ == "__main__":

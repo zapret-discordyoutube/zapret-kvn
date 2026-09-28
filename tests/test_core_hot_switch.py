@@ -311,7 +311,7 @@ class LiveConnectionCutoverTests(unittest.TestCase):
         controller.selected_node = nodes[1]
         controller._active_session = session
         controller.connected = True
-        controller.zapret.apply_cached_proxy_node.return_value = True
+        controller.bypass.ready_for.return_value = True
 
         apply_calls: list[unittest.mock._Call] = []
         results = list(apply_results) if apply_results is not None else None
@@ -372,98 +372,40 @@ class LiveConnectionCutoverTests(unittest.TestCase):
         self.assertEqual(controller._apply_core_calls, [])
         controller._capture_hot_switched_session.assert_not_called()
 
-    def test_udp_hot_switch_waits_for_zapret_pass_restart_readiness(self) -> None:
-        controller, _nodes, _tags, _session = self._controller(hybrid=True)
-        controller.zapret.proxy_protection_is_ready.return_value = False
+    def test_hot_switch_needs_the_zapret_rule_of_the_new_node(self) -> None:
+        controller, nodes, _tags, _session = self._controller(hybrid=True)
+        controller.bypass.ready_for.return_value = False
 
         self.assertFalse(run_hot_switch_generator(controller))
 
+        controller.bypass.ready_for.assert_called_with(nodes[1])
         self.assertEqual(controller._apply_core_calls, [])
         controller._capture_hot_switched_session.assert_not_called()
 
 
 class ProxyProtectionTransitionTests(unittest.TestCase):
-    def test_transition_waits_for_cached_pass_restart_readiness(self) -> None:
-        node = parse_single("hy2://secret@one.example:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#one")
+    """The transition queue stays shut while the Zapret gate waits."""
+
+    def test_drain_is_held_while_the_gate_waits_for_this_generation(self) -> None:
         controller = Mock()
-        controller.selected_node = node
-        controller.zapret.apply_cached_proxy_node.return_value = True
-        controller.zapret.proxy_protection_is_ready.return_value = False
-        controller.zapret.proxy_protection_generation = 7
-        controller._proxy_protection_wait_generation = 0
-        controller._proxy_protection_wait_token = 0
-
-        def wait_for_protection(generation: int) -> None:
-            controller._proxy_protection_wait_generation = generation
-            controller._proxy_protection_wait_token = 7
-            controller.transition_state_changed.emit(
-                True,
-                "Ожидание перезапуска UDP-защиты...",
-            )
-
-        controller._wait_for_proxy_protection = wait_for_protection
-
-        self.assertTrue(AppController._prepare_proxy_protection(controller, 11))
-
-        self.assertEqual(controller._proxy_protection_wait_generation, 11)
-        self.assertEqual(controller._proxy_protection_wait_token, 7)
-        controller.transition_state_changed.emit.assert_called_once_with(
-            True,
-            "Ожидание перезапуска UDP-защиты...",
-        )
-
-    def test_readiness_failure_keeps_existing_connection_and_fences_transition(self) -> None:
-        controller = Mock()
-        controller._proxy_protection_wait_generation = 11
-        controller._proxy_protection_wait_token = 7
+        controller._transition_active = False
         controller._transition_generation = 11
-        controller._transition_pending = True
-        controller.connected = True
-        controller._hysteria_recovery_active = False
-        controller._transition_signature.return_value = "blocked-signature"
+        controller.bypass.waiting_for.return_value = True
 
-        AppController._on_proxy_protection_failed(controller, 7, "timeout")
+        AppController._schedule_transition_drain(controller, 0)
 
-        self.assertFalse(controller._transition_pending)
-        self.assertTrue(controller._desired_connected)
-        self.assertEqual(controller._blocked_transition_signature, "blocked-signature")
-        controller.status.emit.assert_called_once_with(
-            "warning",
-            "Не удалось подтвердить UDP-защиту; переход отменён",
-        )
-        controller.transition_state_changed.emit.assert_called_once_with(False, "")
+        controller.bypass.waiting_for.assert_called_once_with(11)
+        controller._transition_timer.start.assert_not_called()
 
-    def test_dns_failure_with_running_zapret_keeps_existing_connection(self) -> None:
-        node = parse_single("hy2://secret@one.example:443/?insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#one")
+    def test_new_request_releases_a_stale_wait(self) -> None:
         controller = Mock()
-        controller.selected_node = node
-        controller.zapret.running = True
-        controller.zapret.proxy_protection_server.return_value = "one.example"
-        controller._transition_generation = 11
-        controller._proxy_protection_wait_generation = 11
-        controller._proxy_protection_wait_token = 0
-        controller._desired_connected = True
-        controller.connected = True
-        controller._hysteria_recovery_active = False
-        controller._transition_pending = True
-        controller._transition_signature.return_value = "blocked-dns"
+        controller._transition_active = True
+        controller._transition_generation = 3
 
-        AppController._on_proxy_protection_resolved(
-            controller,
-            11,
-            "one.example",
-            set(),
-            OSError("temporary DNS failure"),
-        )
+        AppController._request_transition(controller, "node switched")
 
-        self.assertFalse(controller._transition_pending)
-        self.assertTrue(controller._desired_connected)
-        self.assertEqual(controller._blocked_transition_signature, "blocked-dns")
-        controller.status.emit.assert_called_once_with(
-            "warning",
-            "Не удалось подготовить UDP-защиту: адрес сервера не определён",
-        )
-        controller._schedule_transition_drain.assert_not_called()
+        controller.bypass.cancel_wait.assert_called_once_with()
+        self.assertEqual(controller._transition_generation, 4)
 
 
 class HybridRuntimeStartupTests(unittest.TestCase):

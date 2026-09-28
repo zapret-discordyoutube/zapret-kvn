@@ -382,7 +382,8 @@ class RoutingPageTests(unittest.TestCase):
         from xray_fluent.ui.singbox.guide import ART_CLASSES, GUIDES, LINK_LABEL, LINK_TEXT, GuideDialog
 
         page = _page()
-        self.assertEqual(set(GUIDES), {key for key, _title, _icon in SECTIONS})
+        # «zapret» explains the Zapret section with the same dialog.
+        self.assertEqual(set(GUIDES) - {"zapret"}, {key for key, _title, _icon in SECTIONS})
         self.assertEqual(set(ART_CLASSES), set(GUIDES))
         for key, _title, _icon in SECTIONS:
             _section(page, key)

@@ -171,10 +171,8 @@ from .outbound_pool_service import (
 )
 from ..profiles.country_flags import CountryResolver
 from ..network.background_workers import (
-    ProxyProtectionResolver,
     StateWriter,
     SubscriptionUpdateWorker,
-    TargetProfileResolver,
 )
 from ..engines.xray import (
     XrayManager,
@@ -229,6 +227,7 @@ from ..profiles.models import (
     RoutingSettings,
     Subscription,
     SubscriptionUpdateResult,
+    ZapretTargetSettings,
     clamp_subscriptions_check_interval,
     normalize_subscription_warnings,
     utc_now_iso,
@@ -256,9 +255,8 @@ from ..profiles.storage import PassphraseRequired, StateStorage
 from ..platform.windows.startup import build_startup_command, set_startup_enabled
 from ..platform.windows.subprocess_utils import result_output_text, run_text
 from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistoryStorage
-from .zapret_prewarm_service import start_proxy_dns_prewarm
+from .server_bypass import ServerBypass
 from ..engines.zapret.manager import ZapretManager
-from ..engines.zapret.target import ZapretEndpointSpec
 
 if TYPE_CHECKING:
     from ..profiles.country_flags import CountryResolver as CountryResolverType
@@ -374,6 +372,7 @@ class AppController(QObject):
         self._amnezia_target_generation = 0
         self._xray_tun_routes = XrayTunRouteManager(self)
         self.zapret = ZapretManager(self)
+        self.bypass = ServerBypass(self)
         self.proxy = ProxyManager()
         self.network_monitor = NetworkMonitor(parent=self)
 
@@ -417,13 +416,6 @@ class AppController(QObject):
         self._subscription_queued_ids: set[str] = set()
         self._pending_subscription_additions: dict[str, Subscription] = {}
         self._subscription_check_ids: set[str] = set()
-        self._proxy_protection_workers: dict[int, TargetProfileResolver] = {}
-        self._manual_zapret_worker: TargetProfileResolver | None = None
-        self._manual_zapret_generation = 0
-        # «Занято» поднято ручным запуском Zapret (DNS + запуск winws2).
-        self._manual_zapret_busy = False
-        self._proxy_protection_wait_generation = 0
-        self._proxy_protection_wait_token = 0
         self._singbox_documents = SingboxDocumentCache()
         self._ping_total = 0
         self._ping_completed = 0
@@ -515,12 +507,6 @@ class AppController(QObject):
         self._bind_hysteria_manager(self.hysteria)
 
         self._xray_tun_routes.log_received.connect(self._on_xray_log)
-        self.zapret.target_profile_ready.connect(self._on_proxy_protection_ready)
-        self.zapret.target_profile_failed.connect(self._on_proxy_protection_failed)
-        self.zapret.stopped.connect(self._on_zapret_stopped_safety)
-        # Ручной запуск заканчивается фактом процесса: запущен или ошибка.
-        self.zapret.started.connect(self._settle_manual_zapret_busy)
-        self.zapret.error.connect(self._settle_manual_zapret_busy)
 
         self.network_monitor.network_changed.connect(self._on_network_changed)
         self._background_log.connect(self._log)
@@ -572,7 +558,6 @@ class AppController(QObject):
             self.passphrase_required.emit()
             return False
 
-        self.zapret.set_target_settings(self.state.settings.zapret_target)
         self._detect_countries_sync()
         self._migrate_sort_order()
         if self.state.schema_version != STATE_SCHEMA_VERSION:
@@ -2141,8 +2126,7 @@ class AppController(QObject):
         self._transition_pending = True
         self._transition_reason = reason
         self._transition_generation += 1
-        self._proxy_protection_wait_generation = 0
-        self._proxy_protection_wait_token = 0
+        self.bypass.cancel_wait()
         if self._transition_active:
             return
         self._kick_transition(transition_request_delay_ms(reason))
@@ -2152,7 +2136,7 @@ class AppController(QObject):
         generation = self._transition_generation
         if self._desired_connected and self._protection_prepared_generation != generation:
             self._protection_prepared_generation = generation
-            if self._prepare_proxy_protection(generation):
+            if self.bypass.prepare(generation):
                 if self._transition_timer.isActive():
                     self._transition_timer.stop()
                 self._transition_scheduled = False
@@ -2175,7 +2159,7 @@ class AppController(QObject):
         click or signal handler.
         """
         self._transition_active = True
-        self._proxy_protection_wait_generation = generation
+        self.bypass.hold(generation)
         runner = TransitionRunner(
             self._disconnect_current_steps(disable_proxy=disable_proxy, emit_status=False),
             on_finished=lambda finished: self._on_prestop_finished(
@@ -2206,7 +2190,7 @@ class AppController(QObject):
             # A newer request arrived while stopping: prepare for it instead.
             self._kick_transition(0)
             return
-        self._proxy_protection_wait_generation = 0
+        self.bypass.cancel_wait()
         if not stopped and failure_message is not None:
             self._cancel_target_transition(failure_message)
             return
@@ -2268,90 +2252,6 @@ class AppController(QObject):
             self._quiet_disconnect = True
         self._request_transition(reason, keep_blocked=True)
 
-    def _prepare_proxy_protection(self, generation: int) -> bool:
-        """Resolve and activate the selected-server profile before core start.
-
-        This method is deliberately entered for every connection transition;
-        a previous DNS answer is never accepted as readiness proof.
-        """
-        node = self._runtime_selected_node()
-        self.zapret.set_target_settings(self.state.settings.zapret_target)
-        if not self._active_config_uses_selected_node(node):
-            self.zapret.clear_target_profile()
-            return False
-        spec = self.zapret.target_spec(node)
-        if spec is None:
-            self.zapret.clear_target_profile()
-            return False
-        if not isinstance(spec, ZapretEndpointSpec):
-            # Compatibility path for integrations still exposing the former
-            # UDP-only resolver contract.
-            if self.zapret.apply_cached_proxy_node(node):
-                if self.zapret.proxy_protection_is_ready(node):
-                    return False
-                self._wait_for_proxy_protection(generation)
-                return True
-            server = self.zapret.proxy_protection_server(node)
-            if not server:
-                return False
-            worker = ProxyProtectionResolver(
-                generation,
-                server,
-                self.zapret._resolve_server_ips,
-                parent=self if isinstance(self, QObject) else None,
-            )
-            self._proxy_protection_workers[generation] = worker
-            self._proxy_protection_wait_generation = generation
-            worker.resolved.connect(self._on_proxy_protection_resolved)
-            worker.start()
-            return True
-        requires_zapret = self.zapret.target_requires_zapret(node)
-
-        def start_resolution() -> bool:
-            if requires_zapret and not self.state.settings.zapret_preset:
-                fallback = self.zapret.default_preset()
-                if not fallback:
-                    self._cancel_target_transition(
-                        "Для обхода выбранного сервера сначала выберите пресет Zapret"
-                    )
-                    return True
-                self._logger.info("Zapret preset not chosen, falling back to %r", fallback)
-                self.state.settings.zapret_preset = fallback
-                self.schedule_save()
-                self.transition_state_changed.emit(
-                    True, f"Zapret: пресет по умолчанию «{fallback}»"
-                )
-
-            worker = TargetProfileResolver(
-                generation,
-                spec,
-                self.zapret.resolve_target,
-                parent=self,
-            )
-            self._proxy_protection_workers[generation] = worker
-            self._proxy_protection_wait_generation = generation
-            self._proxy_protection_wait_token = 0
-            worker.resolved.connect(self._on_proxy_protection_resolved)
-            worker.finished.connect(
-                lambda generation=generation, worker=worker: self._forget_proxy_protection_worker(generation, worker)
-            )
-            self.transition_state_changed.emit(True, "DNS выбранного VPN-сервера...")
-            worker.start()
-            return True
-
-        if self.connected and not self.zapret.target_profile_is_ready(node):
-            # A server/strategy change must stop the old data plane before DNS
-            # and before winws2 can be rebuilt.  This also disables core-owned
-            # retry loops while the new endpoint is not protected yet.
-            self.transition_state_changed.emit(True, "Остановка VPN перед DNS...")
-            self._run_prestop(
-                generation,
-                start_resolution,
-                failure_message="Не удалось остановить VPN перед обновлением профиля Zapret",
-            )
-            return True
-        return start_resolution()
-
     def _active_config_uses_selected_node(self, node: Node | None) -> bool:
         """Avoid targeting a node ignored by the active raw JSON document."""
         if node is None:
@@ -2376,8 +2276,7 @@ class AppController(QObject):
         return True
 
     def _cancel_target_transition(self, message: str) -> None:
-        self._proxy_protection_wait_generation = 0
-        self._proxy_protection_wait_token = 0
+        self.bypass.cancel_wait()
         self._transition_pending = False
         if self._hysteria_recovery_active:
             self._clear_pending_transport_selection()
@@ -2390,192 +2289,6 @@ class AppController(QObject):
         self._set_connection_status("error", message, level="warning")
         self.transition_state_changed.emit(False, "")
 
-    def _wait_for_proxy_protection(self, generation: int) -> None:
-        self._proxy_protection_wait_generation = generation
-        self._proxy_protection_wait_token = self.zapret.target_profile_generation
-        self.transition_state_changed.emit(True, "Запуск Zapret для выбранного сервера...")
-
-    def _on_proxy_protection_resolved(
-        self,
-        generation: int,
-        spec: object,
-        resolved: object,
-        error: Exception | None,
-    ) -> None:
-        runtime_node = self._runtime_selected_node()
-        if isinstance(spec, str):
-            if error is None:
-                self.zapret.cache_proxy_resolution(spec, resolved)
-            if generation != self._transition_generation:
-                return
-            self._proxy_protection_wait_generation = 0
-            self._proxy_protection_wait_token = 0
-            if error is not None:
-                self._log(
-                    f"[zapret] DNS выбранного сервера host={spec} "
-                    f"завершился ошибкой: {error}"
-                )
-            if error is not None and self.zapret.running:
-                if self._hysteria_recovery_active:
-                    self._cancel_target_transition(
-                        "Не удалось подготовить UDP-защиту replacement target"
-                    )
-                    return
-                self._transition_pending = False
-                self._blocked_transition_signature = self._transition_signature()
-                self._desired_connected = self.connected
-                self.status.emit(
-                    "warning",
-                    "Не удалось подготовить UDP-защиту: адрес сервера не определён",
-                )
-                self.transition_state_changed.emit(False, "")
-                return
-            if error is None and self.zapret.apply_cached_proxy_node(runtime_node):
-                if not self.zapret.proxy_protection_is_ready(runtime_node):
-                    self._wait_for_proxy_protection(generation)
-                    return
-            if not self._transition_active:
-                self._schedule_transition_drain(0)
-            return
-        if generation != self._transition_generation:
-            return
-        self._proxy_protection_wait_generation = 0
-        self._proxy_protection_wait_token = 0
-        if not self._desired_connected:
-            self.transition_state_changed.emit(False, "")
-            return
-        if spec != self.zapret.target_spec(runtime_node):
-            return
-        requires_zapret = self.zapret.target_requires_zapret(runtime_node)
-        if error is not None:
-            hosts = ", ".join(spec.hosts)
-            self._log(
-                f"[zapret] DNS выбранного сервера host={hosts} "
-                f"завершился ошибкой: {error}"
-            )
-            if requires_zapret or self.zapret.running:
-                self._cancel_target_transition(
-                    "Подключение отменено: не удалось определить IP выбранного сервера"
-                )
-            else:
-                self.zapret.clear_target_profile()
-                self._schedule_transition_drain(0)
-            return
-
-        previous_target = self.zapret.resolved_target
-        profile_was_ready = self.zapret.target_profile_is_ready(runtime_node)
-        if self.connected and (previous_target != resolved or not profile_was_ready):
-            if self._hysteria_recovery_active:
-                # Admission was already closed by the Hysteria failure
-                # coordinator.  Preserve the old sidecar process/generation
-                # while winws2 prepares protection for the replacement; the
-                # normal sidecar transition will retire it only after readiness.
-                self._log(
-                    "[hysteria-recovery] preparing Zapret target without "
-                    "stopping the old Hysteria generation"
-                )
-            else:
-                # Stop data-plane retries before winws2 loses the old profile.
-                # The stop is a coordinator step transition; the profile is
-                # applied only after it finished and only if still current.
-                self.transition_state_changed.emit(True, "Остановка VPN перед Zapret...")
-                self._run_prestop(
-                    generation,
-                    lambda: self._apply_resolved_protection(generation, runtime_node, resolved, requires_zapret),
-                    failure_message=None,
-                )
-                return
-        self._apply_resolved_protection(generation, runtime_node, resolved, requires_zapret)
-
-    def _apply_resolved_protection(
-        self,
-        generation: int,
-        runtime_node: Node | None,
-        resolved: object,
-        requires_zapret: bool,
-    ) -> None:
-        if not self.zapret.apply_resolved_target(runtime_node, resolved):
-            self._cancel_target_transition("Не удалось подготовить стратегию выбранного сервера")
-            return
-
-        from .node_runtime_service import remember_country_addresses
-        remember_country_addresses(self, runtime_node, resolved.ips)
-
-        if requires_zapret and not self.zapret.running:
-            preset = self.state.settings.zapret_preset
-            self._wait_for_proxy_protection(generation)
-            self.zapret.start_with_target(preset)
-            return
-        if not self.zapret.target_profile_is_ready(runtime_node):
-            self._wait_for_proxy_protection(generation)
-            return
-        if not self._transition_active:
-            self._schedule_transition_drain(transition_request_delay_ms(self._transition_reason))
-
-    def _on_proxy_protection_ready(self, protection_generation: int) -> None:
-        transition_generation = self._proxy_protection_wait_generation
-        if not transition_generation:
-            return
-        if transition_generation != self._transition_generation:
-            return
-        if protection_generation != self._proxy_protection_wait_token:
-            return
-        if not self._desired_connected:
-            self._proxy_protection_wait_generation = 0
-            self._proxy_protection_wait_token = 0
-            self.transition_state_changed.emit(False, "")
-            return
-        if not self.zapret.target_profile_is_ready(self._runtime_selected_node()):
-            return
-
-        self._proxy_protection_wait_generation = 0
-        self._proxy_protection_wait_token = 0
-        if not self._transition_active:
-            self._schedule_transition_drain(transition_request_delay_ms(self._transition_reason))
-
-    def _on_proxy_protection_failed(self, protection_generation: int, reason: str) -> None:
-        transition_generation = self._proxy_protection_wait_generation
-        if not transition_generation:
-            return
-        if transition_generation != self._transition_generation:
-            return
-        if protection_generation != self._proxy_protection_wait_token:
-            return
-
-        self._proxy_protection_wait_generation = 0
-        self._proxy_protection_wait_token = 0
-        self._transition_pending = False
-        self._blocked_transition_signature = self._transition_signature(
-            self._runtime_selected_node()
-        )
-        if self._hysteria_recovery_active:
-            self._clear_pending_transport_selection()
-            self._hysteria_recovery_active = False
-        legacy_contract = not isinstance(self.zapret, ZapretManager)
-        self._desired_connected = self.connected if legacy_contract else False
-        if legacy_contract:
-            self.status.emit("warning", "Не удалось подтвердить UDP-защиту; переход отменён")
-            self.transition_state_changed.emit(False, "")
-            return
-        if self.connected or self._has_residual_processes():
-            self._request_stop("zapret profile failed", quiet=True)
-        self._log(f"[zapret] точечный профиль не подтверждён: {reason}; подключение отменено")
-        self._set_connection_status(
-            "error",
-            "Zapret не подтвердил профиль выбранного сервера; подключение отменено",
-            level="warning",
-        )
-        self.transition_state_changed.emit(False, "")
-
-    def _forget_proxy_protection_worker(
-        self,
-        generation: int,
-        worker: TargetProfileResolver,
-    ) -> None:
-        if self._proxy_protection_workers.get(generation) is worker:
-            self._proxy_protection_workers.pop(generation, None)
-        worker.deleteLater()
-
     def target_profile_allows_core_start(
         self,
         node: Node | None,
@@ -2583,134 +2296,28 @@ class AppController(QObject):
         used_selected_node: bool = True,
     ) -> bool:
         """Last-moment fence immediately before any VPN process start."""
-        if not used_selected_node:
-            self.zapret.clear_target_profile()
-            return True
-        if self.zapret.target_profile_is_ready(node):
-            return True
-        self._set_connection_status(
-            "error",
-            "Запуск VPN заблокирован: профиль Zapret для выбранного сервера не готов",
-            level="warning",
-        )
-        return False
-
-    def _on_zapret_stopped_safety(self) -> None:
-        """Fail closed if a protected session loses its WinDivert process."""
-        if not self.connected or not self.zapret.target_requires_zapret(self.selected_node):
-            return
-        self._log("[zapret] процесс остановлен во время защищённой VPN-сессии")
-        # Fail closed through the coordinator: the current transition (if
-        # any) is superseded, the queued disconnect stops every process.
-        self._desired_connected = False
-        self._request_stop("zapret stopped", quiet=True)
-        self._set_connection_status(
-            "error",
-            "VPN остановлен: Zapret больше не защищает выбранный сервер",
-            level="error",
-        )
-
-    def _start_proxy_dns_prewarm(self) -> None:
-        """П5 (AC13/AC14): фоновый прогрев DNS-кэша zapret после подключения.
-
-        Батч-резолв всех UDP-прокси нод текущего пула в существующем
-        воркер-пуле; наполняется только ``_proxy_resolution_cache``, winws2 не
-        трогается, ошибки — молча, GUI-поток не блокируется.
-        """
-
-        try:
-            start_proxy_dns_prewarm(self)
-        except Exception:
-            pass
+        return self.bypass.allows_core_start(node, used_selected_node=used_selected_node)
 
     def start_zapret(self, preset_name: str) -> None:
-        """Start a preset with a freshly resolved selected-server profile."""
-        self.state.settings.zapret_preset = preset_name
-        self.zapret.set_target_settings(self.state.settings.zapret_target)
-        self.schedule_save()
-        # Новый запуск отменяет ожидающий DNS прежнего: побеждает последний клик.
-        self._manual_zapret_generation += 1
-        node = self.selected_node
-        if not self._active_config_uses_selected_node(node):
-            self.zapret.clear_target_profile()
-            self._settle_manual_zapret_busy()
-            self.zapret.start(preset_name)
-            return
-        spec = self.zapret.target_spec(node)
-        if spec is None:
-            self.zapret.clear_target_profile()
-            self._settle_manual_zapret_busy()
-            self.zapret.start(preset_name)
-            return
-        generation = self._manual_zapret_generation
-        worker = TargetProfileResolver(generation, spec, self.zapret.resolve_target, parent=self)
-        self._manual_zapret_worker = worker
-        self._manual_zapret_busy = True
-        self.transition_state_changed.emit(True, "DNS выбранного VPN-сервера...")
-
-        def resolved_callback(result_generation, result_spec, endpoint, error) -> None:
-            if result_generation != self._manual_zapret_generation:
-                # Отменён остановкой: не держать ссылку на воркер, который
-                # сейчас удалится (выход приложения ждёт по этой ссылке).
-                if self._manual_zapret_worker is worker:
-                    self._manual_zapret_worker = None
-                return
-            self._manual_zapret_worker = None
-            if error is not None or result_spec != self.zapret.target_spec(self.selected_node):
-                self._settle_manual_zapret_busy()
-                self._set_connection_status(
-                    "error",
-                    "Zapret не запущен: не удалось определить IP выбранного сервера",
-                    level="warning",
-                )
-                return
-            if not self.zapret.apply_resolved_target(self.selected_node, endpoint):
-                self._settle_manual_zapret_busy()
-                self._set_connection_status(
-                    "error",
-                    "Zapret не запущен: проверьте выбранную стратегию",
-                    level="warning",
-                )
-                return
-            self.transition_state_changed.emit(True, "Запуск Zapret...")
-            # «Занято» снимет факт процесса: started или error (_settle_manual_zapret_busy).
-            self.zapret.start_with_target(preset_name)
-
-        worker.resolved.connect(resolved_callback)
-        worker.finished.connect(worker.deleteLater)
-        worker.start()
+        """Start winws2 on a preset with a freshly resolved selected-server rule."""
+        self.bypass.start_manual(preset_name)
 
     def stop_zapret(self) -> None:
-        """Ручная остановка Zapret.
+        """Stop winws2; a pending manual start is cancelled with it."""
+        self.bypass.stop_manual()
 
-        Отменяет и ожидающий ручной запуск (DNS выбранного сервера): иначе
-        его колбэк поднял бы winws2 обратно уже после клика «Остановить».
-        """
-        self._manual_zapret_generation += 1
-        self.zapret.stop()
-        self._settle_manual_zapret_busy()
-
-    def _settle_manual_zapret_busy(self, *_args) -> None:
-        """Ручной запуск Zapret закончился — снять поднятое им «занято».
-
-        Раньше после успешного запуска «занято» не снималось вовсе: панель
-        оставалась с недоступными плитками и сферой до следующего перехода.
-        Индикатор, который держит переход подключения, не трогаем.
-        """
-        if not self._manual_zapret_busy:
-            return
-        self._manual_zapret_busy = False
-        if (
-            self._transition_active
-            or self._transition_scheduled
-            or self._transition_pending
-            or self._proxy_protection_wait_generation
-        ):
-            return
-        self.transition_state_changed.emit(False, "")
+    def apply_zapret_target_settings(self, settings: ZapretTargetSettings) -> None:
+        """New per-kind bypass choices: bring the connection or winws2 in line."""
+        self.state.settings.zapret_target = settings
+        self.schedule_save()
+        if self.connected or self._desired_connected:
+            self._desired_connected = True
+            self._request_transition("Zapret target strategy changed")
+        elif self.zapret.plan is not None:
+            self.start_zapret(self.state.settings.zapret_preset or self.zapret.plan.preset)
 
     def _schedule_transition_drain(self, delay_ms: int) -> None:
-        if self._transition_active or self._proxy_protection_wait_generation == self._transition_generation:
+        if self._transition_active or self.bypass.waiting_for(self._transition_generation):
             return
         self._transition_scheduled = True
         self._transition_timer.start(max(0, int(delay_ms)))
@@ -2719,7 +2326,7 @@ class AppController(QObject):
         self._transition_scheduled = False
         if self._transition_active:
             return
-        if self._proxy_protection_wait_generation == self._transition_generation:
+        if self.bypass.waiting_for(self._transition_generation):
             return
 
         if self._cleanup_pending or self._has_residual_processes():
@@ -3490,13 +3097,8 @@ class AppController(QObject):
             # successful cut-over.
             self._log("[core-switch] fallback: Xray cannot interrupt existing connections")
             return None
-        target_ready = getattr(self.zapret, "target_profile_is_ready", None)
-        if target_ready is not None and not target_ready(node):
-            self._log(f"[core-switch] waiting for selected-server Zapret profile: {node.server}")
-            return None
-        legacy_ready = getattr(self.zapret, "proxy_protection_is_ready", None)
-        if legacy_ready is not None and not legacy_ready(node):
-            self._log(f"[core-switch] waiting for legacy UDP pass profile: {node.server}")
+        if not self.bypass.ready_for(node):
+            self._log(f"[core-switch] full transition: Zapret rule for node {node.id} is not applied")
             return None
         return HotSwitchPlan(
             node=node,
@@ -3948,7 +3550,6 @@ class AppController(QObject):
         old_rotation = self._rotation_settings_signature(old_settings)
         old_auto_switch_enabled = old_settings.auto_switch_enabled
         self.state.settings = settings
-        self.zapret.set_target_settings(settings.zapret_target)
         self.settings_changed.emit(self.state.settings)
         self.schedule_save()
         self._apply_subscription_timer_interval()
@@ -4393,7 +3994,6 @@ class AppController(QObject):
 
     def import_backup(self, path: Path, passphrase: str = "") -> None:
         self.state = self.storage.import_backup(path, passphrase)
-        self.zapret.set_target_settings(self.state.settings.zapret_target)
         self.save()
         self.nodes_changed.emit(self.state.nodes)
         self.selection_changed.emit(self.selected_node)

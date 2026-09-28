@@ -9,7 +9,7 @@ import os
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,8 +21,9 @@ if _existing is not None and not isinstance(_existing, QApplication):
 app = _existing or QApplication([])
 
 from xray_fluent.application.controller import AppController
+from xray_fluent.engines.zapret.endpoint import ResolvedEndpoint, ServerEndpoint
 
-_SPEC = ("tcp", "example.com", 443)
+_ENDPOINT = ServerEndpoint("tcp", ("example.com",), ("443",))
 
 
 def _pump_until(predicate, timeout_s: float = 3.0) -> bool:
@@ -50,17 +51,22 @@ class ManualZapretStartTests(unittest.TestCase):
         self.resolved_calls = 0
         self.workers: list = []
 
-        def resolve(_spec):
+        def resolve(endpoint):
             self.resolved_calls += 1
             self.release.wait(5)
-            return "endpoint"
+            return ResolvedEndpoint(endpoint, ("203.0.113.1",))
 
         controller._active_config_uses_selected_node = lambda _node: True  # type: ignore[method-assign]
-        zapret.target_spec = lambda _node: _SPEC  # type: ignore[method-assign]
-        zapret.resolve_target = resolve  # type: ignore[method-assign]
-        zapret.apply_resolved_target = lambda _node, _endpoint: True  # type: ignore[method-assign]
+        controller.state.selected_node_id = None
+        for target, value in (
+            ("endpoint_for_node", lambda _node: _ENDPOINT),
+            ("resolve_endpoint", resolve),
+        ):
+            patcher = patch(f"xray_fluent.application.server_bypass.{target}", value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         # Процесс «запустился»: менеджер сообщает об этом сигналом started.
-        zapret.start_with_target = Mock(side_effect=lambda _name: zapret.started.emit())  # type: ignore[method-assign]
+        zapret.apply = Mock(side_effect=lambda _plan: zapret.started.emit())  # type: ignore[method-assign]
         zapret.stop = Mock()  # type: ignore[method-assign]
         self.busy: list[bool] = []
         controller.transition_state_changed.connect(self._on_busy)
@@ -74,7 +80,7 @@ class ManualZapretStartTests(unittest.TestCase):
                 pass
         app.processEvents()
         self.controller.transition_state_changed.disconnect(self._on_busy)
-        self.controller._manual_zapret_busy = False
+        self.controller.bypass._manual_busy = False
         self.controller._transition_active = False
 
     def _on_busy(self, busy: bool, _text: str) -> None:
@@ -82,9 +88,7 @@ class ManualZapretStartTests(unittest.TestCase):
 
     def _start(self, preset: str) -> None:
         self.controller.start_zapret(preset)
-        worker = self.controller._manual_zapret_worker
-        if worker is not None:
-            self.workers.append(worker)
+        self.workers.extend(w for w in self.controller.bypass.workers() if w not in self.workers)
 
     def _workers_done(self) -> bool:
         def done(worker) -> bool:
@@ -98,11 +102,12 @@ class ManualZapretStartTests(unittest.TestCase):
     def test_successful_start_releases_busy(self) -> None:
         self._start("general")
         self.assertEqual(self.busy, [True])
-        self.assertTrue(_pump_until(lambda: self.controller.zapret.start_with_target.called))
-        self.controller.zapret.start_with_target.assert_called_once_with("general")
+        self.assertTrue(_pump_until(lambda: self.controller.zapret.apply.called))
+        self.assertEqual(self.controller.zapret.apply.call_args.args[0].preset, "general")
+        self.assertIsNotNone(self.controller.zapret.apply.call_args.args[0].rule)
         # Раньше последним оставалось «занято» — панель висела недоступной.
         self.assertEqual(self.busy[-1], False)
-        self.assertFalse(self.controller._manual_zapret_busy)
+        self.assertFalse(self.controller.bypass.manual_start_pending)
 
     def test_stop_during_pending_start_wins(self) -> None:
         self.release.clear()  # DNS выбранного сервера ещё идёт
@@ -115,10 +120,10 @@ class ManualZapretStartTests(unittest.TestCase):
         self.release.set()
         self.assertTrue(_pump_until(self._workers_done))
         _pump_until(lambda: False, timeout_s=0.1)
-        self.controller.zapret.start_with_target.assert_not_called()
+        self.controller.zapret.apply.assert_not_called()
         self.assertEqual(self.busy, [True, False])
-        # Выход приложения ждёт воркер по ссылке — удалённый воркер там не нужен.
-        self.assertIsNone(self.controller._manual_zapret_worker)
+        # Выход приложения ждёт живые воркеры — завершённый там не нужен.
+        self.assertTrue(_pump_until(lambda: not self.controller.bypass.workers()))
 
     def test_second_start_retargets_to_latest_preset(self) -> None:
         self.release.clear()
@@ -126,9 +131,10 @@ class ManualZapretStartTests(unittest.TestCase):
         self._start("second")
         self.release.set()
         self.assertTrue(_pump_until(self._workers_done))
-        self.assertTrue(_pump_until(lambda: self.controller.zapret.start_with_target.called))
+        self.assertTrue(_pump_until(lambda: self.controller.zapret.apply.called))
         _pump_until(lambda: False, timeout_s=0.1)
-        self.controller.zapret.start_with_target.assert_called_once_with("second")
+        self.controller.zapret.apply.assert_called_once()
+        self.assertEqual(self.controller.zapret.apply.call_args.args[0].preset, "second")
         self.assertEqual(self.busy[-1], False)
 
     def test_connection_transition_keeps_its_busy(self) -> None:
@@ -137,7 +143,7 @@ class ManualZapretStartTests(unittest.TestCase):
         self.controller._transition_active = True  # индикатор держит переход подключения
         self.controller.stop_zapret()
         self.assertEqual(self.busy, [True])
-        self.assertFalse(self.controller._manual_zapret_busy)
+        self.assertFalse(self.controller.bypass.manual_start_pending)
 
 
 if __name__ == "__main__":

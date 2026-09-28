@@ -17,7 +17,8 @@ from .detail_page import DetailPage
 
 
 class PresetEditWidget(DetailPage):
-    save_requested = pyqtSignal(str, str, str)  # name, description, content
+    #: original name ("" for a new preset), name, description, content
+    save_requested = pyqtSignal(str, str, str, str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(
@@ -33,6 +34,8 @@ class PresetEditWidget(DetailPage):
 
         root = self.content_layout
 
+        self.error_label = CaptionLabel("", self)
+        self.add_header_action(self.error_label)
         self.save_btn = PrimaryPushButton(FIF.SAVE, "Сохранить", self)
         self.save_btn.clicked.connect(self._on_save)
         self.add_header_action(self.save_btn)
@@ -76,6 +79,7 @@ class PresetEditWidget(DetailPage):
         self._original_description = description
         self._original_content = content
 
+        self.error_label.setText("")
         self.name_edit.setText(name)
         self.desc_edit.setText(description)
         self.editor.setPlainText(content)
@@ -98,14 +102,21 @@ class PresetEditWidget(DetailPage):
     def _on_save(self) -> None:
         name = self.name_edit.text().strip()
         if not name:
+            self.error_label.setText("Введите название")
             return
-        # Validate filename characters
-        invalid = set('\\/:*?"<>|')
-        if any(c in invalid for c in name):
+        if any(char in '\\/:*?"<>|' for char in name) or name.startswith("_"):
+            self.error_label.setText("Название не может содержать \\ / : * ? \" < > | и начинаться с _")
             return
+        self.error_label.setText("")
         desc = self.desc_edit.text().strip()
         content = self.editor.toPlainText()
-        self.save_requested.emit(name, desc, content)
+        self.save_requested.emit(self._original_name, name, desc, content)
+
+    def mark_saved(self, name: str, description: str, content: str) -> None:
+        """The file is written: this is the new clean state."""
         self._original_name = name
-        self._original_description = desc
+        self._original_description = description
         self._original_content = content
+
+    def show_error(self, message: str) -> None:
+        self.error_label.setText(message)

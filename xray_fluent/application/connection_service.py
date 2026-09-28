@@ -136,9 +136,8 @@ def connect_selected_steps(controller: AppController, allow_during_reconnect: bo
             return False
         controller.schedule_save()
         controller._traffic_history.start_session(session_label, "singbox")
-        # П5 (AC13): подключение состоялось (сессия зафиксирована, статус
-        # running) — фоновый прогрев DNS-кэша zapret для всех нод пула.
-        controller._start_proxy_dns_prewarm()
+        # Log redaction learns the other pool servers' IPs (hot switch targets).
+        controller.bypass.learn_pool_addresses()
         return True
     finally:
         controller._connecting = False

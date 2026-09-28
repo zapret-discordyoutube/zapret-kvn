@@ -7,13 +7,13 @@ from unittest.mock import Mock
 
 from PyQt6.QtCore import Qt
 
-from xray_fluent.network.background_workers import ProxyProtectionResolver, StateWriter
+from xray_fluent.network.background_workers import EndpointResolver, StateWriter
 
 
 class BackgroundWorkerTests(unittest.TestCase):
-    def test_proxy_resolution_reports_generation_and_result(self) -> None:
+    def test_endpoint_resolution_reports_generation_and_result(self) -> None:
         events: list[tuple[int, str, set[str], Exception | None]] = []
-        worker = ProxyProtectionResolver(
+        worker = EndpointResolver(
             7,
             "proxy.example.com",
             lambda _server: {"203.0.113.7"},
@@ -24,19 +24,19 @@ class BackgroundWorkerTests(unittest.TestCase):
 
         self.assertEqual(events, [(7, "proxy.example.com", {"203.0.113.7"}, None)])
 
-    def test_proxy_resolution_returns_errors_instead_of_raising(self) -> None:
+    def test_endpoint_resolution_returns_errors_instead_of_raising(self) -> None:
         error = OSError("DNS unavailable")
         events = []
 
         def fail(_server: str) -> set[str]:
             raise error
 
-        worker = ProxyProtectionResolver(8, "proxy.example.com", fail)
+        worker = EndpointResolver(8, "proxy.example.com", fail)
         worker.resolved.connect(lambda *args: events.append(args))
 
         worker.run()
 
-        self.assertEqual(events, [(8, "proxy.example.com", set(), error)])
+        self.assertEqual(events, [(8, "proxy.example.com", None, error)])
 
     def test_state_writer_writes_off_the_caller_thread(self) -> None:
         caller = threading.get_ident()
