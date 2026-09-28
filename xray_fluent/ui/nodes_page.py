@@ -23,6 +23,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import RoundMenu, Action
 
+from ..application.selection_source import SelectionSource
 from ..profiles.models import Node, Subscription
 from .bulk_edit_page import BulkEditPage
 from .detail_page import StackedSection
@@ -93,10 +94,11 @@ class NodesPage(StackedSection):
     cancel_speed_test_requested = pyqtSignal()
     export_outbound_json_requested = pyqtSignal(str)
     export_runtime_json_requested = pyqtSignal(str)
-    # Запрос подключиться к серверу (controller.set_selected_node). Только явные
-    # действия: двойной клик, Enter, пункт меню «Подключить к этому серверу».
-    # Выделение строк (клик, стрелки, Shift/Ctrl, правый клик) его не эмитит.
-    selected_node_changed = pyqtSignal(str)
+    # Запрос подключиться к серверу (controller.set_selected_node): id сервера и
+    # SelectionSource жеста. Только явные действия: двойной клик, Enter, пункт
+    # меню «Подключить к этому серверу». Выделение строк (клик, стрелки,
+    # Shift/Ctrl, правый клик) его не эмитит.
+    connect_node_requested = pyqtSignal(str, object)
     edit_node_requested = pyqtSignal(str)           # node_id
     node_edit_saved = pyqtSignal(str, dict)         # node_id, updated fields
     bulk_edit_requested = pyqtSignal(object)        # set[str] of node_ids
@@ -618,8 +620,9 @@ class NodesPage(StackedSection):
         targets = set(node_ids) if node_ids else {node.id for node in self._nodes}
         if not targets:
             return
-        self._pending_ping_ids = targets
-        self._table_model.set_ping_busy_ids(targets)
+        # Новый запрос вливается в идущий раунд пинга, а не заменяет его.
+        self._pending_ping_ids |= targets
+        self._table_model.set_ping_busy_ids(self._pending_ping_ids)
 
     def start_speed_activity(self) -> None:
         self._speed_progress_timer.stop()
@@ -1042,10 +1045,10 @@ class NodesPage(StackedSection):
         self.move_up_btn.setEnabled(is_manual and len(ids) == 1)
         self.move_down_btn.setEnabled(is_manual and len(ids) == 1)
 
-    def _connect_node(self, node_id: str) -> None:
+    def _connect_node(self, node_id: str, source: SelectionSource) -> None:
         """Явный запрос подключиться к серверу."""
         if node_id in self._id_to_node:
-            self.selected_node_changed.emit(node_id)
+            self.connect_node_requested.emit(node_id, source)
 
     # ── Button handlers ──
 
@@ -1143,7 +1146,7 @@ class NodesPage(StackedSection):
         if count == 1:
             node_id = next(iter(ids))
             connect_action = Action("Подключить к этому серверу", self)
-            connect_action.triggered.connect(lambda: self._connect_node(node_id))
+            connect_action.triggered.connect(lambda: self._connect_node(node_id, SelectionSource.NODES_MENU))
             menu.addAction(connect_action)
             detail_action = Action("Подробности", self)
             detail_action.triggered.connect(lambda: self._show_detail(self._id_to_node[node_id]))

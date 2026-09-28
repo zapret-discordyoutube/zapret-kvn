@@ -19,6 +19,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QHeaderView
 
+from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.profiles.models import AppSettings, Node
 from xray_fluent.ui.nodes_page import _COLUMN_WIDTHS, _FLAG_ICON_SIZE, _ROW_HEIGHT, NodesPage
 from xray_fluent.ui.nodes_table_model import (
@@ -288,7 +289,7 @@ class NodesPageColumnLayoutTests(NodesPageViewTestCase):
         # Выбор ≠ подключение: ни обновление списка, ни программное
         # выделение не переключают сервер.
         requests = []
-        self.connect(self.page.selected_node_changed, requests.append)
+        self.connect(self.page.connect_node_requested, lambda node_id, source: requests.append((node_id, source)))
         for _ in range(3):
             self.page.set_nodes([Node(id='one'), Node(id='two')], 'one')
         self.assertEqual(self.page._selected_ids(), {'one'})
@@ -296,8 +297,8 @@ class NodesPageColumnLayoutTests(NodesPageViewTestCase):
         self.page._select_node('two')
         self.assertEqual(self.page._selected_ids(), {'two'})
         self.assertEqual(requests, [])
-        self.page._connect_node('two')
-        self.assertEqual(requests, ['two'])
+        self.page._connect_node('two', SelectionSource.NODES_MENU)
+        self.assertEqual(requests, [('two', SelectionSource.NODES_MENU)])
 
     def test_find_shortcut_shows_search_and_escape_clears_it(self):
         self.page.show()

@@ -63,6 +63,8 @@ from .nodes import (
     get_next_node_for_auto_switch as get_next_node_for_auto_switch_operation,
     get_node_by_id as get_node_by_id_operation,
     import_nodes_from_text as import_nodes_from_text_operation,
+    log_selection_change,
+    selection_snapshot,
     on_countries_resolved as on_countries_resolved_operation,
     prepare_node_for_runtime as prepare_node_for_runtime_operation,
     remove_nodes as remove_nodes_operation,
@@ -71,6 +73,7 @@ from .nodes import (
     start_country_ip_resolution as start_country_ip_resolution_operation,
     update_node as update_node_operation,
 )
+from .selection_source import SelectionSource
 from .auto_switch_service import (
     begin_auto_switch_warmup,
     transport_kind_for_node,
@@ -1741,6 +1744,9 @@ class AppController(QObject):
             return
 
         self._hysteria_recovery_active = True
+        log_selection_change(
+            self, SelectionSource.HYSTERIA_RECOVERY, selection_snapshot(self, failed_id or None), replacement.id
+        )
         self._pending_transport_node_id = replacement.id
         self._auto_switch_transitioning = True
         self._switching = True
@@ -2744,8 +2750,10 @@ class AppController(QObject):
             ]
             self._subscription_queued_ids.discard(subscription_id)
         previous_selected = self.state.selected_node_id
+        selected_before = selection_snapshot(self)
         if not remove_subscription_operation(self.state, subscription_id, keep_nodes=keep_nodes):
             return False
+        log_selection_change(self, SelectionSource.SUBSCRIPTION, selected_before, self.state.selected_node_id)
         self.subscriptions_changed.emit(self.state.subscriptions)
         self.nodes_changed.emit(self.state.nodes)
         self.selection_changed.emit(self.selected_node)
@@ -2761,12 +2769,14 @@ class AppController(QObject):
 
     def hide_subscription_nodes(self, node_ids: set[str]) -> int:
         previous_selected = self.state.selected_node_id
+        selected_before = selection_snapshot(self)
         hidden = 0
         for node_id in set(node_ids):
             if hide_subscription_node_operation(self.state, node_id) is not None:
                 hidden += 1
         if not hidden:
             return 0
+        log_selection_change(self, SelectionSource.NODE_REMOVED, selected_before, self.state.selected_node_id)
         self.subscriptions_changed.emit(self.state.subscriptions)
         self.nodes_changed.emit(self.state.nodes)
         self.selection_changed.emit(self.selected_node)
@@ -2907,6 +2917,7 @@ class AppController(QObject):
         if fetched.not_modified:
             result = apply_not_modified(subscription, fetched)
         else:
+            selected_before = selection_snapshot(self)
             outcome = reconcile_subscription(self.state, subscription, parsed, fetched)
             result = outcome.result
             if pending_add:
@@ -2914,6 +2925,7 @@ class AppController(QObject):
             if pending_add and self.state.selected_node_id is None:
                 first = next((node for node in self.state.nodes if node.subscription_id == subscription.id), None)
                 self.state.selected_node_id = first.id if first else None
+            log_selection_change(self, SelectionSource.SUBSCRIPTION, selected_before, self.state.selected_node_id)
             self._detect_countries_sync()
             QTimer.singleShot(0, self._start_country_ip_resolution)
             self.nodes_changed.emit(self.state.nodes)
@@ -3002,8 +3014,8 @@ class AppController(QObject):
     def reorder_nodes(self, node_id: str, direction: str) -> None:
         reorder_nodes_operation(self, node_id, direction)
 
-    def set_selected_node(self, node_id: str, *, reset_auto_switch: bool = True) -> None:
-        set_selected_node_operation(self, node_id, reset_auto_switch=reset_auto_switch)
+    def set_selected_node(self, node_id: str, *, source: SelectionSource) -> None:
+        set_selected_node_operation(self, node_id, source=source)
 
     def _set_connection_status(self, phase: str, message: str, level: str | None = None) -> None:
         self.connection_status_changed.emit(phase, message)
@@ -3406,7 +3418,7 @@ class AppController(QObject):
         self._log(f"[rotation] переключение -> {node.name}")
         # Штатный путь смены сервера: он сам делает горячий свитч по тегу, который
         # ядро получило при запуске, а при неудаче честно переподключается.
-        self.set_selected_node(node.id, reset_auto_switch=False)
+        self.set_selected_node(node.id, source=SelectionSource.ROTATION)
         self.status.emit("info", f"Ротация: {node.name}")
         return True
 
@@ -3501,7 +3513,7 @@ class AppController(QObject):
             self._hysteria_recovery_active = False
         self._request_transition("toggle connection")
 
-    def switch_next_node(self) -> None:
+    def switch_next_node(self, *, source: SelectionSource) -> None:
         if not self.state.nodes:
             return
         current_id = self.state.selected_node_id
@@ -3512,20 +3524,7 @@ class AppController(QObject):
                     index = idx
                     break
         index = (index + 1) % len(self.state.nodes)
-        self.set_selected_node(self.state.nodes[index].id)
-
-    def switch_prev_node(self) -> None:
-        if not self.state.nodes:
-            return
-        current_id = self.state.selected_node_id
-        index = 0
-        if current_id:
-            for idx, node in enumerate(self.state.nodes):
-                if node.id == current_id:
-                    index = idx
-                    break
-        index = (index - 1) % len(self.state.nodes)
-        self.set_selected_node(self.state.nodes[index].id)
+        self.set_selected_node(self.state.nodes[index].id, source=source)
 
     def update_routing(self, routing: RoutingSettings) -> None:
         if routing.mode not in ROUTING_MODES:

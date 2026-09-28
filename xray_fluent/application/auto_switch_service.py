@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
+from .selection_source import SelectionSource
+
 if TYPE_CHECKING:
     from .controller import AppController
     from ..profiles.models import Node
@@ -160,9 +162,9 @@ def _execute_auto_switch(controller: AppController, now: float, log_message: str
 
     # П4 (AC11/AC12): единый путь переключения — set_selected_node сам делает
     # selection_changed/schedule_save, пробует горячий свитч и при неудаче
-    # честно падает в очередь переходов. reset_auto_switch=False сохраняет
+    # честно падает в очередь переходов. Автоматический источник сохраняет
     # учёт cooldown/cycle (анти-дребезг, A6), выставленный выше.
-    controller.set_selected_node(next_node.id, reset_auto_switch=False)
+    controller.set_selected_node(next_node.id, source=SelectionSource.AUTO_SWITCH)
 
 
 def get_next_node_for_auto_switch(controller: AppController) -> Node | None:

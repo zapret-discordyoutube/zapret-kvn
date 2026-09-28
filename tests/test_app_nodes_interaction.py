@@ -12,6 +12,7 @@ from unittest.mock import patch
 from PyQt6.QtCore import Qt, QPersistentModelIndex
 from PyQt6.QtTest import QTest, QAbstractItemModelTester
 from PyQt6.QtWidgets import QApplication
+from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.profiles.models import AppSettings, Node
 from xray_fluent.profiles.node_presentation import display_name, node_country
 from xray_fluent.ui.nodes_page import NodesPage
@@ -164,7 +165,9 @@ class NodesInteractionTests(unittest.TestCase):
     def test_double_click_connects_once_and_does_not_open_details(self):
         self.click('2')
         switches = []
-        self.connect(self.page.selected_node_changed, switches.append)
+        self.connect(self.page.connect_node_requested, lambda node_id, _source: switches.append(node_id))
+        sources = []
+        self.connect(self.page.connect_node_requested, lambda _node_id, source: sources.append(source))
         pos = self.table.visualRect(self.index('2')).center()
         with patch.object(self.page, '_show_detail') as detail:
             # Первое нажатие двойного клика — просто выделение.
@@ -174,12 +177,13 @@ class NodesInteractionTests(unittest.TestCase):
             detail.assert_not_called()
         self.assertEqual(switches, ['2'])
         self.assertEqual(self.page._selected_ids(), {'2'})
+        self.assertEqual(sources, [SelectionSource.NODES_DOUBLE_CLICK])
 
     def test_context_menu_keeps_multiselection_and_offers_no_connect_for_many(self):
         self.click('2')
         self.click('4', Qt.KeyboardModifier.ControlModifier)
         switches = []
-        self.connect(self.page.selected_node_changed, switches.append)
+        self.connect(self.page.connect_node_requested, lambda node_id, _source: switches.append(node_id))
         actions = self.context_menu('2')
         self.assertEqual(self.page._selected_ids(), {'2', '4'})
         self.assertNotIn('Подключить к этому серверу', actions)
@@ -188,7 +192,9 @@ class NodesInteractionTests(unittest.TestCase):
     def test_right_click_on_other_row_only_selects_and_menu_connects(self):
         self.click('1')
         switches = []
-        self.connect(self.page.selected_node_changed, switches.append)
+        self.connect(self.page.connect_node_requested, lambda node_id, _source: switches.append(node_id))
+        sources = []
+        self.connect(self.page.connect_node_requested, lambda _node_id, source: sources.append(source))
         actions = self.context_menu('3')
         self.assertEqual(self.page._selected_ids(), {'3'})
         self.assertEqual(switches, [])
@@ -199,11 +205,12 @@ class NodesInteractionTests(unittest.TestCase):
         self.assertEqual(switches, [])
         actions['Подключить к этому серверу'].trigger()
         self.assertEqual(switches, ['3'])
+        self.assertEqual(sources, [SelectionSource.NODES_MENU])
 
     def test_arrow_keys_and_modifier_selection_do_not_connect(self):
         self.click('1')
         switches = []
-        self.connect(self.page.selected_node_changed, switches.append)
+        self.connect(self.page.connect_node_requested, lambda node_id, _source: switches.append(node_id))
         QTest.keyClick(self.table, Qt.Key.Key_Down)
         QTest.keyClick(self.table, Qt.Key.Key_Down)
         self.assertEqual(self.page._selected_ids(), {'3'})
@@ -218,7 +225,9 @@ class NodesInteractionTests(unittest.TestCase):
     def test_enter_connects_current_server_and_toggles_group_header(self):
         self.click('3')
         switches = []
-        self.connect(self.page.selected_node_changed, switches.append)
+        self.connect(self.page.connect_node_requested, lambda node_id, _source: switches.append(node_id))
+        sources = []
+        self.connect(self.page.connect_node_requested, lambda _node_id, source: sources.append(source))
         QTest.keyClick(self.table, Qt.Key.Key_Return)
         self.assertEqual(switches, ['3'])
         QTest.keyClick(self.table, Qt.Key.Key_Enter, Qt.KeyboardModifier.KeypadModifier)
@@ -232,10 +241,11 @@ class NodesInteractionTests(unittest.TestCase):
         QTest.keyClick(self.table, Qt.Key.Key_Return)
         self.assertTrue(self.table.is_group_expanded(_GROUP))
         self.assertEqual(switches, ['3', '3'])
+        self.assertEqual(sources, [SelectionSource.NODES_ENTER, SelectionSource.NODES_ENTER])
 
     def test_double_click_on_group_header_toggles_without_connecting(self):
         switches = []
-        self.connect(self.page.selected_node_changed, switches.append)
+        self.connect(self.page.connect_node_requested, lambda node_id, _source: switches.append(node_id))
         pos = self.table.visualRect(self.model.index(self.model.row_of_key(_GROUP), 0)).center()
         # Настоящий двойной клик: нажатие/отпускание, затем DblClick (QTest.mouseDClick
         # в Qt 6 шлёт только DblClick). Итог — одно переключение группы.
@@ -250,7 +260,7 @@ class NodesInteractionTests(unittest.TestCase):
     def test_groups_collapse_with_mouse_and_keyboard_without_switching_server(self):
         self.click('2')
         switches = []
-        self.connect(self.page.selected_node_changed, switches.append)
+        self.connect(self.page.connect_node_requested, lambda node_id, _source: switches.append(node_id))
         group = self.model.index(self.model.row_of_key(_GROUP), 0)
         QTest.mouseClick(self.table.viewport(), Qt.MouseButton.LeftButton,
                          pos=self.table.visualRect(group).center())

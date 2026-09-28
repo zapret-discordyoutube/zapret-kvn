@@ -327,6 +327,9 @@ class DashboardPage(StackedSection):
         row.addWidget(self.server_ping_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.next_server_btn = PushButton(FIF.SYNC, "Следующий", self.server_row)
         self.next_server_btn.setToolTip("Переключиться на следующий сервер из списка")
+        # Только мышью: с фокусом клавиатуры пробел/Enter, нажатые «мимо» (окно
+        # активно, но человек печатает не сюда), незаметно меняли сервер.
+        self.next_server_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.next_server_btn.clicked.connect(self.next_node_requested)
         row.addWidget(self.next_server_btn)
         self.servers_btn = PushButton(FIF.MENU, "Все серверы", self.server_row)

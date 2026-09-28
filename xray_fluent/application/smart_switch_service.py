@@ -19,7 +19,7 @@
    меряются штатным ``SpeedTestWorker`` (временный xray на своих портах, активное
    подключение не трогается).  Переключение — только если лучший кандидат не
    ниже порога и быстрее текущего в ``SMART_SWITCH_BETTER_FACTOR`` раз, и только
-   через ``set_selected_node(..., reset_auto_switch=False)``.
+   через ``set_selected_node(..., source=SelectionSource.SMART_SWITCH)``.
 
 Анти-дребезг: после переключения ``SMART_SWITCH_POST_SWITCH_HOLD_SEC`` без
 умных переключений, покинутый сервер помечается медленным на
@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 from ..constants import ROUTING_GLOBAL, SPEED_TEST_DEFAULT_URL, XRAY_PATH_DEFAULT
 from .auto_switch_service import _transition_in_progress
+from .selection_source import SelectionSource
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -515,7 +516,7 @@ def on_candidates_done(controller: AppController, worker: Any, *, now: float | N
     )
     # Единственный путь смены ноды (hot-switch-invariants): горячий свитч с
     # честным откатом в очередь переходов; анти-дребезг не сбрасывается.
-    controller.set_selected_node(target_id, reset_auto_switch=False)
+    controller.set_selected_node(target_id, source=SelectionSource.SMART_SWITCH)
 
 
 def cancel_smart_check(controller: AppController, reason: str) -> None:

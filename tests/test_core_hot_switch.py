@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.application.controller import AppController
 from tests.step_fakes import bridge_controller, drive
 from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
@@ -264,13 +265,13 @@ class ManualSelectionTests(unittest.TestCase):
 
     def test_successful_core_switch_skips_transition_queue(self) -> None:
         controller, nodes = self._controller(True)
-        set_selected_node(controller, nodes[1].id)
+        set_selected_node(controller, nodes[1].id, source=SelectionSource.NODES_MENU)
         controller._try_hot_switch_selected_node.assert_called_once_with()
         controller._request_transition.assert_not_called()
 
     def test_rejected_core_switch_falls_back_to_transition(self) -> None:
         controller, nodes = self._controller(False)
-        set_selected_node(controller, nodes[1].id)
+        set_selected_node(controller, nodes[1].id, source=SelectionSource.NODES_MENU)
         controller._request_transition.assert_called_once_with("node switched")
 
 

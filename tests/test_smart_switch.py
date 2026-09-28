@@ -3,7 +3,7 @@
 Подозрение возникает только при реальном спросе (проксируемые соединения
 качают), решение — после контрольного замера текущего сервера и замера
 кандидатов; переключение — единственным путём set_selected_node(...,
-reset_auto_switch=False), с анти-дребезгом.
+source=SelectionSource.SMART_SWITCH), с анти-дребезгом.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.application import smart_switch_service as smart
 from xray_fluent.application.smart_switch_service import (
     PHASE_IDLE,
@@ -125,8 +126,8 @@ class FakeController:
     def selected_node(self):
         return next((n for n in self.state.nodes if n.id == self.state.selected_node_id), None)
 
-    def set_selected_node(self, node_id: str, *, reset_auto_switch: bool = True) -> None:
-        self.selected.append((node_id, reset_auto_switch))
+    def set_selected_node(self, node_id: str, *, source: SelectionSource) -> None:
+        self.selected.append((node_id, source))
         self.state.selected_node_id = node_id
 
     def _rotation_available_ids(self):
@@ -309,9 +310,10 @@ class GateTests(SmartSwitchTestBase):
             selection_changed=_Recorder(),
             schedule_save=lambda: None,
             _reset_auto_switch_state=lambda **kwargs: None,
+            _log=lambda line: None,
         )
         with patch.object(smart.time, "monotonic", return_value=4242.0):
-            node_service.set_selected_node(controller, "n2")
+            node_service.set_selected_node(controller, "n2", source=SelectionSource.NODES_MENU)
         self.assertTrue(controller._auto_switch_manual_hold)
         self.assertEqual(controller._smart_switch_manual_at, 4242.0)
 
@@ -324,8 +326,9 @@ class GateTests(SmartSwitchTestBase):
             selection_changed=_Recorder(),
             schedule_save=lambda: None,
             _reset_auto_switch_state=lambda **kwargs: None,
+            _log=lambda line: None,
         )
-        node_service.set_selected_node(auto, "n3", reset_auto_switch=False)
+        node_service.set_selected_node(auto, "n3", source=SelectionSource.SMART_SWITCH)
         self.assertFalse(hasattr(auto, "_smart_switch_manual_at"))
 
     def test_dead_link_manual_hold_is_unchanged(self) -> None:
@@ -388,7 +391,7 @@ class ProbeDecisionTests(SmartSwitchTestBase):
 
         self.run_candidates(now + 20, {"n1": 0.05, "n2": 1.5, "n3": None})
 
-        self.assertEqual(self.controller.selected, [("n2", False)])
+        self.assertEqual(self.controller.selected, [("n2", SelectionSource.SMART_SWITCH)])
         self.assertEqual(self.state.phase, PHASE_IDLE)
         level, message = self.controller.status.calls[-1]
         self.assertEqual(level, "warning")
@@ -474,7 +477,7 @@ class HysteresisTests(SmartSwitchTestBase):
         self.assertEqual(len(self.probes), before + 1, self.controller.logs)
         on_current_probe_measured(self.controller, self.probes[-1], 10 * 1024.0, now=now)
         self.run_candidates(now + 20, {to: speed_mbps})
-        self.assertEqual(self.controller.selected[-1], (to, False))
+        self.assertEqual(self.controller.selected[-1], (to, SelectionSource.SMART_SWITCH))
         return now + 20
 
     def test_post_switch_hold_blocks_new_checks_for_10_minutes(self) -> None:

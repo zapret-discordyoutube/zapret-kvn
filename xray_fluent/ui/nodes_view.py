@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import QAbstractItemView, QHeaderView, QStyle, QStyledItemD
 from qfluentwidgets import FluentStyleSheet, SmoothScrollDelegate, isDarkTheme
 from qfluentwidgets.common.font import getFont
 
+from ..application.selection_source import SelectionSource
 from ..profiles.country_flags import get_flag_icon
 from ..profiles.node_presentation import node_country
 from .nodes_table_model import (
@@ -299,9 +300,9 @@ class NodesView(QTableView):
     """Плоская таблица с группами-заголовками; свёртка — через модель."""
 
     group_toggled = pyqtSignal(str, bool)  # ключ группы, развёрнута
-    # Явная активация сервера (двойной клик или Enter по строке-серверу).
-    # Простое выделение строк её не вызывает.
-    node_activated = pyqtSignal(str)
+    # Явная активация сервера (двойной клик или Enter по строке-серверу):
+    # id сервера и SelectionSource жеста. Простое выделение строк её не вызывает.
+    node_activated = pyqtSignal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -464,7 +465,7 @@ class NodesView(QTableView):
     def _on_double_clicked(self, index: QModelIndex) -> None:
         node = self.model().node_at_row(index.row()) if index.isValid() else None
         if node is not None:
-            self.node_activated.emit(node.id)
+            self.node_activated.emit(node.id, SelectionSource.NODES_DOUBLE_CLICK)
 
     # ── Группы ─────────────────────────────────────────────
 
@@ -507,7 +508,7 @@ class NodesView(QTableView):
             if item.is_group:
                 self.toggle_group(item.key)
             else:
-                self.node_activated.emit(item.node.id)
+                self.node_activated.emit(item.node.id, SelectionSource.NODES_ENTER)
             return
         if item is not None and not event.modifiers():
             if item.is_group and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Space):

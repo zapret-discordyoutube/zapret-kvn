@@ -14,6 +14,8 @@ from .node_service import (
     get_all_groups,
     get_all_tags,
     import_nodes_from_text,
+    log_selection_change,
+    selection_snapshot,
     remove_nodes,
     reorder_nodes,
     set_selected_node,

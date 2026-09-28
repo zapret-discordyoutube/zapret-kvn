@@ -24,6 +24,7 @@ from qfluentwidgets import (
 from ..diagnostics.connection_message import connection_message
 from ..diagnostics.runtime_logging import redact_server_addresses
 from ..application.controller import AppController
+from ..application.selection_source import SelectionSource
 from ..application.route_check import RouteCheck
 from ..application.singbox_editor_check import SingboxEditorCheck
 from ..profiles.storage import PassphraseRequired
@@ -99,6 +100,13 @@ class MainWindow(FluentWindow):
         self._startup_started = time.perf_counter()
         self._bulk_task_tip: InfoBar | None = None
         self._bulk_task_type: str | None = None
+        # Один таймер на закрытие подсказки: новый раунд его останавливает.
+        # Раньше каждый раунд ставил свой singleShot, и запоздавший таймер
+        # прошлого раунда закрывал подсказку уже следующего.
+        self._bulk_task_tip_close_timer = QTimer(self)
+        self._bulk_task_tip_close_timer.setSingleShot(True)
+        self._bulk_task_tip_close_timer.setInterval(1000)
+        self._bulk_task_tip_close_timer.timeout.connect(self._clear_bulk_task_tip)
         self._speed_test_was_cancelled = False
         self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
         self._deferred_dashboard_metrics: tuple[float, float, int | None] | None = None
@@ -395,7 +403,9 @@ class MainWindow(FluentWindow):
         self.tray.activated.connect(self._on_tray_activated)
         self.tray_show_action.triggered.connect(self._toggle_window_visible)
         self.tray_connect_action.triggered.connect(self.controller.toggle_connection)
-        self.tray_next_action.triggered.connect(self.controller.switch_next_node)
+        self.tray_next_action.triggered.connect(
+            lambda: self.controller.switch_next_node(source=SelectionSource.TRAY_NEXT)
+        )
         self.tray_quit_action.triggered.connect(self._quit_app)
         self.tray_mode_global.triggered.connect(lambda: self._set_mode_from_tray("global"))
         self.tray_mode_rule.triggered.connect(lambda: self._set_mode_from_tray("rule"))
@@ -409,13 +419,17 @@ class MainWindow(FluentWindow):
         self.dashboard_page.proxy_toggled.connect(self._on_dashboard_proxy_toggled)
         self.controller.system_proxy_state_changed.connect(self.dashboard_page.set_system_proxy_state)
         self.dashboard_page.servers_requested.connect(lambda: self.switchTo(self.nodes_page))
-        self.dashboard_page.next_node_requested.connect(self.controller.switch_next_node)
+        self.dashboard_page.next_node_requested.connect(
+            lambda: self.controller.switch_next_node(source=SelectionSource.DASHBOARD_NEXT)
+        )
         self.dashboard_page.configs_requested.connect(lambda: self.switchTo(self.configs_page))
         self.nodes_page.import_clipboard_requested.connect(self._import_nodes_from_clipboard)
         self.nodes_page.delete_requested.connect(self.controller.remove_nodes)
         self.nodes_page.hide_subscription_nodes_requested.connect(self.controller.hide_subscription_nodes)
         self.nodes_page.reorder_requested.connect(self.controller.reorder_nodes)
-        self.nodes_page.selected_node_changed.connect(self.controller.set_selected_node)
+        self.nodes_page.connect_node_requested.connect(
+            lambda node_id, source: self.controller.set_selected_node(node_id, source=source)
+        )
         self.nodes_page.ping_requested.connect(self._ping_requested)
         self.nodes_page.export_outbound_json_requested.connect(self._export_outbound_json)
         self.nodes_page.export_runtime_json_requested.connect(self._export_runtime_json)
@@ -890,6 +904,7 @@ class MainWindow(FluentWindow):
         total = max(1, total)
         current = max(0, min(current, total))
         title = "Пинг серверов" if task == "ping" else "Тест скорости"
+        self._bulk_task_tip_close_timer.stop()
 
         if completed:
             if task == "ping":
@@ -902,7 +917,7 @@ class MainWindow(FluentWindow):
                     self._speed_test_was_cancelled = False
                 else:
                     self._set_bulk_task_tip_content(f"Завершено {current}/{total}")
-                QTimer.singleShot(1000, self._clear_bulk_task_tip)
+                self._bulk_task_tip_close_timer.start()
             return
 
         content = f"{current}/{total}"

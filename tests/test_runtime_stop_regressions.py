@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
+from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.application.async_steps import TransitionRunner
 from xray_fluent.application.controller import AppController
 from xray_fluent.application.connection_service import connect_selected, disconnect_current
@@ -79,7 +80,7 @@ class RuntimeStopTests(TestCase):
             controller.state.nodes = [Node(id='old', scheme='awg'), Node(id='new', scheme='awg')]
             controller.state.selected_node_id = 'old'
             controller._pending_transport_node_id = pending
-            set_selected_node(controller, pending or 'old')
+            set_selected_node(controller, pending or 'old', source=SelectionSource.NODES_MENU)
             controller._request_transition.assert_not_called()
 
     def test_cold_reconnect_uses_and_commits_the_requested_node_for_every_protocol(self):

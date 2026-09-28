@@ -31,6 +31,7 @@ from unittest.mock import call, patch
 
 from PyQt6.QtCore import QCoreApplication
 
+from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.application.controller import AppController
 from xray_fluent.application import async_steps
 from xray_fluent.application.async_steps import RunInWorkerStep
@@ -645,7 +646,7 @@ class AutoSwitchSinglePathTests(unittest.TestCase):
         controller._auto_switch_last_switch = 123.0
         controller._auto_switch_cycle_attempts = 2
 
-        controller.set_selected_node(nodes[2].id)  # ручной путь — дефолт
+        controller.set_selected_node(nodes[2].id, source=SelectionSource.NODES_MENU)  # ручной источник
 
         self.assertEqual(controller._auto_switch_last_switch, 0.0)
         self.assertEqual(controller._auto_switch_cycle_attempts, 0)

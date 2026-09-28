@@ -69,6 +69,16 @@ class DashboardWordWrapTest(unittest.TestCase):
         page.deleteLater()
         QApplication.processEvents()
 
+    def test_next_server_button_is_mouse_only(self) -> None:
+        # Пробел/Enter при фокусе на «Следующий» незаметно меняли сервер
+        # (инцидент 28.09.2026): кнопка не берёт фокус клавиатуры.
+        from PyQt6.QtCore import Qt
+
+        page = DashboardPage()
+        self.assertEqual(page.next_server_btn.focusPolicy(), Qt.FocusPolicy.NoFocus)
+        page.deleteLater()
+        QApplication.processEvents()
+
     def test_selected_server_endpoint_is_masked(self) -> None:
         page = DashboardPage()
         page.set_selected_node(

@@ -13,6 +13,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.application import auto_switch_service
 from xray_fluent.application.auto_switch_service import (
     AUTO_SWITCH_DEAD_LINK_SEC,
@@ -74,8 +75,8 @@ class FakeController:
             None,
         )
 
-    def set_selected_node(self, node_id: str, *, reset_auto_switch: bool = True) -> None:
-        self.selected.append((node_id, reset_auto_switch))
+    def set_selected_node(self, node_id: str, *, source: SelectionSource) -> None:
+        self.selected.append((node_id, source))
 
 
 def _tick(
@@ -117,9 +118,9 @@ class DeadLinkTriggerTests(unittest.TestCase):
         self.assertEqual(controller.selected, [])            # not yet
         _tick(controller, 100.0 + AUTO_SWITCH_DEAD_LINK_SEC + 1, link_alive=False)
         self.assertEqual(len(controller.selected), 1)
-        node_id, reset = controller.selected[0]
+        node_id, source = controller.selected[0]
         self.assertNotEqual(node_id, controller.state.selected_node_id)
-        self.assertFalse(reset)                              # анти-дребезг сохранён
+        self.assertIs(source, SelectionSource.AUTO_SWITCH)   # автоматика: анти-дребезг сохранён
         self.assertTrue(any("unreachable" in line for line in controller.logs))
         self.assertTrue(controller._auto_switch_transitioning)
 

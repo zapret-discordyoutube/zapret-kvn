@@ -47,6 +47,7 @@ if _existing is not None and not isinstance(_existing, QApplication):
     raise RuntimeError("controller harness needs a QApplication")
 app = _existing or QApplication([])
 
+from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.application import runtime_services
 from xray_fluent.application.controller import AppController
 from xray_fluent.diagnostics.gui_stall_watchdog import GuiStallWatchdog
@@ -410,7 +411,7 @@ class TransitionGuiStallTests(unittest.TestCase):
 
         # hot switch inside the running pool (selector PUT only)
         self._measure(
-            lambda: controller.set_selected_node(native_b.id),
+            lambda: controller.set_selected_node(native_b.id, source=SelectionSource.NODES_MENU),
             until=lambda: self._connected_to(native_b),
         )
 
@@ -427,11 +428,11 @@ class TransitionGuiStallTests(unittest.TestCase):
 
         # full transition to a node that needs the Xray sidecar, and back
         self._measure(
-            lambda: controller.set_selected_node(hybrid.id),
+            lambda: controller.set_selected_node(hybrid.id, source=SelectionSource.NODES_MENU),
             until=lambda: self._connected_to(hybrid) and controller.xray.is_running,
         )
         self._measure(
-            lambda: controller.set_selected_node(native_a.id),
+            lambda: controller.set_selected_node(native_a.id, source=SelectionSource.NODES_MENU),
             until=lambda: self._connected_to(native_a) and not controller.xray.is_running,
         )
 
@@ -471,7 +472,7 @@ class TransitionGuiStallTests(unittest.TestCase):
 
         def switch_mid_transition() -> None:
             clicks.append(f"active={controller._transition_active}")
-            controller.set_selected_node(second.id)
+            controller.set_selected_node(second.id, source=SelectionSource.NODES_MENU)
 
         def connect_then_click() -> None:
             controller.toggle_connection()
@@ -507,7 +508,7 @@ class TransitionGuiStallTests(unittest.TestCase):
         )
         # AWG/WireGuard: replacement sidecar prepared before the front cut-over
         self._measure(
-            lambda: controller.set_selected_node(awg.id),
+            lambda: controller.set_selected_node(awg.id, source=SelectionSource.NODES_MENU),
             until=lambda: self._connected_to(awg) and controller.amnezia.is_running,
         )
         self.assertFalse(controller.hysteria.is_running)
@@ -529,7 +530,7 @@ class TransitionGuiStallTests(unittest.TestCase):
             )
             first_winws = controller.zapret._process
             self._measure(
-                lambda: controller.set_selected_node(native_b.id),
+                lambda: controller.set_selected_node(native_b.id, source=SelectionSource.NODES_MENU),
                 until=lambda: self._connected_to(native_b)
                 and controller.zapret.running
                 and controller.zapret._process is not first_winws,

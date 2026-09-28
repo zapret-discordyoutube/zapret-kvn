@@ -1,15 +1,60 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QTimer
 
+from ..diagnostics.runtime_logging import node_ref
 from ..profiles.geoip import normalize_country
 from ..importer.link_parser import parse_links_text, validate_node_outbound
+from .selection_source import SelectionSource
 from .smart_switch_service import note_manual_selection
 
 if TYPE_CHECKING:
     from .controller import AppController
+
+
+@dataclass(frozen=True)
+class SelectionSnapshot:
+    """Выбранный сервер до изменения: удалённый сервер уже не найти по id."""
+
+    node_id: str | None
+    name: str
+
+    def describe(self) -> str:
+        if not self.node_id:
+            return "нет"
+        return f"«{self.name}» node_ref={node_ref(self.node_id)}"
+
+
+def selection_snapshot(controller: AppController, node_id: str | None = None) -> SelectionSnapshot:
+    """Снимок сервера ``node_id`` (по умолчанию — выбранного) до изменения списка."""
+
+    if node_id is None:
+        node_id = controller.state.selected_node_id
+    node = next((item for item in controller.state.nodes if item.id == node_id), None) if node_id else None
+    return SelectionSnapshot(node_id or None, node.name if node is not None else "?")
+
+
+def log_selection_change(
+    controller: AppController,
+    source: SelectionSource,
+    before: SelectionSnapshot,
+    new_id: str | None,
+) -> None:
+    """Единая строка лога о смене выбранного сервера (см. ``selection_source``).
+
+    ``node_ref`` — та же метка, что в ``[runtime-map]`` и строках ядер, поэтому
+    смену можно сопоставить с логами ядер; сам id в логе скрывается.
+    """
+
+    if before.node_id == (new_id or None):
+        return
+    after = selection_snapshot(controller, new_id) if new_id else SelectionSnapshot(None, "")
+    controller._log(
+        f"[select] source={source.code} ({source.label}): {before.describe()} → {after.describe()}"
+    )
 
 
 def import_nodes_from_text(controller: AppController, text: str) -> tuple[int, list[str]]:
@@ -37,10 +82,14 @@ def import_nodes_from_text(controller: AppController, text: str) -> tuple[int, l
             first_new_id = node.id
         added += 1
 
+    selected_before = selection_snapshot(controller)
     if first_new_id:
         controller.state.selected_node_id = first_new_id
     elif not controller.state.selected_node_id and controller.state.nodes:
         controller.state.selected_node_id = controller.state.nodes[0].id
+    log_selection_change(
+        controller, SelectionSource.NODES_IMPORTED, selected_before, controller.state.selected_node_id
+    )
 
     controller.nodes_changed.emit(controller.state.nodes)
     controller.selection_changed.emit(controller.selected_node)
@@ -58,10 +107,14 @@ def remove_nodes(controller: AppController, node_ids: set[str]) -> None:
     if not node_ids:
         return
     removed_selected = controller.state.selected_node_id in node_ids
+    selected_before = selection_snapshot(controller)
     should_reconcile = removed_selected and (controller.connected or controller._desired_connected)
     controller.state.nodes = [node for node in controller.state.nodes if node.id not in node_ids]
     if removed_selected:
         controller.state.selected_node_id = controller.state.nodes[0].id if controller.state.nodes else None
+        log_selection_change(
+            controller, SelectionSource.NODE_REMOVED, selected_before, controller.state.selected_node_id
+        )
         controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
     controller.nodes_changed.emit(controller.state.nodes)
     controller.selection_changed.emit(controller.selected_node)
@@ -158,20 +211,30 @@ def reorder_nodes(controller: AppController, node_id: str, direction: str) -> No
     controller.save()
 
 
-def set_selected_node(controller: AppController, node_id: str, *, reset_auto_switch: bool = True) -> None:
+def set_selected_node(controller: AppController, node_id: str, *, source: SelectionSource) -> None:
+    """Единственный путь смены сервера по команде (пользователь или автоматика).
+
+    ``source`` обязателен: каждая смена пишет ``[select] source=…``, а ручной
+    источник (``source.manual``) сбрасывает учёт авто-переключения.
+    """
     from .protocol_core import ProtocolCore, protocol_core
     target = next((node for node in controller.state.nodes if node.id == node_id), None)
     session = getattr(controller, "_active_session", None)
     # Re-selecting the current or already requested row is idempotent.
     pending = getattr(controller, "_pending_transport_node_id", None)
-    if node_id == (pending or controller.state.selected_node_id):
+    current_id = pending or controller.state.selected_node_id
+    if node_id == current_id:
         return
+    # До ветвления: и Amnezia-путь (через pending), и обычный пишут источник.
+    # Пишется и без подключения — сохранённый выбор определяет следующий запуск.
+    log_selection_change(controller, source, selection_snapshot(controller, current_id), node_id)
+    manual = source.manual
     if controller.connected and target is not None and (
         protocol_core(target) is ProtocolCore.AMNEZIA or
         (session is not None and session.sidecar_kind == "amnezia")
     ):
         controller._pending_transport_node_id = node_id
-        if reset_auto_switch:
+        if manual:
             controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
             controller._auto_switch_manual_hold = True
             note_manual_selection(controller)
@@ -181,10 +244,10 @@ def set_selected_node(controller: AppController, node_id: str, *, reset_auto_swi
     if controller.state.selected_node_id == node_id:
         return
     controller.state.selected_node_id = node_id
-    if reset_auto_switch:
-        # Ручной выбор сбрасывает cooldown/cycle авто-переключения; сам
-        # auto_switch_service выбирает ноду с reset_auto_switch=False, чтобы
-        # не обнулять свой учёт анти-дребезга (П4/A6).  Заодно ручной выбор
+    if manual:
+        # Ручной выбор сбрасывает cooldown/cycle авто-переключения; автоматика
+        # (source.manual=False) свой учёт анти-дребезга не обнуляет (П4/A6).
+        # Заодно ручной выбор
         # фиксирует сервер до явного повторного включения авто-переключения
         # (для переключения при отказе); умное переключение при низкой
         # скорости держит ручной выбор SMART_SWITCH_MANUAL_HOLD_SEC.

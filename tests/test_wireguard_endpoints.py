@@ -518,9 +518,13 @@ class _StubController:
         self.selection_changed = _StubSignal()
         self.selected_node = None
         self._desired_connected = False
+        self.logs: list[str] = []
 
     def save(self) -> None:
         return None
+
+    def _log(self, line: str) -> None:
+        self.logs.append(line)
 
     def _start_country_ip_resolution(self) -> None:
         return None
