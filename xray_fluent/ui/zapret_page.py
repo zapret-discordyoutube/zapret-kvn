@@ -1,66 +1,46 @@
-"""Zapret section: one overview, one page per server kind, the preset list.
+"""Zapret section: an overview and two list ↔ card pages.
 
 Overview (root)
-    Status card — is winws2 running, on which preset, one start/stop button,
-    autostart.  Selected server — what Zapret does with its traffic right now.
-    Three rows — TCP / QUIC / WireGuard servers: bypass on (strategy) or off.
+    Status card: is winws2 running, which preset (a link to the preset page),
+    one start/stop button, autostart.  The selected VPN server and what Zapret
+    does with it.  One row per server kind — TCP / QUIC / WireGuard.
 Kind page
-    Bypass switch and the strategy catalog for that kind; «Применить».
+    Bypass switch in the header; strategy browser (``zapret_browser``).
 Presets page
-    The winws2 preset files: create, import, edit, delete, start.
+    Preset browser; the file editor is one level deeper.
 
-Only titles and data live on these pages; the explanation for newcomers is in
-the «Как это б#&^ь работает?» window (``singbox.guide``, key ``zapret``).
+Choices apply at once — the button in a card, the switch in a header; there
+is no separate «Применить».  Only titles and data live on the pages; the
+explanation for newcomers is the «Как это б#&^ь работает?» window.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QModelIndex, QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFont, QPainter
-from PyQt6.QtWidgets import (
-    QFileDialog,
-    QHBoxLayout,
-    QListWidgetItem,
-    QSizePolicy,
-    QStyleOptionViewItem,
-    QVBoxLayout,
-    QWidget,
-)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    Action,
     BodyLabel,
     CaptionLabel,
     CardWidget,
-    ComboBox,
     FluentIcon as FIF,
+    HyperlinkButton,
     IconWidget,
-    ListWidget,
     MessageBox,
-    PlainTextEdit,
     PrimaryPushButton,
     PushButton,
-    RoundMenu,
     StrongBodyLabel,
     SubtitleLabel,
     SwitchButton,
-    TransparentPushButton,
 )
-from qfluentwidgets.components.widgets.list_view import ListItemDelegate
 
 from ..engines.zapret import presets
 from ..engines.zapret.command import ServerRule
 from ..engines.zapret.endpoint import KIND_PROTOCOLS, KIND_TITLES, endpoint_for_node
 from ..engines.zapret.presets import PresetInfo
-from ..engines.zapret.strategies import (
-    CUSTOM_STRATEGY_ID,
-    chosen_strategy,
-    load_strategy_catalog,
-    validate_custom_strategy,
-)
+from ..engines.zapret.strategies import chosen_strategy, load_strategy_catalog
 from ..profiles.models import ZAPRET_SERVER_KINDS, Node, ZapretTargetSettings
 from .base_page import ScrollablePage
 from .detail_page import DetailPage, StackedSection
@@ -69,11 +49,10 @@ from .singbox.art import KindBadge
 from .singbox.guide import help_link, open_guide
 from .singbox.lists import section_header
 from .singbox.visuals import BLOCK, NEUTRAL, PROXY, SPECIAL, Visual
-from .strategy_picker import StrategyPicker
-from .theme import accent_color, on_theme_or_accent_changed, text_muted_color
+from .theme import on_theme_or_accent_changed
+from .zapret_browser import PresetBrowser, StrategyBrowser
 
 _KIND_ICONS = {"tcp": FIF.CONNECT, "quic": FIF.SPEED_HIGH, "wireguard": FIF.VPN}
-_PRESET_ROW_HEIGHT = 32
 
 
 @dataclass(frozen=True)
@@ -84,10 +63,20 @@ class ZapretStatus:
     preset: str = ""
     message: str = ""
 
+    @property
+    def active(self) -> bool:
+        return self.state in ("running", "starting")
+
 
 def off_meaning(kind: str) -> str:
     """What «bypass off» does for a kind — the preset for TCP, hands off for UDP."""
     return "по пресету" if kind == "tcp" else "не трогать"
+
+
+def off_explained(kind: str) -> str:
+    if kind == "tcp":
+        return "Трафик к таким серверам обрабатывается пресетом, как и все сайты."
+    return "Zapret не трогает трафик к таким серверам, даже если пресет обрабатывает UDP."
 
 
 def strategy_title(settings: ZapretTargetSettings, kind: str) -> str:
@@ -97,9 +86,13 @@ def strategy_title(settings: ZapretTargetSettings, kind: str) -> str:
         return "стратегия не найдена"
 
 
-def _expanding(widget: QWidget) -> QWidget:
-    widget.setSizePolicy(QSizePolicy.Policy.Expanding, widget.sizePolicy().verticalPolicy())
-    return widget
+def _switch(parent: QWidget) -> SwitchButton:
+    switch = SwitchButton(parent)
+    # SwitchButton(text) fills only the «off» caption; the state is spelled
+    # out by a label next to it instead.
+    switch.setOnText("")
+    switch.setOffText("")
+    return switch
 
 
 # ── overview rows ────────────────────────────────────────────────────────────
@@ -152,280 +145,110 @@ class KindRow(CardWidget):
 
 
 class KindPage(DetailPage):
-    """Bypass switch and strategy for one server kind."""
+    """Bypass switch and strategy for one server kind; every choice applies at once."""
 
-    apply_requested = pyqtSignal(object)  # ZapretTargetSettings
+    settings_changed = pyqtSignal(object)  # ZapretTargetSettings
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__("Zapret", KIND_TITLES["tcp"], parent, root_key="zapret", page_key="kind")
         self.kind = "tcp"
         self._settings = ZapretTargetSettings()
-        self._original: tuple = ()
+        self._loaded_transport = ""
 
-        self.validation_label = CaptionLabel("", self)
-        self.apply_btn = PrimaryPushButton(FIF.ACCEPT, "Применить", self)
-        self.apply_btn.clicked.connect(self._apply)
-        self.add_header_action(self.validation_label)
-        self.add_header_action(self.apply_btn)
+        self.state_label = CaptionLabel("", self)
+        self.switch = _switch(self)
+        self.add_header_action(self.state_label)
+        self.add_header_action(self.switch)
 
-        switch_card = CardWidget(self)
-        switch_layout = QHBoxLayout(switch_card)
-        switch_layout.setContentsMargins(14, 10, 14, 10)
-        switch_layout.setSpacing(12)
-        self.badge = KindBadge(switch_card)
-        switch_layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        column = QVBoxLayout()
-        column.setSpacing(1)
-        column.addWidget(BodyLabel("Обход DPI до сервера", switch_card))
-        self.protocols_label = CaptionLabel("", switch_card)
-        column.addWidget(self.protocols_label)
-        switch_layout.addLayout(column, 1)
-        self.state_label = CaptionLabel("", switch_card)
-        switch_layout.addWidget(self.state_label)
-        self.switch = SwitchButton(switch_card)
-        # SwitchButton(text) fills only the «off» caption; the state is spelled
-        # out by state_label instead.
-        self.switch.setOnText("")
-        self.switch.setOffText("")
-        switch_layout.addWidget(self.switch)
-        self.content_layout.addWidget(switch_card)
+        self.off_card = CardWidget(self)
+        off_layout = QHBoxLayout(self.off_card)
+        off_layout.setContentsMargins(16, 14, 16, 14)
+        off_layout.setSpacing(12)
+        self.off_badge = KindBadge(self.off_card)
+        off_layout.addWidget(self.off_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        off_text = QVBoxLayout()
+        off_text.setSpacing(2)
+        self.off_title = BodyLabel("", self.off_card)
+        self.off_detail = CaptionLabel("", self.off_card)
+        self.off_detail.setWordWrap(True)
+        off_text.addWidget(self.off_title)
+        off_text.addWidget(self.off_detail)
+        off_layout.addLayout(off_text, 1)
+        self.content_layout.addWidget(self.off_card)
 
-        self.strategy_card = CardWidget(self)
-        strategy_layout = QVBoxLayout(self.strategy_card)
-        strategy_layout.setContentsMargins(16, 12, 16, 12)
-        strategy_layout.setSpacing(8)
-        self.picker = StrategyPicker(self.strategy_card)
-        strategy_layout.addWidget(self.picker)
-        self.custom_edit = PlainTextEdit(self.strategy_card)
-        self.custom_edit.setPlaceholderText("# комментарий\n--lua-desync=...")
-        self.custom_edit.setMaximumHeight(96)
-        self.custom_edit.hide()
-        strategy_layout.addWidget(self.custom_edit)
-        self.content_layout.addWidget(self.strategy_card)
-        self.content_layout.addStretch(1)
+        self.browser = StrategyBrowser(self)
+        self.content_layout.addWidget(self.browser, 1)
+        self.off_stretch = QWidget(self)
+        self.content_layout.addWidget(self.off_stretch, 1)
 
-        self.switch.checkedChanged.connect(lambda _checked: self._on_edited())
-        self.picker.selection_changed.connect(lambda _id: self._on_edited())
-        self.custom_edit.textChanged.connect(self._on_edited)
-
-    # ── public API ──
+        self.switch.checkedChanged.connect(self._on_switch)
+        self.browser.chosen.connect(self._on_chosen)
 
     def open_kind(self, kind: str, settings: ZapretTargetSettings) -> None:
-        """Load one kind's stored choice; this is the page's clean state."""
-
         self.kind = kind
         self._settings = settings
         self.set_page_label(KIND_TITLES[kind])
-        self.protocols_label.setText(KIND_PROTOCOLS[kind])
         transport = "tcp" if kind == "tcp" else "udp"
-        self.picker.set_entries(
-            "TCP-стратегия" if transport == "tcp" else "UDP-стратегия",
-            load_strategy_catalog(transport),
-        )
-        self.picker.set_selected(settings.strategy_id(kind))
-        self.custom_edit.blockSignals(True)
-        self.custom_edit.setPlainText(settings.custom_args(kind))
-        self.custom_edit.blockSignals(False)
-        self.switch.blockSignals(True)
-        self.switch.setChecked(settings.enabled(kind))
-        self.switch.blockSignals(False)
-        self.validation_label.setText("")
-        self._sync()
-        self._original = self._snapshot()
+        if transport != self._loaded_transport:
+            self.browser.set_entries(load_strategy_catalog(transport))
+            self._loaded_transport = transport
+        self.browser.set_chosen(settings.strategy_id(kind), settings.custom_args(kind))
+        self._render()
 
     def set_settings(self, settings: ZapretTargetSettings) -> None:
-        """Stored settings changed elsewhere; unapplied edits on screen win.
+        """Stored settings changed elsewhere; a hidden page reloads on its next visit."""
 
-        A hidden page only remembers them: ``open_kind`` reloads on the next
-        visit, and rebuilding a ~470-row catalog nobody sees is wasted work.
-        """
+        self._settings = settings
+        if self.isVisible():
+            self.browser.set_chosen(settings.strategy_id(self.kind), settings.custom_args(self.kind))
+            self._render()
 
-        if self.is_dirty() or not self.isVisible():
-            self._settings = settings
-            return
-        self.open_kind(self.kind, settings)
-
-    def is_dirty(self) -> bool:
-        return bool(self._original) and self._snapshot() != self._original
-
-    # ── internals ──
-
-    def _snapshot(self) -> tuple:
-        return (self.switch.isChecked(), self.picker.selected_id(), self.custom_edit.toPlainText())
-
-    def _on_edited(self) -> None:
-        self.validation_label.setText("")
-        self._sync()
-
-    def _sync(self) -> None:
-        enabled = self.switch.isChecked()
-        self.badge.set_visual(Visual(_KIND_ICONS[self.kind], PROXY if enabled else NEUTRAL), vivid=enabled)
-        self.state_label.setText("включён" if enabled else f"выключен · {off_meaning(self.kind)}")
-        self.strategy_card.setVisible(enabled)
-        self.custom_edit.setVisible(enabled and self.picker.selected_id() == CUSTOM_STRATEGY_ID)
-
-    def _apply(self) -> None:
-        strategy_id = self.picker.selected_id()
-        custom = self.custom_edit.toPlainText()
-        if self.switch.isChecked():
-            if not strategy_id:
-                self.validation_label.setText("Выберите стратегию")
-                return
-            if strategy_id == CUSTOM_STRATEGY_ID:
-                try:
-                    validate_custom_strategy(custom)
-                except ValueError as exc:
-                    self.validation_label.setText(str(exc))
-                    return
-        updated = self._settings.with_kind(
-            self.kind,
-            enabled=self.switch.isChecked(),
-            strategy_id=strategy_id,
-            custom_args=custom,
+    def _render(self) -> None:
+        enabled = self._settings.enabled(self.kind)
+        self.switch.blockSignals(True)
+        self.switch.setChecked(enabled)
+        self.switch.blockSignals(False)
+        self.state_label.setText("Обход включён" if enabled else "Обход выключен")
+        self.off_badge.set_visual(Visual(_KIND_ICONS[self.kind], NEUTRAL))
+        self.off_title.setText(f"Выключено · {off_meaning(self.kind)}")
+        self.off_detail.setText(
+            off_explained(self.kind) + " Включите переключатель вверху, чтобы выбрать стратегию."
         )
-        self._settings = updated
-        self._original = self._snapshot()
-        self.apply_requested.emit(updated)
+        self.off_card.setVisible(not enabled)
+        self.off_stretch.setVisible(not enabled)
+        self.browser.setVisible(enabled)
+
+    def _emit(self, **changes) -> None:
+        settings = self._settings
+        values = {
+            "enabled": settings.enabled(self.kind),
+            "strategy_id": settings.strategy_id(self.kind),
+            "custom_args": settings.custom_args(self.kind),
+            **changes,
+        }
+        self._settings = settings.with_kind(self.kind, **values)
+        self._render()
+        self.settings_changed.emit(self._settings)
+
+    def _on_switch(self, checked: bool) -> None:
+        self._emit(enabled=bool(checked))
+
+    def _on_chosen(self, strategy_id: str, custom_text: str) -> None:
+        self._emit(strategy_id=strategy_id, custom_args=custom_text)
 
 
 # ── presets page ─────────────────────────────────────────────────────────────
 
 
-class PresetItemDelegate(ListItemDelegate):
-    """Thin one-line preset row: name, then meta and an «active» badge."""
-
-    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
-        return QSize(super().sizeHint(option, index).width(), _PRESET_ROW_HEIGHT)
-
-    def initStyleOption(self, option: QStyleOptionViewItem, index: QModelIndex) -> None:
-        # The base delegate re-reads DisplayRole here; the text is drawn below.
-        super().initStyleOption(option, index)
-        option.text = ""
-
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
-        name = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-        meta = str(index.data(Qt.ItemDataRole.UserRole + 1) or "")
-        badge = str(index.data(Qt.ItemDataRole.UserRole + 2) or "")
-        super().paint(painter, option, index)
-
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        small = QFont(option.font)
-        small.setPointSizeF(max(7.5, option.font.pointSizeF() - 1.5))
-        right = option.rect.right() - 12
-        if badge:
-            painter.setFont(small)
-            width = painter.fontMetrics().horizontalAdvance(badge) + 16
-            rect = QRect(right - width, option.rect.center().y() - 9, width, 18)
-            fill = QColor(accent_color())
-            fill.setAlpha(38)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(fill)
-            painter.drawRoundedRect(rect, 9, 9)
-            painter.setPen(accent_color())
-            painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), badge)
-            right -= width + 8
-        if meta:
-            painter.setFont(small)
-            painter.setPen(text_muted_color())
-            width = min(260, painter.fontMetrics().horizontalAdvance(meta) + 8)
-            rect = QRect(right - width, option.rect.y(), width, option.rect.height())
-            painter.drawText(
-                rect,
-                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, width),
-            )
-            right -= width + 8
-        left = option.rect.left() + 14
-        text_width = max(40, right - left)
-        painter.setFont(option.font)
-        painter.setPen(accent_color() if badge else option.palette.text().color())
-        painter.drawText(
-            QRect(left, option.rect.y(), text_width, option.rect.height()),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            painter.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, text_width),
-        )
-        painter.restore()
-
-
 class PresetsPage(DetailPage):
-    """The preset files; double click edits, the context menu does the rest."""
-
-    edit_requested = pyqtSignal(str)
-    start_requested = pyqtSignal(str)
-    create_requested = pyqtSignal()
-    import_requested = pyqtSignal()
-    delete_requested = pyqtSignal(str)
-
     def __init__(self, parent: QWidget | None = None):
         super().__init__("Zapret", "Пресеты", parent, root_key="zapret", page_key="presets")
-        self._presets: list[PresetInfo] = []
-        self._active = ""
-
         self.import_btn = PushButton(FIF.FOLDER, "Импорт", self)
-        self.import_btn.clicked.connect(lambda: self.import_requested.emit())
         self.add_header_action(self.import_btn)
         self.create_btn = PrimaryPushButton(FIF.ADD, "Создать", self)
-        self.create_btn.clicked.connect(lambda: self.create_requested.emit())
         self.add_header_action(self.create_btn)
-
-        self.empty_label = CaptionLabel("Пресетов нет", self)
-        self.empty_label.hide()
-        self.content_layout.addWidget(self.empty_label)
-        self.list = ListWidget(self)
-        self.list.setItemDelegate(PresetItemDelegate(self.list))
-        self.list.setUniformItemSizes(True)
-        self.list.setVerticalScrollMode(ListWidget.ScrollMode.ScrollPerItem)
-        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.list.doubleClicked.connect(lambda index: self._emit_for_row(index.row(), self.edit_requested))
-        self.list.customContextMenuRequested.connect(self._on_context_menu)
-        self.content_layout.addWidget(self.list, 1)
-
-    def show_presets(self, infos: list[PresetInfo], active: str) -> None:
-        self._presets = list(infos)
-        self._active = active
-        self.list.clear()
-        for preset in self._presets:
-            item = QListWidgetItem(preset.name)
-            item.setData(Qt.ItemDataRole.UserRole + 1, preset.description or f"{preset.arg_count} арг.")
-            if preset.name == active:
-                item.setData(Qt.ItemDataRole.UserRole + 2, "Работает")
-            item.setSizeHint(QSize(0, _PRESET_ROW_HEIGHT))
-            item.setToolTip(
-                f"{preset.name}\nАргументов: {preset.arg_count}\nИзменён: {_format_date(preset.modified)}"
-            )
-            self.list.addItem(item)
-        self.empty_label.setVisible(not self._presets)
-        # Size the list to its rows: the page itself scrolls.
-        self.list.setFixedHeight(max(1, len(self._presets)) * _PRESET_ROW_HEIGHT + 8)
-
-    def _emit_for_row(self, row: int, signal) -> None:
-        if 0 <= row < len(self._presets):
-            signal.emit(self._presets[row].name)
-
-    def _on_context_menu(self, pos) -> None:
-        item = self.list.itemAt(pos)
-        if item is None:
-            return
-        row = self.list.row(item)
-        self.list.setCurrentRow(row)
-        menu = RoundMenu(parent=self)
-        for text, icon, signal in (
-            ("Изменить", FIF.EDIT, self.edit_requested),
-            ("Запустить", FIF.PLAY, self.start_requested),
-            ("Удалить", FIF.DELETE, self.delete_requested),
-        ):
-            action = Action(icon, text, self)
-            action.triggered.connect(lambda _checked=False, s=signal: self._emit_for_row(row, s))
-            menu.addAction(action)
-        menu.exec(QCursor.pos())
-
-
-def _format_date(iso: str) -> str:
-    try:
-        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M") if iso else ""
-    except (ValueError, TypeError):
-        return iso
+        self.browser = PresetBrowser(self)
+        self.content_layout.addWidget(self.browser, 1)
 
 
 # ── section ──────────────────────────────────────────────────────────────────
@@ -448,7 +271,6 @@ class ZapretPage(StackedSection):
         self._node: Node | None = None
         self._rule: ServerRule | None = None
         self._server_status = ""
-        self._list_key: tuple = ()
 
         overview = ScrollablePage()
         body, root = overview.body, overview.body_layout
@@ -469,7 +291,7 @@ class ZapretPage(StackedSection):
         status_card = CardWidget(body)
         status_layout = QVBoxLayout(status_card)
         status_layout.setContentsMargins(16, 14, 16, 14)
-        status_layout.setSpacing(12)
+        status_layout.setSpacing(10)
         head = QHBoxLayout()
         head.setSpacing(12)
         self.status_badge = KindBadge(status_card, size=40)
@@ -488,21 +310,20 @@ class ZapretPage(StackedSection):
         status_layout.addLayout(head)
 
         preset_row = QHBoxLayout()
-        preset_row.setSpacing(8)
+        preset_row.setSpacing(6)
         preset_row.addWidget(BodyLabel("Пресет", status_card))
-        self.preset_combo = _expanding(ComboBox(status_card))
-        self.preset_combo.setMinimumWidth(220)
-        preset_row.addWidget(self.preset_combo, 1)
-        self.presets_btn = TransparentPushButton(FIF.LIBRARY, "Все пресеты", status_card)
-        preset_row.addWidget(self.presets_btn)
+        self.preset_link = HyperlinkButton(status_card)
+        self.preset_link.setToolTip("Выбрать пресет")
+        self.preset_link.clicked.connect(self._open_presets)
+        preset_row.addWidget(self.preset_link)
+        self.preset_summary = CaptionLabel("", status_card)
+        preset_row.addWidget(self.preset_summary, 1)
         status_layout.addLayout(preset_row)
 
         autostart_row = QHBoxLayout()
         autostart_row.addWidget(BodyLabel("Запускать вместе с приложением", status_card))
         autostart_row.addStretch(1)
-        self.autostart_switch = SwitchButton(status_card)
-        self.autostart_switch.setOnText("")
-        self.autostart_switch.setOffText("")
+        self.autostart_switch = _switch(status_card)
         autostart_row.addWidget(self.autostart_switch)
         status_layout.addLayout(autostart_row)
         root.addWidget(status_card)
@@ -525,6 +346,9 @@ class ZapretPage(StackedSection):
         for label in (self.server_title, self.server_endpoint, self.server_rule):
             server_text.addWidget(label)
         server_layout.addLayout(server_text, 1)
+        self.server_setup_btn = PushButton(FIF.SETTING, "Настроить", server_card)
+        self.server_setup_btn.clicked.connect(self._open_current_kind)
+        server_layout.addWidget(self.server_setup_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(server_card)
 
         # ── server kinds ──
@@ -542,26 +366,28 @@ class ZapretPage(StackedSection):
         self.add_sub_page(self._presets_page)
         self._editor = PresetEditWidget(self)
         self.add_sub_page(self._editor)
-        # The editor is reached from the preset list and returns there.
+        # The editor is reached from the preset page and returns there.
         self._editor.back_requested.disconnect(self.show_root)
         self._editor.back_requested.connect(lambda: self.show_sub_page(self._presets_page))
 
-        self.presets_btn.clicked.connect(lambda: self.show_sub_page(self._presets_page))
-        self.preset_combo.currentIndexChanged.connect(self._on_preset_chosen)
-        self.autostart_switch.checkedChanged.connect(lambda checked: self.autostart_changed.emit(bool(checked)))
-        self._kind_page.apply_requested.connect(self._on_kind_applied)
-        self._presets_page.edit_requested.connect(self._open_editor)
-        self._presets_page.start_requested.connect(self.start_requested)
-        self._presets_page.create_requested.connect(self._on_create)
-        self._presets_page.import_requested.connect(self._on_import)
-        self._presets_page.delete_requested.connect(self._on_delete)
+        self.autostart_switch.checkedChanged.connect(
+            lambda checked: self.autostart_changed.emit(bool(checked))
+        )
+        self._kind_page.settings_changed.connect(self._on_kind_changed)
+        browser = self._presets_page.browser
+        browser.chosen.connect(self._choose_preset)
+        browser.edit_requested.connect(self._open_editor)
+        browser.delete_requested.connect(self._on_delete)
+        self._presets_page.create_btn.clicked.connect(self._on_create)
+        self._presets_page.import_btn.clicked.connect(self._on_import)
         self._editor.save_requested.connect(self._on_save_preset)
         on_theme_or_accent_changed(self._on_theme_changed)
         self._render()
 
     def _on_theme_changed(self, *_args) -> None:
-        # Delegates read the accent at paint time; a repaint picks up a new one.
-        self._presets_page.list.viewport().update()
+        # List delegates read the theme at paint time; a repaint picks it up.
+        self._presets_page.browser.list.viewport().update()
+        self._kind_page.browser.list.viewport().update()
 
     # ── state from the application ──
 
@@ -569,14 +395,16 @@ class ZapretPage(StackedSection):
         self._presets = list(infos)
         if selected:
             self._selected_preset = selected
-        self._fill_preset_combo()
+        self._sync_presets()
         self._render()
 
     def set_status(self, status: ZapretStatus) -> None:
+        running_changed = status.active != self._status.active or status.preset != self._status.preset
         self._status = status
-        if status.preset and status.state in ("running", "starting"):
+        if status.preset and status.active:
             self._selected_preset = status.preset
-        self._fill_preset_combo()  # the «Работает» badge follows the process
+        if running_changed:
+            self._sync_presets()  # the «Работает» chip follows the process
         self._render()
 
     def set_target_settings(self, settings: ZapretTargetSettings) -> None:
@@ -595,7 +423,7 @@ class ZapretPage(StackedSection):
     def set_server_status(self, busy: bool, text: str = "") -> None:
         """Connection-transition text («DNS выбранного VPN-сервера…»)."""
         self._server_status = text if busy else ""
-        self._render()
+        self._render_server()
 
     def set_autostart(self, enabled: bool) -> None:
         self.autostart_switch.blockSignals(True)
@@ -616,35 +444,33 @@ class ZapretPage(StackedSection):
 
     def _render_status(self) -> None:
         status = self._status
-        running = status.state in ("running", "starting")
-        preset = status.preset or self._selected_preset
         if status.state == "running":
-            visual, title = Visual(FIF.PLAY_SOLID, PROXY), "Zapret работает"
-            detail = f"Пресет «{preset}»"
+            visual, title, detail = Visual(FIF.PLAY_SOLID, PROXY), "Zapret работает", ""
         elif status.state == "starting":
-            visual, title = Visual(FIF.SYNC, SPECIAL), "Zapret запускается…"
-            detail = f"Пресет «{preset}»"
+            visual, title, detail = Visual(FIF.SYNC, SPECIAL), "Zapret запускается…", ""
         elif status.state == "error":
-            visual, title = Visual(FIF.CLOSE, BLOCK), "Zapret остановлен из-за ошибки"
-            detail = status.message
+            visual, title, detail = Visual(FIF.CLOSE, BLOCK), "Zapret остановлен из-за ошибки", status.message
         else:
-            visual, title = Visual(FIF.PAUSE_BOLD, NEUTRAL), "Zapret выключен"
+            visual, title, detail = Visual(FIF.PAUSE_BOLD, NEUTRAL), "Zapret выключен", ""
             endpoint = endpoint_for_node(self._node)
             if endpoint is not None and self._settings.enabled(endpoint.kind):
                 detail = f"Включится сам при подключении к «{self._node.name}»"
-            else:
-                detail = ""
         self.status_badge.set_visual(visual, vivid=status.state == "running")
         self.status_title.setText(title)
         self.status_detail.setText(detail)
         self.status_detail.setVisible(bool(detail))
-        self.toggle_btn.setText("Остановить" if running else "Запустить")
-        self.toggle_btn.setIcon(FIF.PAUSE_BOLD if running else FIF.PLAY)
-        self.toggle_btn.setEnabled(running or bool(self._selected_preset))
+        self.toggle_btn.setText("Остановить" if status.active else "Запустить")
+        self.toggle_btn.setIcon(FIF.PAUSE_BOLD if status.active else FIF.PLAY)
+        self.toggle_btn.setEnabled(status.active or bool(self._selected_preset))
+
+        preset = next((item for item in self._presets if item.name == self._selected_preset), None)
+        self.preset_link.setText(self._selected_preset or "выбрать")
+        self.preset_summary.setText(preset.summary.short() if preset is not None else "")
 
     def _render_server(self) -> None:
         node = self._node
         endpoint = endpoint_for_node(node)
+        self.server_setup_btn.setVisible(endpoint is not None)
         if node is None:
             self.server_badge.set_visual(Visual(FIF.VPN, NEUTRAL))
             self.server_title.setText("Сервер не выбран")
@@ -676,57 +502,49 @@ class ZapretPage(StackedSection):
             text += " · применится при подключении"
         self.server_rule.setText(text)
 
-    def _fill_preset_combo(self) -> None:
-        names = [preset.name for preset in self._presets]
-        if self._selected_preset and self._selected_preset not in names:
-            names.insert(0, self._selected_preset)
-        active = self._status.preset if self._status.state in ("running", "starting") else ""
-        key = (tuple(self._presets), self._selected_preset, active)
-        if key == self._list_key:
-            return  # status ticks (every transition step) change nothing here
-        self._list_key = key
-        self.preset_combo.blockSignals(True)
-        self.preset_combo.clear()
-        for name in names:
-            self.preset_combo.addItem(name, userData=name)
-        if self._selected_preset in names:
-            self.preset_combo.setCurrentIndex(names.index(self._selected_preset))
-        else:
-            self.preset_combo.setCurrentIndex(-1)
-        self.preset_combo.blockSignals(False)
-        self._presets_page.show_presets(self._presets, active)
+    def _sync_presets(self) -> None:
+        running = self._status.preset if self._status.active else ""
+        self._presets_page.browser.set_presets(self._presets, self._selected_preset, running)
 
     # ── user actions ──
 
     def _on_toggle(self) -> None:
-        if self._status.state in ("running", "starting"):
+        if self._status.active:
             self.stop_requested.emit()
         elif self._selected_preset:
             self.start_requested.emit(self._selected_preset)
 
-    def _on_preset_chosen(self, index: int) -> None:
-        name = str(self.preset_combo.itemData(index) or "")
-        if not name or name == self._selected_preset:
+    def _open_presets(self) -> None:
+        self._presets_page.browser.highlight(self._selected_preset)
+        self.show_sub_page(self._presets_page)
+
+    def _choose_preset(self, name: str) -> None:
+        if not name:
             return
         self._selected_preset = name
         self.preset_selected.emit(name)
-        if self._status.state in ("running", "starting"):
-            # The combo shows what runs: switching it restarts on that preset.
+        if self._status.active:
+            # What runs is what is chosen: switching restarts on that preset.
             self.start_requested.emit(name)
+        self._sync_presets()
         self._render()
 
     def _open_kind(self, kind: str) -> None:
         self._kind_page.open_kind(kind, self._settings)
         self.show_sub_page(self._kind_page)
 
-    def _on_kind_applied(self, settings: ZapretTargetSettings) -> None:
+    def _open_current_kind(self) -> None:
+        endpoint = endpoint_for_node(self._node)
+        if endpoint is not None:
+            self._open_kind(endpoint.kind)
+
+    def _on_kind_changed(self, settings: ZapretTargetSettings) -> None:
         self._settings = settings
         self._render()
-        self.show_root()
         self.target_settings_changed.emit(settings)
 
-    def _reload_presets(self, select: str = "") -> None:
-        self.set_presets(presets.list_preset_infos(), select)
+    def _reload_presets(self) -> None:
+        self.set_presets(presets.list_preset_infos())
 
     def _open_editor(self, name: str) -> None:
         info = next((preset for preset in self._presets if preset.name == name), None)
@@ -751,6 +569,8 @@ class ZapretPage(StackedSection):
         self._reload_presets()
         if info is None:
             MessageBox("Импорт пресета", "Не удалось импортировать файл.", self.window()).exec()
+        else:
+            self._presets_page.browser.highlight(info.name)
 
     def _on_delete(self, name: str) -> None:
         box = MessageBox("Удаление пресета", f"Удалить «{name}»?", self.window())
@@ -758,7 +578,7 @@ class ZapretPage(StackedSection):
         box.cancelButton.setText("Отмена")
         if not box.exec():
             return
-        if name == self._status.preset and self._status.state in ("running", "starting"):
+        if name == self._status.preset and self._status.active:
             self.stop_requested.emit()
         presets.delete_preset(name)
         if name == self._selected_preset:
@@ -782,10 +602,10 @@ class ZapretPage(StackedSection):
             self._editor.show_error(f"Не удалось сохранить: {exc}")
             return
         self._editor.mark_saved(name, description, content)
-        running = self._status.state in ("running", "starting")
         self._reload_presets()
+        self._presets_page.browser.highlight(name)
         self.show_sub_page(self._presets_page)
-        if running and self._status.preset in (original, name):
+        if self._status.active and self._status.preset in (original, name):
             # winws2 reads the file at launch: restart it on what was saved.
             self._selected_preset = name
             self.start_requested.emit(name)

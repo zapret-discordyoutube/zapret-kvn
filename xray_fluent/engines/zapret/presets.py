@@ -27,6 +27,99 @@ DEFAULT_PRESET_NAME = "Default"
 _HEADER_KEYS = ("Preset", "Description", "Created", "Modified", "BuiltinVersion")
 _REWRITTEN_KEYS = ("Preset", "Description", "Created", "Modified")
 
+_TARGET_PREFIXES = ("--hostlist=", "--ipset=", "--hostlist-domains=", "--ipset-ip=", "--filter-l7=")
+#: Generic list names read better in words.
+_TARGET_WORDS = {
+    "other": "прочие сайты",
+    "blacklist": "реестр блокировок",
+    "all": "общий IP-список",
+    "base": "",
+    "exclude": "",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PresetSummary:
+    """What a preset works on, read from its own arguments."""
+
+    profiles: int = 0
+    tcp_ports: str = ""
+    udp_ports: str = ""
+    #: Named targets (lists, domains, L7 protocols) in order of appearance.
+    targets: tuple[str, ...] = ()
+    #: Some profile has a filter but no target: it handles all other traffic.
+    catch_all: bool = False
+
+    def short(self) -> str:
+        """One line for a list row: targets first, then the rest."""
+
+        parts = list(self.targets[:4])
+        if len(self.targets) > 4:
+            parts.append(f"ещё {len(self.targets) - 4}")
+        if self.catch_all:
+            parts.append("остальной трафик")
+        return ", ".join(parts) or "без целей"
+
+
+def _target_name(raw: str) -> str:
+    """``lists/ipset-discord.txt`` → ``discord``; ``googlevideo.com`` → ``googlevideo``."""
+
+    value = raw.strip().replace("\\", "/").lower()
+    if "/" in value or value.endswith(".txt"):
+        name = value.rsplit("/", 1)[-1].removesuffix(".txt")
+    else:
+        # A domain names its site: updates.discord.com → discord.
+        labels = [label for label in value.split(".") if label]
+        name = labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
+    for prefix in ("ipset-", "russia-"):
+        name = name.removeprefix(prefix)
+    for suffix in ("-ipset_v6", "-ipset", "_v6", "-rtmps"):
+        name = name.removesuffix(suffix)
+    name = name.rstrip("0123456789")
+    return _TARGET_WORDS.get(name, name)
+
+
+def summarize_arguments(args: list[str]) -> PresetSummary:
+    profiles: list[list[str]] = [[]]
+    tcp: list[str] = []
+    udp: list[str] = []
+    for arg in args:
+        if arg == "--new" or arg.startswith("--new="):
+            profiles.append([])
+        elif arg.startswith("--wf-tcp-out="):
+            tcp.append(arg.removeprefix("--wf-tcp-out="))
+        elif arg.startswith("--wf-udp-out="):
+            udp.append(arg.removeprefix("--wf-udp-out="))
+        else:
+            profiles[-1].append(arg)
+    targets: dict[str, None] = {}
+    catch_all = False
+    counted = 0
+    for profile in profiles:
+        if not any(arg.startswith("--filter-") for arg in profile):
+            continue
+        counted += 1
+        named = False
+        for arg in profile:
+            prefix = next((item for item in _TARGET_PREFIXES if arg.startswith(item)), "")
+            if not prefix:
+                continue
+            named = True
+            if prefix == "--ipset-ip=":
+                continue
+            for value in arg[len(prefix):].split(","):
+                target = _target_name(value)
+                if len(target) > 1:  # x.com / t.me read as noise
+                    targets.setdefault(target, None)
+        catch_all = catch_all or not named
+    return PresetSummary(
+        profiles=counted,
+        tcp_ports=",".join(tcp),
+        udp_ports=",".join(udp),
+        targets=tuple(targets),
+        catch_all=catch_all,
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class PresetInfo:
@@ -36,6 +129,7 @@ class PresetInfo:
     modified: str
     arg_count: int
     file_path: Path
+    summary: PresetSummary = PresetSummary()
 
 
 def preset_path(name: str) -> Path:
@@ -73,13 +167,15 @@ def _header(text: str) -> dict[str, str]:
 
 def _info(path: Path, text: str) -> PresetInfo:
     meta = _header(text)
+    args = _argument_lines(text)
     return PresetInfo(
         name=path.stem,
         description=meta.get("Description", ""),
         created=meta.get("Created", ""),
         modified=meta.get("Modified", ""),
-        arg_count=len(_argument_lines(text)),
+        arg_count=len(args),
         file_path=path,
+        summary=summarize_arguments(args),
     )
 
 

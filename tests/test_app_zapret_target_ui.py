@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 _existing = QApplication.instance()
 if _existing is not None and not isinstance(_existing, QApplication):
@@ -24,6 +24,7 @@ from xray_fluent.engines.zapret.endpoint import ResolvedEndpoint, endpoint_for_n
 from xray_fluent.engines.zapret.presets import PresetInfo
 from xray_fluent.engines.zapret.strategies import CUSTOM_STRATEGY_ID, load_strategy_catalog
 from xray_fluent.profiles.models import Node, ZapretTargetSettings
+from xray_fluent.ui.zapret_browser import ID_ROLE
 from xray_fluent.ui.zapret_page import ZapretPage, ZapretStatus
 
 _page = ZapretPage()
@@ -73,18 +74,27 @@ class ZapretOverviewTests(unittest.TestCase):
         self.assertEqual(started, ["Default"])
         self.assertEqual(stopped, [True])
 
-    def test_changing_the_preset_while_running_restarts_on_it(self) -> None:
+    def test_choosing_a_preset_while_running_restarts_on_it(self) -> None:
         started: list[str] = []
         chosen: list[str] = []
         _page.set_status(ZapretStatus("running", "Default"))
+        _page.preset_link.click()
+        self.assertIs(_page._stack.currentWidget(), _page._presets_page)
+        browser = _page._presets_page.browser
+        self.assertEqual(browser.highlighted(), "Default")
         _page.start_requested.connect(started.append)
         _page.preset_selected.connect(chosen.append)
         try:
-            _page.preset_combo.setCurrentIndex(1)
+            browser.highlight("Other")
+            self.assertEqual(chosen, [])  # highlighting only shows the preset
+            browser.choose_btn.click()
         finally:
             _page.start_requested.disconnect(started.append)
             _page.preset_selected.disconnect(chosen.append)
         self.assertEqual((chosen, started), (["Other"], ["Other"]))
+        self.assertEqual(_page.preset_link.text(), "Other")
+        self.assertEqual(browser.choose_btn.text(), "Выбран")
+        _page.show_root()
 
     def test_stopped_card_says_when_zapret_will_start_by_itself(self) -> None:
         _page.set_selected_node(_TCP)
@@ -130,82 +140,101 @@ class KindPageTests(unittest.TestCase):
     def setUp(self) -> None:
         _page.show_root()
         _page.set_target_settings(ZapretTargetSettings())
+        self.emitted: list[ZapretTargetSettings] = []
+        _page.target_settings_changed.connect(self.emitted.append)
+
+    def tearDown(self) -> None:
+        _page.target_settings_changed.disconnect(self.emitted.append)
+        _page.show_root()
 
     def _open(self, kind: str):
         _page.kind_rows[kind].clicked.emit()
         return _page._kind_page
 
-    def test_row_opens_the_kind_page(self) -> None:
-        page = self._open("wireguard")
+    def test_row_opens_the_kind_page_on_the_strategy_in_use(self) -> None:
+        page = self._open("tcp")
         self.assertIs(_page._stack.currentWidget(), page)
-        self.assertEqual(page.title_label.text(), "WireGuard")
-        self.assertFalse(page.is_dirty())
+        self.assertEqual(page.title_label.text(), "TCP-серверы")
+        self.assertEqual(page.browser.highlighted_id(), "alt9")
+        self.assertEqual(page.browser.use_btn.text(), "Используется")
+        self.assertFalse(page.browser.use_btn.isEnabled())
 
-    def test_catalog_is_hidden_while_the_bypass_is_off(self) -> None:
+    def test_switch_applies_at_once_and_shows_the_catalog(self) -> None:
         page = self._open("quic")
-        self.assertTrue(page.strategy_card.isHidden())
+        self.assertTrue(page.browser.isHidden())
+        self.assertIn("не трогать", page.off_title.text())
         page.switch.setChecked(True)
-        self.assertFalse(page.strategy_card.isHidden())
-        self.assertTrue(page.is_dirty())
+        self.assertFalse(page.browser.isHidden())
+        self.assertEqual(len(self.emitted), 1)
+        self.assertTrue(self.emitted[0].quic_proxy_enabled)
 
-    def test_apply_changes_only_that_kind_and_returns(self) -> None:
-        emitted: list[ZapretTargetSettings] = []
-        _page.target_settings_changed.connect(emitted.append)
-        try:
-            page = self._open("wireguard")
-            page.switch.setChecked(True)
-            page.picker.set_selected("fake_zero")
-            page.apply_btn.click()
-        finally:
-            _page.target_settings_changed.disconnect(emitted.append)
-        self.assertEqual(len(emitted), 1)
-        self.assertTrue(emitted[0].wireguard_enabled)
-        self.assertEqual(emitted[0].wireguard_strategy_id, "fake_zero")
-        self.assertEqual(emitted[0].quic_strategy_id, "general_bf_32")
-        self.assertTrue(_page.is_root_visible())
+    def test_use_button_changes_only_that_kind(self) -> None:
+        page = self._open("wireguard")
+        page.switch.setChecked(True)
+        page.browser.highlight("fake_zero")
+        self.assertEqual(len(self.emitted), 1)  # highlighting applies nothing
+        page.browser.use_btn.click()
+        latest = self.emitted[-1]
+        self.assertTrue(latest.wireguard_enabled)
+        self.assertEqual(latest.wireguard_strategy_id, "fake_zero")
+        self.assertEqual(latest.quic_strategy_id, "general_bf_32")
+        self.assertEqual(page.browser.chosen_id(), "fake_zero")
         self.assertIn("Fake 0x00", _page.kind_rows["wireguard"].value.text())
 
     def test_invalid_own_strategy_is_refused(self) -> None:
-        emitted: list[ZapretTargetSettings] = []
-        _page.target_settings_changed.connect(emitted.append)
-        try:
-            page = self._open("tcp")
-            page.picker.set_selected(CUSTOM_STRATEGY_ID)
-            page._on_edited()
-            page.custom_edit.setPlainText("--new")
-            page.apply_btn.click()
-        finally:
-            _page.target_settings_changed.disconnect(emitted.append)
-        self.assertEqual(emitted, [])
-        self.assertTrue(page.validation_label.text())
-        self.assertFalse(page.custom_edit.isHidden())
-
-    def test_unapplied_edits_survive_an_external_settings_change(self) -> None:
         page = self._open("tcp")
-        page.picker.set_selected("multisplit_pos1")
-        page._on_edited()
-        _page.set_target_settings(ZapretTargetSettings(quic_proxy_enabled=True))
-        self.assertEqual(page.picker.selected_id(), "multisplit_pos1")
-        self.assertTrue(page._settings.quic_proxy_enabled)
+        page.browser.highlight(CUSTOM_STRATEGY_ID)
+        self.assertFalse(page.browser.custom_edit.isHidden())
+        page.browser.custom_edit.setPlainText("--new")
+        page.browser.use_btn.click()
+        self.assertEqual(self.emitted, [])
+        self.assertTrue(page.browser.error_label.text())
+        page.browser.custom_edit.setPlainText("--lua-desync=fake:repeats=2")
+        page.browser.use_btn.click()
+        self.assertEqual(self.emitted[-1].tcp_strategy_id, CUSTOM_STRATEGY_ID)
+        self.assertEqual(self.emitted[-1].tcp_custom_args, "--lua-desync=fake:repeats=2")
 
-    def test_search_does_not_reassign_the_selection(self) -> None:
-        page = self._open("tcp")
-        page.picker.set_selected("alt9")
-        page.picker.search.setText("zzz-no-such-strategy")
-        page.picker._rebuild()
-        self.assertEqual(page.picker.selected_id(), "alt9")
-        self.assertIn("скрыта", page.picker.hidden_hint.text())
-        page.picker.search.setText("")
-        page.picker._rebuild()
+    def test_filter_keeps_the_highlight(self) -> None:
+        browser = self._open("tcp").browser
+        browser.search.setText("zzz-no-such-strategy")
+        browser._rebuild()
+        self.assertEqual(browser.highlighted_id(), "alt9")
+        self.assertEqual(browser.list.count(), 0)
+        browser.search.setText("")
+        browser._rebuild()
+        self.assertEqual(browser.list.currentItem().data(ID_ROLE), "alt9")
 
-    def test_strategy_list_never_shows_a_sliced_row(self) -> None:
-        from xray_fluent.ui.strategy_picker import _ROW_HEIGHT, _VISIBLE_ROWS
+    def test_group_filter_lists_labels_with_counts(self) -> None:
+        browser = self._open("tcp").browser
+        titles = [browser.group.itemText(index) for index in range(browser.group.count())]
+        self.assertTrue(titles[0].startswith("Все · "))
+        self.assertTrue(any(title.startswith("Рекомендуется · ") for title in titles))
+        browser.group.setCurrentIndex(titles.index(next(t for t in titles if t.startswith("Осторожно"))))
+        shown = [browser.list.item(row).data(ID_ROLE) for row in range(browser.list.count())]
+        self.assertTrue(all(load_strategy_catalog("tcp")[i].label == "caution" for i in shown if i != CUSTOM_STRATEGY_ID))
+        browser.group.setCurrentIndex(0)
 
-        picker = self._open("quic").picker
-        picker._fit_list_height()
-        viewport = picker.list.viewport().height()
-        self.assertEqual(viewport % _ROW_HEIGHT, 0)
-        self.assertEqual(viewport // _ROW_HEIGHT, _VISIBLE_ROWS)
+    def test_arguments_are_split_into_readable_lines(self) -> None:
+        from xray_fluent.ui.zapret_browser import readable_arguments
+
+        self.assertEqual(
+            readable_arguments(("--payload=tls_client_hello", "--lua-desync=fake:blob=tls_google:repeats=6")),
+            "--payload=tls_client_hello\n--lua-desync=fake\n    blob=tls_google\n    repeats=6",
+        )
+
+    def test_card_moves_under_the_list_on_a_narrow_window(self) -> None:
+        from xray_fluent.ui.zapret_browser import SplitView
+
+        split = SplitView(QWidget(), QWidget())
+        split.resize(1000, 600)
+        split.resize(700, 600)
+        split.show()
+        app.processEvents()
+        self.assertTrue(split.stacked)
+        split.resize(1100, 600)
+        app.processEvents()
+        self.assertFalse(split.stacked)
+        split.deleteLater()
 
 
 class PresetsPageTests(unittest.TestCase):
@@ -214,7 +243,7 @@ class PresetsPageTests(unittest.TestCase):
         _page.set_status(ZapretStatus("running", "Other"))
         from PyQt6.QtCore import Qt
 
-        badge = _page._presets_page.list.item(1).data(Qt.ItemDataRole.UserRole + 2)
+        badge = _page._presets_page.browser.list.item(1).data(Qt.ItemDataRole.UserRole + 2)
         self.assertEqual(badge, "Работает")
         _page.set_status(ZapretStatus("stopped"))
 
@@ -263,8 +292,23 @@ class PresetsPageTests(unittest.TestCase):
         from PyQt6.QtWidgets import QAbstractItemView
 
         per_item = QAbstractItemView.ScrollMode.ScrollPerItem
-        self.assertEqual(_page._presets_page.list.verticalScrollMode(), per_item)
-        self.assertEqual(_page._kind_page.picker.list.verticalScrollMode(), per_item)
+        self.assertEqual(_page._presets_page.browser.list.verticalScrollMode(), per_item)
+        self.assertEqual(_page._kind_page.browser.list.verticalScrollMode(), per_item)
+
+    def test_preset_summary_names_its_targets(self) -> None:
+        from xray_fluent.engines.zapret.presets import summarize_arguments
+
+        summary = summarize_arguments([
+            "--wf-tcp-out=80,443", "--filter-tcp=443", "--hostlist=lists/youtube.txt",
+            "--hostlist-domains=updates.discord.com", "--new", "--filter-udp=443",
+            "--ipset=lists/ipset-cloudflare1.txt", "--new", "--filter-tcp=80,443",
+            "--hostlist-exclude=lists/netrogat.txt",
+        ])
+        self.assertEqual(summary.profiles, 3)
+        self.assertEqual(summary.targets, ("youtube", "discord", "cloudflare"))
+        self.assertTrue(summary.catch_all)
+        self.assertEqual(summary.tcp_ports, "80,443")
+        self.assertIn("остальной трафик", summary.short())
 
 
 class SourceRulesTests(unittest.TestCase):

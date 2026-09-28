@@ -204,7 +204,7 @@ class ZapretActivePresetAccentTest(_AccentRestoreMixin):
         super().tearDown()
 
     def _badge(self, row: int) -> str:
-        item = self.page._presets_page.list.item(row)
+        item = self.page._presets_page.browser.list.item(row)
         return str(item.data(Qt.ItemDataRole.UserRole + 2) or "")
 
     def _row_colors(self, row: int) -> set[tuple[int, int, int]]:
@@ -214,7 +214,7 @@ class ZapretActivePresetAccentTest(_AccentRestoreMixin):
         from PyQt6.QtGui import QImage, QPainter
         from PyQt6.QtWidgets import QStyleOptionViewItem
 
-        view = self.page._presets_page.list
+        view = self.page._presets_page.browser.list
         index = view.model().index(row, 0)
         option = QStyleOptionViewItem()
         option.rect = QRect(0, 0, 420, 44)
