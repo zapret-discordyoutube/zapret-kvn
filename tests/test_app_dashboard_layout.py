@@ -114,8 +114,9 @@ class DashboardWordWrapTest(unittest.TestCase):
         self.assertFalse(page.connection_ports_label.isHidden())
         self.assertEqual(
             page.connection_ports_label.text(),
-            "Mixed (SOCKS5 + HTTP): 127.0.0.1:1392  ·  HTTP: 127.0.0.1:1393",
+            "SOCKS5: 127.0.0.1:1392  ·  HTTP: 127.0.0.1:1393",
         )
+        self.assertIn("Порт 1392 принимает и HTTP", page.connection_ports_label.toolTip())
 
         page.set_tun_mode(True)
         page._do_refresh_dashboard()

@@ -865,6 +865,7 @@ class DashboardPage(StackedSection):
         self.proxy_options.setVisible(not self._settings.tun_mode)
         ports_text = self._proxy_ports_text()
         self.connection_ports_label.setText(ports_text)
+        self.connection_ports_label.setToolTip(self._proxy_ports_tooltip())
         self.connection_ports_label.setVisible(bool(ports_text))
 
     def _color_state_title(self, *_args) -> None:
@@ -1093,11 +1094,23 @@ class DashboardPage(StackedSection):
             or self._proxy_http_port <= 0
         ):
             return ""
-        socks_role = "Mixed (SOCKS5 + HTTP)" if self._is_singbox_proxy_mode() else "SOCKS5"
+        # Каждый протокол — со своим портом; то, что SOCKS-порт sing-box
+        # (mixed) понимает и HTTP, — подробность для подсказки, не для строки.
         return (
-            f"{socks_role}: 127.0.0.1:{self._proxy_socks_port}  ·  "
+            f"SOCKS5: 127.0.0.1:{self._proxy_socks_port}  ·  "
             f"HTTP: 127.0.0.1:{self._proxy_http_port}"
         )
+
+    def _proxy_ports_tooltip(self) -> str:
+        if not self._proxy_ports_text():
+            return ""
+        tip = (
+            f"SOCKS5 — 127.0.0.1:{self._proxy_socks_port}\n"
+            f"HTTP — 127.0.0.1:{self._proxy_http_port}"
+        )
+        if self._is_singbox_proxy_mode():
+            tip += f"\nПорт {self._proxy_socks_port} принимает и HTTP (режим mixed)"
+        return tip
 
     def _system_proxy_note(self) -> str:
         """Пояснение о реальном состоянии прокси Windows (чужой прокси / PAC)."""
