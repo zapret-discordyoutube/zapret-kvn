@@ -467,3 +467,40 @@ class LockUpdateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetadataRetryTests(unittest.TestCase):
+    def test_transient_reset_is_retried_and_http_status_is_not(self) -> None:
+        from urllib.error import HTTPError
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"{}"
+
+        calls = [ConnectionResetError(104, "Connection reset by peer"), _Response()]
+
+        def flaky(_request, timeout):
+            item = calls.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with patch.object(resolver, "urlopen", side_effect=flaky), patch.object(
+            resolver.time, "sleep"
+        ):
+            self.assertEqual(resolver.fetch_bytes("https://example.invalid/a"), b"{}")
+        self.assertEqual(calls, [])
+
+        refused = HTTPError("https://example.invalid/a", 403, "Forbidden", {}, None)
+        with patch.object(resolver, "urlopen", side_effect=refused) as opened, patch.object(
+            resolver.time, "sleep"
+        ):
+            with self.assertRaises(resolver.ResolverError):
+                resolver.fetch_bytes("https://example.invalid/a")
+        self.assertEqual(opened.call_count, 1)

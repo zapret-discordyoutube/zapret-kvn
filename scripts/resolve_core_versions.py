@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -40,6 +41,7 @@ USER_AGENT = "ZapretKVN-core-resolver/1"
 # sing-box page is a little over 4 MiB, so keep a bounded but sufficient cap
 # rather than making the API read unbounded.
 METADATA_LIMIT = 16 * 1024 * 1024
+METADATA_ATTEMPTS = 4
 ARCHIVE_LIMIT = 512 * 1024 * 1024
 
 XRAY_REPOSITORY = "XTLS/Xray-core"
@@ -94,11 +96,19 @@ def fetch_bytes(url: str, *, timeout: float = 30.0, limit: int = METADATA_LIMIT)
     """Fetch a bounded response using the resolver's fixed public User-Agent."""
 
     request = Request(url, headers=_request_headers(url, "application/json"))
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return _read_bounded(response, limit=limit)
-    except (HTTPException, HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise ResolverError(f"download failed for {url}: {exc}") from exc
+    # A reset or timeout before any HTTP answer is transient on the release
+    # host's network; an HTTP status is the server's verdict and is not retried.
+    for attempt in range(METADATA_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return _read_bounded(response, limit=limit)
+        except HTTPError as exc:
+            raise ResolverError(f"download failed for {url}: {exc}") from exc
+        except (HTTPException, URLError, TimeoutError, OSError) as exc:
+            if attempt + 1 == METADATA_ATTEMPTS:
+                raise ResolverError(f"download failed for {url}: {exc}") from exc
+            time.sleep(1.0 + attempt)
+    raise AssertionError("unreachable")
 
 
 def fetch_json(url: str, *, timeout: float = 30.0) -> Any:
