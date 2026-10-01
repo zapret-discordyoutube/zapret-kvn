@@ -60,7 +60,9 @@ def read_tree(root: Path) -> dict[str, str]:
 
 class InstallerCase(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
+        # Windows отпускает образ завершённого процесса не мгновенно: уборка
+        # временного каталога не должна превращать это в провал теста.
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)
         self.app_dir = root / "app"
