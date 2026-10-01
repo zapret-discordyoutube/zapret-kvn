@@ -519,3 +519,67 @@ class Ac7UiInvariantTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DependentSettingsVisibilityTests(unittest.TestCase):
+    """Настройка, которая сейчас ни на что не влияет, не показывается."""
+
+    def _page(self, **settings):
+        page = _get_settings_page()
+        page.set_values(AppSettings(**settings), SecuritySettings())
+        return page
+
+    def test_rotation_details_appear_only_when_rotation_is_on(self) -> None:
+        page = self._page(rotation_enabled=False)
+        details = (
+            page.rotation_mode_card, page.rotation_interval_card, page.rotation_jitter_card,
+            page.rotation_pool_card, page.rotation_only_alive_card, page.rotation_max_nodes_card,
+            page.rotation_pool_value_card,
+        )
+        self.assertTrue(all(card.isHidden() for card in details))
+        page = self._page(rotation_enabled=True, rotation_pool="all")
+        self.assertFalse(any(card.isHidden() for card in details[:-1]))
+        # «Все серверы» уточнять нечем.
+        self.assertTrue(page.rotation_pool_value_card.isHidden())
+
+    def test_pool_value_is_named_after_the_chosen_pool(self) -> None:
+        page = self._page(rotation_enabled=True, rotation_pool="tag")
+        self.assertFalse(page.rotation_pool_value_card.isHidden())
+        self.assertEqual(page.rotation_pool_value_card.titleLabel.text(), "Тег")
+        page = self._page(rotation_enabled=True, rotation_pool="subscription")
+        self.assertEqual(page.rotation_pool_value_card.titleLabel.text(), "Подписка")
+
+    def test_auto_switch_details_follow_their_switch(self) -> None:
+        page = self._page(auto_switch_enabled=False)
+        self.assertTrue(page.auto_switch_low_speed_card.isHidden())
+        self.assertTrue(page.auto_switch_cooldown_card.isHidden())
+        page.auto_switch_card.setChecked(True)
+        self.assertFalse(page.auto_switch_low_speed_card.isHidden())
+        self.assertFalse(page.auto_switch_cooldown_card.isHidden())
+
+    def test_startup_order_needs_both_autoconnect_and_startup_subscription_check(self) -> None:
+        both = dict(
+            auto_connect_last=True, subscriptions_auto_update=True, subscriptions_check_on_startup=True
+        )
+        self.assertFalse(self._page(**both).startup_order_card.isHidden())
+        for off in both:
+            page = self._page(**{**both, off: False})
+            self.assertTrue(page.startup_order_card.isHidden(), off)
+
+    def test_hidden_settings_keep_their_values(self) -> None:
+        page = self._page(rotation_enabled=False, rotation_interval_sec=777, rotation_pool="tag",
+                          rotation_pool_value="игры")
+        received: list[AppSettings] = []
+        page.save_requested.connect(received.append)
+        try:
+            page.reconnect_card.setChecked(not page.reconnect_card.isChecked())
+        finally:
+            page.save_requested.disconnect(received.append)
+        self.assertEqual(received[-1].rotation_interval_sec, 777)
+        self.assertEqual(received[-1].rotation_pool_value, "игры")
+
+    def test_units_are_shown_next_to_the_number(self) -> None:
+        page = _get_settings_page()
+        self.assertEqual(page.auto_switch_cooldown_card.spin.suffix(), " с")
+        self.assertEqual(page.rotation_jitter_card.spin.suffix(), " %")
+        self.assertEqual(page.subscriptions_interval_card.spin.suffix(), " мин")

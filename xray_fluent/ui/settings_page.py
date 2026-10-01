@@ -53,10 +53,12 @@ class _ComboCard(SettingCard):
 class _SpinCard(SettingCard):
     """Setting card with a spin box on the right."""
 
-    def __init__(self, icon, title, content, min_val=1, max_val=65535, parent=None):
+    def __init__(self, icon, title, content, min_val=1, max_val=65535, suffix="", parent=None):
         super().__init__(icon, title, content, parent)
         self.spin = SpinBox(self)
         self.spin.setRange(min_val, max_val)
+        # Единица измерения стоит у самого числа, а не в скобках заголовка.
+        self.spin.setSuffix(suffix)
         self.spin.setMinimumWidth(180)
         self.hBoxLayout.addWidget(self.spin, 0, Qt.AlignmentFlag.AlignRight)
         self.hBoxLayout.addSpacing(16)
@@ -218,12 +220,12 @@ class SettingsPage(ScrollablePage):
         appearance_group = SettingCardGroup("Внешний вид", container)
 
         self.theme_card = _ComboCard(
-            FIF.BRUSH, "Тема", "Выберите светлую, тёмную или системную тему",
-            [("Авто", "system"), ("Светлая", "light"), ("Тёмная", "dark")],
+            FIF.BRUSH, "Тема", "Светлая, тёмная или такая же, как в Windows",
+            [("Как в Windows", "system"), ("Светлая", "light"), ("Тёмная", "dark")],
             parent=appearance_group,
         )
         self.accent_card = _ColorCard(
-            FIF.PALETTE, "Цвет акцента", "Выберите цвет акцента для элементов интерфейса",
+            FIF.PALETTE, "Цвет акцента", "Цвет кнопок, переключателей и выделения",
             parent=appearance_group,
         )
 
@@ -237,13 +239,13 @@ class SettingsPage(ScrollablePage):
         network_group = SettingCardGroup("Сеть", container)
 
         self.proxy_bypass_lan_card = SwitchSettingCard(
-            FIF.HOME, "Обход локальной сети",
-            "Не отправлять локальные адреса через системный прокси Windows",
+            FIF.HOME, "Локальная сеть напрямую",
+            "Роутер, принтеры и другие домашние устройства открываются без прокси",
             parent=network_group,
         )
         self.reconnect_card = SwitchSettingCard(
             FIF.SYNC, "Переподключение при смене сети",
-            "Автоматически переподключаться при смене сетевого адаптера",
+            "Восстанавливать подключение после перехода на другой Wi-Fi или кабель",
             parent=network_group,
         )
 
@@ -254,25 +256,23 @@ class SettingsPage(ScrollablePage):
         # ============================================================
         # Auto-switch
         # ============================================================
-        auto_switch_group = SettingCardGroup("Авто-переключение", container)
+        auto_switch_group = SettingCardGroup("Смена сервера при сбоях", container)
 
         self.auto_switch_card = SwitchSettingCard(
-            FIF.SYNC, "Авто-переключение при отказе сервера",
-            "Переключаться на другой сервер, если текущий перестал отвечать. "
-            "Без этого переключателя не работает и переключение при низкой скорости",
+            FIF.SYNC, "Менять сервер, если он перестал отвечать",
+            "Приложение само перейдёт на другой рабочий сервер",
             parent=auto_switch_group,
         )
         self.auto_switch_low_speed_card = SwitchSettingCard(
-            FIF.SPEED_MEDIUM, "Переключать при низкой скорости",
-            "Срабатывает, только когда приложения действительно качают через VPN, "
-            "а скорость дольше 20 с ниже 1 Мбит/с. Сначала контрольный замер текущего "
-            "сервера, затем замер других серверов; переход — только на вдвое более быстрый",
+            FIF.SPEED_MEDIUM, "Менять сервер при низкой скорости",
+            "Если загрузка дольше 20 секунд идёт медленнее 1 Мбит/с — перейти "
+            "на сервер, который быстрее хотя бы вдвое",
             parent=auto_switch_group,
         )
         self.auto_switch_cooldown_card = _SpinCard(
-            FIF.HISTORY, "Кулдаун (секунды)",
-            "Минимальный интервал между автопереключениями",
-            min_val=10, max_val=600, parent=auto_switch_group,
+            FIF.HISTORY, "Пауза между сменами",
+            "Не менять сервер чаще, чем раз в указанное время",
+            min_val=10, max_val=600, suffix=" с", parent=auto_switch_group,
         )
 
         auto_switch_group.addSettingCard(self.auto_switch_card)
@@ -286,29 +286,29 @@ class SettingsPage(ScrollablePage):
         rotation_group = SettingCardGroup("Ротация серверов", container)
 
         self.rotation_card = SwitchSettingCard(
-            FIF.ROTATE, "Ротация серверов",
-            "Периодически менять выходной сервер без разрыва подключения",
+            FIF.ROTATE, "Менять сервер по расписанию",
+            "Регулярно переходить на другой сервер, не разрывая подключение",
             parent=rotation_group,
         )
         self.rotation_mode_card = _ComboCard(
             FIF.RIGHT_ARROW, "Порядок",
-            "Как выбирается следующий сервер пула",
+            "Как выбирается следующий сервер",
             [("Случайный", "random"), ("По очереди", "sequential")],
             parent=rotation_group,
         )
         self.rotation_interval_card = _SpinCard(
-            FIF.STOP_WATCH, "Интервал (секунды)",
-            "Через сколько переключаться на следующий сервер",
-            min_val=30, max_val=86400, parent=rotation_group,
+            FIF.STOP_WATCH, "Как часто менять",
+            "Время работы на одном сервере",
+            min_val=30, max_val=86400, suffix=" с", parent=rotation_group,
         )
         self.rotation_jitter_card = _SpinCard(
-            FIF.DICTIONARY_ADD, "Разброс интервала (%)",
-            "Случайное отклонение от интервала, чтобы переключения не были строго периодичными",
-            min_val=0, max_val=90, parent=rotation_group,
+            FIF.DICTIONARY_ADD, "Случайный разброс",
+            "На сколько время может отклоняться, чтобы смены не шли строго по часам",
+            min_val=0, max_val=90, suffix=" %", parent=rotation_group,
         )
         self.rotation_pool_card = _ComboCard(
-            FIF.FILTER, "Пул серверов",
-            "Из каких серверов набирается ротация",
+            FIF.FILTER, "Какие серверы использовать",
+            "Все или только из одной группы, с одним тегом, из одной подписки",
             [
                 ("Все серверы", "all"),
                 ("Группа", "group"),
@@ -318,19 +318,18 @@ class SettingsPage(ScrollablePage):
             parent=rotation_group,
         )
         self.rotation_pool_value_card = _LineEditCard(
-            FIF.TAG, "Значение пула",
-            "Имя группы, тег или идентификатор подписки; для «Все серверы» не нужно",
+            FIF.TAG, "Название группы", "",
             placeholder="например: Нидерланды",
             parent=rotation_group,
         )
         self.rotation_only_alive_card = SwitchSettingCard(
-            FIF.HEART, "Только живые серверы",
-            "Не брать в ротацию серверы, помеченные недоступными по результатам проверки",
+            FIF.HEART, "Только рабочие серверы",
+            "Пропускать серверы, которые не прошли проверку",
             parent=rotation_group,
         )
         self.rotation_max_nodes_card = _SpinCard(
-            FIF.MENU, "Максимум серверов в пуле",
-            "Все они попадают в конфиг ядра, поэтому размер пула ограничен",
+            FIF.MENU, "Сколько серверов брать",
+            "Наибольшее число серверов, между которыми идёт смена",
             min_val=2, max_val=50, parent=rotation_group,
         )
 
@@ -347,39 +346,19 @@ class SettingsPage(ScrollablePage):
         # ============================================================
         # Core paths
         # ============================================================
-        paths_group = SettingCardGroup("Пути к ядрам", container)
+        paths_group = SettingCardGroup("Ядра", container)
 
         self.xray_path_card = _BrowseCard(
-            FIF.COMMAND_PROMPT, "Путь к Xray", "Относительные пути разрешаются от папки приложения",
+            FIF.COMMAND_PROMPT, "Файл Xray", "Путь к xray.exe; можно указать относительно папки приложения",
             parent=paths_group,
         )
         self.singbox_path_card = _BrowseCard(
-            FIF.COMMAND_PROMPT, "Путь к sing-box", "Маршрутизация и DNS для всех протоколов; относительные пути — от папки приложения",
-            parent=paths_group,
-        )
-
-        self.proxy_engine_card = _ComboCard(
-            FIF.DEVELOPER_TOOLS, "Движок прокси",
-            "Маршрутизация и DNS — sing-box; VLESS — Xray; Hysteria2 — Hysteria",
-            [
-                ("sing-box", "singbox"),
-            ],
-            parent=paths_group,
-        )
-
-        self.tun_engine_card = _ComboCard(
-            FIF.DEVELOPER_TOOLS, "Движок TUN",
-            "Единственный TUN и общие правила всех протоколов — sing-box",
-            [
-                ("sing-box", "singbox"),
-            ],
+            FIF.COMMAND_PROMPT, "Файл sing-box", "Путь к sing-box.exe; можно указать относительно папки приложения",
             parent=paths_group,
         )
 
         paths_group.addSettingCard(self.xray_path_card)
         paths_group.addSettingCard(self.singbox_path_card)
-        paths_group.addSettingCard(self.proxy_engine_card)
-        paths_group.addSettingCard(self.tun_engine_card)
         root.addWidget(paths_group)
 
         # ============================================================
@@ -388,18 +367,18 @@ class SettingsPage(ScrollablePage):
         startup_group = SettingCardGroup("Запуск", container)
 
         self.launch_card = SwitchSettingCard(
-            FIF.POWER_BUTTON, "Запуск при старте Windows",
-            "Автоматически запускать приложение в трее при входе в систему",
+            FIF.POWER_BUTTON, "Запускать вместе с Windows",
+            "Приложение стартует при входе в систему и сворачивается в трей",
             parent=startup_group,
         )
         self.auto_connect_card = SwitchSettingCard(
-            FIF.PLAY, "Автоподключение при запуске",
-            "Автоматически подключаться к последнему серверу при старте приложения",
+            FIF.PLAY, "Подключаться при запуске",
+            "Сразу подключаться к серверу, выбранному в прошлый раз",
             parent=startup_group,
         )
         self.startup_order_card = _ComboCard(
-            FIF.ALIGNMENT, "Порядок при запуске",
-            "Что делать сначала, если включены автоподключение и проверка подписок",
+            FIF.ALIGNMENT, "Что сначала",
+            "Подключиться сразу или сперва получить свежий список серверов",
             [
                 ("Подключаться сразу", "immediate"),
                 ("Сначала обновить подписки", "after_subscriptions"),
@@ -418,19 +397,19 @@ class SettingsPage(ScrollablePage):
         subscriptions_group = SettingCardGroup("Подписки", container)
 
         self.subscriptions_auto_update_card = SwitchSettingCard(
-            FIF.CLOUD, "Автообновление подписок",
-            "Глобально разрешить автоматическую проверку и обновление подписок",
+            FIF.CLOUD, "Обновлять подписки автоматически",
+            "Приложение само получает свежие списки серверов",
             parent=subscriptions_group,
         )
         self.subscriptions_startup_check_card = SwitchSettingCard(
             FIF.CLOUD_DOWNLOAD, "Проверять при запуске",
-            "Однократно проверять подписки вскоре после запуска приложения",
+            "Один раз, вскоре после старта приложения",
             parent=subscriptions_group,
         )
         self.subscriptions_interval_card = _SpinCard(
-            FIF.STOP_WATCH, "Интервал проверки (минуты)",
-            "Как часто проверять подписки в фоне (от 5 минут до 24 часов)",
-            min_val=5, max_val=1440, parent=subscriptions_group,
+            FIF.STOP_WATCH, "Как часто проверять",
+            "От 5 минут до 24 часов",
+            min_val=5, max_val=1440, suffix=" мин", parent=subscriptions_group,
         )
 
         subscriptions_group.addSettingCard(self.subscriptions_auto_update_card)
@@ -445,18 +424,17 @@ class SettingsPage(ScrollablePage):
 
         self.check_updates_card = SwitchSettingCard(
             FIF.UPDATE, "Проверять обновления",
-            "Проверять новые версии при запуске и каждые 30 минут",
+            "При запуске и каждые 30 минут",
             parent=updates_group,
         )
         self.allow_updates_card = SwitchSettingCard(
-            FIF.DOWNLOAD, "Разрешить обновления",
-            "Устанавливать новые версии в фоне: приложение само перезапустится "
-            "и вернёт подключение",
+            FIF.DOWNLOAD, "Устанавливать автоматически",
+            "Приложение само обновится, перезапустится и вернёт подключение",
             parent=updates_group,
         )
         self.xray_auto_update_card = SwitchSettingCard(
-            FIF.CLOUD_DOWNLOAD, "Автообновление ядра Xray",
-            "Автоматически обновлять ядро Xray при запуске",
+            FIF.CLOUD_DOWNLOAD, "Обновлять ядро Xray",
+            "Проверять и ставить новую версию ядра при запуске",
             parent=updates_group,
         )
 
@@ -506,9 +484,9 @@ class SettingsPage(ScrollablePage):
             parent=security_group,
         )
         self.auto_lock_card = _SpinCard(
-            FIF.STOP_WATCH, "Автоблокировка (минуты)",
-            "Блокировать приложение после периода бездействия",
-            min_val=1, max_val=120, parent=security_group,
+            FIF.STOP_WATCH, "Автоблокировка",
+            "Блокировать приложение, если им не пользуются указанное время",
+            min_val=1, max_val=120, suffix=" мин", parent=security_group,
         )
 
         security_group.addSettingCard(self.password_card)
@@ -516,6 +494,11 @@ class SettingsPage(ScrollablePage):
         root.addWidget(security_group)
 
         root.addStretch(1)
+
+        self._groups = (
+            appearance_group, network_group, auto_switch_group, rotation_group, paths_group,
+            startup_group, subscriptions_group, updates_group, data_group, security_group,
+        )
 
         # ============================================================
         # Signal connections
@@ -545,8 +528,6 @@ class SettingsPage(ScrollablePage):
         self.proxy_bypass_lan_card.checkedChanged.connect(self._auto_save)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)
-        self.proxy_engine_card.combo.currentIndexChanged.connect(self._auto_save)
-        self.tun_engine_card.combo.currentIndexChanged.connect(self._auto_save)
 
         self.launch_card.checkedChanged.connect(self._auto_save)
         self.auto_connect_card.checkedChanged.connect(self._auto_save)
@@ -560,7 +541,6 @@ class SettingsPage(ScrollablePage):
         self.xray_auto_update_card.checkedChanged.connect(self._auto_save)
 
         self.auto_switch_card.checkedChanged.connect(self._auto_save)
-        self.auto_switch_card.checkedChanged.connect(self.auto_switch_low_speed_card.setEnabled)
         self.auto_switch_low_speed_card.checkedChanged.connect(self._auto_save)
         self.auto_switch_cooldown_card.spin.valueChanged.connect(self._auto_save)
 
@@ -574,6 +554,16 @@ class SettingsPage(ScrollablePage):
         self.rotation_max_nodes_card.spin.valueChanged.connect(self._auto_save)
 
         self.auto_lock_card.spin.valueChanged.connect(self._auto_save)
+
+        # Настройки, которые сейчас ни на что не влияют, не показываются.
+        for switch in (
+            self.auto_switch_card, self.rotation_card, self.auto_connect_card,
+            self.subscriptions_auto_update_card, self.subscriptions_startup_check_card,
+            self.check_updates_card,
+        ):
+            switch.checkedChanged.connect(self._sync_dependent_cards)
+        self.rotation_pool_card.combo.currentIndexChanged.connect(self._sync_dependent_cards)
+        self._sync_dependent_cards()
 
     # ================================================================
     # Public API
@@ -603,8 +593,6 @@ class SettingsPage(ScrollablePage):
                 migrate_default_location=True,
             )
         )
-        self._select_combo_data(self.proxy_engine_card.combo, settings.proxy_engine)
-        self._select_combo_data(self.tun_engine_card.combo, settings.tun_engine)
         self.launch_card.setChecked(settings.launch_on_startup)
         self.auto_connect_card.setChecked(settings.auto_connect_last)
         self._select_combo_data(self.startup_order_card.combo, settings.startup_connect_order)
@@ -620,7 +608,6 @@ class SettingsPage(ScrollablePage):
 
         self.auto_switch_card.setChecked(settings.auto_switch_enabled)
         self.auto_switch_low_speed_card.setChecked(settings.auto_switch_low_speed_enabled)
-        self.auto_switch_low_speed_card.setEnabled(settings.auto_switch_enabled)
         self.auto_switch_cooldown_card.spin.setValue(settings.auto_switch_cooldown_sec)
 
         self.rotation_card.setChecked(settings.rotation_enabled)
@@ -635,6 +622,7 @@ class SettingsPage(ScrollablePage):
         self.auto_lock_card.spin.setValue(security.auto_lock_minutes)
         self.password_card.edit.clear()
         self._loading = False
+        self._sync_dependent_cards()
 
     def set_encryption_active(self, active: bool) -> None:
         self.encryption_card.buttons[1].setEnabled(active)  # Disable encryption btn
@@ -710,8 +698,8 @@ class SettingsPage(ScrollablePage):
         )
         self.xray_path_card.edit.setText(data.xray_path)
         self.singbox_path_card.edit.setText(data.singbox_path)
-        data.proxy_engine = self.proxy_engine_card.combo.currentData() or "singbox"
-        data.tun_engine = self.tun_engine_card.combo.currentData() or "singbox"
+        data.proxy_engine = "singbox"
+        data.tun_engine = "singbox"
         data.start_minimized = False
         data.launch_on_startup = self.launch_card.isChecked()
         data.auto_connect_last = self.auto_connect_card.isChecked()
@@ -736,6 +724,45 @@ class SettingsPage(ScrollablePage):
         data.rotation_max_nodes = int(self.rotation_max_nodes_card.spin.value())
         self.save_requested.emit(data)
         self.auto_lock_minutes_changed.emit(int(self.auto_lock_card.spin.value()))
+
+    _POOL_VALUE_TITLES = {
+        "group": ("Название группы", "например: Нидерланды"),
+        "tag": ("Тег", "например: игры"),
+        "subscription": ("Подписка", "название или идентификатор подписки"),
+    }
+
+    def _sync_dependent_cards(self, *_args) -> None:
+        """Показать только те настройки, которые сейчас на что-то влияют."""
+
+        auto_switch = self.auto_switch_card.isChecked()
+        self.auto_switch_low_speed_card.setVisible(auto_switch)
+        self.auto_switch_cooldown_card.setVisible(auto_switch)
+
+        rotation = self.rotation_card.isChecked()
+        for card in (
+            self.rotation_mode_card, self.rotation_interval_card, self.rotation_jitter_card,
+            self.rotation_pool_card, self.rotation_only_alive_card, self.rotation_max_nodes_card,
+        ):
+            card.setVisible(rotation)
+        pool = str(self.rotation_pool_card.combo.currentData() or "all")
+        self.rotation_pool_value_card.setVisible(rotation and pool in self._POOL_VALUE_TITLES)
+        title, placeholder = self._POOL_VALUE_TITLES.get(pool, self._POOL_VALUE_TITLES["group"])
+        self.rotation_pool_value_card.setTitle(title)
+        self.rotation_pool_value_card.edit.setPlaceholderText(placeholder)
+
+        subscriptions = self.subscriptions_auto_update_card.isChecked()
+        self.subscriptions_startup_check_card.setVisible(subscriptions)
+        self.subscriptions_interval_card.setVisible(subscriptions)
+        # Выбирать порядок есть смысл, только когда при запуске делается и то, и другое.
+        self.startup_order_card.setVisible(
+            self.auto_connect_card.isChecked()
+            and subscriptions
+            and self.subscriptions_startup_check_card.isChecked()
+        )
+        self.allow_updates_card.setVisible(self.check_updates_card.isChecked())
+
+        for group in self._groups:
+            group.adjustSize()
 
     def _emit_set_encryption(self) -> None:
         value = self.encryption_card.edit.text().strip()

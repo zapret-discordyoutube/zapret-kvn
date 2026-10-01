@@ -288,6 +288,30 @@ def _update_plan_argument() -> str | None:
     return arguments[position + 1] if position + 1 < len(arguments) else None
 
 
+def _show_after_update_window(show) -> None:
+    """Показать окно сразу или, при запуске из установщика, после его окна."""
+    import time
+
+    from PyQt6.QtCore import QTimer
+    from xray_fluent.updates.installer import handoff
+
+    hold = handoff.claim()
+    if hold is None:
+        show()
+        return
+    _bootstrap_logger.info("Started by the update installer; waiting for its window to close")
+    handoff.confirm_ready(hold)
+    deadline = time.monotonic() + handoff.MAX_HOLD_S
+
+    def poll() -> None:
+        if hold.exists() and time.monotonic() < deadline:
+            QTimer.singleShot(100, poll)
+            return
+        show()
+
+    poll()
+
+
 def main() -> int:
     # Установщик работает из временного каталога, пока приложение закрыто:
     # ему не нужны ни журнал запуска, ни возврат системного прокси на выходе.
@@ -350,7 +374,9 @@ def main() -> int:
         window._startup_loader = loader
         window._apply_window_geometry(settings)
         if not (args.tray and tray_available and not locked):
-            window.show()
+            _show_after_update_window(window.show)
+        else:
+            _show_after_update_window(lambda: None)
         _bootstrap_logger.info("main shell ready; tray=%s", args.tray and tray_available and not locked)
 
     def loaded(state, history):
