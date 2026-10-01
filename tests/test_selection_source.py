@@ -28,7 +28,7 @@ SELECTION_WRITERS: dict[tuple[str, str], str] = {
     ("application/node_service.py", "set_selected_node"): "self",
     ("application/node_service.py", "import_nodes_from_text"): "self",
     ("application/node_service.py", "remove_nodes"): "self",
-    ("application/controller.py", "AppController._on_subscription_update_completed"): "self",
+    ("application/controller.py", "AppController._apply_subscription_update"): "self",
     # Чистые функции над AppState: лог пишет AppController вокруг вызова.
     ("application/subscription_service.py", "reconcile_subscription"): "caller",
     ("application/subscription_service.py", "remove_subscription"): "caller",

@@ -3,10 +3,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from xray_fluent.application.worker_service import (
-    on_ping_complete,
+    on_ping_measured,
+    on_ping_progress,
     on_speed_complete,
     on_speed_result,
 )
+from xray_fluent.network.ping_service import PingOutcome, PingTarget
 from xray_fluent.profiles.models import Node
 
 
@@ -40,24 +42,50 @@ class WorkerServiceBatchingTests(unittest.TestCase):
         controller.save.assert_called_once_with()
         controller.bulk_task_progress.emit.assert_called_once_with("speed", 1, 1, True)
 
-    def test_ping_complete_uses_debounced_schedule_save(self) -> None:
-        worker = object()
+    def test_ping_round_end_uses_debounced_schedule_save(self) -> None:
         controller = SimpleNamespace(
-            _ping_worker=worker,
-            _ping_total=3,
-            _ping_completed=3,
-            sender=lambda: worker,
             bulk_task_progress=_Signal(),
             save=Mock(),
             schedule_save=Mock(),
         )
 
-        on_ping_complete(controller)
+        on_ping_progress(controller, 2, 3, False)
+        controller.schedule_save.assert_not_called()
+
+        on_ping_progress(controller, 3, 3, True)
 
         controller.save.assert_not_called()
         controller.schedule_save.assert_called_once_with()
-        controller.bulk_task_progress.emit.assert_called_once_with("ping", 3, 3, True)
-        self.assertIsNone(controller._ping_worker)
+        controller.bulk_task_progress.emit.assert_called_with("ping", 3, 3, True)
+
+    def test_ping_result_for_a_moved_server_is_not_applied(self) -> None:
+        node = Node(id="node-1", server="old.example", port=443, ping_ms=40)
+        target = PingTarget.of(node)
+        node.server = "new.example"
+        controller = SimpleNamespace(
+            _get_node_by_id=lambda node_id: node if node_id == node.id else None,
+            ping_updated=_Signal(),
+        )
+
+        on_ping_measured(controller, PingOutcome(target, 999, ("1.2.3.4",)))
+
+        self.assertEqual(node.ping_ms, 40)
+        self.assertEqual(node.ping_history, [])
+        controller.ping_updated.emit.assert_called_once_with("node-1", 40)
+
+    def test_ping_result_is_applied_and_recorded(self) -> None:
+        node = Node(id="node-1", server="vpn.example", port=443)
+        controller = SimpleNamespace(
+            _get_node_by_id=lambda node_id: node if node_id == node.id else None,
+            ping_updated=_Signal(),
+        )
+
+        on_ping_measured(controller, PingOutcome(PingTarget.of(node), 25, ()))
+
+        self.assertEqual(node.ping_ms, 25)
+        self.assertTrue(node.is_alive)
+        self.assertEqual(len(node.ping_history), 1)
+        controller.ping_updated.emit.assert_called_once_with("node-1", 25)
 
 
 if __name__ == "__main__":

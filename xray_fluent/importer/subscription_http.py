@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import locale
 import platform
+import queue
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
@@ -17,6 +21,17 @@ from ..profiles.models import Subscription
 
 
 MAX_SUBSCRIPTION_BYTES = 10 * 1024 * 1024
+# Потолок на всё обновление целиком. ``timeout`` у urllib ограничивает одну
+# сетевую операцию, а не запрос: подключение к каждому адресу хоста, TLS и
+# каждое чтение ждут по отдельности и в сумме дают минуты.
+SUBSCRIPTION_FETCH_DEADLINE = 30.0
+# Фора прямого маршрута перед параллельным стартом прокси. Живой сервер
+# отвечает напрямую быстрее и прокси не нужен; при молчаливой блокировке
+# ждать полный таймаут прямого пути незачем.
+PROXY_HEAD_START = 1.0
+# Сколько ещё ждать прямой маршрут, когда через прокси сервер уже отказал.
+_DIRECT_GRACE = 3.0
+_READ_CHUNK = 64 * 1024
 _LOCALE_CODE = re.compile(r"[A-Za-z]{2,3}(?:[_-][A-Za-z0-9]{2,8})*")
 _PANEL_HWID = re.compile(r"[A-Za-z0-9=-]{10,64}")
 CLIENT_PROFILES = ("zapret", "happ", "incy", "v2raytun", "custom")
@@ -65,6 +80,7 @@ class SubscriptionFetchResult:
     status: int = 200
     not_modified: bool = False
     via_proxy: bool = False
+    elapsed: float = 0.0
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -362,7 +378,17 @@ def fetch_subscription(
     timeout: float = 15,
     max_bytes: int = MAX_SUBSCRIPTION_BYTES,
     force_refresh: bool = False,
+    deadline: float = SUBSCRIPTION_FETCH_DEADLINE,
+    cancel: threading.Event | None = None,
+    on_route: Callable[[bool], None] | None = None,
 ) -> SubscriptionFetchResult:
+    """Загрузить подписку по первому ответившему маршруту.
+
+    Маршруты не ждут друг друга: прямой стартует сразу, прокси — после
+    ``PROXY_HEAD_START`` или сразу, если прямой путь уже отвалился. Вся
+    загрузка укладывается в ``deadline`` при любом поведении сети.
+    """
+
     url = validate_subscription_url(subscription.url)
     if mode not in {"auto", "direct", "proxy"}:
         raise SubscriptionFetchError(f"Неизвестный режим загрузки: {mode}")
@@ -374,13 +400,16 @@ def fetch_subscription(
     if mode == "proxy" and not attempts:
         raise SubscriptionFetchError("Активный HTTP-прокси недоступен")
 
-    errors: list[str] = []
     unconditional = bool(force_refresh) or (
         int(subscription.parser_revision) != SUBSCRIPTION_PARSER_REVISION
     )
-    for via_proxy, port in attempts:
+    started = time.monotonic()
+    expires = started + max(0.0, float(deadline))
+    results: queue.SimpleQueue[tuple[bool, object]] = queue.SimpleQueue()
+
+    def run(via_proxy: bool, port: int | None) -> None:
         try:
-            return _fetch_once(
+            outcome: object = _fetch_once(
                 subscription,
                 url=url,
                 via_proxy=via_proxy,
@@ -388,19 +417,75 @@ def fetch_subscription(
                 timeout=timeout,
                 max_bytes=max_bytes,
                 force_refresh=unconditional,
+                expires_at=expires,
             )
-        except SubscriptionServerResponseError as exc:
+        except Exception as exc:
+            outcome = exc
+        results.put((via_proxy, outcome))
+
+    pending = list(attempts)
+    running: set[bool] = set()
+
+    def start_next() -> None:
+        via_proxy, port = pending.pop(0)
+        running.add(via_proxy)
+        if on_route is not None:
+            on_route(via_proxy)
+        # urllib нельзя прервать снаружи, поэтому попытка живёт в daemon-потоке:
+        # координатор перестаёт её ждать, а она доживает свой таймаут сама.
+        threading.Thread(
+            target=run, args=(via_proxy, port), name="subscription-fetch", daemon=True
+        ).start()
+
+    start_next()
+    next_start = started + PROXY_HEAD_START
+    errors: list[str] = []
+    held: SubscriptionServerResponseError | None = None
+    while running:
+        if cancel is not None and cancel.is_set():
+            raise SubscriptionFetchError("Обновление подписки отменено")
+        now = time.monotonic()
+        if now >= expires:
+            break
+        if pending and now >= next_start:
+            start_next()
+            continue
+        wait = expires - now
+        if pending:
+            wait = min(wait, next_start - now)
+        if cancel is not None:
+            wait = min(wait, 0.2)
+        try:
+            via_proxy, outcome = results.get(timeout=wait)
+        except queue.Empty:
+            continue
+        running.discard(via_proxy)
+        if isinstance(outcome, SubscriptionFetchResult):
+            outcome.elapsed = time.monotonic() - started
+            return outcome
+        if isinstance(outcome, SubscriptionServerResponseError):
+            if via_proxy and False in running:
+                # Прямой маршрут ещё в пути, а его ответ главнее: отказ через
+                # прокси бывает отказом выходному адресу VPN, а не подписке.
+                held = outcome
+                expires = min(expires, time.monotonic() + _DIRECT_GRACE)
+                continue
             # The server answered on this path.  Its answer is the same on the
             # VPN proxy, so surface it now instead of masking it behind the
             # proxy attempt's transport error.  This is the direct 404 the user
             # must see, not a "loading failed via VPN".
             raise SubscriptionFetchError(
-                f"Не удалось загрузить подписку: {exc}"
-            ) from exc
-        except Exception as exc:
-            # No response reached us on this path (DNS, connect, TLS handshake,
-            # timeout).  Only this case is worth retrying through the proxy.
-            errors.append(sanitize_fetch_error(exc))
+                f"Не удалось загрузить подписку: {outcome}"
+            ) from outcome
+        # No response reached us on this path (DNS, connect, TLS handshake,
+        # timeout).  Only this case is worth retrying through the proxy.
+        errors.append(sanitize_fetch_error(outcome))  # type: ignore[arg-type]
+        if pending:
+            start_next()
+    if held is not None:
+        raise SubscriptionFetchError(f"Не удалось загрузить подписку: {held}") from held
+    if running:
+        errors.append(f"сервер не ответил за {time.monotonic() - started:.0f} с")
     detail = "; ".join(dict.fromkeys(errors)) or "неизвестная ошибка"
     raise SubscriptionFetchError(f"Не удалось загрузить подписку: {detail}")
 
@@ -414,6 +499,7 @@ def _fetch_once(
     timeout: float,
     max_bytes: int,
     force_refresh: bool = False,
+    expires_at: float | None = None,
 ) -> SubscriptionFetchResult:
     proxy_handler = (
         urllib.request.ProxyHandler(
@@ -463,7 +549,7 @@ def _fetch_once(
             raise SubscriptionServerResponseError(
                 describe_http_failure(int(getattr(response, "status", 200) or 200), response_headers)
             )
-        data = response.read(max_bytes + 1)
+        data = _read_body(response, max_bytes + 1, expires_at)
         if len(data) > max_bytes:
             raise SubscriptionServerResponseError(
                 f"Ответ подписки превышает {max_bytes // (1024 * 1024)} МиБ"
@@ -474,6 +560,30 @@ def _fetch_once(
             status=int(getattr(response, "status", 200) or 200),
             via_proxy=via_proxy,
         )
+
+
+def _read_body(response, limit: int, expires_at: float | None) -> bytes:
+    """Прочитать тело, не выходя за общий дедлайн.
+
+    ``read(n)`` ждёт все ``n`` байт, и таймаут сокета действует на каждый recv
+    отдельно — сервер, цедящий ответ по капле, держал бы поток бесконечно.
+    ``read1`` возвращается после одного recv, между ними проверяется срок.
+    """
+
+    read1 = getattr(response, "read1", None)
+    if expires_at is None or read1 is None:
+        return response.read(limit)
+    chunks: list[bytes] = []
+    size = 0
+    while size < limit:
+        if time.monotonic() >= expires_at:
+            raise TimeoutError("сервер слишком медленно отдаёт подписку")
+        chunk = read1(min(_READ_CHUNK, limit - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
 
 
 def _response_headers(headers) -> dict[str, str]:

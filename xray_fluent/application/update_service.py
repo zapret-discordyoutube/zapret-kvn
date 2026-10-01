@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..engines.xray import XrayCoreUpdateResult, XrayCoreUpdateWorker
+from .worker_keeper import start_kept
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -54,7 +55,7 @@ def _start_update_worker(controller: AppController, apply_update: bool, silent: 
         apply_update=apply_update,
     )
     controller._xray_update_worker.done.connect(controller._on_xray_update_worker_done)
-    controller._xray_update_worker.start()
+    start_kept(controller._background_workers, controller._xray_update_worker)
 
     if not silent:
         message = "Обновление Xray..." if apply_update else "Проверка обновлений Xray..."

@@ -6,35 +6,27 @@ from typing import TYPE_CHECKING
 from ..network.connectivity_test import ConnectivityTestWorker
 from ..constants import DEFAULT_HTTP_PORT, XRAY_PATH_DEFAULT
 from ..profiles.path_utils import resolve_configured_path
-from ..network.ping_worker import PingWorker, apply_ping_measurement
+from ..network.ping_worker import apply_ping_measurement
 from ..network.speed_test_worker import SpeedTestWorker
 from .smart_switch_service import cancel_smart_check
+from .worker_keeper import start_kept
 
 if TYPE_CHECKING:
     from .controller import AppController
+    from ..network.ping_service import PingOutcome
     from ..profiles.models import Node
 
 
 def ping_nodes(controller: AppController, node_ids: set[str] | None = None) -> None:
+    """Поставить серверы в очередь пинга; уже измеряемые не повторяются.
+
+    Ничего не отменяет и не ждёт: новые серверы вливаются в текущий раунд.
+    """
     nodes = controller.state.nodes
     if node_ids:
         nodes = [node for node in nodes if node.id in node_ids]
-    if not nodes:
-        return
-
-    if controller._ping_worker and controller._ping_worker.isRunning():
-        controller._ping_worker.cancel()
-        controller._ping_worker.wait(500)
-
-    controller._ping_total = len(nodes)
-    controller._ping_completed = 0
-    controller.bulk_task_progress.emit("ping", 0, controller._ping_total, False)
-    controller._ping_worker = PingWorker(nodes)
-    controller._ping_worker.peer_observed.connect(controller._on_ping_peer_observed)
-    controller._ping_worker.result.connect(controller._on_ping_result)
-    controller._ping_worker.progress.connect(controller._on_ping_progress)
-    controller._ping_worker.completed.connect(controller._on_ping_complete)
-    controller._ping_worker.start()
+    if nodes:
+        controller.ping.request(nodes)
 
 
 def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None) -> bool:
@@ -74,7 +66,7 @@ def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None
     controller._speed_worker.progress.connect(controller._on_speed_progress)
     controller._speed_worker.node_progress.connect(controller._on_speed_node_progress)
     controller._speed_worker.completed.connect(controller._on_speed_complete)
-    controller._speed_worker.start()
+    start_kept(controller._background_workers, controller._speed_worker)
     return True
 
 
@@ -100,46 +92,36 @@ def test_connectivity(controller: AppController, url: str | None = None) -> None
     http_port = controller.get_effective_http_proxy_port() or DEFAULT_HTTP_PORT
     controller._connectivity_worker = ConnectivityTestWorker(http_port, target, tun_mode=controller.state.settings.tun_mode)
     controller._connectivity_worker.result.connect(controller._on_connectivity_result)
-    controller._connectivity_worker.start()
+    start_kept(controller._background_workers, controller._connectivity_worker)
 
 
-def on_ping_peer_observed(controller, node_id, fingerprint, addresses):
-    if controller.sender() is not controller._ping_worker:
+def on_ping_measured(controller: AppController, outcome: PingOutcome) -> None:
+    target = outcome.target
+    node = controller._get_node_by_id(target.node_id)
+    if node is None:
         return
-    from ..profiles.geoip import endpoint_hosts
-    from .node_runtime_service import remember_country_addresses
-    node = controller._get_node_by_id(node_id)
-    if node is None or endpoint_hosts(node) != fingerprint:
+    if not target.matches(node):
+        # Адрес сервера сменили, пока шёл замер: чужой результат не пишем,
+        # но строка должна выйти из состояния «измеряется».
+        controller.ping_updated.emit(node.id, node.ping_ms)
         return
-    remember_country_addresses(controller, node, addresses, refresh=False)
-    controller._country_ping_pending = True
+    if outcome.peers:
+        from .node_runtime_service import remember_country_addresses
+
+        remember_country_addresses(controller, node, outcome.peers, refresh=False)
+        controller._country_ping_pending = True
+    apply_ping_measurement(node, outcome.ping_ms)
+    ts = datetime.now(timezone.utc).isoformat()
+    node.ping_history.append((ts, node.ping_ms))
+    if len(node.ping_history) > 50:
+        node.ping_history = node.ping_history[-50:]
+    controller.ping_updated.emit(node.id, node.ping_ms)
 
 
-def on_ping_result(controller: AppController, node_id: str, ping_ms: int | None) -> None:
-    if controller.sender() is not controller._ping_worker:
+def on_ping_progress(controller: AppController, done: int, total: int, finished: bool) -> None:
+    controller.bulk_task_progress.emit("ping", done, total, finished)
+    if not finished:
         return
-    node = controller._get_node_by_id(node_id)
-    if node is not None:
-        apply_ping_measurement(node, ping_ms)
-        ts = datetime.now(timezone.utc).isoformat()
-        node.ping_history.append((ts, node.ping_ms))
-        if len(node.ping_history) > 50:
-            node.ping_history = node.ping_history[-50:]
-    controller.ping_updated.emit(node_id, ping_ms)
-
-
-def on_ping_progress(controller: AppController, current: int, total: int) -> None:
-    if controller.sender() is not controller._ping_worker:
-        return
-    controller._ping_completed = current
-    controller.bulk_task_progress.emit("ping", current, total, False)
-
-
-def on_ping_complete(controller: AppController) -> None:
-    if controller.sender() is not controller._ping_worker:
-        return
-    controller.bulk_task_progress.emit("ping", controller._ping_completed, controller._ping_total, True)
-    controller._ping_worker = None
     if getattr(controller, "_country_ping_pending", False):
         controller._country_ping_pending = False
         controller._start_country_ip_resolution()

@@ -12,6 +12,7 @@ class CoreUpdateStopTests(unittest.TestCase):
     def _controller(self) -> Mock:
         controller = Mock()
         controller._xray_update_worker = None
+        controller._background_workers = []
         controller.connected = True
         controller._run_coordinated_stop.return_value = True
         return controller

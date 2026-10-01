@@ -115,15 +115,23 @@ class SubscriptionUpdateWorker(QThread):
         self._mode = mode
         self._proxy_port = proxy_port
         self._force_refresh = bool(force_refresh)
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        """Stop waiting for the network; the worker then fails promptly."""
+        self._cancel.set()
 
     def run(self) -> None:
         try:
-            self.progress.emit(self._subscription.id, "download")
             fetched = fetch_subscription(
                 self._subscription,
                 mode=self._mode,
                 proxy_port=self._proxy_port,
                 force_refresh=self._force_refresh,
+                cancel=self._cancel,
+                on_route=lambda via_proxy: self.progress.emit(
+                    self._subscription.id, "proxy" if via_proxy else "download"
+                ),
             )
             if fetched.not_modified:
                 self.completed.emit(self._subscription, fetched, None)

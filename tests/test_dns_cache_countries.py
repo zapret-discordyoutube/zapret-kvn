@@ -4,7 +4,7 @@ from subprocess import TimeoutExpired
 
 from xray_fluent.platform.windows.dns_cache import cached_addresses, read_dns_cache
 from xray_fluent.network.country_resolver import CountryResolver
-from xray_fluent.network.ping_worker import _tcp_observation
+from xray_fluent.network.ping_worker import tcp_observation
 from xray_fluent.profiles.geoip import CountryDatabase
 
 
@@ -56,7 +56,7 @@ class CachedCountryTests(TestCase):
         connection.__enter__.return_value.getpeername.return_value = ('8.8.8.8', 443)
         with patch('socket.create_connection', return_value=connection) as connect, patch(
                 'socket.getaddrinfo', side_effect=AssertionError('extra DNS forbidden')):
-            ms, addresses = _tcp_observation('vpn.example', 443)
+            ms, addresses = tcp_observation('vpn.example', 443)
         connect.assert_called_once_with(('vpn.example', 443), timeout=2.0)
         self.assertGreaterEqual(ms, 0)
         self.assertEqual(addresses, ('8.8.8.8',))

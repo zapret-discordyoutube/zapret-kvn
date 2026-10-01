@@ -122,9 +122,8 @@ from .runtime import (
     on_connectivity_result as on_connectivity_result_operation,
     on_core_state_changed as on_core_state_changed_operation,
     on_live_metrics as on_live_metrics_operation,
-    on_ping_complete as on_ping_complete_operation,
+    on_ping_measured as on_ping_measured_operation,
     on_ping_progress as on_ping_progress_operation,
-    on_ping_result as on_ping_result_operation,
     on_speed_complete as on_speed_complete_operation,
     on_speed_node_progress as on_speed_node_progress_operation,
     on_speed_progress as on_speed_progress_operation,
@@ -242,6 +241,7 @@ from ..importer.subscription_http import (
 )
 from ..importer.subscription_parser import validate_filter_patterns
 from ..network.network_monitor import NetworkMonitor
+from ..network.ping_service import PingService
 from ..platform.windows.proxy_manager import PROXY_EXECUTOR, ProxyManager, SystemProxyState
 from ..platform.windows.security import create_password_hash, get_idle_seconds, verify_password
 from ..diagnostics.runtime_logging import (
@@ -266,7 +266,6 @@ if TYPE_CHECKING:
     from ..network.connectivity_test import ConnectivityTestWorker
     from ..engines.xray import XrayCoreUpdateResult, XrayCoreUpdateWorker
     from ..diagnostics.live_metrics_worker import LiveMetricsWorker
-    from ..network.ping_worker import PingWorker
     from ..network.speed_test_worker import SpeedTestWorker
 
 
@@ -407,7 +406,12 @@ class AppController(QObject):
         self.nodes_changed.connect(register_server_nodes)
 
         self._country_resolver: CountryResolver | None = None
-        self._ping_worker: PingWorker | None = None
+        # Пинг — долгоживущая служба без QThread; короткие QThread-воркеры
+        # живут в _background_workers до своего finished (worker_keeper).
+        self.ping = PingService(self)
+        self.ping.measured.connect(self._on_ping_measured)
+        self.ping.progress.connect(self._on_ping_progress)
+        self._background_workers: list = []
         self._speed_worker: SpeedTestWorker | None = None
         self._connectivity_worker: ConnectivityTestWorker | None = None
         self._metrics_worker: LiveMetricsWorker | None = None
@@ -420,8 +424,6 @@ class AppController(QObject):
         self._pending_subscription_additions: dict[str, Subscription] = {}
         self._subscription_check_ids: set[str] = set()
         self._singbox_documents = SingboxDocumentCache()
-        self._ping_total = 0
-        self._ping_completed = 0
         self._speed_total = 0
         self._speed_completed = 0
         self._xray_update_silent = False
@@ -495,6 +497,7 @@ class AppController(QObject):
         self._pending_transport_node_id: str | None = None
         self._hysteria_cooldown_until: dict[str, float] = {}
         self._hysteria_failure_started_at = 0.0
+        self._hysteria_return_episode = 0
         self._hysteria_contract = HysteriaTransitionContract()
 
         self.xray.log_received.connect(self._on_xray_log)
@@ -1666,6 +1669,9 @@ class AppController(QObject):
                     code,
                     generation=self._hysteria_contract.session.session_generation,
                 )
+                # Отказал резервный сервер, а не выбранный пользователем:
+                # его надолго исключаем и возвращаемся на выбранный.
+                self._reject_hysteria_replacement(3600.0, f"replacement rejected ({code.value})")
             else:
                 self._hysteria_contract.fail(
                     code,
@@ -1682,6 +1688,14 @@ class AppController(QObject):
             # transport whose pin/CA/auth/obfs contract was rejected.
             if self.singbox.is_running:
                 self.singbox.request_stop(expected=True)
+            return
+        if (
+            code in AUTOMATIC_SWITCH_FAILURES
+            and self.connected
+            and self._hysteria_recovery_active
+            and not self._disconnecting
+        ):
+            self._reject_hysteria_replacement(300.0, f"replacement failed ({code.value})")
             return
         if (
             code not in AUTOMATIC_SWITCH_FAILURES
@@ -1704,6 +1718,8 @@ class AppController(QObject):
             if candidate.id == failed_id or node_is_maintenance(candidate):
                 continue
             if self._hysteria_cooldown_until.get(candidate.id, 0.0) > now:
+                continue
+            if getattr(candidate, "is_alive", None) is False:
                 continue
             raw_uri = str(candidate.link or "")
             if raw_uri.partition(":")[0].lower() in {"hy2", "hysteria2"}:
@@ -1741,6 +1757,7 @@ class AppController(QObject):
             if self.singbox.is_running:
                 self.singbox.request_stop(expected=True)
             self._desired_connected = False
+            self._schedule_return_to_selected("no replacement server available")
             return
 
         self._hysteria_recovery_active = True
@@ -1767,6 +1784,40 @@ class AppController(QObject):
             # kill без ожидания: выход процесса придёт сигналом, а переход
             # дождётся его шагом перед запуском нового front'а.
             self.singbox.request_stop(expected=True)
+
+    def _reject_hysteria_replacement(self, cooldown_sec: float, reason: str) -> None:
+        replacement_id = self._pending_transport_node_id
+        if isinstance(replacement_id, str) and replacement_id:
+            self._hysteria_cooldown_until[replacement_id] = time.monotonic() + cooldown_sec
+        self._schedule_return_to_selected(reason)
+
+    def _schedule_return_to_selected(self, reason: str) -> None:
+        """Замена не удалась: не оставаться отключённым, вернуться на свой сервер.
+
+        Возврат — обычное подключение к выбранному серверу после того, как
+        неудачный переход полностью завершится; один раз на эпизод отказа.
+        """
+
+        episode = self._hysteria_failure_episode_id
+        self._hysteria_return_episode = episode
+        self._log(f"[hysteria-recovery] {reason}; returning to the selected server")
+        QTimer.singleShot(2000, lambda: self._return_to_selected_server(episode, 0))
+
+    def _return_to_selected_server(self, episode: int, attempt: int) -> None:
+        if self._hysteria_return_episode != episode or self.locked:
+            return
+        if self._transition_active or self._transition_pending or self._disconnecting:
+            if attempt < 10:
+                QTimer.singleShot(
+                    1000, lambda: self._return_to_selected_server(episode, attempt + 1)
+                )
+            return
+        self._hysteria_return_episode = 0
+        if self.connected or self._desired_connected or self.selected_node is None:
+            return
+        self._log("[hysteria-recovery] reconnecting to the selected server")
+        self._desired_connected = True
+        self._request_transition("return to selected server")
 
     def _record_hysteria_switch_commit(self) -> None:
         started = float(getattr(self, "_hysteria_failure_started_at", 0.0))
@@ -2860,6 +2911,22 @@ class AppController(QObject):
             worker.start()
 
     def _on_subscription_update_completed(self, worker_subscription, fetched, parsed) -> None:
+        # Любой выход отсюда обязан завершиться subscription_update_finished,
+        # иначе строка подписки навсегда остаётся в «Обновление…».
+        try:
+            self._apply_subscription_update(worker_subscription, fetched, parsed)
+        except Exception as exc:
+            self._logger.exception("subscription update apply failed")
+            self._on_subscription_update_failed(
+                worker_subscription, f"Не удалось применить подписку: {exc}"
+            )
+
+    def _apply_subscription_update(self, worker_subscription, fetched, parsed) -> None:
+        self._log(
+            f"[subscription] {worker_subscription.name or 'новая'}: "
+            f"{'без изменений' if fetched.not_modified else 'загружена'} за {fetched.elapsed:.1f} с "
+            f"{'через прокси' if fetched.via_proxy else 'напрямую'}"
+        )
         subscription = self.get_subscription(worker_subscription.id)
         pending_add = subscription is None and worker_subscription.id in self._pending_subscription_additions
         if pending_add:
@@ -2878,6 +2945,13 @@ class AppController(QObject):
                 subscription.name or parsed.metadata.title or "Подписка"
             )
         if subscription is None:
+            self.subscription_update_finished.emit(
+                SubscriptionUpdateResult(
+                    subscription_id=worker_subscription.id,
+                    success=False,
+                    message="Подписка удалена во время обновления",
+                )
+            )
             return
         if parsed is not None and subscription.hidden_source_keys:
             hidden = set(subscription.hidden_source_keys)
@@ -2943,6 +3017,7 @@ class AppController(QObject):
         self.subscription_update_finished.emit(result)
 
     def _on_subscription_update_failed(self, worker_subscription, message: str) -> None:
+        self._log(f"[subscription] {worker_subscription.name or 'новая'}: {message}")
         subscription = self.get_subscription(worker_subscription.id)
         if subscription is not None:
             result = mark_subscription_failure(subscription, message)
@@ -3508,6 +3583,8 @@ class AppController(QObject):
     def toggle_connection(self) -> None:
         current_target = self._desired_connected if (self._transition_active or self._transition_pending) else self.connected
         self._desired_connected = not current_target
+        # Ручное действие отменяет отложенный возврат после неудачной замены.
+        self._hysteria_return_episode = 0
         if not self._desired_connected:
             self._clear_pending_transport_selection()
             self._hysteria_recovery_active = False
@@ -3844,18 +3921,11 @@ class AppController(QObject):
     def _on_core_state_changed(self, _running: bool) -> None:
         on_core_state_changed_operation(self, _running)
 
-    def _on_ping_peer_observed(self, node_id, fingerprint, addresses):
-        from .worker_service import on_ping_peer_observed
-        on_ping_peer_observed(self, node_id, fingerprint, addresses)
+    def _on_ping_measured(self, outcome) -> None:
+        on_ping_measured_operation(self, outcome)
 
-    def _on_ping_result(self, node_id: str, ping_ms: int | None) -> None:
-        on_ping_result_operation(self, node_id, ping_ms)
-
-    def _on_ping_progress(self, current: int, total: int) -> None:
-        on_ping_progress_operation(self, current, total)
-
-    def _on_ping_complete(self) -> None:
-        on_ping_complete_operation(self)
+    def _on_ping_progress(self, done: int, total: int, finished: bool) -> None:
+        on_ping_progress_operation(self, done, total, finished)
 
     def _on_speed_result(self, node_id: str, speed_mbps: float | None, is_alive: bool) -> None:
         on_speed_result_operation(self, node_id, speed_mbps, is_alive)

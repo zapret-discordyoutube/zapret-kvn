@@ -293,7 +293,7 @@ def gate_reason(controller: AppController, now: float) -> str | None:
         return "прогрев после смены сервера"
     if _worker_running(getattr(controller, "_speed_worker", None)):
         return "идёт тест скорости"
-    if _worker_running(getattr(controller, "_ping_worker", None)):
+    if getattr(getattr(controller, "ping", None), "busy", False) is True:
         return "идёт пинг серверов"
     return None
 
@@ -560,24 +560,9 @@ def shutdown_smart_check(controller: AppController, wait_ms: int = 8000) -> None
 def _track_worker(state: SmartSwitchState, worker: Any) -> None:
     """Держать сильную ссылку на QThread до его finished."""
 
-    state.workers.append(worker)
-    finished = getattr(worker, "finished", None)
-    if finished is None:
-        return
+    from .worker_keeper import keep_until_finished
 
-    def _release(_done: list[bool] = []) -> None:
-        if _done:
-            return
-        _done.append(True)
-        try:
-            state.workers.remove(worker)
-        except ValueError:
-            pass
-        delete_later = getattr(worker, "deleteLater", None)
-        if callable(delete_later):
-            delete_later()
-
-    finished.connect(_release)
+    keep_until_finished(state.workers, worker)
 
 
 def _available_ids(controller: AppController) -> set[str] | None:

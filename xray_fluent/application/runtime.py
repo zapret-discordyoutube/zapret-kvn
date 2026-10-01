@@ -44,9 +44,8 @@ from .update_service import on_xray_update_worker_done, run_xray_core_update
 from .worker_service import (
     cancel_speed_test,
     on_connectivity_result,
-    on_ping_complete,
+    on_ping_measured,
     on_ping_progress,
-    on_ping_result,
     on_speed_complete,
     on_speed_node_progress,
     on_speed_progress,

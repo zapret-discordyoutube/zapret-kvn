@@ -6,6 +6,7 @@ from ..constants import SINGBOX_CLASH_API_PORT
 from .async_steps import TransitionSteps, run_steps_blocking
 from .auto_switch_service import transport_kind_for_node
 from .smart_switch_service import cancel_smart_check, shutdown_smart_check
+from .worker_keeper import keep_until_finished, wait_all
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -62,25 +63,11 @@ def stop_metrics_worker(controller: AppController, *, wait: bool = False) -> Non
     if wait:
         # Блокирующий путь — только для shutdown приложения.
         worker.wait(1200)
-        return
+        if not worker.isRunning():
+            return
     # Горячий путь (hot-swap): не блокируем GUI-поток ожиданием потока —
     # воркер доживает в списке retiring и удаляется по своему finished.
-    retiring = _retiring_metrics_workers(controller)
-    retiring.append(worker)
-
-    def _release(_done: list[bool] = []) -> None:
-        if _done:
-            return
-        _done.append(True)
-        try:
-            retiring.remove(worker)
-        except ValueError:
-            pass
-        worker.deleteLater()
-
-    worker.finished.connect(_release)
-    if not worker.isRunning():
-        _release()
+    keep_until_finished(_retiring_metrics_workers(controller), worker)
 
 
 def _retiring_metrics_workers(controller: AppController) -> list:
@@ -306,8 +293,9 @@ def shutdown(controller: AppController) -> None:
     controller._subscription_check_ids.clear()
     for worker in list(controller._subscription_workers.values()):
         if worker.isRunning():
-            # Auto mode may perform one 15-second direct attempt and one proxy retry.
-            worker.wait(32000)
+            # The fetch polls its cancel flag, so the worker ends within a moment.
+            worker.cancel()
+            worker.wait(3000)
     for worker in controller.bypass.workers():
         if worker.isRunning():
             worker.wait(5000)
@@ -315,9 +303,7 @@ def shutdown(controller: AppController) -> None:
     if controller._country_resolver and controller._country_resolver.isRunning():
         controller._country_resolver.requestInterruption()
         controller._country_resolver.wait(6000)
-    if controller._ping_worker and controller._ping_worker.isRunning():
-        controller._ping_worker.cancel()
-        controller._ping_worker.wait(500)
+    controller.ping.close()
     if controller._connectivity_worker and controller._connectivity_worker.isRunning():
         controller._connectivity_worker.wait(1000)
     stop_metrics_worker(controller, wait=True)
@@ -330,6 +316,7 @@ def shutdown(controller: AppController) -> None:
     shutdown_smart_check(controller)
     if controller._xray_update_worker and controller._xray_update_worker.isRunning():
         controller._xray_update_worker.wait(1000)
+    wait_all(controller._background_workers, 1000)
 
     controller.disconnect_current()
     if getattr(controller, "amnezia", None) is not None:

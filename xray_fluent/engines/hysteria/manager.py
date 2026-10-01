@@ -37,6 +37,12 @@ from ...platform.windows.subprocess_utils import decode_output, kill_processes_b
 
 _FUNCTIONAL_HTTPS_ENDPOINTS = HTTPS_ENDPOINTS
 
+# Проверка живого туннеля после ошибки в логе: одна волна HTTPS-проб через
+# relay и число волн. Клиент Hysteria сам переподключается при следующем
+# запросе, так что проба одновременно и вызывает переподключение.
+_TUNNEL_CHECK_TIMEOUT = 6.0
+_TUNNEL_CHECK_WAVES = 2
+
 # start_steps(): the in-flight attempt saw a Chrome-parrot TLS rejection and
 # must be repeated once with disableChromeParrot (no nested start()).
 _RETRY_WITHOUT_CHROME_PARROT = object()
@@ -100,6 +106,12 @@ class HysteriaManager(QObject):
         self._remote_authenticated = False
         self.stats: dict[str, Any] = {}
         self._health = BackgroundHealthCheck(self)
+        # Ошибка транспорта в логе работающего туннеля — повод для проверки,
+        # а не приговор серверу: failure уходит, только если проверка провалена.
+        self._tunnel_check = BackgroundHealthCheck(self)
+        self._tunnel_check_wave = 0
+        self._tunnel_check_evidence: tuple[str, str, HysteriaFailureCode] | None = None
+        self._relay_probe: tuple[int, str, str] | None = None
         self._start_depth = 0
         self._fallback_runner: TransitionRunner | None = None
         # A crash can leave a short-lived config behind. It is never reusable:
@@ -238,6 +250,13 @@ class HysteriaManager(QObject):
             self._last_failure_code = None
         self._compatibility_config = deepcopy(config)
         self._compatibility_relay_port = relay_port
+        socks = config.get("socks5")
+        socks = socks if isinstance(socks, dict) else {}
+        self._relay_probe = (
+            relay_port,
+            str(socks.get("username") or ""),
+            str(socks.get("password") or ""),
+        )
         self._compatibility_context = context
         exe = HYSTERIA_PATH_DEFAULT.resolve()
         if not exe.is_file():
@@ -586,6 +605,8 @@ class HysteriaManager(QObject):
 
     def _cancel_health(self):
         self._health.cancel()
+        self._tunnel_check.cancel()
+        self._tunnel_check_evidence = None
         if self.stats.get("https_check") == "pending":
             self.stats["https_check"] = "cancelled"
 
@@ -612,8 +633,88 @@ class HysteriaManager(QObject):
             self.warning.emit("Hysteria подключена к серверу, но проверочные HTTPS-адреса не ответили. "
                               "Соединение сохранено; доступность сайтов пока не подтверждена.")
 
+    def _begin_tunnel_check(self, message: str, stage: str, code: HysteriaFailureCode) -> None:
+        """Проверить работающий туннель вместо немедленного отказа сервера.
+
+        Таймаут одного запроса, обрыв простаивавшей QUIC-сессии или мёртвый
+        сайт выглядят в логе одинаково с гибелью сервера. Различает их только
+        проверка: если сервер снова авторизовал клиента или HTTPS-проба через
+        relay прошла, сервер остаётся; иначе публикуется исходная ошибка.
+        """
+
+        if self._tunnel_check.active:
+            return
+        if self._relay_probe is None or self._relay_probe[0] <= 0:
+            self._emit_error(message, stage=stage, code=code)
+            return
+        self._tunnel_check_evidence = (message, stage, code)
+        self._tunnel_check_wave = 0
+        self.stats["tunnel_checks"] = int(self.stats.get("tunnel_checks", 0)) + 1
+        self._emit_log(
+            f"transport error observed ({code.value}); verifying the tunnel before any recovery",
+            stage="tunnel_check",
+        )
+        self._start_tunnel_check_wave()
+
+    def _start_tunnel_check_wave(self) -> None:
+        relay_port, username, password = self._relay_probe or (0, "", "")
+        generation = self._compatibility_generation
+        self._tunnel_check_wave += 1
+        executor = ThreadPoolExecutor(
+            max_workers=len(_FUNCTIONAL_HTTPS_ENDPOINTS),
+            thread_name_prefix="hysteria-tunnel-check",
+        )
+        futures = {
+            executor.submit(
+                self._probe_remote_endpoint,
+                relay_port,
+                username=username,
+                password=password,
+                endpoint=endpoint,
+                timeout=_TUNNEL_CHECK_TIMEOUT,
+            ): endpoint[1]
+            for endpoint in _FUNCTIONAL_HTTPS_ENDPOINTS
+        }
+        self._tunnel_check.adopt(
+            executor,
+            futures,
+            {},
+            current=lambda: (
+                generation == self._compatibility_generation
+                and self._running
+                and not self._stop_requested
+                and self._process.state() != QProcess.ProcessState.NotRunning
+            ),
+            complete=self._tunnel_check_complete,
+        )
+
+    def _tunnel_check_complete(self, winner, failures) -> None:
+        evidence = self._tunnel_check_evidence
+        if evidence is None:
+            return
+        if winner is not None:
+            self._tunnel_check_passed(f"HTTPS check succeeded via {winner}")
+            return
+        if self._tunnel_check_wave < _TUNNEL_CHECK_WAVES:
+            self._start_tunnel_check_wave()
+            return
+        self._tunnel_check_evidence = None
+        summary = "; ".join(f"{host}={error}" for host, error in sorted(failures.items()))
+        self._emit_log(f"tunnel did not recover: {summary}", stage="tunnel_check")
+        message, stage, code = evidence
+        self._emit_error(message, stage=stage, code=code)
+
+    def _tunnel_check_passed(self, reason: str) -> None:
+        self._tunnel_check.cancel()
+        self._tunnel_check_evidence = None
+        self._last_failure_code = None
+        self.stats["tunnel_recoveries"] = int(self.stats.get("tunnel_recoveries", 0)) + 1
+        self._emit_log(f"tunnel is alive, server retained: {reason}", stage="tunnel_check")
+
     def _is_health_probe_error(self, line):
-        if not self._remote_authenticated or not (self._starting or self._health.active):
+        if not self._remote_authenticated or not (
+            self._starting or self._health.active or self._tunnel_check.active
+        ):
             return False
         parts = strip_terminal_controls(line).split("\t")
         if len(parts) < 4 or parts[-2] != "SOCKS5 TCP error":
@@ -629,8 +730,9 @@ class HysteriaManager(QObject):
         # Parse the official CLI event before log redaction replaces JSON fields.
         # A listener message or a quoted error cannot establish remote readiness.
         parts = strip_terminal_controls(line).split("\t")
+        checking = self._tunnel_check.active
         if (len(parts) < 4 or parts[-3:-1] != ["INFO", "connected to server"]
-                or not self._starting or self._stop_requested):
+                or not (self._starting or checking) or self._stop_requested):
             return
         try:
             fields = json.loads(parts[-1])
@@ -641,6 +743,10 @@ class HysteriaManager(QObject):
             return
         self._remote_authenticated = True
         self.stats["remote_authenticated"] = True
+        if checking:
+            # Клиент сам переподключился и сервер его авторизовал — это
+            # сильнее любой пробы: проверочные адреса выход может фильтровать.
+            self._tunnel_check_passed("server re-authenticated the client")
 
     def _probe_remote_endpoint(
         self,
@@ -828,8 +934,10 @@ class HysteriaManager(QObject):
                     # Keep the cause and raw log until the readiness gate ends.
                     if self._last_failure_code not in SECURITY_FAILURES:
                         self._last_failure_code = failure
-                else:
+                elif failure in SECURITY_FAILURES or not self._running:
                     self._emit_error(clean, stage=stage, code=failure)
+                else:
+                    self._begin_tunnel_check(clean, stage, failure)
 
     @staticmethod
     def _is_chrome_parrot_compatibility_error(line: str) -> bool:

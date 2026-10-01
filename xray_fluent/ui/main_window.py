@@ -520,6 +520,7 @@ class MainWindow(FluentWindow):
         self.controller.countries_changed.connect(self._on_countries_changed)
         self.controller.subscriptions_changed.connect(self._on_subscriptions_changed)
         self.controller.subscription_update_started.connect(self._on_subscription_update_started)
+        self.controller.subscription_update_progress.connect(self.subscriptions_page.set_update_phase)
         self.controller.subscription_update_finished.connect(self._on_subscription_update_finished)
         self.controller.selection_changed.connect(self._on_selection_changed)
         self.controller.connection_changed.connect(self._on_connection_changed)

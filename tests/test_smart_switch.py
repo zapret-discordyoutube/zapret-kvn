@@ -112,7 +112,7 @@ class FakeController:
         self._auto_switch_warmup_until = 0.0
         self._auto_switch_last_switch = 0.0
         self._speed_worker = None
-        self._ping_worker = None
+        self.ping = SimpleNamespace(busy=False)
         self._active_session = SimpleNamespace(http_port=10809, tun_mode=False)
         self.pool: set[str] | None = None
         self.status = _Recorder()
@@ -280,7 +280,7 @@ class GateTests(SmartSwitchTestBase):
         self.assert_never_probes()
 
     def test_ping_batch_running(self) -> None:
-        self.controller._ping_worker = SimpleNamespace(isRunning=lambda: True)
+        self.controller.ping = SimpleNamespace(busy=True)
         self.assert_never_probes()
 
     def test_manual_selection_blocks_smart_switch_for_exactly_30_minutes(self) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import re
+import time
 
 from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen
@@ -448,13 +449,21 @@ class SubscriptionEditPage(DetailPage):
         self.match_label.setText(f"Совпадений: {count} из {len(self._provider_names)}")
 
 
+_PHASE_LABELS = {
+    "download": "Загрузка…",
+    "proxy": "Загрузка через VPN…",
+    "parse": "Разбор…",
+}
+_STATUS_COLUMN = 6
+
+
 def _subscription_status(
     subscription: Subscription,
     *,
     updating: bool,
 ) -> tuple[str, str]:
     if updating:
-        return "Обновление…", "Подписка загружается и проверяется"
+        return _PHASE_LABELS["download"], "Подписка загружается и проверяется"
 
     diagnostics: list[str] = []
     if subscription.skipped_count:
@@ -527,7 +536,11 @@ class SubscriptionsPage(StackedSection):
         self._subscriptions: dict[str, Subscription] = {}
         self._row_ids: list[str] = []
         self._updating: set[str] = set()
+        self._update_phases: dict[str, tuple[str, float]] = {}  # id -> phase, started
         self._nodes: list[Node] = []
+        self._phase_timer = QTimer(self)
+        self._phase_timer.setInterval(1000)
+        self._phase_timer.timeout.connect(self._refresh_update_status)
 
         list_page = QWidget()
         root = QVBoxLayout(list_page)
@@ -633,7 +646,7 @@ class SubscriptionsPage(StackedSection):
             )
             status_item = QTableWidgetItem(status if len(status) <= 80 else f"{status[:77]}…")
             status_item.setToolTip(status_tooltip)
-            self.table.setItem(row, 6, status_item)
+            self.table.setItem(row, _STATUS_COLUMN, status_item)
             switch = SwitchButton(self.table)
             switch.setChecked(subscription.auto_update)
             # Пока подписка обновляется, контроллер отклоняет правку определения:
@@ -649,6 +662,7 @@ class SubscriptionsPage(StackedSection):
         if selected_id in self._row_ids:
             self.table.selectRow(self._row_ids.index(selected_id))
         self._sync_controls()
+        self._refresh_update_status()
 
     def open_editor(
         self,
@@ -674,9 +688,32 @@ class SubscriptionsPage(StackedSection):
     def set_updating(self, subscription_id: str, updating: bool) -> None:
         if updating:
             self._updating.add(subscription_id)
+            self._update_phases[subscription_id] = ("download", time.monotonic())
         else:
             self._updating.discard(subscription_id)
+            self._update_phases.pop(subscription_id, None)
         self.set_data(list(self._subscriptions.values()), self._nodes)
+
+    def set_update_phase(self, subscription_id: str, phase: str) -> None:
+        started = self._update_phases.get(subscription_id, ("", time.monotonic()))[1]
+        self._update_phases[subscription_id] = (phase, started)
+        self._refresh_update_status()
+
+    def _refresh_update_status(self) -> None:
+        """Обновить только ячейку статуса: этап и сколько секунд он идёт."""
+        if not self._updating:
+            self._phase_timer.stop()
+            return
+        if not self._phase_timer.isActive():
+            self._phase_timer.start()
+        for row, subscription_id in enumerate(self._row_ids):
+            item = self.table.item(row, _STATUS_COLUMN)
+            if item is None or subscription_id not in self._updating:
+                continue
+            phase, started = self._update_phases.get(subscription_id, ("download", time.monotonic()))
+            text = _PHASE_LABELS.get(phase, _PHASE_LABELS["download"])
+            seconds = int(time.monotonic() - started)
+            item.setText(f"{text} {seconds} с" if seconds else text)
 
     def _sync_controls(self) -> None:
         subscription_id = self.selected_id()
