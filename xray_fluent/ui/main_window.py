@@ -70,7 +70,7 @@ from .zapret_page import ZapretPage
 #: the tour flag): its stale copy must not roll them back when it saves.
 _WINDOW_OWNED_SETTINGS = tuple(
     item.name for item in fields(AppSettings)
-    if item.name.startswith(("window_", "nodes_", "zapret_")) or item.name in ("nav_expanded", "tour_seen")
+    if item.name.startswith(("window_", "nodes_", "zapret_")) or item.name in ("nav_expanded", "tour_seen", "system_proxy_before_tun")
 )
 
 
@@ -1477,9 +1477,7 @@ class MainWindow(FluentWindow):
     def _on_dashboard_tun_toggled(self, checked: bool) -> None:
         from copy import deepcopy
         settings = deepcopy(self.controller.state.settings)
-        settings.tun_mode = checked
-        if checked:
-            settings.enable_system_proxy = False
+        settings.set_tun_mode(checked)
         self.controller.update_settings(settings)
 
     def _on_dashboard_proxy_toggled(self, checked: bool) -> None:

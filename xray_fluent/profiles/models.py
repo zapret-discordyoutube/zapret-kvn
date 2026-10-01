@@ -543,6 +543,9 @@ class AppSettings:
     auto_connect_last: bool = True
     start_minimized: bool = False
     enable_system_proxy: bool = True
+    # Каким был «Системный прокси Windows» до включения VPN (TUN): режим его
+    # выключает, а при возврате в «Прокси» выбор пользователя восстанавливается.
+    system_proxy_before_tun: bool = True
     system_proxy_bypass_lan: bool = True
     launch_on_startup: bool = False
     reconnect_on_network_change: bool = True
@@ -607,6 +610,22 @@ class AppSettings:
     subscriptions_check_interval_min: int = SUBSCRIPTIONS_CHECK_INTERVAL_DEFAULT  # clamp 5..1440
     startup_connect_order: str = "immediate"  # immediate | after_subscriptions
 
+    def set_tun_mode(self, enabled: bool) -> None:
+        """Переключить «Прокси» ↔ «VPN (TUN)», не теряя выбор системного прокси.
+
+        В VPN (TUN) локальных прокси-входов нет, поэтому системный прокси
+        выключается; при возврате он становится таким, каким был до VPN.
+        """
+        enabled = bool(enabled)
+        if enabled == self.tun_mode:
+            return
+        if enabled:
+            self.system_proxy_before_tun = self.enable_system_proxy
+            self.enable_system_proxy = False
+        else:
+            self.enable_system_proxy = self.system_proxy_before_tun
+        self.tun_mode = enabled
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "theme": self.theme,
@@ -614,6 +633,7 @@ class AppSettings:
             "auto_connect_last": self.auto_connect_last,
             "start_minimized": self.start_minimized,
             "enable_system_proxy": self.enable_system_proxy,
+            "system_proxy_before_tun": self.system_proxy_before_tun,
             "system_proxy_bypass_lan": self.system_proxy_bypass_lan,
             "launch_on_startup": self.launch_on_startup,
             "reconnect_on_network_change": self.reconnect_on_network_change,
@@ -688,6 +708,7 @@ class AppSettings:
             ),
             start_minimized=bool(data.get("start_minimized", False)),
             enable_system_proxy=bool(data.get("enable_system_proxy", True)),
+            system_proxy_before_tun=bool(data.get("system_proxy_before_tun", True)),
             system_proxy_bypass_lan=bool(data.get("system_proxy_bypass_lan", True)),
             launch_on_startup=bool(data.get("launch_on_startup", False)),
             reconnect_on_network_change=bool(data.get("reconnect_on_network_change", True)),
