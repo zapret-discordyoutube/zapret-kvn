@@ -286,6 +286,28 @@ class MetricsWorkerPingTargetTests(unittest.TestCase):
         self.assertEqual(worker._last_ping_ts, 0.0)  # next tick probes now
         self.assertTrue(worker.pings_active_node())
 
+    def test_background_ping_cadence_follows_link_state(self) -> None:
+        # Пустое TCP-соединение раз в 3 с всю сессию — маяк на линии: часто
+        # пингуем только когда вердикт о канале действительно нужен.
+        import sys
+
+        worker_class = self._worker_class()
+        module = sys.modules[worker_class.__module__]
+        worker = worker_class("xray.exe", 0, ping_host="a.example.com", ping_port=443)
+        self.assertEqual(worker._ping_interval(0.0, 0.0), 3.0)  # ещё ни одного замера
+
+        worker._last_ping_ts, worker._last_ping_ms, worker._ping_jitter = 100.0, 40, 1.0
+        self.assertEqual(worker._ping_interval(50_000.0, 1_000.0), module.PING_INTERVAL_TRAFFIC_SEC)
+        self.assertEqual(worker._ping_interval(0.0, 0.0), module.PING_INTERVAL_IDLE_SEC)
+        # Запросы уходят, ответа нет — проверяем часто.
+        self.assertEqual(worker._ping_interval(0.0, 4_000.0), 3.0)
+
+        worker._last_ping_ms = None  # прошлый пинг не прошёл
+        self.assertEqual(worker._ping_interval(50_000.0, 0.0), 3.0)
+        # Подтверждение мёртвого канала укладывается в окно авто-переключения.
+        from xray_fluent.application.auto_switch_service import AUTO_SWITCH_DEAD_LINK_SEC
+        self.assertGreaterEqual(AUTO_SWITCH_DEAD_LINK_SEC / worker._ping_interval(0.0, 0.0), 4)
+
     def test_udp_transport_does_not_start_tcp_probe(self) -> None:
         worker_class = self._worker_class()
         worker = worker_class(

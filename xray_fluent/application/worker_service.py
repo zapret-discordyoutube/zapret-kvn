@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import random
 from typing import TYPE_CHECKING
 
 from ..network.connectivity_test import ConnectivityTestWorker
-from ..constants import DEFAULT_HTTP_PORT, XRAY_PATH_DEFAULT
+from ..constants import (
+    DEFAULT_HTTP_PORT,
+    SPEED_TEST_MAX_BYTES,
+    SPEED_TEST_PAUSE_RANGE_SEC,
+    SPEED_TEST_RETRIES,
+    SPEED_TEST_WARMUP_SEC,
+    SPEED_TEST_WINDOW_SEC,
+    XRAY_PATH_DEFAULT,
+)
 from ..profiles.path_utils import resolve_configured_path
 from ..network.ping_worker import apply_ping_measurement
 from ..network.speed_test_worker import SpeedTestWorker
@@ -29,6 +38,11 @@ def ping_nodes(controller: AppController, node_ids: set[str] | None = None) -> N
         controller.ping.request(nodes)
 
 
+def cancel_ping(controller: AppController) -> bool:
+    """Снять с очереди ещё не начатые замеры пинга."""
+    return controller.ping.cancel() > 0
+
+
 def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None) -> bool:
     nodes = controller.state.nodes
     if node_ids:
@@ -51,17 +65,31 @@ def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None
     )
     xray_path = str(resolved) if resolved else controller.state.settings.xray_path
 
+    # Случайный порядок: перебор серверов всегда в порядке списка — лишний
+    # повторяемый признак для наблюдателя на линии.
+    nodes = list(nodes)
+    random.shuffle(nodes)
+
     controller._speed_total = len(nodes)
     controller._speed_completed = 0
+    controller._speed_skipped = []
     controller.bulk_task_progress.emit("speed", 0, controller._speed_total, False)
     controller._speed_worker = SpeedTestWorker(
         nodes,
         xray_path=xray_path,
-        routing=controller.state.routing,
+        max_bytes=SPEED_TEST_MAX_BYTES,
+        retries=SPEED_TEST_RETRIES,
+        warmup=SPEED_TEST_WARMUP_SEC,
+        window=SPEED_TEST_WINDOW_SEC,
+        partial_on_error=True,
+        pause_range=SPEED_TEST_PAUSE_RANGE_SEC,
     )
     controller._speed_worker.result.connect(controller._on_speed_result)
+    # Пропуски копятся и показываются одной строкой в конце: по сообщению на
+    # сервер давало десятки всплывающих плашек на списке native-нод.
+    skipped = controller._speed_skipped
     controller._speed_worker.skipped.connect(
-        lambda _node_id, message: controller.status.emit("info", message)
+        lambda _node_id, message: skipped.append(message)
     )
     controller._speed_worker.progress.connect(controller._on_speed_progress)
     controller._speed_worker.node_progress.connect(controller._on_speed_node_progress)
@@ -168,6 +196,15 @@ def on_speed_complete(controller: AppController) -> None:
     controller.bulk_task_progress.emit("speed", completed, controller._speed_total, True)
     controller._speed_worker = None
     controller.save()
+    skipped = list(getattr(controller, "_speed_skipped", None) or ())
+    controller._speed_skipped = []
+    if len(skipped) == 1:
+        controller.status.emit("info", skipped[0])
+    elif skipped:
+        controller.status.emit(
+            "info",
+            f"Тест скорости пропустил серверов: {len(skipped)} — их протоколы не поддерживаются ядром xray.",
+        )
     if cancelled:
         controller.status.emit("info", f"Тест скорости остановлен ({completed}/{controller._speed_total})")
     else:

@@ -42,6 +42,7 @@ from .transition_engine import (
 )
 from .update_service import on_xray_update_worker_done, run_xray_core_update
 from .worker_service import (
+    cancel_ping,
     cancel_speed_test,
     on_connectivity_result,
     on_ping_measured,

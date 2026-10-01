@@ -112,6 +112,60 @@ class PingServiceTests(unittest.TestCase):
         self.assertEqual(self.outcomes, [])
         self.assertEqual(self.service.request([_node(99)]), 0)
 
+    def test_servers_sharing_an_endpoint_are_measured_once(self) -> None:
+        # В подписках один адрес:порт повторяется под разными именами: одно
+        # соединение вместо десятка — и быстрее, и незаметнее на линии.
+        nodes = [Node(id=f"s{i}", name=f"s{i}", server="Shared.Example", port=443) for i in range(5)]
+        nodes.append(Node(id="other", name="other", server="shared.example", port=8443))
+        self.probe.release.set()
+        self.assertEqual(self.service.request(nodes), 6)
+        self.assertTrue(_spin_until(lambda: not self.service.busy))
+        self.assertEqual(len(self.probe.calls), 2)
+        self.assertEqual(sorted(o.target.node_id for o in self.outcomes),
+                         ["other", "s0", "s1", "s2", "s3", "s4"])
+        self.assertEqual({o.ping_ms for o in self.outcomes}, {10})
+        self.assertEqual(self.progress[-1], (6, 6, True))
+
+    def test_late_request_joins_a_measurement_in_flight(self) -> None:
+        first = Node(id="a", name="a", server="shared.example", port=443)
+        second = Node(id="b", name="b", server="shared.example", port=443)
+        self.service.request([first])
+        self.assertTrue(_spin_until(lambda: self.probe.active == 1))
+        self.service.request([second])
+        self.probe.release.set()
+        self.assertTrue(_spin_until(lambda: not self.service.busy))
+        self.assertEqual(len(self.probe.calls), 1)
+        self.assertEqual(sorted(o.target.node_id for o in self.outcomes), ["a", "b"])
+
+    def test_cancel_drops_queued_servers_and_finishes_the_round(self) -> None:
+        self.service.request([_node(i) for i in range(20)])
+        self.assertTrue(_spin_until(lambda: self.probe.active == 4))
+        self.assertEqual(self.service.cancel(), 16)
+        self.assertTrue(self.service.busy)  # четыре соединения ещё идут
+        self.assertEqual(self.progress[-1], (0, 4, False))
+        self.probe.release.set()
+        self.assertTrue(_spin_until(lambda: not self.service.busy))
+        self.assertEqual(len(self.probe.calls), 4)
+        self.assertEqual(len(self.outcomes), 4)
+        self.assertEqual(self.progress[-1], (4, 4, True))
+        # После отмены служба принимает новые запросы.
+        self.assertEqual(self.service.request([_node(50)]), 1)
+        self.assertTrue(_spin_until(lambda: not self.service.busy))
+
+    def test_cancel_with_nothing_queued_changes_nothing(self) -> None:
+        self.assertEqual(self.service.cancel(), 0)
+        self.assertEqual(self.progress, [])
+
+    def test_measurement_order_is_shuffled(self) -> None:
+        service = PingService(probe=self.probe, max_parallel=1, start_jitter_sec=0.0)
+        self.probe.release.set()
+        nodes = [_node(i) for i in range(40)]
+        service.request(nodes)
+        self.assertTrue(_spin_until(lambda: not service.busy))
+        self.assertEqual(sorted(self.probe.calls), sorted(node.id for node in nodes))
+        self.assertNotEqual(self.probe.calls, [node.id for node in nodes])
+        service.close()
+
     def test_idle_threads_exit(self) -> None:
         self.probe.release.set()
         self.service.request([_node(1), _node(2)])

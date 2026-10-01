@@ -21,7 +21,8 @@ AUTO_SWITCH_IDLE_BPS = 1024.0
 UDP_NATIVE_TYPES = frozenset({"hysteria", "hysteria2", "tuic", "wireguard"})
 AUTO_SWITCH_WARMUP_SEC = 20.0
 AUTO_SWITCH_UDP_WARMUP_SEC = 45.0
-# The metrics worker TCP-pings the active node every ~3s; this many seconds of
+# The metrics worker TCP-pings the active node: rarely while the link is fine,
+# every ~3s once a ping fails or requests go unanswered.  This many seconds of
 # continuously failing pings with no payload traffic mean a TCP link is dead.
 AUTO_SWITCH_DEAD_LINK_SEC = 15.0
 

@@ -164,7 +164,7 @@ class WorkerLaunchTests(unittest.TestCase):
                     patch.object(speed_test_worker, "prepare_speed_test_xray",
                                  lambda src: prepare_speed_test_xray(src, target)), \
                     patch.object(speed_test_worker.subprocess, "Popen", _popen), \
-                    patch.object(speed_test_worker, "build_xray_config", lambda *a, **k: {"inbounds": []}), \
+                    patch.object(speed_test_worker, "build_speed_test_config", lambda *a, **k: {"inbounds": []}), \
                     patch.object(speed_test_worker.time, "sleep", lambda _s: None):
                 worker.run()
         self.assertEqual(len(calls), 1)
@@ -197,7 +197,7 @@ class WorkerLaunchTests(unittest.TestCase):
             worker.result.connect(lambda node_id, mbps, alive: results.append((node_id, mbps, alive)))
             with patch.object(speed_test_worker, "prepare_speed_test_xray", lambda src: Path(src)), \
                     patch.object(speed_test_worker.subprocess, "Popen", lambda *a, **k: _Proc()), \
-                    patch.object(speed_test_worker, "build_xray_config", lambda *a, **k: {"inbounds": []}), \
+                    patch.object(speed_test_worker, "build_speed_test_config", lambda *a, **k: {"inbounds": []}), \
                     patch.object(speed_test_worker, "_port_open", lambda host, port: next(port_checks)), \
                     patch.object(speed_test_worker, "measure_download_bps", lambda *a, **k: 2.0 * 1024 * 1024), \
                     patch.object(speed_test_worker.time, "sleep", lambda _s: None):
@@ -205,6 +205,213 @@ class WorkerLaunchTests(unittest.TestCase):
         self.assertEqual(results, [("a", 2.0, True)])
         self.assertIsNone(next(port_checks, None))
 
+
+class _Proc:
+    """Временное ядро, которое «работает», пока его не остановят."""
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _vless_node(node_id: str = "a"):
+    from xray_fluent.profiles.models import Node
+
+    return Node(id=node_id, name=node_id, outbound={"protocol": "vless", "settings": {}})
+
+
+class SpeedTestConfigTests(unittest.TestCase):
+    def test_temp_core_config_has_no_routing_or_geo_data(self) -> None:
+        # Правила с geosite:/geoip: заставляли xray грузить гео-базы 9–16 с и
+        # могли увести замер «напрямую»: у временного ядра маршрут один.
+        node = _vless_node()
+        node.outbound = {"protocol": "vless", "settings": {"vnext": []}, "tag": "user-tag"}
+
+        config = speed_test_worker.build_speed_test_config(node, 23456)
+
+        self.assertNotIn("routing", config)
+        self.assertNotIn("geo", json.dumps(config))
+        self.assertEqual([ib["protocol"] for ib in config["inbounds"]], ["http"])
+        self.assertEqual(config["inbounds"][0]["port"], 23456)
+        self.assertEqual([ob["tag"] for ob in config["outbounds"]], ["proxy"])
+        self.assertEqual(node.outbound["tag"], "user-tag")  # исходная нода не тронута
+
+    def test_busy_preferred_port_is_replaced_with_free_one(self) -> None:
+        # Осиротевший xray-speedtest.exe держит порт: «порт открыт» не должен
+        # сойти за готовность нашего ядра.
+        with patch.object(speed_test_worker, "_port_open", lambda host, port: True), \
+                patch.object(speed_test_worker, "_free_port", lambda host: 40123):
+            self.assertEqual(speed_test_worker._pick_port("127.0.0.1", 19101), 40123)
+        with patch.object(speed_test_worker, "_port_open", lambda host, port: False):
+            self.assertEqual(speed_test_worker._pick_port("127.0.0.1", 19101), 19101)
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _TimedResponse:
+    """Ответ, отдающий чанки по расписанию фальшивых часов."""
+
+    def __init__(self, clock: _Clock, chunks: list[tuple[float, int]], *, fail_after: bool = False):
+        self._clock = clock
+        self._chunks = list(chunks)
+        self._fail_after = fail_after
+        self.headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, _size: int) -> bytes:
+        if not self._chunks:
+            if self._fail_after:
+                raise TimeoutError("stalled")
+            return b""
+        delay, size = self._chunks.pop(0)
+        self._clock.now += delay
+        return b"x" * size
+
+
+class _Opener:
+    def __init__(self, response) -> None:
+        self._response = response
+
+    def open(self, _req, timeout=None):
+        return self._response
+
+
+class WindowedMeasurementTests(unittest.TestCase):
+    def _measure(self, chunks, **kwargs):
+        clock = _Clock()
+        response = _TimedResponse(clock, chunks, fail_after=kwargs.pop("fail_after", False))
+        with patch.object(speed_test_worker.time, "perf_counter", clock):
+            return speed_test_worker.measure_download_bps(
+                _Opener(response), "https://example.invalid/f", timeout=6.0, **kwargs
+            )
+
+    def test_warmup_is_discarded_and_download_stops_after_window(self) -> None:
+        # 2 с ответа, затем разгон 100 Б/с и установившиеся 1000 Б/с.
+        chunks = [(2.0, 100)] + [(1.0, 100)] + [(1.0, 1000)] * 10
+        clock = _Clock()
+        response = _TimedResponse(clock, chunks)
+        with patch.object(speed_test_worker.time, "perf_counter", clock):
+            bps = speed_test_worker.measure_download_bps(
+                _Opener(response), "https://example.invalid/f",
+                timeout=6.0, warmup=1.0, window=3.0,
+            )
+        self.assertEqual(bps, 1000.0)
+        self.assertEqual(len(response._chunks), 7)  # файл до конца не качался
+
+    def test_volume_cap_before_warmup_measures_from_first_byte(self) -> None:
+        # Очень быстрый сервер исчерпал лимит раньше разгона: время ответа
+        # (2 с до первого байта) в скорость не входит.
+        bps = self._measure([(2.0, 500), (0.5, 500)], warmup=1.0, window=3.0, max_bytes=1000)
+        self.assertEqual(bps, 2000.0)
+
+    def test_stall_inside_window_counts_received_bytes(self) -> None:
+        bps = self._measure(
+            [(0.1, 100), (1.0, 100), (1.0, 400)],
+            warmup=1.0, window=3.0, partial_on_error=True, fail_after=True,
+        )
+        self.assertEqual(bps, 400.0)
+
+    def test_without_window_time_runs_from_request_start(self) -> None:
+        # Контракт «умной проверки»: обе её стороны меряются именно так.
+        self.assertEqual(self._measure([(2.0, 500), (2.0, 500)]), 250.0)
+
+
+class WorkerMeasurementPolicyTests(unittest.TestCase):
+    def _run(self, worker, measure):
+        results: list = []
+        percents: list = []
+        worker.result.connect(lambda node_id, mbps, alive: results.append((node_id, mbps, alive)))
+        worker.node_progress.connect(lambda node_id, percent: percents.append((node_id, percent)))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "xray.exe"
+            source.write_bytes(b"x")
+            worker._xray_path = str(source)
+            port_checks = iter([False, True] * len(worker._nodes))
+            with patch.object(speed_test_worker, "prepare_speed_test_xray", lambda src: Path(src)), \
+                    patch.object(speed_test_worker.subprocess, "Popen", lambda *a, **k: _Proc()), \
+                    patch.object(speed_test_worker, "_port_open", lambda host, port: next(port_checks)), \
+                    patch.object(speed_test_worker, "measure_download_bps", measure), \
+                    patch.object(speed_test_worker.time, "sleep", lambda _s: None):
+                worker.run()
+        return results, percents
+
+    def test_failed_measurement_is_retried_once(self) -> None:
+        outcomes = iter([None, 4.0 * 1024 * 1024])
+        calls: list[dict] = []
+
+        def _measure(*_a, **kwargs):
+            calls.append(kwargs)
+            return next(outcomes)
+
+        worker = speed_test_worker.SpeedTestWorker(
+            [_vless_node()], xray_path="", retries=1, warmup=1.0, window=3.0, partial_on_error=True,
+        )
+        results, _ = self._run(worker, _measure)
+
+        self.assertEqual(results, [("a", 4.0, True)])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((calls[0]["warmup"], calls[0]["window"], calls[0]["partial_on_error"]), (1.0, 3.0, True))
+
+    def test_successful_measurement_is_not_repeated(self) -> None:
+        calls: list[int] = []
+
+        def _measure(*_a, **_k):
+            calls.append(1)
+            return 2.0 * 1024 * 1024
+
+        worker = speed_test_worker.SpeedTestWorker([_vless_node()], xray_path="", retries=1)
+        results, _ = self._run(worker, _measure)
+
+        self.assertEqual(results, [("a", 2.0, True)])
+        self.assertEqual(len(calls), 1)
+
+    def test_dead_server_reports_once_after_all_attempts(self) -> None:
+        worker = speed_test_worker.SpeedTestWorker([_vless_node()], xray_path="", retries=1)
+        results, _ = self._run(worker, lambda *_a, **_k: None)
+        self.assertEqual(results, [("a", None, False)])
+
+    def test_row_progress_is_emitted_only_when_percent_changes(self) -> None:
+        def _measure(*_a, on_fraction=None, **_k):
+            for _ in range(500):
+                on_fraction(0.5)  # сотни чанков — один и тот же процент
+            return 2.0 * 1024 * 1024
+
+        worker = speed_test_worker.SpeedTestWorker([_vless_node()], xray_path="")
+        _, percents = self._run(worker, _measure)
+
+        self.assertEqual(len(percents), len(set(percents)))
+        self.assertLess(len(percents), 10)
+        self.assertEqual(percents[-1], ("a", 100))
+
+    def test_pause_between_servers_is_cancellable(self) -> None:
+        worker = speed_test_worker.SpeedTestWorker(
+            [_vless_node("a"), _vless_node("b")], xray_path="", pause_range=(30.0, 30.0),
+        )
+
+        def _measure(*_a, **_k):
+            worker.cancel()  # отмена приходит, пока идёт первый сервер
+            return 2.0 * 1024 * 1024
+
+        results, _ = self._run(worker, _measure)
+
+        self.assertEqual(results, [])
+        self.assertTrue(worker.was_cancelled)
 
 if __name__ == "__main__":
     unittest.main()

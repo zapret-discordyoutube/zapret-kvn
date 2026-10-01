@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import time
 from typing import Any
@@ -20,6 +21,20 @@ from ..platform.windows.process_traffic_collector import collect_process_stats, 
 from ..platform.windows.subprocess_utils import decode_output, run_text
 from ..platform.windows.win_proc_monitor import get_proxy_connections, ProxyProcessInfo
 from .proxy_demand import clash_proxy_demand, local_proxy_demand
+
+
+# Фоновый TCP-пинг активного сервера — пустое соединение без данных.  Раз в 3 с
+# всю сессию это ровный маяк на линии, поэтому частота зависит от того, нужен
+# ли вердикт прямо сейчас:
+# * трафик идёт — канал и так доказанно жив, пинг только освежает цифру;
+# * тишина — редкая проверка;
+# * прошлый пинг не прошёл или запросы уходят без ответа — частая проверка:
+#   авто-переключению нужны подряд идущие отказы, чтобы признать канал мёртвым.
+PING_INTERVAL_TRAFFIC_SEC = 60.0
+PING_INTERVAL_IDLE_SEC = 20.0
+PING_TRAFFIC_BPS = 2048.0
+PING_UNANSWERED_UP_BPS = 512.0
+PING_JITTER = (0.7, 1.3)
 
 
 class LiveMetricsWorker(QThread):
@@ -50,6 +65,7 @@ class LiveMetricsWorker(QThread):
         self._stopped = False
         self._last_ping_ms: int | None = None
         self._last_ping_ts = 0.0
+        self._ping_jitter = 1.0
         self._mode = mode
         self._clash_api_port = clash_api_port
         self._socks_port = socks_port
@@ -82,6 +98,17 @@ class LiveMetricsWorker(QThread):
             and bool(self._ping_host)
             and self._ping_port > 0
         )
+
+    def _ping_interval(self, down_bps: float | None, up_bps: float | None) -> float:
+        """Сколько ждать до следующего пинга при текущем состоянии канала."""
+        if self._last_ping_ts <= 0.0 or self._last_ping_ms is None:
+            return self._ping_interval_sec
+        down = down_bps or 0.0
+        if down >= PING_TRAFFIC_BPS:
+            return PING_INTERVAL_TRAFFIC_SEC * self._ping_jitter
+        if (up_bps or 0.0) >= PING_UNANSWERED_UP_BPS:
+            return self._ping_interval_sec
+        return PING_INTERVAL_IDLE_SEC * self._ping_jitter
 
     def set_ping_target(self, host: str, port: int, transport_kind: str | None = None) -> None:
         """Re-point the TCP ping after a hot-switch (the worker survives it).
@@ -136,9 +163,13 @@ class LiveMetricsWorker(QThread):
                 prev_downlink = downlink_total
                 prev_ts = now
 
-            if self.pings_active_node() and (now - self._last_ping_ts) >= self._ping_interval_sec:
+            if self.pings_active_node() and (
+                self._last_ping_ts <= 0.0
+                or (now - self._last_ping_ts) >= self._ping_interval(down_bps, up_bps)
+            ):
                 self._last_ping_ms = tcp_ping(self._ping_host, self._ping_port, timeout=1.6)
                 self._last_ping_ts = now
+                self._ping_jitter = random.uniform(*PING_JITTER)
 
             process_stats = None
             if self._mode != "singbox":

@@ -643,7 +643,7 @@ class MeasureDownloadTests(unittest.TestCase):
         self.assertIsNone(measure_download_bps(opener(0), "https://example.invalid/f", timeout=5.0, partial_on_error=True))
 
     def test_candidate_worker_uses_bounded_isolated_measurement(self) -> None:
-        from xray_fluent.constants import ROUTING_GLOBAL, SPEED_TEST_TEMP_HTTP_PORT
+        from xray_fluent.constants import SPEED_TEST_TEMP_HTTP_PORT
 
         controller = SimpleNamespace(state=SimpleNamespace(settings=AppSettings()))
         worker = smart.create_candidate_worker(controller, [Node(id="a", outbound={"protocol": "vless"})])
@@ -651,7 +651,9 @@ class MeasureDownloadTests(unittest.TestCase):
         self.assertEqual(worker._max_bytes, smart.SMART_SWITCH_PROBE_MAX_BYTES)
         self.assertEqual(worker._url, smart.SMART_SWITCH_PROBE_URL)
         self.assertNotEqual(worker._http_port, SPEED_TEST_TEMP_HTTP_PORT)
-        self.assertEqual(worker._routing.mode, ROUTING_GLOBAL)
+        # Та же методика, что у замера текущего сервера: без окна и повторов.
+        self.assertEqual((worker._retries, worker._warmup, worker._window), (0, 0.0, None))
+        self.assertFalse(worker._partial_on_error)
         self.assertNotIn(".ru/", smart.SMART_SWITCH_PROBE_URL)
         self.assertNotIn("dns-query", smart.SMART_SWITCH_PROBE_URL)
 

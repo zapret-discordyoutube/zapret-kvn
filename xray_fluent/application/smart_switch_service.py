@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
 
-from ..constants import ROUTING_GLOBAL, SPEED_TEST_DEFAULT_URL, XRAY_PATH_DEFAULT
+from ..constants import SPEED_TEST_DEFAULT_URL, XRAY_PATH_DEFAULT
 from .auto_switch_service import _transition_in_progress
 from .selection_source import SelectionSource
 
@@ -75,9 +75,8 @@ SMART_SWITCH_PROBE_TIMEOUT_SEC = 6.0
 # одинаковым», а российский адрес шаблоны маршрутизируют напрямую (замер
 # показал бы скорость провайдера, а не сервера).  Не DoH и не IP-discovery.
 SMART_SWITCH_PROBE_URL = SPEED_TEST_DEFAULT_URL
-# Свои временные порты для xray кандидатов: не пересекаются с ручным тестом
-# скорости (19100/19101).
-SMART_SWITCH_TEMP_SOCKS_PORT = 19102
+# Свой временный порт для xray кандидатов: не пересекается с ручным тестом
+# скорости (19101).
 SMART_SWITCH_TEMP_HTTP_PORT = 19103
 # Ручной выбор сервера фиксирует его для УМНОГО переключения на это время, потом
 # проверка снова работает.  Бессрочную фиксацию (_auto_switch_manual_hold) до
@@ -588,7 +587,6 @@ def create_probe_worker(http_port: int | None):
 
 def create_candidate_worker(controller: AppController, nodes: list[Node]):
     from ..network.speed_test_worker import SpeedTestWorker
-    from ..profiles.models import RoutingSettings
     from ..profiles.path_utils import resolve_configured_path
 
     resolved = resolve_configured_path(
@@ -598,18 +596,15 @@ def create_candidate_worker(controller: AppController, nodes: list[Node]):
         migrate_default_location=True,
     )
     xray_path = str(resolved) if resolved else controller.state.settings.xray_path
-    # Временный xray кандидата пускает весь трафик замера через кандидата:
-    # иначе правила «напрямую» дали бы скорость провайдера и ложную победу.
-    routing = RoutingSettings()
-    routing.mode = ROUTING_GLOBAL
+    # Временный xray кандидата пускает весь трафик замера через кандидата
+    # (правил «напрямую» у него нет вовсе): иначе вышла бы скорость провайдера
+    # и ложная победа.  Замер — без окна и повторов, как у текущего сервера.
     return SpeedTestWorker(
         nodes,
         xray_path=xray_path,
-        routing=routing,
         timeout=SMART_SWITCH_PROBE_TIMEOUT_SEC,
         rounds=1,
         max_bytes=SMART_SWITCH_PROBE_MAX_BYTES,
         url=SMART_SWITCH_PROBE_URL,
-        socks_port=SMART_SWITCH_TEMP_SOCKS_PORT,
         http_port=SMART_SWITCH_TEMP_HTTP_PORT,
     )

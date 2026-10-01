@@ -479,19 +479,19 @@ class WireguardWorkerSafetyTests(unittest.TestCase):
         )
         self.assertEqual(speed_test_worker.should_skip_speed_test(vless), (False, ""))
 
-        original_builder = speed_test_worker.build_xray_config
+        original_builder = speed_test_worker.build_speed_test_config
 
         def _forbidden(*args, **kwargs):
-            raise AssertionError("build_xray_config must not be called for endpoint nodes")
+            raise AssertionError("build_speed_test_config must not be called for endpoint nodes")
 
-        speed_test_worker.build_xray_config = _forbidden
+        speed_test_worker.build_speed_test_config = _forbidden
         skipped: list[tuple[str, str]] = []
         try:
             worker = speed_test_worker.SpeedTestWorker([node], xray_path="missing-xray.exe")
             worker.skipped.connect(lambda node_id, msg: skipped.append((node_id, msg)))
             worker.run()
         finally:
-            speed_test_worker.build_xray_config = original_builder
+            speed_test_worker.build_speed_test_config = original_builder
 
         self.assertEqual(worker.completed_nodes, 1)
         self.assertEqual(len(skipped), 1)

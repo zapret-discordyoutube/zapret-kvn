@@ -520,6 +520,7 @@ class MainWindow(FluentWindow):
         # Тест скорости
         self.nodes_page.speed_test_requested.connect(self._speed_test_requested)
         self.nodes_page.cancel_speed_test_requested.connect(self._cancel_speed_test_requested)
+        self.nodes_page.cancel_ping_requested.connect(self.controller.cancel_ping)
         self.controller.speed_updated.connect(self._on_speed_updated)
         self.controller.speed_test_cancelled.connect(self._on_speed_test_cancelled)
 

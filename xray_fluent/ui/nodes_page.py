@@ -92,6 +92,7 @@ class NodesPage(StackedSection):
     ping_requested = pyqtSignal(object)             # emits set[str] or empty set
     speed_test_requested = pyqtSignal(object)       # emits set[str] of node IDs (or empty set for all)
     cancel_speed_test_requested = pyqtSignal()
+    cancel_ping_requested = pyqtSignal()
     export_outbound_json_requested = pyqtSignal(str)
     export_runtime_json_requested = pyqtSignal(str)
     # Запрос подключиться к серверу (controller.set_selected_node): id сервера и
@@ -215,6 +216,11 @@ class NodesPage(StackedSection):
         self.ping_all_btn = TransparentToolButton(FIF.SYNC, self)
         self.ping_all_btn.setToolTip("Пинг всех")
         toolbar.addWidget(self.ping_all_btn)
+
+        self.stop_ping_btn = TransparentToolButton(FIF.CANCEL, self)
+        self.stop_ping_btn.setToolTip("Остановить пинг")
+        self.stop_ping_btn.setVisible(False)
+        toolbar.addWidget(self.stop_ping_btn)
 
 
         self.speed_test_btn = TransparentToolButton(FIF.SPEED_HIGH, self)
@@ -409,6 +415,7 @@ class NodesPage(StackedSection):
         self.speed_test_btn.clicked.connect(self._on_speed_test_selected)
         self.speed_test_all_btn.clicked.connect(self._on_speed_test_all)
         self.stop_speed_test_btn.clicked.connect(self.cancel_speed_test_requested.emit)
+        self.stop_ping_btn.clicked.connect(self.cancel_ping_requested.emit)
         self.delete_btn.clicked.connect(self._on_delete_selected)
         self.move_up_btn.clicked.connect(self._on_move_up)
         self.move_down_btn.clicked.connect(self._on_move_down)
@@ -623,6 +630,7 @@ class NodesPage(StackedSection):
         # Новый запрос вливается в идущий раунд пинга, а не заменяет его.
         self._pending_ping_ids |= targets
         self._table_model.set_ping_busy_ids(self._pending_ping_ids)
+        self.stop_ping_btn.setVisible(True)
 
     def start_speed_activity(self) -> None:
         self._speed_progress_timer.stop()
@@ -652,6 +660,7 @@ class NodesPage(StackedSection):
         self._table_model.finish_ping_batch(ids)
 
     def finish_ping_activity(self) -> None:
+        self.stop_ping_btn.setVisible(False)
         self._ping_batch_timer.stop()
         self._flush_ping_batch()
         if not self._pending_ping_ids:
@@ -945,10 +954,12 @@ class NodesPage(StackedSection):
             combo.setCurrentIndex(0)
         self.favorites_filter.setChecked(False)
 
-    def _update_counter(self):
+    def _update_counter(self, selected: int | None = None):
         if hasattr(self, "counter_label"):
+            if selected is None:
+                selected = len(self._selected_ids())
             self.counter_label.setText(
-                f"Показано: {self._table_model.visible_node_count()} из {len(self._nodes)} · Выбрано: {len(self._selected_ids())}"
+                f"Показано: {self._table_model.visible_node_count()} из {len(self._nodes)} · Выбрано: {selected}"
             )
 
     def _group_expanded(self, _key: str, _expanded: bool) -> None:
@@ -1040,7 +1051,7 @@ class NodesPage(StackedSection):
         сервер здесь не переключается (см. ``_connect_node``)."""
         ids = self._selected_ids()
         self.bulk_edit_btn.setVisible(len(ids) > 1)
-        self._update_counter()
+        self._update_counter(len(ids))
         is_manual = self._manual_moves_allowed()
         self.move_up_btn.setEnabled(is_manual and len(ids) == 1)
         self.move_down_btn.setEnabled(is_manual and len(ids) == 1)

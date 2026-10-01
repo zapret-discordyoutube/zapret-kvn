@@ -84,9 +84,15 @@ SPEED_TEST_URLS_BY_COUNTRY: dict[str, str] = {
     "us": "https://ams.download.datapacket.com/100mb.bin",
 }
 SPEED_TEST_DEFAULT_URL = "https://fra.download.datapacket.com/100mb.bin"
-SPEED_TEST_TIMEOUT = 20  # seconds per single measurement
-SPEED_TEST_ROUNDS = 3    # number of measurements per node (best avg of N-1)
-SPEED_TEST_TEMP_SOCKS_PORT = 19100
+SPEED_TEST_TIMEOUT = 6   # seconds: ожидание ответа/данных одной попытки
+SPEED_TEST_ROUNDS = 1    # удачных замеров на сервер
+# Ручной тест скорости: один оконный замер вместо трёх полных скачиваний —
+# разгон TCP отбрасывается, дальше считается короткое установившееся окно.
+SPEED_TEST_RETRIES = 1              # повторная попытка, если замер не удался
+SPEED_TEST_WARMUP_SEC = 1.0
+SPEED_TEST_WINDOW_SEC = 3.0
+SPEED_TEST_MAX_BYTES = 32 * 1024 * 1024
+SPEED_TEST_PAUSE_RANGE_SEC = (0.4, 1.6)  # случайная пауза между серверами
 SPEED_TEST_TEMP_HTTP_PORT = 19101
 # Временное ядро теста скорости запускается из отдельной ссылки/копии xray.exe
 # с собственным именем: план sing-box TUN уводит ровно этот путь в direct

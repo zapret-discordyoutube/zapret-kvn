@@ -109,6 +109,7 @@ from .runtime import (
     can_apply_proxy_runtime_change as can_apply_proxy_runtime_change_rule,
     can_proxy_hot_swap as can_proxy_hot_swap_rule,
     can_tun_hot_swap as can_tun_hot_swap_rule,
+    cancel_ping as cancel_ping_operation,
     cancel_speed_test as cancel_speed_test_operation,
     cleanup_connection_runtime_state as cleanup_connection_runtime_state_operation,
     compute_transition_action,
@@ -3665,6 +3666,9 @@ class AppController(QObject):
 
     def ping_nodes(self, node_ids: set[str] | None = None) -> None:
         ping_nodes_operation(self, node_ids)
+
+    def cancel_ping(self) -> bool:
+        return cancel_ping_operation(self)
 
     def speed_test_nodes(self, node_ids: set[str] | None = None) -> bool:
         return speed_test_nodes_operation(self, node_ids)

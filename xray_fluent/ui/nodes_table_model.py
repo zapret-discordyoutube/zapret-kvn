@@ -101,6 +101,10 @@ STATUS_NONE, STATUS_ALIVE, STATUS_DEGRADED, STATUS_DEAD = range(4)
 
 # Перестройка раскладки после метрик (пинг/скорость) не чаще, чем раз в N мс.
 _METRIC_RELAYOUT_MS = 300
+# Пока идёт раунд пинга или теста скорости, результаты сыплются непрерывно:
+# при сортировке по метрике таблица иначе перестраивалась бы трижды в секунду
+# (полная пересортировка + layoutChanged + перенос выделения) весь раунд.
+_METRIC_RELAYOUT_BUSY_MS = 1500
 
 
 def node_type_text(node: Node) -> str:
@@ -329,6 +333,7 @@ class NodesTableModel(QAbstractTableModel):
         changed = node_ids ^ self._busy_ping_ids
         self._busy_ping_ids = node_ids
         self._repaint_nodes(changed, COL_PING)
+        self._hasten_relayout()
 
     def clear_ping_busy(self) -> None:
         self.set_ping_busy_ids(set())
@@ -350,6 +355,7 @@ class NodesTableModel(QAbstractTableModel):
             changed = set(self._speed_progress)
             self._speed_progress.clear()
             self._repaint_nodes(changed, COL_SPEED)
+            self._hasten_relayout()
 
     def speed_progress(self, node_id: str) -> int | None:
         return self._speed_progress.get(node_id)
@@ -360,6 +366,7 @@ class NodesTableModel(QAbstractTableModel):
         node_ids = set(node_ids)
         self._busy_ping_ids -= node_ids
         self._metrics_changed(node_ids)
+        self._hasten_relayout()
 
     def finish_speed(self, node_id: str) -> None:
         self._speed_progress.pop(node_id, None)
@@ -385,8 +392,18 @@ class NodesTableModel(QAbstractTableModel):
             # Пачки результатов пинга не должны пересортировывать таблицу на
             # каждый ответ: одна перестройка на окно.
             if not self._relayout_timer.isActive():
-                self._relayout_timer.start()
+                self._relayout_timer.start(
+                    _METRIC_RELAYOUT_BUSY_MS if self._metrics_round_active() else _METRIC_RELAYOUT_MS
+                )
         self._invalidate_nodes(node_ids)
+
+    def _metrics_round_active(self) -> bool:
+        return bool(self._busy_ping_ids or self._speed_progress)
+
+    def _hasten_relayout(self) -> None:
+        """Раунд кончился — отложенную пересортировку не держим до конца окна."""
+        if self._relayout_timer.isActive() and not self._metrics_round_active():
+            self._relayout_timer.start(0)
 
     # ── Доступ для страницы и делегата ─────────────────────
 
