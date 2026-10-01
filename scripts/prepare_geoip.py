@@ -9,7 +9,10 @@ import json
 import re
 import shutil
 import tempfile
+import time
+from http.client import HTTPException
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,10 +26,22 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def fetch(url, destination):
+def fetch(url, destination, attempts=5):
     request = Request(url, headers={"User-Agent": "ZapretKVN-build/1"})
-    with urlopen(request, timeout=90) as response, destination.open("wb") as target:
-        shutil.copyfileobj(response, target)
+    # The release host's link resets long transfers now and then. The lock pins
+    # the result by SHA-256, so restarting the whole download is always safe;
+    # an HTTP status is the server's verdict and is not retried.
+    for attempt in range(attempts):
+        try:
+            with urlopen(request, timeout=90) as response, destination.open("wb") as target:
+                shutil.copyfileobj(response, target)
+            return
+        except HTTPError:
+            raise
+        except (HTTPException, OSError):
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(2.0 * (attempt + 1))
 
 
 def verify_database(path):

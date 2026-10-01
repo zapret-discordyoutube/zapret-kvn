@@ -39,3 +39,24 @@ class GeoipBuildTests(unittest.TestCase):
         lock=json.loads(prepare_geoip.LOCK_PATH.read_text())
         lock['url']='https://example.com/database.mmdb.gz'
         with self.assertRaises(ValueError):prepare_geoip.verify_lock(lock)
+
+
+class GeoipFetchRetryTests(unittest.TestCase):
+    def test_reset_mid_transfer_restarts_the_download(self):
+        import io
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        class Broken(io.BytesIO):
+            def read(self, *_args):
+                raise ConnectionResetError(104, "Connection reset by peer")
+
+        responses = [Broken(b"partial"), io.BytesIO(b"complete")]
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            prepare_geoip, "urlopen", side_effect=lambda *_a, **_k: responses.pop(0)
+        ), patch.object(prepare_geoip.time, "sleep"):
+            target = Path(directory) / "db"
+            prepare_geoip.fetch("https://example.invalid/db", target)
+            self.assertEqual(target.read_bytes(), b"complete")
+        self.assertEqual(responses, [])
