@@ -256,7 +256,7 @@ from ..diagnostics.runtime_logging import (
     runtime_mapping_lines,
 )
 from ..profiles.storage import PassphraseRequired, StateStorage
-from ..platform.windows.startup import build_startup_command, set_startup_enabled
+from ..platform.windows import startup as windows_startup
 from ..platform.windows.subprocess_utils import result_output_text, run_text
 from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistoryStorage
 from .server_bypass import ServerBypass
@@ -3616,6 +3616,17 @@ class AppController(QObject):
                 return
             self._request_transition("routing changed")
 
+    def repair_launch_on_startup(self) -> None:
+        """Сверить задание автозапуска с настройкой и текущим путём приложения."""
+        import threading
+
+        threading.Thread(
+            target=windows_startup.repair,
+            args=(self.state.settings.launch_on_startup,),
+            name="autostart-repair",
+            daemon=True,
+        ).start()
+
     def update_settings(self, settings: AppSettings) -> None:
         settings.proxy_engine = "singbox"
         settings.tun_engine = "singbox"
@@ -3645,9 +3656,13 @@ class AppController(QObject):
 
         if old_launch != settings.launch_on_startup:
             try:
-                set_startup_enabled(APP_NAME, settings.launch_on_startup, build_startup_command())
+                windows_startup.apply(settings.launch_on_startup)
             except Exception as exc:
-                self.status.emit("error", f"Ошибка настройки автозапуска: {exc}")
+                # Переключатель обязан показывать правду: настройка, которую
+                # Windows не приняла, возвращается в прежнее положение.
+                settings.launch_on_startup = old_launch
+                self.settings_changed.emit(self.state.settings)
+                self.status.emit("error", f"Не удалось настроить автозапуск: {exc}")
 
         if self.connected or self._desired_connected:
             if old_tun != settings.tun_mode:

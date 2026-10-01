@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import processes
+from . import handoff, processes
 from .plan import WORK_DIR_PREFIX, InstallPlan
 from .runner import Stage, run_install, setup_logging
 
@@ -22,6 +22,9 @@ def main(plan_path: str) -> int:
     except Exception:
         _log.exception("Установщик завершился с ошибкой")
         ok = False
+    finally:
+        # Окно обновления закрыто: приложение может показать своё.
+        handoff.release(plan.hold_marker)
     _remove_work_dir_later(plan)
     return 0 if ok else 1
 

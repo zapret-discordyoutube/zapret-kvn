@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import QPropertyAnimation, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QLabel, QVBoxLayout, QWidget
@@ -18,6 +20,10 @@ _MARGIN = 24
 _RADIUS = 10
 _PHRASE_INTERVAL_MS = 4200
 _FADE_MS = 180
+# Быстрая установка не должна мелькнуть: окно живёт столько, чтобы успеть
+# прочитать хотя бы пару фраз. Приложение в это время уже запущено и ждёт.
+_MIN_VISIBLE_MS = 7000
+_FAREWELL_MS = {Stage.DONE: 1200, Stage.FAILED: 4500}
 _PROGRESS_STEPS = 1000
 
 # Доля общего индикатора, отведённая каждому шагу: (начало, конец).
@@ -55,6 +61,7 @@ class UpdateWindow(QWidget):
         super().__init__()
         self._plan = plan
         self._finished = False
+        self._shown_at = time.monotonic()
         self._drag_offset = None
         self._deck = phrases.PhraseDeck()
 
@@ -179,11 +186,22 @@ class UpdateWindow(QWidget):
 
     def _finish(self, stage: Stage) -> None:
         self._finished = True
+        farewell = _FAREWELL_MS[stage]
+        shown_ms = int((time.monotonic() - self._shown_at) * 1000)
+        # До прощальной фразы продолжают сменяться обычные.
+        QTimer.singleShot(
+            max(0, _MIN_VISIBLE_MS - farewell - shown_ms), lambda: self._say_farewell(stage)
+        )
+
+    def _say_farewell(self, stage: Stage) -> None:
         self._phrase_timer.stop()
         self._show_phrase(phrases.DONE if stage is Stage.DONE else phrases.FAILED)
-        # Удачный итог уступает место окну приложения сразу, неудачный даёт
-        # время прочитать, что произошло.
-        QTimer.singleShot(900 if stage is Stage.DONE else 4500, self.close)
+        # Главное окно приложения появится, когда закроется это.
+        QTimer.singleShot(_FAREWELL_MS[stage], self.close)
+
+    def showEvent(self, event) -> None:
+        self._shown_at = time.monotonic()
+        super().showEvent(event)
 
     # ── фразы ───────────────────────────────────────────────────
 

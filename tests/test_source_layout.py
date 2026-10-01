@@ -35,8 +35,9 @@ class SourceLayoutTests(unittest.TestCase):
 
     def test_development_startup_still_targets_repository_entry_point(self):
         with patch.object(startup.sys, "frozen", False, create=True):
-            command = startup.build_startup_command()
-        self.assertIn(f'"{ROOT / "main.py"}"', command)
+            target = startup.startup_target()
+        self.assertIn(f'"{ROOT / "main.py"}"', target.arguments)
+        self.assertEqual(target.working_dir, ROOT)
         self.assertEqual(BASE_DIR, ROOT)
 
     def test_builder_bundles_catalog_beside_its_consumer(self):

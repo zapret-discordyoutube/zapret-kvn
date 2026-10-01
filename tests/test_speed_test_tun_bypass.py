@@ -15,7 +15,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from xray_fluent.constants import SPEED_TEST_XRAY_PATH, XRAY_PATH_DEFAULT
+from xray_fluent.constants import (
+    HYSTERIA_PATH_DEFAULT,
+    SPEED_TEST_HYSTERIA_PATH,
+    SPEED_TEST_XRAY_PATH,
+    XRAY_PATH_DEFAULT,
+)
 from xray_fluent.engines.singbox.runtime_planner import (
     parse_singbox_document,
     plan_singbox_proxy_runtime,
@@ -27,7 +32,7 @@ from xray_fluent.network.speed_test_worker import prepare_speed_test_xray
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "data" / "templates" / "sing-box" / "default.json"
 SPEED_RULE = {
-    "process_path": [str(SPEED_TEST_XRAY_PATH.resolve())],
+    "process_path": [str(SPEED_TEST_XRAY_PATH.resolve()), str(SPEED_TEST_HYSTERIA_PATH.resolve())],
     "action": "route",
     "outbound": "direct",
 }
@@ -72,6 +77,15 @@ class PlannerRuleTests(unittest.TestCase):
         paths = [path for rule in rules for path in rule.get("process_path", [])]
         self.assertNotIn(str(XRAY_PATH_DEFAULT.resolve()), paths)
         self.assertNotEqual(SPEED_TEST_XRAY_PATH.name.lower(), "xray.exe")
+
+    def test_rule_covers_temp_hysteria_but_not_the_working_sidecar(self) -> None:
+        # Временный клиент Hysteria при активном vless-сервере иначе ушёл бы в
+        # туннель: замер показал бы скорость текущего сервера, а не кандидата.
+        rules = self.plan(plan_singbox_runtime)
+        paths = [path for rule in rules for path in rule.get("process_path", [])]
+        self.assertIn(str(SPEED_TEST_HYSTERIA_PATH.resolve()), paths)
+        self.assertNotIn(str(HYSTERIA_PATH_DEFAULT.resolve()), paths)
+        self.assertNotEqual(SPEED_TEST_HYSTERIA_PATH.name.lower(), HYSTERIA_PATH_DEFAULT.name.lower())
 
     def test_proxy_plan_has_no_rule(self) -> None:
         self.assertNotIn(SPEED_RULE, self.plan(plan_singbox_proxy_runtime))
@@ -241,6 +255,26 @@ class SpeedTestConfigTests(unittest.TestCase):
         self.assertEqual([ob["tag"] for ob in config["outbounds"]], ["proxy"])
         self.assertEqual(node.outbound["tag"], "user-tag")  # исходная нода не тронута
 
+    def test_hysteria_node_is_measured_by_the_official_client(self) -> None:
+        node = _node(HY2)
+        self.assertTrue(speed_test_worker.is_hysteria_speed_node(node))
+        self.assertEqual(speed_test_worker.should_skip_speed_test(node), (False, ""))
+
+        config = speed_test_worker.build_hysteria_speed_test_config(node, 23456)
+
+        self.assertEqual(config["http"], {"listen": "127.0.0.1:23456"})
+        self.assertNotIn("socks5", config)
+        self.assertIn("hy.example.com", config["server"])
+        self.assertEqual(config["tls"]["sni"], "hy.example.com")
+
+    def test_hysteria_without_source_link_is_skipped_with_a_reason(self) -> None:
+        node = _node(HY2)
+        node.link = ""
+        skip, message = speed_test_worker.should_skip_speed_test(node)
+        self.assertTrue(skip)
+        self.assertIn("hy2://", message)
+        self.assertNotIn("xray", message)
+
     def test_busy_preferred_port_is_replaced_with_free_one(self) -> None:
         # Осиротевший xray-speedtest.exe держит порт: «порт открыт» не должен
         # сойти за готовность нашего ядра.
@@ -316,9 +350,30 @@ class WindowedMeasurementTests(unittest.TestCase):
 
     def test_volume_cap_before_warmup_measures_from_first_byte(self) -> None:
         # Очень быстрый сервер исчерпал лимит раньше разгона: время ответа
-        # (2 с до первого байта) в скорость не входит.
+        # (2 с до первого байта) в скорость не входит, как и сам первый чанк —
+        # он пришёл в момент начала отсчёта.
         bps = self._measure([(2.0, 500), (0.5, 500)], warmup=1.0, window=3.0, max_bytes=1000)
-        self.assertEqual(bps, 2000.0)
+        self.assertEqual(bps, 1000.0)
+
+    def test_short_reply_does_not_look_like_a_record_speed(self) -> None:
+        # Сервер отдал два чанка подряд и закрыл соединение: раньше это давало
+        # сотни МБ/с (весь объём делился на миллисекунду между чанками).
+        bps = self._measure([(0.3, 64 * 1024), (0.001, 64 * 1024)], warmup=1.0, window=3.0)
+        self.assertAlmostEqual(bps, 2 * 64 * 1024 / 0.301)
+        only_one = self._measure([(0.5, 64 * 1024)], warmup=1.0, window=3.0)
+        self.assertEqual(only_one, 64 * 1024 / 0.5)
+
+    def test_trickling_server_does_not_outlive_the_attempt_budget(self) -> None:
+        # Еле живой канал: окно закрывается по общему бюджету попытки, а не
+        # тянется, пока не наберётся разгон.
+        clock = _Clock()
+        response = _TimedResponse(clock, [(4.0, 10)] * 50)
+        with patch.object(speed_test_worker.time, "perf_counter", clock):
+            bps = speed_test_worker.measure_download_bps(
+                _Opener(response), "https://example.invalid/f", timeout=6.0, warmup=1.0, window=3.0,
+            )
+        self.assertIsNotNone(bps)
+        self.assertLessEqual(clock.now, 6.0 + 1.0 + 3.0 + 4.0)
 
     def test_stall_inside_window_counts_received_bytes(self) -> None:
         bps = self._measure(
@@ -350,6 +405,54 @@ class WorkerMeasurementPolicyTests(unittest.TestCase):
                     patch.object(speed_test_worker.time, "sleep", lambda _s: None):
                 worker.run()
         return results, percents
+
+    def test_hysteria_node_launches_temp_hysteria_client(self) -> None:
+        calls: list[tuple[list[str], dict]] = []
+        configs: list[dict] = []
+
+        def _popen(args, **kwargs):
+            calls.append((list(args), kwargs))
+            configs.append(json.loads(Path(args[2]).read_text(encoding="utf-8")))
+            return _Proc()
+
+        results: list = []
+        with tempfile.TemporaryDirectory() as tmp:
+            hysteria = Path(tmp) / "core" / "hysteria.exe"
+            hysteria.parent.mkdir()
+            hysteria.write_bytes(b"h")
+            target = Path(tmp) / "speedtest" / "hysteria-speedtest.exe"
+            worker = speed_test_worker.SpeedTestWorker(
+                [_node(HY2)], xray_path=str(Path(tmp) / "missing-xray.exe"), hysteria_path=str(hysteria),
+            )
+            worker.result.connect(lambda node_id, mbps, alive: results.append((mbps, alive)))
+            port_checks = iter([False, True])
+            with patch.object(speed_test_worker, "SPEED_TEST_HYSTERIA_PATH", target), \
+                    patch.object(speed_test_worker.subprocess, "Popen", _popen), \
+                    patch.object(speed_test_worker, "_port_open", lambda host, port: next(port_checks)), \
+                    patch.object(speed_test_worker, "measure_download_bps", lambda *a, **k: 3.0 * 1024 * 1024), \
+                    patch.object(speed_test_worker.time, "sleep", lambda _s: None):
+                worker.run()
+
+        self.assertEqual(results, [(3.0, True)])
+        args, kwargs = calls[0]
+        self.assertEqual(Path(args[0]).name, "hysteria-speedtest.exe")
+        self.assertEqual(args[1], "--config")
+        self.assertEqual(args[-1], "client")
+        self.assertEqual(kwargs["cwd"], str(hysteria.parent))
+        self.assertIn("http", configs[0])
+
+    def test_hysteria_node_is_skipped_softly_when_the_core_is_missing(self) -> None:
+        skipped: list[str] = []
+        results: list = []
+        worker = speed_test_worker.SpeedTestWorker(
+            [_node(HY2)], xray_path="missing-xray.exe", hysteria_path="missing-hysteria.exe",
+        )
+        worker.skipped.connect(lambda _id, message: skipped.append(message))
+        worker.result.connect(lambda *a: results.append(a))
+        worker.run()
+        self.assertEqual(results, [])  # не помечаем сервер мёртвым
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("Hysteria", skipped[0])
 
     def test_failed_measurement_is_retried_once(self) -> None:
         outcomes = iter([None, 4.0 * 1024 * 1024])

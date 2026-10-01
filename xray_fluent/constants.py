@@ -99,6 +99,7 @@ SPEED_TEST_TEMP_HTTP_PORT = 19101
 # (process_path), чтобы замер кандидата не шёл через текущий сервер. Путь
 # отличается от xray.exe гибридного сайдкара, поэтому правило его не задевает.
 SPEED_TEST_XRAY_PATH = RUNTIME_DIR / "speedtest" / "xray-speedtest.exe"
+SPEED_TEST_HYSTERIA_PATH = RUNTIME_DIR / "speedtest" / "hysteria-speedtest.exe"
 
 SS_PROTECT_PORT_START = 19200
 SS_PROTECT_PORT_END = 19300

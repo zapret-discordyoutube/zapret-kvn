@@ -17,13 +17,17 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..constants import (
     PROXY_HOST,
+    HYSTERIA_PATH_DEFAULT,
     SPEED_TEST_DEFAULT_URL,
+    SPEED_TEST_HYSTERIA_PATH,
     SPEED_TEST_ROUNDS,
     SPEED_TEST_TEMP_HTTP_PORT,
     SPEED_TEST_TIMEOUT,
     SPEED_TEST_URLS_BY_COUNTRY,
     SPEED_TEST_XRAY_PATH,
 )
+from ..engines.hysteria.config_adapter import build_uri_client_config
+from ..engines.hysteria.runtime_contract import classify_hysteria_uri
 from .http_utils import build_opener
 from ..profiles.models import Node
 
@@ -75,6 +79,7 @@ def measure_download_bps(
     windowed = window is not None and window > 0
     warmup = max(0.0, float(warmup)) if windowed else 0.0
     first_byte_at: float | None = None
+    first_chunk_bytes = 0
     mark_at: float | None = None
     mark_bytes = 0
     now = start
@@ -87,8 +92,13 @@ def measure_download_bps(
                 total_length = 0
             if max_bytes:
                 total_length = min(total_length, max_bytes) if total_length > 0 else max_bytes
+            # read1 отдаёт то, что уже пришло, не дожидаясь полного чанка: на
+            # еле живом канале цикл всё равно доходит до проверок окна.
+            read = getattr(resp, "read1", None) if windowed else None
+            if read is None:
+                read = resp.read
             while True:
-                chunk = resp.read(64 * 1024)
+                chunk = read(64 * 1024)
                 if not chunk:
                     break
                 total_bytes += len(chunk)
@@ -98,6 +108,7 @@ def measure_download_bps(
                 elapsed = now - start
                 if first_byte_at is None:
                     first_byte_at = now
+                    first_chunk_bytes = total_bytes
                 since_first = now - first_byte_at
                 if windowed and mark_at is None and since_first >= warmup:
                     mark_at, mark_bytes = now, total_bytes
@@ -117,6 +128,8 @@ def measure_download_bps(
                 if windowed:
                     if mark_at is not None and now - mark_at >= window:
                         break
+                    if elapsed > timeout + warmup + window:
+                        break
                 elif elapsed > timeout:
                     break
     except Exception:
@@ -128,9 +141,13 @@ def measure_download_bps(
     if windowed and first_byte_at is not None:
         if mark_at is not None and now - mark_at >= _MIN_WINDOW_SEC and total_bytes > mark_bytes:
             return (total_bytes - mark_bytes) / (now - mark_at)
+        # Окна не получилось (объём или соединение кончились раньше разгона).
+        # Первый чанк пришёл В момент отсчёта, а не после него, поэтому в
+        # числитель не входит.  Совсем короткий ответ — пара чанков подряд —
+        # скоростью канала не является: его делим на всё время запроса.
         since_first = now - first_byte_at
-        if since_first > 0:
-            return total_bytes / since_first
+        if since_first >= _MIN_WINDOW_SEC and total_bytes > first_chunk_bytes:
+            return (total_bytes - first_chunk_bytes) / since_first
     elapsed = time.perf_counter() - start
     if elapsed <= 0:
         return None
@@ -193,7 +210,10 @@ def _speed_test_env(source: Path) -> dict[str, str]:
     return env
 
 
-# Сколько ждать готовности временного xray.
+# Метка места, куда в команду запуска подставляется путь к конфигу.
+_CONFIG = object()
+
+# Сколько ждать готовности временного ядра.
 SPEED_TEST_CORE_START_TIMEOUT = 20.0
 _CORE_POLL_SEC = 0.1
 
@@ -259,14 +279,59 @@ def _get_speed_url(country_code: str) -> str:
     return SPEED_TEST_URLS_BY_COUNTRY.get(country_code.lower(), SPEED_TEST_DEFAULT_URL)
 
 
-def should_skip_speed_test(node: Node) -> tuple[bool, str]:
-    """Тест скорости работает через временный xray — native sing-box ноды
-    (включая endpoint-ноды WireGuard/AWG) пропускаются мягко, без is_alive=False."""
+def is_hysteria_speed_node(node: Node) -> bool:
+    """Hysteria2 из ссылки hy2:// — её меряет официальный клиент Hysteria."""
     outbound = node.outbound if isinstance(node.outbound, dict) else {}
-    if outbound.get("type") and not outbound.get("protocol"):
-        protocol = str(outbound.get("type") or node.scheme or "native").upper()
-        return True, f"Тест скорости для {node.name} пропущен: протокол {protocol} не поддерживается ядром xray."
-    return False, ""
+    if str(outbound.get("type") or "").strip().lower() != "hysteria2":
+        return False
+    link = str(node.link or "").strip()
+    return link.partition(":")[0].lower() in {"hy2", "hysteria2"}
+
+
+def should_skip_speed_test(node: Node) -> tuple[bool, str]:
+    """Кого тест скорости не умеет мерить; пропуск мягкий, без is_alive=False.
+
+    Временное ядро — то же, которым приложение подключается к серверу: xray
+    для нод в формате xray, официальный клиент для Hysteria2.  Остальные
+    native sing-box ноды (включая endpoint-ноды WireGuard/AWG) пропускаются.
+    """
+    outbound = node.outbound if isinstance(node.outbound, dict) else {}
+    if not (outbound.get("type") and not outbound.get("protocol")):
+        return False, ""
+    protocol = str(outbound.get("type") or node.scheme or "native").upper()
+    if is_hysteria_speed_node(node):
+        capability = classify_hysteria_uri(str(node.link or "").strip(), platform="windows")
+        if capability.valid:
+            return False, ""
+        reason = capability.validation_message or "ссылка несовместима с клиентом Hysteria"
+        return True, f"Тест скорости для {node.name} пропущен: {reason}."
+    if str(outbound.get("type") or "").strip().lower() == "hysteria2":
+        return True, (
+            f"Тест скорости для {node.name} пропущен: Hysteria2 меряется только "
+            "по исходной ссылке hy2:// — импортируйте сервер ссылкой."
+        )
+    return True, f"Тест скорости для {node.name} пропущен: протокол {protocol} пока не измеряется."
+
+
+def build_hysteria_speed_test_config(node: Node, http_port: int) -> dict:
+    """Конфиг временного клиента Hysteria: локальный HTTP-прокси → сервер.
+
+    Собирается тем же адаптером, что и рабочее подключение (обфускация,
+    закрепление сертификата, port hopping, полоса), только вместо SOCKS-relay
+    с паролем — HTTP-прокси на loopback, через который идёт замер.
+    """
+
+    config = build_uri_client_config(
+        str(node.link or "").strip(),
+        node.outbound if isinstance(node.outbound, dict) else {},
+        relay_host=PROXY_HOST,
+        relay_port=int(http_port),
+        relay_username="",
+        relay_password="",
+    )
+    config.pop("socks5", None)
+    config["http"] = {"listen": f"{PROXY_HOST}:{int(http_port)}"}
+    return config
 
 
 class SpeedTestWorker(QThread):
@@ -293,10 +358,13 @@ class SpeedTestWorker(QThread):
         window: float | None = None,
         partial_on_error: bool = False,
         pause_range: tuple[float, float] | None = None,
+        hysteria_path: str | None = None,
     ):
         super().__init__()
         self._nodes = list(nodes)
         self._xray_path = xray_path
+        self._hysteria_path = str(hysteria_path or HYSTERIA_PATH_DEFAULT)
+        self._hysteria_launch_path: str | None = None
         self._timeout = timeout
         # ``rounds`` — сколько удачных замеров усреднять; ``retries`` — сколько
         # лишних попыток дать серверу, пока удачных меньше.  Ручной тест берёт
@@ -349,6 +417,10 @@ class SpeedTestWorker(QThread):
                 if self._cancelled:
                     break
                 skip, skip_message = should_skip_speed_test(node)
+                if not skip and is_hysteria_speed_node(node) and not Path(self._hysteria_path).is_file():
+                    skip, skip_message = True, (
+                        f"Тест скорости для {node.name} пропущен: не найдено ядро Hysteria."
+                    )
                 if skip:
                     self._completed_nodes += 1
                     self.skipped.emit(node.id, skip_message)
@@ -415,20 +487,48 @@ class SpeedTestWorker(QThread):
             time.sleep(_CORE_POLL_SEC)
         return False
 
+    def _core_launch(self, node: Node, http_port: int):
+        """(конфиг, команда, окружение, рабочий каталог) временного ядра или ``None``.
+
+        В команде на месте пути к конфигу стоит метка ``_CONFIG``.
+        """
+
+        if is_hysteria_speed_node(node):
+            source = Path(self._hysteria_path)
+            if not source.is_file():
+                return None
+            if self._hysteria_launch_path is None:
+                self._hysteria_launch_path = str(
+                    prepare_speed_test_xray(source, SPEED_TEST_HYSTERIA_PATH)
+                )
+            command = [
+                self._hysteria_launch_path,
+                "--config", _CONFIG,
+                "--disable-update-check",
+                "--log-level", "error",
+                "client",
+            ]
+            return build_hysteria_speed_test_config(node, http_port), command, None, str(source.parent)
+
+        if not Path(self._xray_path).is_file():
+            return None
+        command = [getattr(self, "_launch_path", "") or self._xray_path, "run", "-c", _CONFIG]
+        return build_speed_test_config(node, http_port), command, _speed_test_env(Path(self._xray_path)), None
+
     def _test_node(self, node: Node) -> tuple[bool, float | None, bool]:
         """Запускает временный xray, скачивает тестовый файл.
 
         Возвращает кортеж (finished, speed_mbps, is_alive), где finished=False
         означает ручную отмену текущего измерения и отсутствие результата для ноды.
         """
-        if not Path(self._xray_path).is_file():
-            return True, None, False
-
         http_port = _pick_port(PROXY_HOST, self._http_port)
         try:
-            config = build_speed_test_config(node, http_port)
+            launch = self._core_launch(node, http_port)
         except Exception:
             return True, None, False
+        if launch is None:
+            return True, None, False
+        config, command, env, cwd = launch
 
         config_path: Path | None = None
         proc = None
@@ -445,10 +545,11 @@ class SpeedTestWorker(QThread):
             tmp.close()
 
             proc = subprocess.Popen(
-                [getattr(self, "_launch_path", "") or self._xray_path, "run", "-c", str(config_path)],
+                [part if part is not _CONFIG else str(config_path) for part in command],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                env=_speed_test_env(Path(self._xray_path)),
+                env=env,
+                cwd=cwd,
                 creationflags=0x08000000,  # CREATE_NO_WINDOW
             )
             self._current_proc = proc

@@ -203,7 +203,7 @@ def on_speed_complete(controller: AppController) -> None:
     elif skipped:
         controller.status.emit(
             "info",
-            f"Тест скорости пропустил серверов: {len(skipped)} — их протоколы не поддерживаются ядром xray.",
+            f"Тест скорости пропустил серверов: {len(skipped)} — их протоколы пока не измеряются.",
         )
     if cancelled:
         controller.status.emit("info", f"Тест скорости остановлен ({completed}/{controller._speed_total})")

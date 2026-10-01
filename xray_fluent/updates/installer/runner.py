@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
 
-from . import processes
+from . import handoff, processes
 from .file_swap import FileSwap, InstallError
 from .plan import InstallPlan
 
@@ -18,10 +18,13 @@ _log = logging.getLogger("xray_fluent.update_installer")
 
 APP_EXIT_WAIT_S = 60.0
 CORE_STOP_WAIT_S = 20.0
-# Сборка, которая не может запуститься, падает в первые секунды: импорт
-# модулей и создание окна. Столько установщик ждёт, прежде чем убрать
-# резервную копию прежней версии.
-HEALTH_CHECK_S = 5.0
+# Новая версия сама сообщает, что оболочка собрана (см. handoff); столько
+# установщик ждёт этого сообщения. Молчащий, но живой процесс считается
+# запустившимся: медленный диск — не повод откатывать обновление.
+NEW_VERSION_READY_WAIT_S = 20.0
+# Прежняя версия при откате может не знать о handoff и не ответить вовсе:
+# для неё достаточно не упасть в первые секунды.
+OLD_VERSION_READY_WAIT_S = 5.0
 
 
 class Stage(Enum):
@@ -108,20 +111,40 @@ def _close_application(plan: InstallPlan) -> None:
 
 def _start_and_verify(plan: InstallPlan, progress: Callable[[float], None]) -> None:
     process = _start_application(plan)
-    started = time.monotonic()
-    while (elapsed := time.monotonic() - started) < HEALTH_CHECK_S:
-        if process.poll() is not None:
-            raise InstallError(
-                f"Новая версия завершилась сразу после запуска (код {process.returncode})"
-            )
-        progress(elapsed / HEALTH_CHECK_S)
-        time.sleep(0.2)
+    if not _wait_until_started(plan, process, NEW_VERSION_READY_WAIT_S, progress):
+        raise InstallError(
+            f"Новая версия завершилась сразу после запуска (код {process.returncode})"
+        )
 
 
 def _start_application(plan: InstallPlan):
+    """Запустить приложение за кулисами: окно оно покажет после release."""
+
     return processes.start_detached(
-        [str(plan.app_exe), *plan.restart_args], cwd=plan.app_dir, console=True
+        [str(plan.app_exe), *plan.restart_args],
+        cwd=plan.app_dir,
+        console=True,
+        env=handoff.arm(plan.hold_marker),
     )
+
+
+def _wait_until_started(
+    plan: InstallPlan,
+    process,
+    wait_s: float,
+    progress: Callable[[float], None] = lambda fraction: None,
+) -> bool:
+    """True — приложение готово показаться или хотя бы пережило ожидание."""
+
+    started = time.monotonic()
+    while (elapsed := time.monotonic() - started) < wait_s:
+        if process.poll() is not None:
+            return False
+        if handoff.is_ready(plan.hold_marker):
+            return True
+        progress(elapsed / wait_s)
+        time.sleep(0.1)
+    return process.poll() is None
 
 
 def _describe_failure(plan: InstallPlan, error: Exception) -> list[str]:
@@ -157,8 +180,7 @@ def _recover(plan: InstallPlan, swap: FileSwap, details: list[str]) -> None:
     if plan.app_exe.is_file():
         try:
             process = _start_application(plan)
-            time.sleep(HEALTH_CHECK_S)
-            restarted = process.poll() is None
+            restarted = _wait_until_started(plan, process, OLD_VERSION_READY_WAIT_S)
         except OSError:
             _log.exception("Не удалось запустить прежнюю версию")
     if not restarted:

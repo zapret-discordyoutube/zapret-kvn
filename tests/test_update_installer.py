@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from xray_fluent.updates.installer import file_swap, phrases, processes, runner
+from xray_fluent.updates.installer import file_swap, handoff, phrases, processes, runner
 from xray_fluent.updates.installer.file_swap import FileSwap, InstallError
 from xray_fluent.updates.installer.plan import InstallPlan
 from xray_fluent.updates.installer.runner import Stage, run_install
@@ -235,31 +235,57 @@ class RunnerTests(InstallerCase):
             (runner.processes, {"stop_processes_under": Mock(return_value=[])}),
             (runner.processes, {"lock_holders": Mock(return_value=["Antivirus (C:\\av.exe)"])}),
             (runner.processes, {"start_detached": self._start}),
-            (runner, {"HEALTH_CHECK_S": 0.05}),
+            (runner, {"NEW_VERSION_READY_WAIT_S": 0.05, "OLD_VERSION_READY_WAIT_S": 0.05}),
             (runner, {"_log": Mock()}),
         ):
             patcher = patch.multiple(target, **replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def _start(self, command, *, cwd, console):
+    def _start(self, command, *, cwd, console, env):
         self.started.append(list(command))
+        self.start_env = env
         code = self.exit_codes.pop(0) if self.exit_codes else None
         return Mock(poll=Mock(return_value=code), returncode=code)
 
     def error_log(self) -> Path:
         return self.app_dir / "data" / "logs" / "update_error.log"
 
+    def tree(self) -> dict[str, str]:
+        # Замок снимает точка входа установщика, когда закрывается его окно.
+        handoff.release(self.plan.hold_marker)
+        return read_tree(self.app_dir)
+
     def test_successful_install_restarts_the_new_version(self) -> None:
         stages: list[Stage] = []
         self.assertTrue(run_install(self.plan, lambda stage, fraction: stages.append(stage)))
-        self.assertEqual(read_tree(self.app_dir), EXPECTED)
+        # Приложение запущено за кулисами: окно покажет, когда снимут замок.
+        self.assertTrue(self.plan.hold_marker.exists())
+        self.assertEqual(self.start_env, {handoff.HOLD_ENV: str(self.plan.hold_marker)})
+        self.assertEqual(self.tree(), EXPECTED)
         self.assertEqual(self.started, [[str(self.app_dir / "ZapretKVN.exe"), "--tray"]])
         self.assertEqual(
             list(dict.fromkeys(stages)),
             [Stage.PREPARE, Stage.WAIT_APP, Stage.SWAP, Stage.START, Stage.DONE],
         )
         self.assertFalse(self.error_log().exists())
+
+    def test_install_finishes_as_soon_as_the_new_version_reports_ready(self) -> None:
+        patcher = patch.multiple(runner, NEW_VERSION_READY_WAIT_S=60.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        real_start = self._start
+
+        def start_and_report(command, **kwargs):
+            process = real_start(command, **kwargs)
+            hold = handoff.claim_from(kwargs["env"])
+            handoff.confirm_ready(hold)
+            return process
+
+        with patch.object(runner.processes, "start_detached", start_and_report):
+            started = time.monotonic()
+            self.assertTrue(run_install(self.plan))
+        self.assertLess(time.monotonic() - started, 30.0)
 
     def test_application_is_closed_before_files_are_replaced(self) -> None:
         order: list[str] = []
@@ -279,7 +305,7 @@ class RunnerTests(InstallerCase):
         self.exit_codes = [3, None]
         stages: list[Stage] = []
         self.assertFalse(run_install(self.plan, lambda stage, fraction: stages.append(stage)))
-        tree = read_tree(self.app_dir)
+        tree = self.tree()
         log = tree.pop("data/logs/update_error.log")
         self.assertEqual(tree, INSTALLED)
         self.assertIn("код 3", log)
@@ -359,6 +385,39 @@ class LaunchTests(InstallerCase):
         self.assertEqual(command[:2], [str(self.source_dir / "ZapretKVN.exe"), "--apply-update"])
         self.assertEqual(InstallPlan.load(Path(command[2])).app_dir, self.app_dir)
         self.assertEqual(start.call_args.kwargs, {"cwd": self.source_dir, "console": False})
+
+
+class HandoffTests(unittest.TestCase):
+    """Приложение не показывает окно, пока открыто окно обновления."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.hold = Path(self._tmp.name) / "runtime" / "update_hold"
+
+    def test_ordinary_start_has_nothing_to_wait_for(self) -> None:
+        self.assertIsNone(handoff.claim_from({}))
+        # Замок от прошлого обновления, которого уже нет на диске.
+        self.assertIsNone(handoff.claim_from({handoff.HOLD_ENV: str(self.hold)}))
+
+    def test_app_reports_ready_and_waits_until_the_installer_releases_it(self) -> None:
+        environment = handoff.arm(self.hold)
+        self.assertFalse(handoff.is_ready(self.hold))
+        hold = handoff.claim_from(environment)
+        self.assertEqual(hold, self.hold)
+        # Переменная не достаётся ядрам и прочим дочерним процессам приложения.
+        self.assertNotIn(handoff.HOLD_ENV, environment)
+        handoff.confirm_ready(hold)
+        self.assertTrue(handoff.is_ready(self.hold))
+        self.assertTrue(hold.exists())
+        handoff.release(self.hold)
+        self.assertFalse(hold.exists())
+        self.assertFalse(handoff.is_ready(self.hold))
+
+    def test_arming_again_forgets_the_previous_readiness(self) -> None:
+        handoff.confirm_ready(handoff.claim_from(handoff.arm(self.hold)))
+        handoff.arm(self.hold)
+        self.assertFalse(handoff.is_ready(self.hold))
 
 
 class PhraseTests(unittest.TestCase):

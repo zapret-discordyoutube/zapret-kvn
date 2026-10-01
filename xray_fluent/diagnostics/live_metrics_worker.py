@@ -31,7 +31,7 @@ from .proxy_demand import clash_proxy_demand, local_proxy_demand
 # * прошлый пинг не прошёл или запросы уходят без ответа — частая проверка:
 #   авто-переключению нужны подряд идущие отказы, чтобы признать канал мёртвым.
 PING_INTERVAL_TRAFFIC_SEC = 60.0
-PING_INTERVAL_IDLE_SEC = 20.0
+PING_INTERVAL_IDLE_SEC = 10.0
 PING_TRAFFIC_BPS = 2048.0
 PING_UNANSWERED_UP_BPS = 512.0
 PING_JITTER = (0.7, 1.3)

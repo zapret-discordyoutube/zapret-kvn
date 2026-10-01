@@ -23,6 +23,7 @@ from ...constants import (
     SINGBOX_PROVIDER_FILE,
     SS_PROTECT_PORT_END,
     SS_PROTECT_PORT_START,
+    SPEED_TEST_HYSTERIA_PATH,
     SPEED_TEST_XRAY_PATH,
 )
 from ...application.outbound_pool_service import (
@@ -979,8 +980,9 @@ def _ensure_singbox_tun_runtime_contract(payload: dict[str, Any]) -> None:
 def _ensure_speed_test_process_direct_route(payload: dict[str, Any]) -> None:
     """Временное ядро теста скорости — мимо TUN (app-owned safety contract).
 
-    Тест скорости и «умная проверка» меряют КАНДИДАТА через временный xray,
-    запущенный из собственного пути ``SPEED_TEST_XRAY_PATH``.  В TUN его
+    Тест скорости и «умная проверка» меряют КАНДИДАТА через временное ядро,
+    запущенное из собственного пути: xray — ``SPEED_TEST_XRAY_PATH``,
+    официальный клиент Hysteria — ``SPEED_TEST_HYSTERIA_PATH``.  В TUN его
     соединение с сервером-кандидатом иначе попадёт в туннель и пойдёт через
     текущий (возможно, медленный) сервер — замер покажет скорость текущего.
     Схема та же, что у сайдкара Hysteria (``process_path → direct``), но
@@ -997,13 +999,16 @@ def _ensure_speed_test_process_direct_route(payload: dict[str, Any]) -> None:
         return
     route = _ensure_dict(payload, "route")
     rules = _ensure_list(route, "rules")
-    executable = str(SPEED_TEST_XRAY_PATH.resolve())
-    direct_rule = {"process_path": [executable], "action": "route", "outbound": "direct"}
+    executables = [
+        str(SPEED_TEST_XRAY_PATH.resolve()),
+        str(SPEED_TEST_HYSTERIA_PATH.resolve()),
+    ]
+    direct_rule = {"process_path": executables, "action": "route", "outbound": "direct"}
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict):
             continue
         paths = rule.get("process_path")
-        if isinstance(paths, list) and executable in [str(item) for item in paths]:
+        if isinstance(paths, list) and set(executables) & {str(item) for item in paths}:
             rules[index] = direct_rule
             return
     insert_index = 0

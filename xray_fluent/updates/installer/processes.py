@@ -219,7 +219,7 @@ def clean_environment() -> dict[str, str]:
 
 
 def start_detached(
-    command: list[str], *, cwd: Path, console: bool
+    command: list[str], *, cwd: Path, console: bool, env: dict[str, str] | None = None
 ) -> subprocess.Popen:
     """Запустить процесс, не привязанный к текущему.
 
@@ -230,7 +230,7 @@ def start_detached(
     return subprocess.Popen(
         command,
         cwd=str(cwd),
-        env=clean_environment(),
+        env={**clean_environment(), **(env or {})},
         close_fds=True,
         creationflags=(CREATE_NEW_CONSOLE if console else CREATE_NO_WINDOW) if IS_WINDOWS else 0,
     )

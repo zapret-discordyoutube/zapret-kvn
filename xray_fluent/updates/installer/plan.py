@@ -46,6 +46,11 @@ class InstallPlan:
         return self.work_dir / READY_FILE_NAME
 
     @property
+    def hold_marker(self) -> Path:
+        """Замок, под которым приложение стартует, не показывая окна (см. handoff)."""
+        return self.app_dir / "data" / "runtime" / "update_hold"
+
+    @property
     def restart_args(self) -> list[str]:
         return ["--tray"] if self.start_in_tray else []
 

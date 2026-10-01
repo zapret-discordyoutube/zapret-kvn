@@ -239,6 +239,7 @@ class MainWindow(FluentWindow):
         self._app_update_scheduler_ready = True
         self._sync_app_update_timer(state.settings)
         self._consume_update_error_log()
+        self.controller.repair_launch_on_startup()
         from ..application.startup_service import MetadataWorker
         from ..profiles.path_utils import resolve_configured_path
         from ..constants import SINGBOX_PATH_DEFAULT
