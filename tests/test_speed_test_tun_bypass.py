@@ -382,6 +382,74 @@ class WindowedMeasurementTests(unittest.TestCase):
         )
         self.assertEqual(bps, 400.0)
 
+    def test_adaptive_window_waits_until_speed_stops_growing(self) -> None:
+        # Разгон 1 → 2 → 4 → 8 КБ/с, дальше ровные 8.  Фиксированное окно
+        # (секунды 1–4) показало бы среднее по разгону; адаптивное — 8.
+        ramp = [1000, 2000, 4000, 8000]
+        chunks = [(0.5, 10)]
+        for rate in ramp + [8000] * 20:
+            chunks += [(0.25, rate // 4)] * 4
+        clock = _Clock()
+        response = _TimedResponse(clock, chunks)
+        with patch.object(speed_test_worker.time, "perf_counter", clock):
+            bps = speed_test_worker.measure_download_bps(
+                _Opener(response), "https://example.invalid/f",
+                timeout=6.0, warmup=1.0, window=2.0, settle_max=8.0,
+            )
+        self.assertAlmostEqual(bps, 8000.0, delta=1.0)
+        self.assertLess(clock.now, 0.5 + 8.0)       # не тянул до потолка
+        self.assertTrue(response._chunks)            # и не качал файл до конца
+
+    def test_adaptive_window_with_chunks_between_samples(self) -> None:
+        # Чанки идут чаще отсчётов (как в жизни): решение об остановке нельзя
+        # принимать между отсчётами — последняя секунда казалась бы медленнее,
+        # и замер обрывался на разгоне.
+        chunks = [(0.5, 10)]
+        for step in range(400):
+            rate = 16000 * min(1.0, max(0.05, step * 0.05 / 6.0))  # линейный разгон 6 с
+            chunks.append((0.05, int(rate * 0.05)))
+        clock = _Clock()
+        response = _TimedResponse(clock, chunks)
+        with patch.object(speed_test_worker.time, "perf_counter", clock):
+            bps = speed_test_worker.measure_download_bps(
+                _Opener(response), "https://example.invalid/f",
+                timeout=6.0, warmup=1.0, window=2.0, settle_max=8.0,
+            )
+        self.assertGreater(bps, 0.9 * 16000)
+
+    def test_adaptive_window_on_a_steady_server_stops_early(self) -> None:
+        clock = _Clock()
+        response = _TimedResponse(clock, [(0.5, 10)] + [(0.25, 500)] * 80)
+        with patch.object(speed_test_worker.time, "perf_counter", clock):
+            bps = speed_test_worker.measure_download_bps(
+                _Opener(response), "https://example.invalid/f",
+                timeout=6.0, warmup=1.0, window=2.0, settle_max=8.0,
+            )
+        self.assertAlmostEqual(bps, 2000.0, delta=1.0)
+        self.assertAlmostEqual(clock.now, 0.5 + 3.0, delta=0.3)  # разгон + минимум
+
+    def test_adaptive_window_is_capped_when_speed_keeps_growing(self) -> None:
+        chunks = [(0.5, 10)]
+        for second in range(30):
+            chunks += [(0.25, 250 * 2 ** min(second, 20))] * 4
+        clock = _Clock()
+        response = _TimedResponse(clock, chunks)
+        with patch.object(speed_test_worker.time, "perf_counter", clock):
+            bps = speed_test_worker.measure_download_bps(
+                _Opener(response), "https://example.invalid/f",
+                timeout=6.0, warmup=1.0, window=2.0, settle_max=8.0,
+            )
+        self.assertAlmostEqual(clock.now, 0.5 + 8.0, delta=0.3)
+        # Не установилась — берётся последняя, самая разогнанная секунда.
+        self.assertAlmostEqual(bps, 1000 * 2 ** 7, delta=1.0)
+
+    def test_file_ending_during_ramp_reports_the_fastest_last_second(self) -> None:
+        chunks = [(0.5, 10)]
+        for rate in (1000, 4000, 16000):
+            chunks += [(0.25, rate // 4)] * 4
+        bps = self._measure(chunks, warmup=1.0, window=2.0, settle_max=8.0)
+        self.assertAlmostEqual(bps, 16000.0, delta=1.0)
+
     def test_without_window_time_runs_from_request_start(self) -> None:
         # Контракт «умной проверки»: обе её стороны меряются именно так.
         self.assertEqual(self._measure([(2.0, 500), (2.0, 500)]), 250.0)

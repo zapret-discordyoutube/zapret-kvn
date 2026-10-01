@@ -86,12 +86,15 @@ SPEED_TEST_URLS_BY_COUNTRY: dict[str, str] = {
 SPEED_TEST_DEFAULT_URL = "https://fra.download.datapacket.com/100mb.bin"
 SPEED_TEST_TIMEOUT = 6   # seconds: ожидание ответа/данных одной попытки
 SPEED_TEST_ROUNDS = 1    # удачных замеров на сервер
-# Ручной тест скорости: один оконный замер вместо трёх полных скачиваний —
-# разгон TCP отбрасывается, дальше считается короткое установившееся окно.
+# Ручной тест скорости: один адаптивный замер вместо трёх полных скачиваний.
+# Разгон отбрасывается, загрузка идёт, пока скорость растёт, и результат —
+# установившаяся скорость.  Медленный сервер заканчивает за ~3 с, быстрому
+# дают разогнаться до SPEED_TEST_SETTLE_MAX_SEC или до конца файла (100 МБ).
 SPEED_TEST_RETRIES = 1              # повторная попытка, если замер не удался
 SPEED_TEST_WARMUP_SEC = 1.0
-SPEED_TEST_WINDOW_SEC = 3.0
-SPEED_TEST_MAX_BYTES = 32 * 1024 * 1024
+SPEED_TEST_WINDOW_SEC = 2.0         # минимум после разгона
+SPEED_TEST_SETTLE_MAX_SEC = 8.0     # потолок от первого байта
+SPEED_TEST_MAX_BYTES = 96 * 1024 * 1024
 SPEED_TEST_PAUSE_RANGE_SEC = (0.4, 1.6)  # случайная пауза между серверами
 SPEED_TEST_TEMP_HTTP_PORT = 19101
 # Временное ядро теста скорости запускается из отдельной ссылки/копии xray.exe

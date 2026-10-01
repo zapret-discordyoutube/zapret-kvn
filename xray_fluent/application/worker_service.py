@@ -10,6 +10,7 @@ from ..constants import (
     SPEED_TEST_MAX_BYTES,
     SPEED_TEST_PAUSE_RANGE_SEC,
     SPEED_TEST_RETRIES,
+    SPEED_TEST_SETTLE_MAX_SEC,
     SPEED_TEST_WARMUP_SEC,
     SPEED_TEST_WINDOW_SEC,
     XRAY_PATH_DEFAULT,
@@ -81,6 +82,7 @@ def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None
         retries=SPEED_TEST_RETRIES,
         warmup=SPEED_TEST_WARMUP_SEC,
         window=SPEED_TEST_WINDOW_SEC,
+        settle_max=SPEED_TEST_SETTLE_MAX_SEC,
         partial_on_error=True,
         pause_range=SPEED_TEST_PAUSE_RANGE_SEC,
     )

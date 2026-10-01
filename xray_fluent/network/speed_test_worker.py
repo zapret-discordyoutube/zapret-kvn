@@ -40,6 +40,29 @@ SPEED_TEST_USER_AGENT = (
 
 # Окно короче этого не считается установившимся замером.
 _MIN_WINDOW_SEC = 0.5
+# Адаптивный замер: скорость снимается отсчётами, и загрузка идёт, пока
+# последняя секунда быстрее предыдущей больше чем на этот допуск.
+_SAMPLE_SEC = 0.25
+_SETTLE_STEP_SEC = 1.0
+_SETTLE_TOLERANCE = 0.10
+_SETTLED_SPAN_SEC = 2.0
+
+
+def _bytes_at(samples: list[tuple[float, int]], moment: float) -> float:
+    """Сколько байт было принято к моменту ``moment`` (линейно между отсчётами)."""
+    if moment <= samples[0][0]:
+        return float(samples[0][1])
+    for (t0, b0), (t1, b1) in zip(samples, samples[1:]):
+        if moment <= t1:
+            return b0 + (b1 - b0) * (moment - t0) / (t1 - t0) if t1 > t0 else float(b1)
+    return float(samples[-1][1])
+
+
+def _span_rate(samples: list[tuple[float, int]], begin: float, end: float) -> float | None:
+    """Средняя скорость на отрезке ``[begin, end]`` или ``None``, если он не покрыт."""
+    if len(samples) < 2 or begin < samples[0][0] - 1e-9 or end - begin < _MIN_WINDOW_SEC:
+        return None
+    return (_bytes_at(samples, end) - _bytes_at(samples, begin)) / (end - begin)
 
 
 def measure_download_bps(
@@ -54,6 +77,7 @@ def measure_download_bps(
     user_agent: str = SPEED_TEST_USER_AGENT,
     warmup: float = 0.0,
     window: float | None = None,
+    settle_max: float | None = None,
 ) -> float | None:
     """Скачать файл через ``opener`` и вернуть скорость в байтах/с.
 
@@ -67,7 +91,17 @@ def measure_download_bps(
     ``warmup`` секунд после первого байта (разгон TCP) отбрасываются, затем
     ``window`` секунд считаются скоростью.  Загрузка заканчивается сама, не
     дожидаясь конца файла.  Если объём кончился раньше разгона, скорость
-    считается от первого байта.  Без ``window`` поведение прежнее: время идёт
+    считается от первого байта.
+
+    ``settle_max`` делает окно адаптивным: ``window`` становится минимумом, а
+    загрузка продолжается, пока скорость растёт (последняя секунда быстрее
+    предыдущей больше чем на 10 %), но не дольше ``settle_max`` секунд от
+    первого байта.  Результат — скорость последних двух секунд, то есть уже
+    установившаяся.  Фиксированное окно на быстром сервере ловило сам разгон,
+    и число зависело от того, насколько быстро соединение разогналось в этот
+    раз.
+
+    Без ``window`` поведение прежнее: время идёт
     от отправки запроса — так меряет «умная проверка», и обе её стороны
     (текущий сервер и кандидат) обязаны мериться одинаково.
     Блокирующий вызов: только из рабочего потока.
@@ -82,6 +116,9 @@ def measure_download_bps(
     first_chunk_bytes = 0
     mark_at: float | None = None
     mark_bytes = 0
+    adaptive = windowed and settle_max is not None and settle_max > 0
+    samples: list[tuple[float, int]] = []
+    settled = False
     now = start
     try:
         with opener.open(req, timeout=timeout) as resp:
@@ -112,9 +149,14 @@ def measure_download_bps(
                 since_first = now - first_byte_at
                 if windowed and mark_at is None and since_first >= warmup:
                     mark_at, mark_bytes = now, total_bytes
+                # Решение об остановке принимается только на свежем отсчёте:
+                # между отсчётами «сейчас» ушло бы вперёд, а байты — нет.
+                sampled = adaptive and (not samples or now - samples[-1][0] >= _SAMPLE_SEC)
+                if sampled:
+                    samples.append((now, total_bytes))
                 if on_fraction is not None:
                     if windowed:
-                        fraction = since_first / (warmup + window)
+                        fraction = since_first / (settle_max if adaptive else warmup + window)
                         if total_length > 0:
                             fraction = max(fraction, total_bytes / total_length)
                         fraction = min(1.0, fraction)
@@ -125,7 +167,22 @@ def measure_download_bps(
                     on_fraction(fraction)
                 if max_bytes and total_bytes >= max_bytes:
                     break
-                if windowed:
+                if adaptive:
+                    if sampled and mark_at is not None and now - mark_at >= window:
+                        recent = _span_rate(samples, now - _SETTLE_STEP_SEC, now)
+                        earlier = _span_rate(
+                            samples, now - 2 * _SETTLE_STEP_SEC, now - _SETTLE_STEP_SEC,
+                        )
+                        if (
+                            recent is not None
+                            and earlier is not None
+                            and recent <= earlier * (1.0 + _SETTLE_TOLERANCE)
+                        ):
+                            settled = True
+                            break
+                    if since_first >= settle_max or elapsed > timeout + settle_max:
+                        break
+                elif windowed:
                     if mark_at is not None and now - mark_at >= window:
                         break
                     if elapsed > timeout + warmup + window:
@@ -138,6 +195,17 @@ def measure_download_bps(
         now = time.perf_counter()
     if total_bytes <= 0:
         return None
+    if adaptive and samples:
+        # Установилась — среднее за две последние секунды; оборвалась на
+        # разгоне (кончился файл, лимит или время) — последняя секунда, самая
+        # разогнанная часть.
+        if samples[-1][0] < now:
+            samples.append((now, total_bytes))
+        span = _SETTLED_SPAN_SEC if settled else _SETTLE_STEP_SEC
+        begin = max(samples[0][0], now - span)
+        rate = _span_rate(samples, begin, now)
+        if rate is not None and rate > 0:
+            return rate
     if windowed and first_byte_at is not None:
         if mark_at is not None and now - mark_at >= _MIN_WINDOW_SEC and total_bytes > mark_bytes:
             return (total_bytes - mark_bytes) / (now - mark_at)
@@ -356,6 +424,7 @@ class SpeedTestWorker(QThread):
         retries: int = 0,
         warmup: float = 0.0,
         window: float | None = None,
+        settle_max: float | None = None,
         partial_on_error: bool = False,
         pause_range: tuple[float, float] | None = None,
         hysteria_path: str | None = None,
@@ -378,6 +447,7 @@ class SpeedTestWorker(QThread):
         self._http_port = int(http_port)
         self._warmup = warmup
         self._window = window
+        self._settle_max = settle_max
         self._partial_on_error = bool(partial_on_error)
         # Случайная пауза между серверами: подряд идущие объёмные потоки на
         # каждый адрес списка без передышки — самый заметный след теста.
@@ -628,6 +698,7 @@ class SpeedTestWorker(QThread):
             partial_on_error=self._partial_on_error,
             warmup=self._warmup,
             window=self._window,
+            settle_max=self._settle_max,
         )
         if bps is None:
             return None
