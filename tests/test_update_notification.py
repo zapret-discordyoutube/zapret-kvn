@@ -356,7 +356,7 @@ class UpdateNotificationTests(unittest.TestCase):
         window.updates_page.show_up_to_date.assert_not_called()
 
     def _apply_window(self, *, busy: bool, deadline_passed: bool = False):
-        downloader = SimpleNamespace(update=_update(), script_path=Path("C:/tmp/_update.ps1"))
+        downloader = SimpleNamespace(update=_update(), prepared=object())
         return SimpleNamespace(
             _quitting=False,
             _update_downloader=downloader,
@@ -367,6 +367,8 @@ class UpdateNotificationTests(unittest.TestCase):
                 _desired_connected=True,
                 _logger=Mock(),
             ),
+            _install_plan=Mock(),
+            _await_installer=Mock(),
             _quit_for_update=Mock(),
             _on_update_error=Mock(),
             _apply_downloaded_update=Mock(),
@@ -376,14 +378,14 @@ class UpdateNotificationTests(unittest.TestCase):
         window = self._apply_window(busy=True)
         with patch("xray_fluent.ui.main_window.QTimer.singleShot") as single_shot, \
                 patch("xray_fluent.ui.main_window.record_attempt") as record, \
-                patch("xray_fluent.ui.main_window.launch_update_script") as launch:
+                patch("xray_fluent.ui.main_window.launch_installer") as launch:
             MainWindow._apply_downloaded_update(window)
         single_shot.assert_called_once()
         record.assert_not_called()
         launch.assert_not_called()
         window._quit_for_update.assert_not_called()
 
-    def test_downloaded_update_records_attempt_before_launch_then_quits(self) -> None:
+    def test_downloaded_update_records_attempt_then_launches_and_awaits_installer(self) -> None:
         for busy, deadline_passed in ((False, False), (True, True)):
             window = self._apply_window(busy=busy, deadline_passed=deadline_passed)
             order: list[str] = []
@@ -391,21 +393,62 @@ class UpdateNotificationTests(unittest.TestCase):
                 "xray_fluent.ui.main_window.record_attempt",
                 side_effect=lambda *a, **k: order.append("record"),
             ) as record, patch(
-                "xray_fluent.ui.main_window.launch_update_script",
-                side_effect=lambda *a, **k: order.append("launch"),
-            ):
+                "xray_fluent.ui.main_window.launch_installer",
+                side_effect=lambda *a, **k: order.append("launch") or "installer",
+            ) as launch:
                 MainWindow._apply_downloaded_update(window)
             self.assertEqual(order, ["record", "launch"])
             record.assert_called_once_with("0.4.67", reconnect=True)
-            window._quit_for_update.assert_called_once()
+            launch.assert_called_once_with(window._install_plan.return_value)
+            # Выход — только после подтверждения установщика.
+            window._quit_for_update.assert_not_called()
+            window._await_installer.assert_called_once()
+            self.assertEqual(window._await_installer.call_args.args[0], "installer")
 
-    def test_failed_script_launch_keeps_app_running(self) -> None:
+    def test_failed_installer_launch_keeps_app_running(self) -> None:
         window = self._apply_window(busy=False)
         with patch("xray_fluent.ui.main_window.record_attempt"), \
-                patch("xray_fluent.ui.main_window.launch_update_script", side_effect=OSError("denied")):
+                patch("xray_fluent.ui.main_window.launch_installer", side_effect=OSError("denied")):
             MainWindow._apply_downloaded_update(window)
         window._quit_for_update.assert_not_called()
+        window._await_installer.assert_not_called()
         window._on_update_error.assert_called_once()
+
+    def _await_window(self):
+        return SimpleNamespace(
+            _quitting=False,
+            controller=SimpleNamespace(_logger=Mock()),
+            _quit_for_update=Mock(),
+            _on_update_error=Mock(),
+        )
+
+    def test_app_quits_once_the_installer_confirms_it_is_running(self) -> None:
+        window = self._await_window()
+        installer = Mock(poll=Mock(return_value=None))
+        marker = Mock(exists=Mock(return_value=True))
+        MainWindow._await_installer(window, installer, marker, float("inf"))
+        window._quit_for_update.assert_called_once()
+        window._on_update_error.assert_not_called()
+
+    def test_app_keeps_waiting_while_the_installer_starts(self) -> None:
+        window = self._await_window()
+        installer = Mock(poll=Mock(return_value=None))
+        marker = Mock(exists=Mock(return_value=False))
+        with patch("xray_fluent.ui.main_window.QTimer.singleShot") as single_shot:
+            MainWindow._await_installer(window, installer, marker, float("inf"))
+        single_shot.assert_called_once()
+        window._quit_for_update.assert_not_called()
+        window._on_update_error.assert_not_called()
+
+    def test_app_stays_open_when_the_installer_dies_or_stays_silent(self) -> None:
+        marker = Mock(exists=Mock(return_value=False))
+        for exit_code, deadline, killed in ((1, float("inf"), False), (None, float("-inf"), True)):
+            window = self._await_window()
+            installer = Mock(poll=Mock(return_value=exit_code))
+            MainWindow._await_installer(window, installer, marker, deadline)
+            window._quit_for_update.assert_not_called()
+            window._on_update_error.assert_called_once()
+            self.assertEqual(installer.kill.called, killed)
 
     def test_background_download_error_is_logged_without_toast(self) -> None:
         window = SimpleNamespace(

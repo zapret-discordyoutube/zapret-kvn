@@ -141,13 +141,16 @@ class LeftoverPurgeTests(unittest.TestCase):
             old_backup = make(runtime / "update_backups" / "a", auto_update.BACKUP_LEFTOVER_MIN_AGE_S + 5)
             fresh_backup = make(runtime / "update_backups" / "b", auto_update.TEMP_LEFTOVER_MIN_AGE_S + 5)
             legacy = make(runtime / "update_backup", auto_update.BACKUP_LEFTOVER_MIN_AGE_S + 5)
+            # Файлы прежней версии, оставшиеся после отката с ошибками.
+            old_stage = make(runtime / "app_update" / "a", auto_update.BACKUP_LEFTOVER_MIN_AGE_S + 5)
+            fresh_stage = make(runtime / "app_update" / "b", auto_update.TEMP_LEFTOVER_MIN_AGE_S + 5)
 
             removed = purge_update_leftovers(runtime_dir=runtime, temp_dir=temp_dir, now=NOW)
 
-            self.assertEqual(removed, 3)
-            for gone in (old_temp, old_backup, legacy):
+            self.assertEqual(removed, 4)
+            for gone in (old_temp, old_backup, legacy, old_stage):
                 self.assertFalse(gone.exists(), gone)
-            for kept in (fresh_temp, foreign, fresh_backup):
+            for kept in (fresh_temp, foreign, fresh_backup, fresh_stage):
                 self.assertTrue(kept.exists(), kept)
 
 

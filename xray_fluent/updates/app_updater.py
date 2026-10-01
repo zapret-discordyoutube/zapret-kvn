@@ -1,20 +1,21 @@
-"""Self-update: check Forgejo releases, download, verify, extract, restart."""
+"""Self-update: check Forgejo releases, download, verify and unpack.
+
+Замену файлов выполняет ``updates.installer`` — новая сборка, запущенная
+из распакованного архива.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
 import threading
 import urllib.error
 import urllib.request
-import zipfile  # kept for legacy .zip support
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,8 @@ from ..network.http_utils import (
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ..constants import APP_VERSION, BASE_DIR
+from ..constants import APP_VERSION
+from .installer.plan import APP_EXE_NAME, WORK_DIR_PREFIX
 
 FORGEJO_RELEASE_API = (
     "https://git.zapret.moe/api/v1/repos/"
@@ -49,14 +51,6 @@ _MAX_RELEASE_METADATA_BYTES = 1024 * 1024
 _MAX_CHECKSUM_BYTES = 16 * 1024
 
 _log = logging.getLogger(__name__)
-
-
-def _powershell_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _write_utf8_bom_text(path: Path, text: str) -> None:
-    path.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
 
 
 def _resolve_extracted_app_dir(root: Path, exe_name: str) -> Path:
@@ -79,6 +73,21 @@ class AppUpdate:
     size: int
     notes: str
     digest_sha256: str = ""
+
+
+@dataclass(slots=True)
+class PreparedUpdate:
+    """Скачанное, проверенное и распакованное обновление, готовое к установке."""
+
+    version: str
+    # Распакованная сборка: каталог с ZapretKVN.exe новой версии.
+    source_dir: Path
+    # Временный каталог загрузки целиком.
+    work_dir: Path
+
+
+class UpdateRejected(Exception):
+    """Архив непригоден, и повторная загрузка этого не исправит."""
 
 
 _SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
@@ -347,12 +356,11 @@ _NUM_SEGMENTS = 4       # parallel download segments
 _CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
-def _purge_stale_update_dirs(prefix: str = "zapretkvn_update_", keep: int = 0) -> int:
-    """Удалить каталоги прерванных обновлений.
+def _purge_stale_update_dirs(prefix: str = WORK_DIR_PREFIX, keep: int = 0) -> int:
+    """Удалить каталоги прошлых загрузок.
 
-    Скрипт замены файлов удаляет свой каталог только на успешном пути, поэтому
-    каждое неудавшееся обновление оставляло распакованную сборку и архив —
-    сотни мегабайт за раз, и у пользователя набралось больше двух гигабайт.
+    Каждый хранит архив и распакованную сборку — сотни мегабайт; прерванные
+    попытки без уборки накапливали у пользователей гигабайты.
     """
 
     root = Path(tempfile.gettempdir())
@@ -373,216 +381,8 @@ def _purge_stale_update_dirs(prefix: str = "zapretkvn_update_", keep: int = 0) -
     return removed
 
 
-def _build_update_script(
-    *,
-    current_pid: int,
-    source_dir: Path,
-    app_dir: Path,
-    exe_name: str,
-    tmp_dir: Path,
-    restart_in_tray: bool,
-) -> str:
-    """Собрать PowerShell-скрипт, который заменяет файлы после выхода приложения."""
-
-    return "\r\n".join([
-        "$ErrorActionPreference = 'Stop'",
-        f"$pidToWait = {current_pid}",
-        f"$sourceDir = {_powershell_literal(str(source_dir))}",
-        f"$appDir = {_powershell_literal(str(app_dir))}",
-        f"$exePath = {_powershell_literal(str(app_dir / exe_name))}",
-        f"$tempDir = {_powershell_literal(str(tmp_dir))}",
-        "$logDir = Join-Path (Join-Path $appDir 'data') 'logs'",
-        "$runtimeDir = Join-Path (Join-Path $appDir 'data') 'runtime'",
-        "$errorLog = Join-Path $logDir 'update_error.log'",
-        "$preserveNames = @('data')",
-        # Каждая попытка получает собственный backup. Старый фиксированный
-        # update_backup мог остаться после прерывания/антивирусной блокировки;
-        # тогда Move-Item десять секунд повторял перенос в уже существующий
-        # каталог и оставлял приложение без штатного перезапуска.
-        "$backupRootDir = Join-Path $runtimeDir 'update_backups'",
-        "$backupDir = Join-Path $backupRootDir (Split-Path -Leaf $tempDir)",
-        "$backupReplaceDir = Join-Path $backupDir 'replace'",
-        "$backupStaleDir = Join-Path $backupDir 'stale'",
-        # Ядра живут отдельными процессами внутри каталога приложения и
-        # держат core\ открытым, поэтому ожидания одного лишь основного
-        # процесса не хватало: перемещение падало на занятом каталоге.
-        "function Stop-AppProcesses {",
-        "    param([string] $root, [int] $timeoutMs)",
-        "    $deadline = (Get-Date).AddMilliseconds($timeoutMs)",
-        "    while ((Get-Date) -lt $deadline) {",
-        "        $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {",
-        "            if ($_.Id -eq $PID) { return $false }",
-        "            try { $path = $_.Path } catch { return $false }",
-        "            $path -and $path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)",
-        "        })",
-        "        if ($running.Count -eq 0) { return }",
-        "        foreach ($item in $running) {",
-        "            Stop-Process -Id $item.Id -Force -ErrorAction SilentlyContinue",
-        "        }",
-        "        Start-Sleep -Milliseconds 300",
-        "    }",
-        "}",
-        # Даже после завершения процесса Windows освобождает файл не мгновенно.
-        # Directory.Move выполняет переименование каталога целиком на том же
-        # томе. В отличие от Move-Item в каталог-контейнер, не остаётся частично
-        # созданного destination, который делает все повторы бесполезными.
-        "function Move-WithRetry {",
-        "    param([string] $path, [string] $destination, [int] $attempts = 20)",
-        "    if (Test-Path -LiteralPath $destination) {",
-        "        throw ('Move destination already exists: ' + $destination)",
-        "    }",
-        "    for ($try = 1; $try -le $attempts; $try++) {",
-        "        try {",
-        "            if (Test-Path -LiteralPath $path -PathType Container) {",
-        "                [System.IO.Directory]::Move($path, $destination)",
-        "            } else {",
-        "                [System.IO.File]::Move($path, $destination)",
-        "            }",
-        "            return",
-        "        } catch {",
-        "            if ($try -eq $attempts) { throw }",
-        "            Start-Sleep -Milliseconds 500",
-        "        }",
-        "    }",
-        "}",
-        "function Remove-WithRetry {",
-        "    param([string] $path, [int] $attempts = 20)",
-        "    for ($try = 1; $try -le $attempts; $try++) {",
-        "        if (-not (Test-Path -LiteralPath $path)) { return }",
-        "        try {",
-        "            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop",
-        "            return",
-        "        } catch {",
-        "            if ($try -eq $attempts) { throw }",
-        "            Start-Sleep -Milliseconds 500",
-        "        }",
-        "    }",
-        "}",
-        "$appRoot = [System.IO.Path]::GetFullPath($appDir).TrimEnd('\\') + '\\'",
-        "$sourceNames = @()",
-        "$originalNames = @()",
-        "try {",
-        # С этого места приложение уже может успеть завершиться по команде UI.
-        # Поэтому даже ошибка подготовки backup обязана попасть в общий rollback,
-        # который снова запустит ещё не изменённую установленную версию.
-        "    New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null",
-        "    New-Item -ItemType Directory -Path $backupRootDir -Force | Out-Null",
-        "    if (Test-Path -LiteralPath $backupDir) { throw ('Update backup already exists: ' + $backupDir) }",
-        "    New-Item -ItemType Directory -Path $backupReplaceDir -Force | Out-Null",
-        "    New-Item -ItemType Directory -Path $backupStaleDir -Force | Out-Null",
-        "for ($i = 0; $i -lt 120; $i++) {",
-        "    if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { break }",
-        "    Start-Sleep -Milliseconds 500",
-        "}",
-        "$proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue",
-        "if ($proc) { Stop-Process -Id $pidToWait -Force }",
-        "Stop-AppProcesses -root $appRoot -timeoutMs 30000",
-        "$sourceItems = @(Get-ChildItem -LiteralPath $sourceDir -Force | Where-Object { $preserveNames -notcontains $_.Name })",
-        "$sourceNames = @($sourceItems | ForEach-Object { $_.Name })",
-        "$installedItems = @(Get-ChildItem -LiteralPath $appDir -Force | Where-Object { $preserveNames -notcontains $_.Name })",
-        "$originalNames = @($installedItems | ForEach-Object { $_.Name })",
-        "    $installedItems | ForEach-Object {",
-        "        $backupTarget = if ($sourceNames -contains $_.Name) { $backupReplaceDir } else { $backupStaleDir }",
-        "        $backupPath = Join-Path $backupTarget $_.Name",
-        "        Move-WithRetry -path $_.FullName -destination $backupPath",
-        "    }",
-        "    foreach ($item in $sourceItems) {",
-        "        $installPath = Join-Path $appDir $item.Name",
-        "        Copy-Item -LiteralPath $item.FullName -Destination $installPath -Recurse -Force -ErrorAction Stop",
-        "    }",
-        (
-            "    $started = Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
-            if restart_in_tray
-            else "    $started = Start-Process -FilePath $exePath -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
-        ),
-        "    Start-Sleep -Seconds 5",
-        "    if ($started.HasExited) {",
-        "        throw ('Updated application exited immediately with code ' + $started.ExitCode)",
-        "    }",
-        "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
-        "}",
-        "catch {",
-        "    $restoreError = $_",
-        "    $rollbackErrors = New-Object 'System.Collections.Generic.List[string]'",
-        # Неудачно стартовавшая новая версия могла успеть породить ядро. Пока
-        # оно держит каталог, очистка и возврат старой версии тоже будут падать.
-        "    Stop-AppProcesses -root $appRoot -timeoutMs 30000",
-        # Удаляем только элементы, которых до обновления не было. Старый элемент,
-        # перенос которого не состоялся, уже является корректной частью rollback
-        # и не должен уничтожаться общей очисткой каталога приложения.
-        "    Get-ChildItem -LiteralPath $appDir -Force -ErrorAction SilentlyContinue | Where-Object {",
-        "        ($sourceNames -contains $_.Name) -and ($originalNames -notcontains $_.Name)",
-        "    } | ForEach-Object {",
-        "        try { Remove-WithRetry -path $_.FullName } catch { [void] $rollbackErrors.Add(($_ | Out-String)) }",
-        "    }",
-        # Один невосстановимый файл не должен обрывать возврат остальных: иначе
-        # каталог приложения остаётся без exe, и запускать становится нечего.
-        "    foreach ($backupSource in @($backupReplaceDir, $backupStaleDir)) {",
-        "        Get-ChildItem -LiteralPath $backupSource -Force -ErrorAction SilentlyContinue | ForEach-Object {",
-        "            $restorePath = Join-Path $appDir $_.Name",
-        "            try {",
-        "                Remove-WithRetry -path $restorePath",
-        "                Move-WithRetry -path $_.FullName -destination $restorePath",
-        "            } catch {",
-        "                [void] $rollbackErrors.Add(($_ | Out-String))",
-        "            }",
-        "        }",
-        "    }",
-        # Последняя линия обороны: работоспособный exe важнее того, чьей он версии.
-        "    if (-not (Test-Path -LiteralPath $exePath)) {",
-        "        $rescue = Join-Path $sourceDir (Split-Path -Leaf $exePath)",
-        "        if (Test-Path -LiteralPath $rescue) {",
-        "            Copy-Item -LiteralPath $rescue -Destination $appDir -Force -ErrorAction SilentlyContinue",
-        "        }",
-        "    }",
-        # Лог должен существовать до запуска восстановленной версии: иначе она
-        # успевала проверить его раньше Set-Content, и сбой снова был «тихим».
-        "    New-Item -ItemType Directory -Path $logDir -Force | Out-Null",
-        "    $errorText = ($restoreError | Out-String)",
-        "    if ($rollbackErrors.Count -gt 0) {",
-        "        $errorText += \"`r`nRollback errors:`r`n\" + ($rollbackErrors -join \"`r`n\")",
-        "    }",
-        "    $errorText | Set-Content -LiteralPath $errorLog -Encoding UTF8",
-        (
-            "    if (Test-Path -LiteralPath $exePath) { $rollbackStarted = Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -PassThru -ErrorAction SilentlyContinue }"
-            if restart_in_tray
-            else "    if (Test-Path -LiteralPath $exePath) { $rollbackStarted = Start-Process -FilePath $exePath -WorkingDirectory $appDir -PassThru -ErrorAction SilentlyContinue }"
-        ),
-        "    if ($rollbackStarted) { Start-Sleep -Seconds 5 }",
-        "    if (-not $rollbackStarted -or $rollbackStarted.HasExited) {",
-        "        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue",
-        "        [System.Windows.Forms.MessageBox]::Show(('Не удалось завершить обновление или восстановить запуск. Подробности: ' + $logDir), 'Zapret KVN', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null",
-        "    } elseif ($rollbackErrors.Count -eq 0) {",
-        "        Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
-        "    }",
-        "    throw",
-        "}",
-        "Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue",
-        "",
-    ])
-
-
-def launch_update_script(script: Path) -> None:
-    """Запустить скрипт замены файлов; после этого приложение должно выйти."""
-
-    subprocess.Popen(
-        [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            str(script),
-        ],
-        creationflags=0x08000000,
-        close_fds=True,
-    )
-
-
 class UpdateDownloader(QThread):
-    """Download, verify and extract the update, then prepare the restart script."""
+    """Download, verify and unpack the update."""
 
     progress = pyqtSignal(int)       # percent 0-100
     status = pyqtSignal(str)         # human-readable status message
@@ -593,14 +393,12 @@ class UpdateDownloader(QThread):
         self,
         update: AppUpdate,
         proxy_url: str | None = None,
-        restart_in_tray: bool = False,
         parent=None,
     ):
         super().__init__(parent)
         self._update = update
         self._proxy_url = proxy_url
-        self._restart_in_tray = restart_in_tray
-        self.script_path: Path | None = None
+        self.prepared: PreparedUpdate | None = None
         # Сбой, который повторится при любой следующей загрузке этого же
         # архива (контрольная сумма, содержимое). Сетевые ошибки — нет.
         self.failure_permanent = False
@@ -750,114 +548,67 @@ class UpdateDownloader(QThread):
             # Clean up segment temp files
             shutil.rmtree(seg_dir, ignore_errors=True)
 
-    # ── main thread entry ───────────────────────────────────────
+    # ── thread entry ────────────────────────────────────────────
 
     def run(self) -> None:
-        tmp_dir: Path | None = None
+        work_dir: Path | None = None
         try:
-            # Каталоги прошлых прерванных попыток чистятся до распаковки новой.
             _purge_stale_update_dirs()
-            tmp_dir = Path(tempfile.mkdtemp(prefix="zapretkvn_update_"))
-            zip_path = tmp_dir / "update.zip"
-
-            downloaded_ok = False
-
-            # Attempt 1: direct (no proxy)
-            self.status.emit("Загрузка напрямую...")
-            try:
-                self._download(zip_path, None)
-                downloaded_ok = True
-            except Exception as exc:
-                _log.warning("Direct download failed: %s", exc)
-                if self._proxy_url:
-                    self.status.emit(
-                        "Прямая загрузка не удалась, пробую через прокси..."
-                    )
-                    self.progress.emit(0)
-                    # clean partial file
-                    if zip_path.exists():
-                        zip_path.unlink()
-
-            # Attempt 2: through proxy (if available)
-            if not downloaded_ok and self._proxy_url:
-                self.status.emit("Загрузка через прокси...")
-                try:
-                    self._download(zip_path, self._proxy_url)
-                    downloaded_ok = True
-                except Exception as exc:
-                    _log.warning("Proxy download failed: %s", exc)
-
-            if not downloaded_ok:
-                msg = (
-                    "Не удалось скачать обновление.\n"
-                    "Переключитесь на рабочий сервер и попробуйте снова."
-                )
-                if self._proxy_url:
-                    msg = (
-                        "Не удалось скачать обновление ни напрямую, ни через прокси.\n"
-                        "Переключитесь на рабочий сервер и попробуйте снова."
-                    )
-                self.error.emit(msg)
-                # cleanup
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return
-
-            self.status.emit("Проверка архива...")
-            expected_hash = _extract_digest(self._update.digest_sha256)
-            if not expected_hash:
-                self.failure_permanent = True
-                self.error.emit("У релизного архива отсутствует SHA-256")
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return
-
-            real_hash = _sha256_file(zip_path)
-            if real_hash.lower() != expected_hash.lower():
-                self.failure_permanent = True
-                self.error.emit("Контрольная сумма архива не совпадает")
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return
-
-            self.progress.emit(100)
-            self.status.emit("Распаковка...")
-
-            # Extract
-            extract_dir = tmp_dir / "extracted"
-            try:
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    zf.extractall(extract_dir)
-            except zipfile.BadZipFile:
-                self.failure_permanent = True
-                raise
-
-            exe_name = "ZapretKVN.exe"
-            source_dir = _resolve_extracted_app_dir(extract_dir, exe_name)
-            if not (source_dir / exe_name).is_file():
-                self.failure_permanent = True
-                self.error.emit("Архив обновления не содержит ZapretKVN.exe")
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return
-
-            # Write restart script
-            current_pid = os.getpid()
-            app_dir = BASE_DIR
-            script = tmp_dir / "_update.ps1"
-            script_text = _build_update_script(
-                current_pid=current_pid,
-                source_dir=source_dir,
-                app_dir=app_dir,
-                exe_name=exe_name,
-                tmp_dir=tmp_dir,
-                restart_in_tray=self._restart_in_tray,
-            )
-            _write_utf8_bom_text(script, script_text)
-
-            # Скрипт запускает окно в момент выхода (launch_update_script): он
-            # ждёт завершения процесса не дольше минуты, а приложение может
-            # отложить перезапуск, пока идёт переключение подключения.
-            self.script_path = script
-            self.finished_ok.emit()
-
+            work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX))
+            archive = work_dir / "update.zip"
+            self._fetch(archive)
+            self._verify(archive)
+            source_dir = self._unpack(archive, work_dir / "extracted")
+            # Дальше архив не нужен, а места занимает столько же, сколько сборка.
+            archive.unlink(missing_ok=True)
+            self.prepared = PreparedUpdate(self._update.version, source_dir, work_dir)
         except Exception as exc:
-            if tmp_dir is not None:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            self.error.emit(str(exc))
+            self.failure_permanent = isinstance(exc, (UpdateRejected, zipfile.BadZipFile))
+            if work_dir is not None:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            self.error.emit(str(exc) or "Не удалось подготовить обновление")
+            return
+        self.finished_ok.emit()
+
+    def _fetch(self, archive: Path) -> None:
+        """Скачать архив напрямую, а при неудаче — через активный прокси."""
+
+        routes: list[tuple[str, str | None]] = [("Загрузка напрямую...", None)]
+        if self._proxy_url:
+            routes.append(("Загрузка через прокси...", self._proxy_url))
+        for status, proxy_url in routes:
+            self.status.emit(status)
+            self.progress.emit(0)
+            try:
+                self._download(archive, proxy_url)
+                return
+            except Exception as exc:
+                _log.warning("Update download failed (%s): %s", status, exc)
+                archive.unlink(missing_ok=True)
+        if self._proxy_url:
+            raise RuntimeError(
+                "Не удалось скачать обновление ни напрямую, ни через прокси.\n"
+                "Переключитесь на рабочий сервер и попробуйте снова."
+            )
+        raise RuntimeError(
+            "Не удалось скачать обновление.\n"
+            "Переключитесь на рабочий сервер и попробуйте снова."
+        )
+
+    def _verify(self, archive: Path) -> None:
+        self.status.emit("Проверка архива...")
+        expected = _extract_digest(self._update.digest_sha256)
+        if not expected:
+            raise UpdateRejected("У релизного архива отсутствует SHA-256")
+        if _sha256_file(archive).lower() != expected:
+            raise UpdateRejected("Контрольная сумма архива не совпадает")
+        self.progress.emit(100)
+
+    def _unpack(self, archive: Path, destination: Path) -> Path:
+        self.status.emit("Распаковка...")
+        with zipfile.ZipFile(archive, "r") as bundle:
+            bundle.extractall(destination)
+        source_dir = _resolve_extracted_app_dir(destination, APP_EXE_NAME)
+        if not (source_dir / APP_EXE_NAME).is_file():
+            raise UpdateRejected(f"Архив обновления не содержит {APP_EXE_NAME}")
+        return source_dir

@@ -277,7 +277,26 @@ def _purge_update_leftovers() -> None:
         _bootstrap_logger.exception("Failed to purge stale update leftovers")
 
 
+def _update_plan_argument() -> str | None:
+    """Путь к плану установки, если exe запущен как установщик обновления."""
+    from xray_fluent.updates.installer import APPLY_UPDATE_FLAG
+
+    arguments = sys.argv[1:]
+    if APPLY_UPDATE_FLAG not in arguments:
+        return None
+    position = arguments.index(APPLY_UPDATE_FLAG)
+    return arguments[position + 1] if position + 1 < len(arguments) else None
+
+
 def main() -> int:
+    # Установщик работает из временного каталога, пока приложение закрыто:
+    # ему не нужны ни журнал запуска, ни возврат системного прокси на выходе.
+    plan_path = _update_plan_argument()
+    if plan_path is not None:
+        from xray_fluent.updates.installer.entry import main as install_update
+
+        return install_update(plan_path)
+
     _setup_bootstrap_logging()
     _install_exception_hooks()
     _enforce_frozen()

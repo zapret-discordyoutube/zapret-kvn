@@ -20,6 +20,8 @@ from pathlib import Path
 
 from ..constants import RUNTIME_DIR
 from .app_updater import _is_newer_version, _parse_semver
+from .installer.file_swap import STAGE_ROOT_NAME
+from .installer.plan import WORK_DIR_PREFIX
 
 _log = logging.getLogger(__name__)
 
@@ -32,13 +34,14 @@ RETRY_BACKOFF_S = 60 * 60
 # Возврат подключения относится только к перезапуску самого обновления, а не
 # к ручному запуску приложения через день после сорвавшейся попытки.
 RESUME_WINDOW_S = 15 * 60
-# Каталог обновления читает скрипт замены (в том числе аварийная копия exe
-# при откате), поэтому свежие каталоги не трогаем.
+# Из каталога загрузки работает установщик, поэтому свежие каталоги не трогаем.
 TEMP_LEFTOVER_MIN_AGE_S = 10 * 60
-# Резервная копия, оставшаяся после отката с ошибками, — последняя копия
-# старых файлов; держим её сутки на случай ручного восстановления.
+# Вынесенные файлы, оставшиеся после отката с ошибками, — последняя копия
+# прежней версии; держим её сутки на случай ручного восстановления.
 BACKUP_LEFTOVER_MIN_AGE_S = 24 * 60 * 60
-TEMP_PREFIX = "zapretkvn_update_"
+TEMP_PREFIX = WORK_DIR_PREFIX
+# Каталоги резервных копий, которые создавали прежние версии установщика.
+_LEGACY_BACKUP_DIRS = ("update_backups",)
 
 
 @dataclass(slots=True)
@@ -117,7 +120,7 @@ def record_attempt(
 ) -> UpdateAttempt:
     """Записать попытку установки.
 
-    ``restarting=True`` — непосредственно перед запуском скрипта: следующий
+    ``restarting=True`` — непосредственно перед запуском установщика: следующий
     старт вернёт подключение. ``False`` — архив отвергнут ещё до установки
     (битая сумма или содержимое): попытка засчитывается, чтобы неисправный
     релиз не скачивался каждые полчаса, но перезапуска не было.
@@ -145,7 +148,7 @@ def resolve_startup(
     """Разобрать запись о попытке после перезапуска.
 
     Успех определяется только версией запущенной сборки: наличие или
-    отсутствие ``update_error.log`` ничего не доказывает (скрипт мог
+    отсутствие ``update_error.log`` ничего не доказывает (установщик мог
     «успешно» поставить сборку, которая всё ещё сообщает старую версию).
     """
 
@@ -222,13 +225,14 @@ def purge_update_leftovers(
         ]
     except OSError:
         pass
-    backups = runtime_dir / "update_backups"
-    try:
-        if backups.is_dir():
-            candidates += [(item, BACKUP_LEFTOVER_MIN_AGE_S) for item in backups.iterdir()]
-    except OSError:
-        pass
-    # Фиксированный каталог старых версий скрипта.
+    for name in (STAGE_ROOT_NAME, *_LEGACY_BACKUP_DIRS):
+        attempts = runtime_dir / name
+        try:
+            if attempts.is_dir():
+                candidates += [(item, BACKUP_LEFTOVER_MIN_AGE_S) for item in attempts.iterdir()]
+        except OSError:
+            pass
+    # Фиксированный каталог самых ранних версий установщика.
     legacy = runtime_dir / "update_backup"
     if legacy.exists():
         candidates.append((legacy, BACKUP_LEFTOVER_MIN_AGE_S))

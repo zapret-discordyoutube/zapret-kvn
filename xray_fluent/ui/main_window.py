@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import fields
 from pathlib import Path
+import os
 import sys
 import time
 import logging
@@ -33,10 +34,12 @@ from ..profiles.models import AppSettings, Node, RoutingSettings, Subscription, 
 from ..importer.subscription_http import mask_subscription_url
 from ..updates.app_updater import (
     AppUpdate,
+    PreparedUpdate,
     UpdateChecker,
     UpdateDownloader,
-    launch_update_script,
 )
+from ..updates.installer.launch import launch_installer
+from ..updates.installer.plan import InstallPlan
 from ..updates.auto_update import (
     MAX_AUTO_ATTEMPTS,
     auto_install_block_reason,
@@ -75,6 +78,10 @@ APP_UPDATE_INTERVAL_MS = 30 * 60 * 1000
 # Скачанное обновление ждёт конца переключения подключения не дольше этого.
 UPDATE_APPLY_MAX_WAIT_S = 120
 UPDATE_APPLY_RETRY_MS = 2000
+# Сколько приложение ждёт подтверждения от установщика, прежде чем закрыться.
+# Запас большой: антивирус может долго проверять только что распакованный exe.
+INSTALLER_START_MAX_WAIT_S = 60
+INSTALLER_START_POLL_MS = 200
 
 
 def _runtime_identity_log_line() -> str:
@@ -1647,12 +1654,7 @@ class MainWindow(FluentWindow):
 
         proxy_url = self._active_update_proxy_url()
 
-        self._update_downloader = UpdateDownloader(
-            update,
-            proxy_url=proxy_url,
-            restart_in_tray=self._restart_update_in_tray(background),
-            parent=self,
-        )
+        self._update_downloader = UpdateDownloader(update, proxy_url=proxy_url, parent=self)
         self._update_downloader.progress.connect(self.updates_page.show_download_progress)
         self._update_downloader.status.connect(self.updates_page.set_app_status)
         self._update_downloader.finished_ok.connect(self._on_update_ready)
@@ -1667,7 +1669,7 @@ class MainWindow(FluentWindow):
         # Тихая установка не должна выводить окно поверх чужих программ:
         # после перезапуска оно показывается, только если пользователь сейчас
         # в нём и работает. Свёрнутое или фоновое окно уходит в трей.
-        # Только существующий флаг --tray: откат запускает старую сборку с теми
+        # Только существующий флаг --tray: откат запускает прежнюю сборку с теми
         # же аргументами, а новый флаг она бы не поняла.
         return not (self.isVisible() and not self.isMinimized() and self.isActiveWindow())
 
@@ -1682,8 +1684,8 @@ class MainWindow(FluentWindow):
         if self._quitting:
             return
         downloader = self._update_downloader
-        script = getattr(downloader, "script_path", None)
-        if downloader is None or script is None:
+        prepared = getattr(downloader, "prepared", None)
+        if downloader is None or prepared is None:
             return
         # Перезапуск посреди переключения сервера оставил бы ядро в
         # полусостоянии; ждём конца перехода, но не бесконечно.
@@ -1696,7 +1698,8 @@ class MainWindow(FluentWindow):
         reconnect = bool(self.controller.connected or self.controller._desired_connected)
         try:
             record_attempt(downloader.update.version, reconnect=reconnect)
-            launch_update_script(script)
+            plan = self._install_plan(prepared)
+            installer = launch_installer(plan)
         except Exception as exc:
             self.controller._logger.exception("[update] Не удалось запустить установку")
             self._on_update_error(f"Не удалось запустить установку: {exc}")
@@ -1706,7 +1709,54 @@ class MainWindow(FluentWindow):
             downloader.update.version,
             "восстановлено" if reconnect else "выключено",
         )
-        self._quit_for_update()
+        self._await_installer(
+            installer, plan.ready_marker, time.monotonic() + INSTALLER_START_MAX_WAIT_S
+        )
+
+    def _await_installer(self, installer, ready_marker: Path, deadline: float) -> None:
+        """Выйти, когда установщик подтвердил запуск; иначе остаться работать."""
+
+        if self._quitting:
+            return
+        if ready_marker.exists():
+            self._quit_for_update()
+            return
+        exit_code = installer.poll()
+        if exit_code is None and time.monotonic() < deadline:
+            QTimer.singleShot(
+                INSTALLER_START_POLL_MS,
+                lambda: self._await_installer(installer, ready_marker, deadline),
+            )
+            return
+        if exit_code is None:
+            # Молчащий установщик нельзя оставлять: позже он дождался бы
+            # своего и закрыл работающее приложение.
+            installer.kill()
+            reason = "установщик не ответил"
+        else:
+            reason = f"установщик завершился с кодом {exit_code}"
+        self.controller._logger.error("[update] Установка не началась: %s", reason)
+        self._on_update_error(f"Не удалось запустить установку: {reason}")
+
+    def _install_plan(self, prepared: PreparedUpdate) -> InstallPlan:
+        settings = self.controller.state.settings
+        geometry = self.geometry()
+        return InstallPlan(
+            version=prepared.version,
+            app_pid=os.getpid(),
+            app_dir=BASE_DIR,
+            source_dir=prepared.source_dir,
+            work_dir=prepared.work_dir,
+            start_in_tray=self._restart_update_in_tray(self._update_background),
+            theme=settings.theme,
+            accent=settings.accent_color,
+            # Окно обновления встаёт на место главного окна, если оно на экране.
+            anchor=(
+                (geometry.x(), geometry.y(), geometry.width(), geometry.height())
+                if self.isVisible() and not self.isMinimized()
+                else None
+            ),
+        )
 
     def _on_update_error(self, err: str) -> None:
         self._update_in_progress = False

@@ -120,3 +120,91 @@ class AppUpdateCheckTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateDownloaderTests(unittest.TestCase):
+    """Загрузчик отдаёт установщику распакованную сборку или внятный отказ."""
+
+    def _downloader(self, files: dict[str, str], *, digest: str | None = None):
+        import hashlib
+        import io
+        import zipfile
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            for name, text in files.items():
+                bundle.writestr(name, text)
+        payload = buffer.getvalue()
+        update = app_updater.AppUpdate(
+            version="9.9.9",
+            tag="v9.9.9",
+            download_url="https://git.zapret.moe/zapretkvn/zapret-kvn/releases/download/v9.9.9/a.zip",
+            size=len(payload),
+            notes="",
+            digest_sha256=hashlib.sha256(payload).hexdigest() if digest is None else digest,
+        )
+        downloader = app_updater.UpdateDownloader(update)
+        downloader._download = lambda archive, proxy_url: archive.write_bytes(payload)
+        self.errors: list[str] = []
+        downloader.error.connect(self.errors.append)
+        return downloader
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch.object(app_updater.tempfile, "gettempdir", return_value=self._tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(
+            app_updater.tempfile, "mkdtemp",
+            side_effect=lambda prefix: self._make_work_dir(prefix),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _make_work_dir(self, prefix: str) -> str:
+        from pathlib import Path
+
+        path = Path(self._tmp.name) / f"{prefix}test"
+        path.mkdir()
+        return str(path)
+
+    def test_valid_archive_becomes_a_prepared_update(self) -> None:
+        downloader = self._downloader({"ZapretKVN/ZapretKVN.exe": "exe", "ZapretKVN/core/xray.exe": "x"})
+        downloader.run()
+        self.assertEqual(self.errors, [])
+        prepared = downloader.prepared
+        self.assertEqual(prepared.version, "9.9.9")
+        self.assertTrue((prepared.source_dir / "ZapretKVN.exe").is_file())
+        self.assertEqual(prepared.source_dir.name, "ZapretKVN")
+        self.assertEqual(prepared.source_dir.parent.parent, prepared.work_dir)
+        # Архив после распаковки не нужен.
+        self.assertFalse((prepared.work_dir / "update.zip").exists())
+
+    def test_wrong_checksum_is_a_permanent_failure_and_leaves_nothing_behind(self) -> None:
+        downloader = self._downloader({"ZapretKVN/ZapretKVN.exe": "exe"}, digest="0" * 64)
+        downloader.run()
+        self.assertIsNone(downloader.prepared)
+        self.assertTrue(downloader.failure_permanent)
+        self.assertEqual(self.errors, ["Контрольная сумма архива не совпадает"])
+        self.assertEqual(list(__import__("pathlib").Path(self._tmp.name).iterdir()), [])
+
+    def test_archive_without_the_application_is_rejected(self) -> None:
+        downloader = self._downloader({"readme.txt": "nothing here"})
+        downloader.run()
+        self.assertIsNone(downloader.prepared)
+        self.assertTrue(downloader.failure_permanent)
+
+    def test_network_failure_is_not_permanent(self) -> None:
+        downloader = self._downloader({"ZapretKVN/ZapretKVN.exe": "exe"})
+
+        def offline(archive, proxy_url):
+            raise OSError("no route")
+
+        downloader._download = offline
+        downloader.run()
+        self.assertIsNone(downloader.prepared)
+        self.assertFalse(downloader.failure_permanent)
+        self.assertEqual(len(self.errors), 1)
