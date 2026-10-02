@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import webbrowser
 
-from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
@@ -28,7 +27,6 @@ def _muted_caption_qss(extra: str = "") -> tuple[str, str]:
 
 
 class AboutPage(QWidget):
-    tour_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -103,11 +101,6 @@ class AboutPage(QWidget):
             lambda: webbrowser.open("https://t.me/zapretvpns_bot")
         )
         btn_row.addWidget(tg_bot_btn)
-
-        self.tour_btn = PushButton(FIF.EDUCATION, "Обучение", self)
-        self.tour_btn.setToolTip("Пройти экскурсию по приложению ещё раз")
-        self.tour_btn.clicked.connect(self.tour_requested)
-        btn_row.addWidget(self.tour_btn)
 
         btn_row.addStretch()
         root.addLayout(btn_row)

@@ -571,7 +571,7 @@ class AppSettings:
     window_x: int = -1
     window_y: int = -1
     nav_expanded: bool = False  # боковое меню развёрнуто (последний явный выбор пользователя)
-    tour_seen: bool = False  # обучающая экскурсия уже показывалась
+    tour_banner_closed: bool = False  # плашку «Пройти обучение» закрыли или по ней начали экскурсию
     zapret_preset: str = ""
     zapret_autostart: bool = False
     zapret_target: ZapretTargetSettings = field(default_factory=ZapretTargetSettings)
@@ -659,7 +659,7 @@ class AppSettings:
             "window_x": self.window_x,
             "window_y": self.window_y,
             "nav_expanded": self.nav_expanded,
-            "tour_seen": self.tour_seen,
+            "tour_banner_closed": self.tour_banner_closed,
             "zapret_preset": self.zapret_preset,
             "zapret_autostart": self.zapret_autostart,
             "zapret_target": self.zapret_target.to_dict(),
@@ -734,7 +734,7 @@ class AppSettings:
             window_x=int(data.get("window_x", -1)),
             window_y=int(data.get("window_y", -1)),
             nav_expanded=bool(data.get("nav_expanded", False)),
-            tour_seen=bool(data.get("tour_seen", False)),
+            tour_banner_closed=bool(data.get("tour_banner_closed", False)),
             zapret_preset=str(data.get("zapret_preset") or ""),
             zapret_autostart=bool(data.get("zapret_autostart", False)),
             zapret_target=ZapretTargetSettings.from_dict(data.get("zapret_target")),

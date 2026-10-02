@@ -20,6 +20,7 @@ from qfluentwidgets import (
     InfoBarPosition,
     NavigationDisplayMode,
     NavigationItemPosition,
+    PrimaryPushButton,
 )
 
 from ..diagnostics.connection_message import connection_message
@@ -70,7 +71,7 @@ from .zapret_page import ZapretPage
 #: the tour flag): its stale copy must not roll them back when it saves.
 _WINDOW_OWNED_SETTINGS = tuple(
     item.name for item in fields(AppSettings)
-    if item.name.startswith(("window_", "nodes_", "zapret_")) or item.name in ("nav_expanded", "tour_seen", "system_proxy_before_tun")
+    if item.name.startswith(("window_", "nodes_", "zapret_")) or item.name in ("nav_expanded", "tour_banner_closed", "system_proxy_before_tun")
 )
 
 
@@ -83,11 +84,11 @@ UPDATE_APPLY_RETRY_MS = 2000
 # Запас большой: антивирус может долго проверять только что распакованный exe.
 INSTALLER_START_MAX_WAIT_S = 60
 INSTALLER_START_POLL_MS = 200
-# Экскурсия при первом запуске: даём окну дорисоваться, а если мешает диалог
+# Плашка «Пройти обучение» при первом запуске: даём окну дорисоваться, а если мешает диалог
 # или обновление — проверяем снова, но не бесконечно.
-TOUR_AUTOSTART_DELAY_MS = 1200
-TOUR_AUTOSTART_RETRY_MS = 2000
-TOUR_AUTOSTART_MAX_TRIES = 60
+TOUR_BANNER_DELAY_MS = 1200
+TOUR_BANNER_RETRY_MS = 2000
+TOUR_BANNER_MAX_TRIES = 60
 
 
 def _runtime_identity_log_line() -> str:
@@ -135,10 +136,12 @@ class MainWindow(FluentWindow):
         self._app_update_timer = QTimer(self)
         self._app_update_timer.setSingleShot(True)
         self._app_update_timer.timeout.connect(self._on_app_update_timer_timeout)
-        self._tour_autostart_tries = 0
-        self._tour_autostart_timer = QTimer(self)
-        self._tour_autostart_timer.setSingleShot(True)
-        self._tour_autostart_timer.timeout.connect(self._try_autostart_tour)
+        self._tour_automatic = False
+        self._tour_banner: InfoBar | None = None
+        self._tour_banner_tries = 0
+        self._tour_banner_timer = QTimer(self)
+        self._tour_banner_timer.setSingleShot(True)
+        self._tour_banner_timer.timeout.connect(self._try_show_tour_banner)
         self.tray: QSystemTrayIcon | None = None
         self.tray_show_action: QAction | None = None
         self.tray_connect_action: QAction | None = None
@@ -260,7 +263,7 @@ class MainWindow(FluentWindow):
         if state.settings.xray_auto_update:
             QTimer.singleShot(4500, lambda: self.controller.run_xray_core_update(True, silent=True) if not self._quitting else None)
         logging.getLogger("xray_fluent.bootstrap").info("controls_ready_ms=%.1f", (time.perf_counter() - self._startup_started) * 1000)
-        self._schedule_tour_autostart()
+        self._schedule_tour_banner()
 
     def _metadata_ready(self, result):
         if self._quitting:
@@ -308,6 +311,16 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.zapret_page, FIF.COMMAND_PROMPT, "Zapret", scroll)
         self.addSubInterface(self.logs_page, FIF.DOCUMENT, "Логи", scroll)
         self.addSubInterface(self.history_page, FIF.HISTORY, "История", scroll)
+        # Не страница, а кнопка: запускает экскурсию поверх текущей страницы.
+        self.navigationInterface.addItem(
+            routeKey="tour",
+            icon=FIF.EDUCATION,
+            text="Обучение",
+            onClick=lambda *_args: self._start_tour(),
+            selectable=False,
+            position=NavigationItemPosition.BOTTOM,
+            tooltip="Экскурсия по приложению",
+        )
         self.addSubInterface(self.about_page, FIF.INFO, "О проекте", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.updates_page, FIF.UPDATE, "Обновления", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.settings_page, FIF.SETTING, "Настройки", NavigationItemPosition.BOTTOM)
@@ -524,7 +537,6 @@ class MainWindow(FluentWindow):
         self.updates_page.update_xray_requested.connect(self._update_xray_core)
         self.updates_page.check_singbox_requested.connect(self._check_singbox_updates)
         self.updates_page.update_singbox_requested.connect(self._update_singbox_core)
-        self.about_page.tour_requested.connect(self._start_tour)
         self.settings_page.export_backup_requested.connect(self._export_backup)
         self.settings_page.import_backup_requested.connect(self._import_backup)
         self.settings_page.set_encryption_requested.connect(self._set_encryption)
@@ -626,8 +638,8 @@ class MainWindow(FluentWindow):
         if not getattr(self, "_first_show_logged", False):
             self._first_show_logged = True
             QTimer.singleShot(0, lambda: logging.getLogger("xray_fluent.bootstrap").info("first_window_ms=%.1f", (time.perf_counter() - self._startup_started) * 1000))
-        # Запуск в трей окно не показывает — экскурсия ждёт первого появления.
-        self._schedule_tour_autostart()
+        # Запуск в трей окно не показывает — плашка ждёт первого появления.
+        self._schedule_tour_banner()
         if not getattr(self, "_screen_signals_connected", False) and self.windowHandle():
             self._screen_signals_connected = True
             self.windowHandle().screenChanged.connect(self._on_window_screen_changed)
@@ -1404,6 +1416,7 @@ class MainWindow(FluentWindow):
     def _start_tour(self, automatic: bool = False) -> None:
         if active_tour(self) is not None:
             return
+        self._close_tour_banner()
         self._tour_automatic = automatic
         overlay = TourOverlay(self, TOUR_STEPS)
         overlay.step_opening.connect(self._open_tour_step)
@@ -1427,28 +1440,30 @@ class MainWindow(FluentWindow):
         if reason == "done":
             self.switchTo(self.dashboard_page)
         elif reason == "interrupted" and self._tour_automatic:
-            # Первую экскурсию оборвало само приложение — покажем её ещё раз.
-            self._set_tour_seen(False)
+            # Экскурсию с плашки оборвало само приложение — предложим её снова.
+            self._set_tour_banner_closed(False)
 
-    def _set_tour_seen(self, seen: bool) -> None:
+    def _set_tour_banner_closed(self, closed: bool) -> None:
         settings = self.controller.state.settings
-        if settings.tour_seen != seen:
-            settings.tour_seen = seen
+        if settings.tour_banner_closed != closed:
+            settings.tour_banner_closed = closed
             self.controller.schedule_save()
 
-    def _schedule_tour_autostart(self) -> None:
-        timer = getattr(self, "_tour_autostart_timer", None)
+    def _schedule_tour_banner(self) -> None:
+        timer = getattr(self, "_tour_banner_timer", None)
         if timer is None or self._quitting or not getattr(self, "_geometry_persistence_ready", False):
             return
-        if self.controller.state.settings.tour_seen or not self.isVisible():
+        if self.controller.state.settings.tour_banner_closed or not self.isVisible():
             return
-        self._tour_autostart_tries = 0
-        timer.start(TOUR_AUTOSTART_DELAY_MS)
+        if self._tour_banner is not None or timer.isActive():
+            return
+        self._tour_banner_tries = 0
+        timer.start(TOUR_BANNER_DELAY_MS)
 
-    def _try_autostart_tour(self) -> None:
-        if self._quitting or self.controller.state.settings.tour_seen or active_tour(self) is not None:
+    def _try_show_tour_banner(self) -> None:
+        if self._quitting or self.controller.state.settings.tour_banner_closed:
             return
-        if not self.isVisible():
+        if self._tour_banner is not None or active_tour(self) is not None or not self.isVisible():
             return
         app = QApplication.instance()
         busy = (
@@ -1459,14 +1474,47 @@ class MainWindow(FluentWindow):
             or app.activePopupWidget() is not None
         )
         if busy:
-            self._tour_autostart_tries += 1
-            if self._tour_autostart_tries < TOUR_AUTOSTART_MAX_TRIES:
-                self._tour_autostart_timer.start(TOUR_AUTOSTART_RETRY_MS)
+            self._tour_banner_tries += 1
+            if self._tour_banner_tries < TOUR_BANNER_MAX_TRIES:
+                self._tour_banner_timer.start(TOUR_BANNER_RETRY_MS)
             return
-        # Отмечаем при показе, а не по завершении: закрытую экскурсию не
-        # навязываем снова, её можно открыть со страницы «О проекте».
-        self._set_tour_seen(True)
-        self._start_tour(automatic=True)
+        self._show_tour_banner()
+
+    def _show_tour_banner(self) -> None:
+        """Плашка внизу окна: экскурсия начинается только по кнопке.
+
+        Висит, пока её не закроют или не начнут экскурсию, — даже если окно
+        прятали в трей. Флаг ставится только этими действиями, поэтому
+        незамеченная плашка покажется и при следующем запуске.
+        """
+        banner = InfoBar(
+            icon=InfoBarIcon.INFORMATION,
+            title="Впервые здесь?",
+            content="Короткая экскурсия покажет, где что находится и с чего начать.",
+            isClosable=True,
+            duration=-1,
+            position=InfoBarPosition.BOTTOM,
+            parent=self,
+        )
+        start_btn = PrimaryPushButton("Пройти обучение", banner)
+        start_btn.clicked.connect(lambda *_args: self._start_tour(automatic=True))
+        banner.addWidget(start_btn)
+        banner.closeButton.setToolTip("Не показывать — экскурсия останется в меню «Обучение»")
+        banner.closeButton.clicked.connect(lambda *_args: self._set_tour_banner_closed(True))
+        banner.closedSignal.connect(self._on_tour_banner_closed)
+        self._tour_banner = banner
+        banner.show()
+
+    def _on_tour_banner_closed(self) -> None:
+        self._tour_banner = None
+
+    def _close_tour_banner(self) -> None:
+        banner = self._tour_banner
+        if banner is None:
+            return
+        self._tour_banner = None
+        self._set_tour_banner_closed(True)
+        banner.close()
 
     def _on_settings_page_saved(self, settings: AppSettings) -> None:
         current = self.controller.state.settings
