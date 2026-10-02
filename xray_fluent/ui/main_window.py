@@ -71,7 +71,7 @@ from .zapret_page import ZapretPage
 #: the tour flag): its stale copy must not roll them back when it saves.
 _WINDOW_OWNED_SETTINGS = tuple(
     item.name for item in fields(AppSettings)
-    if item.name.startswith(("window_", "nodes_", "zapret_")) or item.name in ("nav_expanded", "tour_banner_closed", "system_proxy_before_tun")
+    if item.name.startswith(("window_", "nodes_", "zapret_")) or item.name in ("nav_expanded", "tour_banner_dismissed", "system_proxy_before_tun")
 )
 
 
@@ -136,7 +136,8 @@ class MainWindow(FluentWindow):
         self._app_update_timer = QTimer(self)
         self._app_update_timer.setSingleShot(True)
         self._app_update_timer.timeout.connect(self._on_app_update_timer_timeout)
-        self._tour_automatic = False
+        # Начатая экскурсия прячет плашку до конца запуска, но не навсегда.
+        self._tour_started_this_session = False
         self._tour_banner: InfoBar | None = None
         self._tour_banner_tries = 0
         self._tour_banner_timer = QTimer(self)
@@ -1413,11 +1414,11 @@ class MainWindow(FluentWindow):
 
     # ── Обучающая экскурсия ─────────────────────────────────────
 
-    def _start_tour(self, automatic: bool = False) -> None:
+    def _start_tour(self) -> None:
         if active_tour(self) is not None:
             return
+        self._tour_started_this_session = True
         self._close_tour_banner()
-        self._tour_automatic = automatic
         overlay = TourOverlay(self, TOUR_STEPS)
         overlay.step_opening.connect(self._open_tour_step)
         overlay.step_upcoming.connect(self._prewarm_tour_step)
@@ -1458,22 +1459,29 @@ class MainWindow(FluentWindow):
     def _on_tour_finished(self, reason: str) -> None:
         self.stackedWidget.setAnimationEnabled(self._tour_restores_page_animation)
         if reason == "done":
+            # Пройдена до конца — плашка больше не нужна. Брошенная на
+            # середине вернёт плашку при следующем запуске.
+            self._dismiss_tour_banner()
             self.switchTo(self.dashboard_page)
-        elif reason == "interrupted" and self._tour_automatic:
-            # Экскурсию с плашки оборвало само приложение — предложим её снова.
-            self._set_tour_banner_closed(False)
 
-    def _set_tour_banner_closed(self, closed: bool) -> None:
+    def _dismiss_tour_banner(self) -> None:
         settings = self.controller.state.settings
-        if settings.tour_banner_closed != closed:
-            settings.tour_banner_closed = closed
+        if not settings.tour_banner_dismissed:
+            settings.tour_banner_dismissed = True
             self.controller.schedule_save()
+
+    def _tour_banner_wanted(self) -> bool:
+        return not (
+            self._quitting
+            or self._tour_started_this_session
+            or self.controller.state.settings.tour_banner_dismissed
+        )
 
     def _schedule_tour_banner(self) -> None:
         timer = getattr(self, "_tour_banner_timer", None)
-        if timer is None or self._quitting or not getattr(self, "_geometry_persistence_ready", False):
+        if timer is None or not getattr(self, "_geometry_persistence_ready", False):
             return
-        if self.controller.state.settings.tour_banner_closed or not self.isVisible():
+        if not self._tour_banner_wanted() or not self.isVisible():
             return
         if self._tour_banner is not None or timer.isActive():
             return
@@ -1481,7 +1489,7 @@ class MainWindow(FluentWindow):
         timer.start(TOUR_BANNER_DELAY_MS)
 
     def _try_show_tour_banner(self) -> None:
-        if self._quitting or self.controller.state.settings.tour_banner_closed:
+        if not self._tour_banner_wanted():
             return
         if self._tour_banner is not None or active_tour(self) is not None or not self.isVisible():
             return
@@ -1504,8 +1512,8 @@ class MainWindow(FluentWindow):
         """Плашка внизу окна: экскурсия начинается только по кнопке.
 
         Висит, пока её не закроют или не начнут экскурсию, — даже если окно
-        прятали в трей. Флаг ставится только этими действиями, поэтому
-        незамеченная плашка покажется и при следующем запуске.
+        прятали в трей. Навсегда её прячут только крестик и экскурсия,
+        пройденная до конца; иначе плашка вернётся при следующем запуске.
         """
         banner = InfoBar(
             icon=InfoBarIcon.INFORMATION,
@@ -1517,10 +1525,10 @@ class MainWindow(FluentWindow):
             parent=self,
         )
         start_btn = PrimaryPushButton("Пройти обучение", banner)
-        start_btn.clicked.connect(lambda *_args: self._start_tour(automatic=True))
+        start_btn.clicked.connect(lambda *_args: self._start_tour())
         banner.addWidget(start_btn)
         banner.closeButton.setToolTip("Не показывать — экскурсия останется в меню «Обучение»")
-        banner.closeButton.clicked.connect(lambda *_args: self._set_tour_banner_closed(True))
+        banner.closeButton.clicked.connect(lambda *_args: self._dismiss_tour_banner())
         banner.closedSignal.connect(self._on_tour_banner_closed)
         self._tour_banner = banner
         banner.show()
@@ -1533,7 +1541,6 @@ class MainWindow(FluentWindow):
         if banner is None:
             return
         self._tour_banner = None
-        self._set_tour_banner_closed(True)
         banner.close()
 
     def _on_settings_page_saved(self, settings: AppSettings) -> None:

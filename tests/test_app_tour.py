@@ -157,19 +157,21 @@ class StepsTests(unittest.TestCase):
 
 class SettingsTests(unittest.TestCase):
     def test_banner_flag_round_trips_and_defaults_to_false(self) -> None:
-        self.assertFalse(AppSettings.from_dict({}).tour_banner_closed)
-        # Старый флаг v0.8.10 ставился при показе, без действия пользователя, —
-        # он не должен прятать плашку.
-        self.assertFalse(AppSettings.from_dict({"tour_seen": True}).tour_banner_closed)
+        self.assertFalse(AppSettings.from_dict({}).tour_banner_dismissed)
+        # Старые флаги ставились без согласия пользователя: tour_seen (v0.8.10)
+        # — при автопоказе, tour_banner_closed (v0.8.12) — при начале
+        # экскурсии. Ни один не должен прятать плашку.
+        self.assertFalse(AppSettings.from_dict({"tour_seen": True}).tour_banner_dismissed)
+        self.assertFalse(AppSettings.from_dict({"tour_banner_closed": True}).tour_banner_dismissed)
         settings = AppSettings()
-        settings.tour_banner_closed = True
-        self.assertTrue(AppSettings.from_dict(settings.to_dict()).tour_banner_closed)
+        settings.tour_banner_dismissed = True
+        self.assertTrue(AppSettings.from_dict(settings.to_dict()).tour_banner_dismissed)
 
     def test_settings_page_cannot_roll_the_flag_back(self) -> None:
         source = (UI_DIR / "main_window.py").read_text(encoding="utf-8")
         block = source[source.index("_WINDOW_OWNED_SETTINGS = tuple("):]
-        self.assertIn('"tour_banner_closed"', block[: block.index(")\n\n")])
-        self.assertIn("tour_banner_closed", {item.name for item in fields(AppSettings)})
+        self.assertIn('"tour_banner_dismissed"', block[: block.index(")\n\n")])
+        self.assertIn("tour_banner_dismissed", {item.name for item in fields(AppSettings)})
 
 
 class PlaceCardTests(unittest.TestCase):
@@ -470,8 +472,8 @@ class TourBannerTests(unittest.TestCase):
 
         MainWindow = _main_window_class()
         names = (
-            "_start_tour", "_open_tour_step", "_prewarm_tour_step", "_on_tour_finished", "_set_tour_banner_closed",
-            "_schedule_tour_banner", "_try_show_tour_banner", "_show_tour_banner",
+            "_start_tour", "_open_tour_step", "_prewarm_tour_step", "_on_tour_finished", "_dismiss_tour_banner",
+            "_tour_banner_wanted", "_schedule_tour_banner", "_try_show_tour_banner", "_show_tour_banner",
             "_on_tour_banner_closed", "_close_tour_banner",
         )
         host_cls = type("Host", (QWidget,), {name: getattr(MainWindow, name) for name in names})
@@ -479,7 +481,7 @@ class TourBannerTests(unittest.TestCase):
         self.window.resize(900, 600)
         self.window._quitting = False
         self.window._geometry_persistence_ready = True
-        self.window._tour_automatic = False
+        self.window._tour_started_this_session = False
         self.window._tour_banner = None
         self.window._tour_banner_tries = 0
         self.window._tour_banner_timer = QTimer(self.window)
@@ -515,7 +517,7 @@ class TourBannerTests(unittest.TestCase):
     def test_banner_does_not_start_tour_or_set_flag(self) -> None:
         self._show_banner()
         self.assertIsNone(active_tour(self.window))
-        self.assertFalse(self.settings.tour_banner_closed)
+        self.assertFalse(self.settings.tour_banner_dismissed)
         # Повторный вызов (showEvent + controls-ready) не плодит вторую плашку.
         banner = self.window._tour_banner
         self.window._try_show_tour_banner()
@@ -523,15 +525,44 @@ class TourBannerTests(unittest.TestCase):
         self.assertIs(self.window._tour_banner, banner)
         self.assertFalse(self.window._tour_banner_timer.isActive())
 
-    def test_start_button_closes_banner_and_starts_tour(self) -> None:
+    def _start_from_banner(self) -> None:
         from qfluentwidgets import PrimaryPushButton
 
-        banner = self._show_banner()
-        banner.findChild(PrimaryPushButton).click()
+        self._show_banner().findChild(PrimaryPushButton).click()
         self.assertIsNone(self.window._tour_banner)
         self.assertIsNotNone(active_tour(self.window))
-        self.assertTrue(self.window._tour_automatic)
-        self.assertTrue(self.settings.tour_banner_closed)
+
+    def _next_launch_shows_banner(self) -> bool:
+        self.window._tour_started_this_session = False
+        self.window._try_show_tour_banner()
+        return self.window._tour_banner is not None
+
+    def test_starting_tour_does_not_dismiss_banner_for_good(self) -> None:
+        self._start_from_banner()
+        self.assertFalse(self.settings.tour_banner_dismissed)
+
+    def test_abandoned_tour_hides_banner_only_until_next_launch(self) -> None:
+        for reason in ("skipped", "hidden", "interrupted"):
+            with self.subTest(reason=reason):
+                self._start_from_banner()
+                active_tour(self.window).finish(reason)
+                _spin(10)
+                self.assertFalse(self.settings.tour_banner_dismissed)
+                # В этом запуске (например, после возврата из трея) — не мешаем.
+                self.window._try_show_tour_banner()
+                self.assertIsNone(self.window._tour_banner)
+                self.assertTrue(self._next_launch_shows_banner())
+
+    def test_completed_tour_dismisses_banner_for_good(self) -> None:
+        self._start_from_banner()
+        active_tour(self.window).finish("done")
+        self.assertTrue(self.settings.tour_banner_dismissed)
+        self.assertFalse(self._next_launch_shows_banner())
+
+    def test_completed_menu_tour_also_dismisses_banner(self) -> None:
+        self.window._start_tour()
+        active_tour(self.window).finish("done")
+        self.assertTrue(self.settings.tour_banner_dismissed)
 
     def test_close_button_hides_banner_for_good(self) -> None:
         banner = self._show_banner()
@@ -539,23 +570,8 @@ class TourBannerTests(unittest.TestCase):
         _spin(10)
         self.assertIsNone(self.window._tour_banner)
         self.assertIsNone(active_tour(self.window))
-        self.assertTrue(self.settings.tour_banner_closed)
-        self.window._schedule_tour_banner()
-        self.assertFalse(self.window._tour_banner_timer.isActive())
-
-    def test_interrupted_banner_tour_offers_banner_again(self) -> None:
-        from qfluentwidgets import PrimaryPushButton
-
-        self._show_banner().findChild(PrimaryPushButton).click()
-        active_tour(self.window).finish("interrupted")
-        self.assertFalse(self.settings.tour_banner_closed)
-
-    def test_menu_tour_is_not_automatic(self) -> None:
-        self.settings.tour_banner_closed = True
-        self.window._start_tour()
-        self.assertFalse(self.window._tour_automatic)
-        active_tour(self.window).finish("interrupted")
-        self.assertTrue(self.settings.tour_banner_closed)
+        self.assertTrue(self.settings.tour_banner_dismissed)
+        self.assertFalse(self._next_launch_shows_banner())
 
     def test_busy_window_postpones_banner(self) -> None:
         self.window.controller.locked = True
