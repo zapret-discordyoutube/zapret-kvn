@@ -119,7 +119,7 @@ class UpdateWindow(QWidget):
             metrics.boundingRect(
                 QRect(0, 0, text_width, 1000), int(Qt.TextFlag.TextWordWrap), text
             ).height()
-            for text in (*phrases.WAITING, phrases.DONE, phrases.FAILED)
+            for text in (*phrases.WAITING, *phrases.DONE, *phrases.FAILED)
         ))
         self._phrase_opacity = QGraphicsOpacityEffect(self._phrase_label)
         self._phrase_opacity.setOpacity(1.0)
@@ -195,7 +195,7 @@ class UpdateWindow(QWidget):
 
     def _say_farewell(self, stage: Stage) -> None:
         self._phrase_timer.stop()
-        self._show_phrase(phrases.DONE if stage is Stage.DONE else phrases.FAILED)
+        self._show_phrase(phrases.farewell(stage is Stage.DONE))
         # Главное окно приложения появится, когда закроется это.
         QTimer.singleShot(_FAREWELL_MS[stage], self.close)
 

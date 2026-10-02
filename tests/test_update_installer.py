@@ -427,10 +427,23 @@ class PhraseTests(unittest.TestCase):
         self.assertEqual(sorted(first), sorted(phrases.WAITING))
         self.assertNotEqual(deck.next(), first[-1])
 
-    def test_phrases_are_distinct_and_fit_the_window(self) -> None:
-        self.assertEqual(len(set(phrases.WAITING)), len(phrases.WAITING))
-        for text in (*phrases.WAITING, phrases.DONE, phrases.FAILED):
-            self.assertLessEqual(len(text), 90, text)
+    def test_phrases_are_many_distinct_and_fit_the_window(self) -> None:
+        # Большие наборы — чтобы от обновления к обновлению текст был разный.
+        for pool, minimum in ((phrases.WAITING, 60), (phrases.DONE, 8), (phrases.FAILED, 6)):
+            self.assertGreaterEqual(len(pool), minimum)
+            self.assertEqual(len(set(pool)), len(pool))
+        # Окно подгоняет высоту под самую длинную фразу: длиннее не делаем.
+        for text in (*phrases.WAITING, *phrases.DONE, *phrases.FAILED):
+            self.assertLessEqual(len(text), 76, text)
+
+    def test_farewell_varies_and_matches_the_outcome(self) -> None:
+        rng = random.Random(2)
+        done = {phrases.farewell(True, rng=rng) for _ in range(60)}
+        failed = {phrases.farewell(False, rng=rng) for _ in range(60)}
+        self.assertGreater(len(done), 1)
+        self.assertGreater(len(failed), 1)
+        self.assertTrue(done <= set(phrases.DONE))
+        self.assertTrue(failed <= set(phrases.FAILED))
 
 
 class WindowProgressTests(unittest.TestCase):
