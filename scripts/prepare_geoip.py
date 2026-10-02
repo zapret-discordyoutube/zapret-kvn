@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from http.client import HTTPException
@@ -26,19 +27,42 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+USER_AGENT = "ZapretKVN-build/1"
+# curl exits with 22 when --fail sees an HTTP error status.
+CURL_HTTP_ERROR = 22
+
+
 def fetch(url, destination, attempts=5):
-    request = Request(url, headers={"User-Agent": "ZapretKVN-build/1"})
+    request = Request(url, headers={"User-Agent": USER_AGENT})
     # The release host's link resets long transfers now and then. The lock pins
     # the result by SHA-256, so restarting the whole download is always safe;
     # an HTTP status is the server's verdict and is not retried.
+    curl = shutil.which("curl")
     for attempt in range(attempts):
         try:
-            with urlopen(request, timeout=90) as response, destination.open("wb") as target:
-                shutil.copyfileobj(response, target)
+            if curl:
+                # Python's stream from DB-IP's CDN is cut off at the same point
+                # on every try from the release host, while curl gets the whole
+                # file; resolve_core_versions.py downloads cores the same way.
+                subprocess.run(
+                    [curl, "--disable", "--fail", "--silent", "--show-error",
+                     "--location", "--proto", "=https", "--proto-redir", "=https",
+                     "--max-redirs", "5", "--connect-timeout", "30", "--max-time", "600",
+                     "--user-agent", USER_AGENT, "--output", str(destination), url],
+                    stderr=subprocess.PIPE, check=True, timeout=610,
+                )
+            else:
+                with urlopen(request, timeout=90) as response, destination.open("wb") as target:
+                    shutil.copyfileobj(response, target)
             return
         except HTTPError:
             raise
-        except (HTTPException, OSError):
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == CURL_HTTP_ERROR or attempt + 1 == attempts:
+                detail = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+                raise OSError(f"download failed for {url}: {detail or exc}") from exc
+            time.sleep(2.0 * (attempt + 1))
+        except (HTTPException, OSError, subprocess.SubprocessError):
             if attempt + 1 == attempts:
                 raise
             time.sleep(2.0 * (attempt + 1))

@@ -55,8 +55,51 @@ class GeoipFetchRetryTests(unittest.TestCase):
         responses = [Broken(b"partial"), io.BytesIO(b"complete")]
         with tempfile.TemporaryDirectory() as directory, patch.object(
             prepare_geoip, "urlopen", side_effect=lambda *_a, **_k: responses.pop(0)
-        ), patch.object(prepare_geoip.time, "sleep"):
+        ), patch.object(prepare_geoip.shutil, "which", return_value=None), patch.object(
+            prepare_geoip.time, "sleep"
+        ):
             target = Path(directory) / "db"
             prepare_geoip.fetch("https://example.invalid/db", target)
             self.assertEqual(target.read_bytes(), b"complete")
         self.assertEqual(responses, [])
+
+    def test_curl_downloads_when_available_and_retries_a_reset(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                raise subprocess.CalledProcessError(56, command, stderr=b"Connection reset by peer")
+            Path(command[command.index("--output") + 1]).write_bytes(b"complete")
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            prepare_geoip.shutil, "which", return_value="/usr/bin/curl"
+        ), patch.object(prepare_geoip.subprocess, "run", side_effect=run), patch.object(
+            prepare_geoip, "urlopen", side_effect=AssertionError("curl must be used")
+        ), patch.object(prepare_geoip.time, "sleep"):
+            target = Path(directory) / "db"
+            prepare_geoip.fetch("https://example.invalid/db", target)
+            self.assertEqual(target.read_bytes(), b"complete")
+        self.assertEqual(len(calls), 2)
+
+    def test_curl_http_error_is_not_retried(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        run = patch.object(
+            prepare_geoip.subprocess, "run",
+            side_effect=subprocess.CalledProcessError(22, ["curl"], stderr=b"404"),
+        )
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            prepare_geoip.shutil, "which", return_value="/usr/bin/curl"
+        ), run as mocked, patch.object(prepare_geoip.time, "sleep"):
+            with self.assertRaises(OSError):
+                prepare_geoip.fetch("https://example.invalid/db", Path(directory) / "db")
+        self.assertEqual(mocked.call_count, 1)
