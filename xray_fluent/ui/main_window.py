@@ -316,7 +316,7 @@ class MainWindow(FluentWindow):
             routeKey="tour",
             icon=FIF.EDUCATION,
             text="Обучение",
-            onClick=lambda *_args: self._start_tour(),
+            onClick=lambda *_args: self._on_tour_nav_clicked(),
             selectable=False,
             position=NavigationItemPosition.BOTTOM,
             tooltip="Экскурсия по приложению",
@@ -1422,6 +1422,14 @@ class MainWindow(FluentWindow):
         overlay.step_opening.connect(self._open_tour_step)
         overlay.finished.connect(self._on_tour_finished)
         overlay.start()
+
+    def _on_tour_nav_clicked(self) -> None:
+        # Невыделяемый пункт панель сама не сворачивает: в узком окне
+        # выпавшее меню осталось бы поверх подсвеченных элементов.
+        panel = self.navigationInterface.panel
+        if panel.displayMode == NavigationDisplayMode.MENU:
+            panel.collapse()
+        self._start_tour()
 
     def _open_tour_step(self, step: TourStep) -> None:
         if step.page is None:

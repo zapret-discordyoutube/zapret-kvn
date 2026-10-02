@@ -76,7 +76,21 @@ class StepsTests(unittest.TestCase):
         self.assertIn("selectable=False", block)
         self.assertIn("NavigationItemPosition.BOTTOM", block)
         # clicked(bool) не должен попасть в automatic: лямбда отбрасывает аргумент.
-        self.assertIn("onClick=lambda *_args: self._start_tour()", block)
+        self.assertIn("onClick=lambda *_args: self._on_tour_nav_clicked()", block)
+
+    def test_menu_item_collapses_overlay_menu_before_tour(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from qfluentwidgets import NavigationDisplayMode
+
+        MainWindow = _main_window_class()
+        for mode, collapsed in ((NavigationDisplayMode.MENU, 1), (NavigationDisplayMode.EXPAND, 0)):
+            panel = SimpleNamespace(displayMode=mode, collapse=Mock())
+            window = SimpleNamespace(navigationInterface=SimpleNamespace(panel=panel), _start_tour=Mock())
+            MainWindow._on_tour_nav_clicked(window)
+            self.assertEqual(panel.collapse.call_count, collapsed, mode)
+            window._start_tour.assert_called_once_with()
 
     def test_pages_are_main_window_pages(self) -> None:
         source = (UI_DIR / "main_window.py").read_text(encoding="utf-8")
