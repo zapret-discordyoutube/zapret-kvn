@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QEventLoop, QPoint, QRect, QSize, Qt, QTimer
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QKeyEvent, QRegion
 from PyQt6.QtWidgets import QApplication, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 _existing = QApplication.instance()
@@ -376,18 +376,34 @@ class OverlayTests(unittest.TestCase):
         self._settle()  # затемнение проявилось — дальше полных перерисовок быть не должно
         # Точка в стороне и от подсветки (вверху окна), и от карточки (по центру и слева).
         untouched = QPoint(self.overlay.width() - 6, self.overlay.height() // 2)
-        hits: list[bool] = []
-        original = self.overlay.paintEvent
+        requested: list[bool] = []
+        painted: list[bool] = []
+        original_update = self.overlay.update
+        original_paint = self.overlay.paintEvent
 
-        def recording(event) -> None:
-            hits.append(event.region().contains(untouched))
-            original(event)
+        def recording_update(*args) -> None:
+            if not args:
+                region = QRegion(self.overlay.rect())
+            elif len(args) == 4:
+                region = QRegion(*args)
+            else:
+                region = QRegion(args[0])
+            requested.append(region.contains(untouched))
+            original_update(*args)
 
-        self.overlay.paintEvent = recording
+        def recording_paint(event) -> None:
+            painted.append(event.region().contains(untouched))
+            original_paint(event)
+
+        self.overlay.update = recording_update
+        self.overlay.paintEvent = recording_paint
         self.overlay.go_next()
         self._settle()
-        self.assertGreater(len(hits), 3)
-        self.assertFalse(any(hits))
+        # Проверяем запросы самого оверлея: на Windows без рабочего стола (гейт
+        # выпуска по SSH) окно не экспонировано и paintEvent не приходит вовсе.
+        self.assertGreater(len(requested), 3)
+        self.assertFalse(any(requested))
+        self.assertFalse(any(painted))
 
     def test_content_fades_in_and_effect_is_off_at_rest(self) -> None:
         self._settle()
