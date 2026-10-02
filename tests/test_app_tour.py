@@ -12,7 +12,8 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QEvent, QEventLoop, QRect, QSize, Qt, QTimer
+from PyQt6 import sip
+from PyQt6.QtCore import QEvent, QEventLoop, QPoint, QRect, QSize, Qt, QTimer
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QApplication, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
@@ -25,7 +26,13 @@ from dataclasses import fields
 
 from xray_fluent.profiles.models import AppSettings
 from xray_fluent.ui.tour import TOUR_STEPS, TourOverlay, TourStep, active_tour
-from xray_fluent.ui.tour.overlay import CARD_GAP, CARD_MARGIN, place_card
+from xray_fluent.ui.tour.overlay import (
+    CARD_GAP,
+    CARD_MARGIN,
+    PULSE_CYCLES,
+    PULSE_PERIOD_MS,
+    place_card,
+)
 from xray_fluent.ui.tour.steps import on_page
 
 UI_DIR = Path(__file__).resolve().parents[1] / "xray_fluent" / "ui"
@@ -246,7 +253,8 @@ class OverlayTests(unittest.TestCase):
         _spin(30)
 
     def tearDown(self) -> None:
-        self.overlay.finish("interrupted")
+        if not sip.isdeleted(self.overlay):
+            self.overlay.finish("interrupted")
         _spin(10)
         self.window.hide()
         self.window.deleteLater()
@@ -338,7 +346,7 @@ class OverlayTests(unittest.TestCase):
 
     def test_idle_tour_does_not_repaint(self) -> None:
         self.overlay.go_next()
-        self._settle()
+        _spin(int(PULSE_CYCLES * PULSE_PERIOD_MS) + 900)  # кольцо отыграло и замерло
         paints = 0
         original = self.overlay.paintEvent
 
@@ -350,6 +358,60 @@ class OverlayTests(unittest.TestCase):
         self.overlay.paintEvent = counting
         _spin(400)
         self.assertEqual(paints, 0)
+
+    def test_card_takes_final_size_at_once_so_text_is_not_rewrapped(self) -> None:
+        """Карточка едет, но не растягивается: иначе текст «плывёт» на каждом кадре."""
+        self._settle()
+        self.overlay.go_next()
+        sizes = set()
+        for _ in range(12):
+            sizes.add((self.overlay.card.width(), self.overlay.card.height()))
+            _spin(20)
+        self.assertEqual(len(sizes), 1, sizes)
+        self._settle()
+        self.assertIn((self.overlay.card.width(), self.overlay.card.height()), sizes)
+
+    def test_step_change_repaints_only_changed_areas(self) -> None:
+        """Полная перерисовка оверлея перерисовывает всю страницу под ним — это и есть лаги."""
+        self._settle()  # затемнение проявилось — дальше полных перерисовок быть не должно
+        # Точка в стороне и от подсветки (вверху окна), и от карточки (по центру и слева).
+        untouched = QPoint(self.overlay.width() - 6, self.overlay.height() // 2)
+        hits: list[bool] = []
+        original = self.overlay.paintEvent
+
+        def recording(event) -> None:
+            hits.append(event.region().contains(untouched))
+            original(event)
+
+        self.overlay.paintEvent = recording
+        self.overlay.go_next()
+        self._settle()
+        self.assertGreater(len(hits), 3)
+        self.assertFalse(any(hits))
+
+    def test_content_fades_in_and_effect_is_off_at_rest(self) -> None:
+        self._settle()
+        self.overlay.go_next()
+        _spin(40)
+        self.assertTrue(self.overlay.card.content_effect.isEnabled())
+        self._settle()
+        self.assertFalse(self.overlay.card.content_effect.isEnabled())
+
+    def test_announces_next_step_for_prewarming(self) -> None:
+        upcoming: list[str] = []
+        self.overlay.step_upcoming.connect(lambda step: upcoming.append(step.key))
+        self._settle()
+        self.assertEqual(upcoming, ["first"])
+
+    def test_dim_fades_out_after_finish(self) -> None:
+        self._settle()
+        self.overlay.skip()
+        self.assertEqual(self.reasons, ["skipped"])
+        self.assertIsNone(active_tour(self.window))
+        self.assertFalse(self.overlay.card.isVisible())
+        self.assertTrue(self.overlay.isVisible())
+        _spin(400)
+        self.assertTrue(sip.isdeleted(self.overlay) or not self.overlay.isVisible())
 
     def test_overlay_holds_no_strong_reference_to_window(self) -> None:
         for value in vars(self.overlay).values():
@@ -392,7 +454,7 @@ class TourBannerTests(unittest.TestCase):
 
         MainWindow = _main_window_class()
         names = (
-            "_start_tour", "_open_tour_step", "_on_tour_finished", "_set_tour_banner_closed",
+            "_start_tour", "_open_tour_step", "_prewarm_tour_step", "_on_tour_finished", "_set_tour_banner_closed",
             "_schedule_tour_banner", "_try_show_tour_banner", "_show_tour_banner",
             "_on_tour_banner_closed", "_close_tour_banner",
         )
@@ -411,6 +473,8 @@ class TourBannerTests(unittest.TestCase):
             state=SimpleNamespace(settings=AppSettings()), locked=False, schedule_save=Mock()
         )
         self.window.switchTo = Mock()
+        self.window.stackedWidget = Mock()
+        self.window.stackedWidget.isAnimationEnabled.return_value = True
         self.window.dashboard_page = QWidget(self.window)
         self.window.show()
 

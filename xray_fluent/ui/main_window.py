@@ -1420,7 +1420,12 @@ class MainWindow(FluentWindow):
         self._tour_automatic = automatic
         overlay = TourOverlay(self, TOUR_STEPS)
         overlay.step_opening.connect(self._open_tour_step)
+        overlay.step_upcoming.connect(self._prewarm_tour_step)
         overlay.finished.connect(self._on_tour_finished)
+        # Страницы под затемнением переключаются без «выезда»: его всё равно
+        # не видно, а перерисовка страницы на каждом кадре даёт рывки.
+        self._tour_restores_page_animation = self.stackedWidget.isAnimationEnabled()
+        self.stackedWidget.setAnimationEnabled(False)
         overlay.start()
 
     def _on_tour_nav_clicked(self) -> None:
@@ -1444,7 +1449,14 @@ class MainWindow(FluentWindow):
         if show_root is not None:
             show_root()
 
+    def _prewarm_tour_step(self, step: TourStep) -> None:
+        """Построить страницу следующего шага заранее, пока читают текущий."""
+        ensure = getattr(getattr(self, step.page or "", None), "ensure_page", None)
+        if ensure is not None and not self._quitting:
+            ensure()
+
     def _on_tour_finished(self, reason: str) -> None:
+        self.stackedWidget.setAnimationEnabled(self._tour_restores_page_animation)
         if reason == "done":
             self.switchTo(self.dashboard_page)
         elif reason == "interrupted" and self._tour_automatic:
