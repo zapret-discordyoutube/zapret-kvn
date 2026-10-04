@@ -42,7 +42,6 @@ from xray_fluent.ui.base_page import ScrollablePage
 from xray_fluent.ui.configs_page import ConfigsPage
 from xray_fluent.ui.dashboard_page import DashboardPage
 from xray_fluent.ui.history_page import HistoryPage
-from xray_fluent.ui.routing_page import RoutingPage
 from xray_fluent.ui.settings_page import SettingsPage, _BrowseCard, _LineEditCard
 from xray_fluent.ui.traffic_graph import DetailTrafficGraphWidget
 
@@ -52,7 +51,6 @@ MIN_WINDOW_WIDTH = 860
 _PAGE_FACTORIES = [
     ("dashboard", DashboardPage),
     ("settings", SettingsPage),
-    ("routing", RoutingPage),
     ("history", HistoryPage),
     ("configs", ConfigsPage),
 ]

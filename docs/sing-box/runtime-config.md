@@ -414,15 +414,6 @@ Manual process rules are normalized into one of:
 The builder also groups values by action, so multiple entries may collapse into
 one rule containing an array of values.
 
-### `RoutingSettings.process_preset_routes`
-
-Process presets are expanded to `process_name` arrays and grouped by action.
-
-### `RoutingSettings.service_routes`
-
-Service presets are converted into `domain_suffix`, `domain`, `domain_keyword`,
-or `ip_cidr` rules depending on the item prefix.
-
 ### `RoutingSettings.direct_domains`, `proxy_domains`, `block_domains`
 
 These lists support these local prefixes:

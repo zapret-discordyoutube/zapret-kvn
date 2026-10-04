@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 UI_DIR = REPO_ROOT / "xray_fluent" / "ui"
 
 # Files whose raw theme-dependent setStyleSheet calls were migrated (AC4).
-AC4_FILES = ("zapret_page.py", "updates_page.py", "about_page.py", "routing_page.py")
+AC4_FILES = ("zapret_page.py", "updates_page.py", "about_page.py")
 
 # Theme-neutral setStyleSheet values that are explicitly allowed (A10):
 # plain-Qt widgets with neutral colors or transparency for the Mica effect.

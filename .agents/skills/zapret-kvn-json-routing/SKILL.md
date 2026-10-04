@@ -10,7 +10,7 @@ description: Preserve and edit Zapret KVN native raw JSON routing for sing-box a
 - Treat the active raw sing-box or Xray JSON as the runtime routing and DNS source of truth.
 - Express product routing policy directly in the original core schema.
 - Do not create an app-specific routing DSL, JSON overlay, merge layer, placeholder compiler, generated policy block, or hidden Python route injection.
-- Do not route raw-config modes through `RoutingSettings`, `service_presets.py`, `process_presets.py`, or `engines/xray/config_builder.py`. Those belong to the separate legacy GUI/tun2socks path.
+- Do not route raw-config modes through `RoutingSettings` or `engines/xray/config_builder.py`. Those belong to the separate legacy GUI/tun2socks path.
 - Treat `${APP_ROUTE_RULES}` and similar material in design documents as unimplemented design context unless current source proves otherwise.
 - Keep runtime mutations limited to app-owned transport and safety contracts already required by the architecture: proxy/TUN inbounds, metrics API, selected `proxy` outbound replacement, endpoint bootstrap, hybrid sidecar protection, interface binding, and port allocation.
 

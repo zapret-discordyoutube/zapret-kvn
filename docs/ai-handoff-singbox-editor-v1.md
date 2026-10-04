@@ -132,7 +132,6 @@ Do not build advanced schema UI.
 ### Files to read first
 
 - `xray_fluent/ui/main_window.py`
-- `xray_fluent/ui/routing_page.py`
 - `xray_fluent/application/controller.py`
 - `xray_fluent/singbox_config_builder.py`
 - `xray_fluent/singbox_manager.py`

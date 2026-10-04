@@ -7,7 +7,7 @@
 | Shipped templates | `data/templates/sing-box/*.json`, `data/templates/xray/*.json` | Versioned defaults and reset/import sources |
 | Active raw configs | `data/configs/sing-box/*.json`, `data/configs/xray/*.json` | Runtime routing and DNS source of truth |
 | Runtime copies | `data/runtime/*.json` or manager-owned temporary files | Launch artifacts; do not author product policy here |
-| Legacy GUI routing | `RoutingSettings`, presets, `engines/xray/config_builder.py` | Separate tun2socks/legacy path, not raw sing-box/Xray modes |
+| Legacy GUI routing | `RoutingSettings`, `engines/xray/config_builder.py` | Separate tun2socks/legacy path, not raw sing-box/Xray modes |
 
 `application/profile_service.py` copies a selected or imported template into the corresponding active config. Reset performs the same copy. Saving in the raw editor writes the active config.
 
