@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "releases": {
-    "windows": "0.6.5",
-    "android": "v0.3.28"
+    "windows": "0.8.16",
+    "android": "v0.4.11"
   },
-  "checked_at_utc": "2026-09-06T16:28:36.791884+00:00",
+  "checked_at_utc": "2026-10-08T21:26:29.841992+00:00",
   "amnezia": {
     "id": "amnezia",
     "repository": "amnezia-vpn/amneziawg-go",
@@ -19,22 +19,29 @@
     "release_prerelease": false,
     "url": "https://github.com/amnezia-vpn/amneziawg-go/tree/b5928efb6ca19f0153958460c3d141f04abc5c2e",
     "toolchain": {
-      "version": "go1.26.4",
-      "archive": "go1.26.4.windows-amd64.zip",
-      "sha256": "3ca8fb4630b07c419cbdd51f754e31363cfcfb83b3a5354d9e895c90be2cc345",
-      "url": "https://go.dev/dl/go1.26.4.windows-amd64.zip"
+      "version": "go1.26.8",
+      "archive": "go1.26.8.windows-amd64.zip",
+      "sha256": "b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59",
+      "url": "https://go.dev/dl/go1.26.8.windows-amd64.zip"
     }
+  },
+  "singbox": {
+    "version": "v1.14.1-extended-2.7.2",
+    "commit": "55faa763f986f4ca8a492d9b2719bc6330d2bef5"
+  },
+  "hysteria": {
+    "version": "app/v2.13.0"
   },
   "inputs": {
     "windows": {
-      "scripts/core-lock.windows-x64.json": "5c560d50c66ced8522fc9dc0dcc730c34d8a601611b62f10ac9930e7832ba3a3",
+      "scripts/core-lock.windows-x64.json": "8d0d31e496060612a180815a9b98d6c22f7ebee229deb6b3b453fd6731fcb651",
       "runtime/amnezia/go.mod": "d855786545c947cee939fc3fda5fce83a5530f0341b109ccce9853447d6241f1",
       "runtime/amnezia/go.sum": "b6e8c738a3eec160d0cc58d10ea6dbbf17886b122ed140a379bd9a29eec8df82"
     },
     "android": {
-      "core.properties": "7e2deebdbdef437d6b1f3b36e7ff158c2d6b3f2e9f2840b1cf1aeaf1695765ac",
-      "core-patches/series.sha256": "1a1d0e6a9a6b5aa5ff7f36a4a62d978f8e1a75ec6d587c890112b747c30026fb",
-      "core-patches/0005-official-amnezia-wg-unified.patch": "7afa8fcc9ec3965e1c651c51df2103f0410bac43b96df35a2be7c92844b1791e"
+      "core.properties": "a358ceeae5e1f5e72e9e154966728d1f041d8f387ec1da7b5aa3fb683766422a",
+      "core-patches/series.sha256": "2998d5aec14785b9de0a59e4f020a0d298c21873baeeb2f0dbc5bd4bf8c8b525",
+      "core-patches/0005-official-amnezia-wg-unified.patch": "e788a9d18e11c3484fa6375d02f1b31e22c6d44abce9fa1762d7d1e99280d898"
     }
   }
 }

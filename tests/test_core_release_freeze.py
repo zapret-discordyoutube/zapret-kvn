@@ -72,8 +72,24 @@ class CoreReleaseFreezeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "Android Hysteria differs"):
                 verify(root, "android", "v0.5.0")
-            with self.assertRaisesRegex(ValueError, "lags Windows app/v2.12.3"):
-                android_hysteria_parity(root, {"sources": [{"id": "hysteria", "version": "app/v2.12.3"}]})
+            newer = {"sources": [{"id": "hysteria", "version": "app/v2.12.3"}]}
+            # Отставание больше не останавливает подготовку: Android сам
+            # перегенерирует серию патчей. Без его скрипта — понятный отказ.
+            with self.assertRaisesRegex(ValueError, "updater is missing"):
+                android_hysteria_parity(root, newer)
+            # Перегенерация, которая не подняла версию, заморозку не пропускает.
+            with self.assertRaisesRegex(ValueError, "lags Windows app/v2.12.3 after regeneration"):
+                android_hysteria_parity(root, newer, regenerate=lambda _android, _version: None)
+
+            def regenerate(android: Path, version: str) -> None:
+                path = android / "core.properties"
+                path.write_text(path.read_text().replace("HYSTERIA_CORE_TAG=app/v2.12.2", f"HYSTERIA_CORE_TAG={version}"))
+
+            self.assertEqual(android_hysteria_parity(root, newer, regenerate=regenerate), "app/v2.12.3")
+            self.assertIn("HYSTERIA_CORE_TAG=app/v2.12.3", (root / "core.properties").read_text())
+            (root / "core.properties").write_text(
+                (root / "core.properties").read_text().replace("app/v2.12.3", "app/v2.12.2")
+            )
             self.assertEqual(
                 android_hysteria_parity(root, {"sources": [{"id": "hysteria", "version": "app/v2.12.2"}]}),
                 "app/v2.12.2",

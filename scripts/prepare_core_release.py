@@ -16,6 +16,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,22 +96,45 @@ def android_core_changes(android: Path, singbox: dict, changes: dict[Path, str])
         raise ValueError(str(error)) from error
 
 
-def android_hysteria_parity(android: Path, lock: dict) -> str:
-    """Both platforms ship the Windows-selected official Hysteria.
-
-    Android embeds it through core-patches/0003, so a new release cannot be
-    retargeted by rewriting a pin: fail before any write and point at the
-    regeneration procedure instead of freezing a stale Android core.
-    """
-    version = next(item["version"] for item in lock["sources"] if item.get("id") == "hysteria")
+def _android_hysteria_tag(android: Path) -> str | None:
     properties = dict(
         line.split("=", 1) for line in (android / "core.properties").read_text(encoding="utf-8").splitlines() if "=" in line
     )
-    if properties.get("HYSTERIA_CORE_TAG") != version:
+    return properties.get("HYSTERIA_CORE_TAG")
+
+
+def _regenerate_android_hysteria(android: Path, version: str) -> None:
+    """Run the Android repository's own regeneration of its Hysteria patch series."""
+
+    script = android / "scripts/update_hysteria_core.py"
+    if not script.is_file():
+        raise ValueError(f"Android Hysteria updater is missing: {script}")
+    result = subprocess.run(
+        [sys.executable, str(script), "--tag", version, "--root", str(android), "--write"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
         raise ValueError(
-            f"Android Hysteria {properties.get('HYSTERIA_CORE_TAG')} lags Windows {version}: "
-            "regenerate android core-patches (docs/CORE_UPDATE.md) before freezing"
+            f"Android Hysteria could not be moved to {version} automatically: "
+            f"{(result.stderr or result.stdout).strip()[-800:]}"
         )
+
+
+def android_hysteria_parity(android: Path, lock: dict, regenerate=_regenerate_android_hysteria) -> str:
+    """Both platforms ship the Windows-selected official Hysteria.
+
+    Android embeds it through core-patches/0003, so a new release cannot be
+    retargeted by rewriting a pin. When Android lags, its own updater
+    regenerates the patch series: it writes only a series that reproduces the
+    previous patches byte for byte, keeps go.mod tidy and compiles, and fails
+    closed otherwise. A lag that survives regeneration stops the freeze.
+    """
+    version = next(item["version"] for item in lock["sources"] if item.get("id") == "hysteria")
+    if _android_hysteria_tag(android) != version:
+        regenerate(android, version)
+    current = _android_hysteria_tag(android)
+    if current != version:
+        raise ValueError(f"Android Hysteria {current} lags Windows {version} after regeneration")
     return version
 
 
