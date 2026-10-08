@@ -36,6 +36,7 @@ from ..hysteria.runtime_contract import classify_hysteria_uri
 from ...application.protocol_core import ProtocolCore, protocol_core
 from ...profiles.models import Node
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity
+from ...network.bootstrap_dns import cached_addresses
 from ..hysteria.config_adapter import build_uri_client_config
 from .config_builder import build_singbox_outbound, is_singbox_endpoint_node
 
@@ -875,6 +876,50 @@ def _is_domain_name(value: str) -> bool:
     return False
 
 
+_APP_BOOTSTRAP_LKG_TAG = "app-bootstrap-lkg"
+_APP_NODE_BOOTSTRAP_TAG = "app-node-bootstrap"
+_TRUSTED_BOOTSTRAP_TAG = "direct-doh"
+
+
+def _server_bootstrap_resolver(payload: dict[str, Any], server: str) -> str:
+    """Резолвер адреса самого сервера с запомненным адресом в запасе.
+
+    Штатный ``bootstrap-dns`` заканчивается системным резолвером, чей NXDOMAIN
+    окончателен: на сети, где провайдер подменяет ответы, а защищённый DoH
+    недоступен, живой сервер получает «домена нет». Когда для имени есть адрес,
+    запомненный после доверенного ответа, сервер разрешается своей цепочкой
+    ``direct-doh`` → запомненный адрес, и системный резолвер в ней не участвует.
+    Конфиг пользователя при этом не меняется: добавляются только app-теги.
+    """
+
+    cached = cached_addresses(server)
+    dns = payload.get("dns")
+    servers = dns.get("servers") if isinstance(dns, dict) else None
+    if not cached or not isinstance(servers, list):
+        return "bootstrap-dns"
+    tags = {str(item.get("tag") or "") for item in servers if isinstance(item, dict)}
+    if _TRUSTED_BOOTSTRAP_TAG not in tags:
+        return "bootstrap-dns"
+
+    lkg = next((item for item in servers if isinstance(item, dict) and item.get("tag") == _APP_BOOTSTRAP_LKG_TAG), None)
+    if lkg is None:
+        lkg = {"type": "hosts", "tag": _APP_BOOTSTRAP_LKG_TAG, "predefined": {}}
+        servers.append(lkg)
+    predefined = lkg.setdefault("predefined", {})
+    predefined[server] = list(cached)
+    if _APP_NODE_BOOTSTRAP_TAG not in tags:
+        servers.append(
+            {
+                "type": "fallback",
+                "tag": _APP_NODE_BOOTSTRAP_TAG,
+                "servers": [_TRUSTED_BOOTSTRAP_TAG, _APP_BOOTSTRAP_LKG_TAG],
+                "strategy": "sequential",
+                "timeout": "4s",
+            }
+        )
+    return _APP_NODE_BOOTSTRAP_TAG
+
+
 def _ensure_proxy_server_bootstrap_contract(
     payload: dict[str, Any],
     proxy_outbound: dict[str, Any],
@@ -891,7 +936,7 @@ def _ensure_proxy_server_bootstrap_contract(
 
     # Domain-based proxy servers must resolve through bootstrap-dns, otherwise
     # proxy-dns can recurse into the proxy outbound before the tunnel is ready.
-    proxy_outbound["domain_resolver"] = "bootstrap-dns"
+    proxy_outbound["domain_resolver"] = _server_bootstrap_resolver(payload, server)
 
     route = _ensure_dict(payload, "route")
     rules = _ensure_list(route, "rules")

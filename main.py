@@ -342,6 +342,12 @@ def main() -> int:
     from xray_fluent.application.startup_service import StartupLoader
 
     app = QApplication(sys.argv)
+    from xray_fluent.constants import DATA_DIR
+    from xray_fluent.network.bootstrap_dns import configure_cache
+
+    # Запомненные адреса VPN-серверов: запас на случай, когда защищённый DNS
+    # недоступен, а системный резолвер отвечает «домена нет».
+    configure_cache(DATA_DIR / "bootstrap-lkg.json")
     from xray_fluent.ui.fluent_fixes import install_translations
 
     install_translations(app)

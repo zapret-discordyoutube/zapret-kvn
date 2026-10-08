@@ -241,6 +241,7 @@ from ..importer.subscription_http import (
     validate_hwid,
 )
 from ..importer.subscription_parser import validate_filter_patterns
+from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
 from ..network.ping_service import PingService
 from ..platform.windows.proxy_manager import PROXY_EXECUTOR, ProxyManager, SystemProxyState
@@ -1053,6 +1054,7 @@ class AppController(QObject):
                 preferred_protect_password = session.protect_ss_password
             elif session.sidecar_kind == "hysteria":
                 preferred_relay_port = session.sidecar_relay_port
+        self._refresh_server_bootstrap(node)
         return plan_singbox_runtime(
             document,
             node,
@@ -1061,6 +1063,14 @@ class AppController(QObject):
             preferred_protect_password=preferred_protect_password,
             pool_nodes=self.state.nodes,
         )
+
+    def _refresh_server_bootstrap(self, node: Node | None) -> None:
+        """Обновить в фоне запомненный адрес сервера, не задерживая подключение."""
+
+        target = node or self.selected_node
+        server = str(getattr(target, "server", "") or "")
+        if server:
+            refresh_bootstrap_address(server)
 
     def _plan_proxy_runtime_singbox(
         self,
@@ -1086,6 +1096,7 @@ class AppController(QObject):
                 preferred_protect_password = session.protect_ss_password
             elif session.sidecar_kind == "hysteria" and not replacement:
                 preferred_relay_port = session.sidecar_relay_port
+        self._refresh_server_bootstrap(node)
         return plan_singbox_proxy_runtime(
             document,
             node,

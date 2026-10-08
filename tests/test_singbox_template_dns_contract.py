@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from ipaddress import ip_address
 from pathlib import Path
 import unittest
 
@@ -83,12 +84,23 @@ class SingboxTemplateDnsContractTests(unittest.TestCase):
                 # туннель и обязан пережить подмену DNS провайдером.
                 group = servers["direct-doh"]
                 self.assertEqual(group["strategy"], "parallel")
-                self.assertEqual(len(group["servers"]), 3)
+                self.assertEqual(len(group["servers"]), 5)
+                addresses: set[str] = set()
                 for tag in group["servers"]:
                     self.assertEqual(servers[tag]["type"], "https")
                     self.assertIsNone(servers[tag].get("detour"))
                     self.assertTrue(servers[tag]["tls"]["enabled"])
                     self.assertNotIn("insecure", servers[tag]["tls"])
+                    # Имя DoH-сервера (dns.google, cloudflare-dns.com, …) ТСПУ
+                    # рвёт по SNI. Адрес — литеральный IP, а имя остаётся только
+                    # для проверки сертификата: в ClientHello его нет.
+                    ip_address(servers[tag]["server"])
+                    self.assertIs(servers[tag]["tls"]["disable_sni"], True)
+                    self.assertTrue(servers[tag]["tls"]["server_name"])
+                    addresses.add(servers[tag]["server"])
+                # Пять разных адресов: блокировка одного IP (как TCP у 8.8.8.8
+                # в июле 2026) не оставляет bootstrap без защищённого пути.
+                self.assertEqual(len(addresses), 5)
                 self.assertEqual(dns["final"], "proxy-dns")
 
                 route = payload["route"]

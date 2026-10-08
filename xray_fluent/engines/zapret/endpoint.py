@@ -9,11 +9,11 @@ the hosts is blocking DNS — callers run :func:`resolve_endpoint` in a worker.
 from __future__ import annotations
 
 import ipaddress
-import socket
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal
 
 from ...diagnostics.runtime_logging import register_server_aliases
+from ...network.bootstrap_dns import resolve_bootstrap
 
 ServerKind = Literal["tcp", "quic", "wireguard"]
 Transport = Literal["tcp", "udp"]
@@ -164,12 +164,10 @@ def resolve_host(host: str) -> set[str]:
         return {str(ipaddress.ip_address(host))}
     except ValueError:
         pass
-    resolved: set[str] = set()
-    for info in socket.getaddrinfo(host, None, type=socket.SOCK_DGRAM):
-        try:
-            resolved.add(str(ipaddress.ip_address(info[4][0])))
-        except ValueError:
-            continue
+    # Тот же доверенный путь, что и у ядра: DoH по IP без SNI, затем системный
+    # резолвер, затем запомненный адрес. Одного системного резолвера мало — на
+    # заблокированное имя он отвечает NXDOMAIN, и правило сервера не строилось.
+    resolved = set(resolve_bootstrap(host).addresses)
     # The server's IPs are masked in logs exactly like its name — register them
     # before anything (the rule log line) can print them.
     register_server_aliases(host, resolved)

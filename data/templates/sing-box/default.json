@@ -255,6 +255,7 @@
         "path": "/dns-query",
         "tls": {
           "enabled": true,
+          "disable_sni": true,
           "server_name": "dns.google"
         }
       },
@@ -265,6 +266,7 @@
         "path": "/dns-query",
         "tls": {
           "enabled": true,
+          "disable_sni": true,
           "server_name": "cloudflare-dns.com"
         }
       },
@@ -275,7 +277,30 @@
         "path": "/dns-query",
         "tls": {
           "enabled": true,
+          "disable_sni": true,
           "server_name": "dns.quad9.net"
+        }
+      },
+      {
+        "type": "https",
+        "tag": "direct-doh-adguard",
+        "server": "94.140.14.14",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "disable_sni": true,
+          "server_name": "dns.adguard-dns.com"
+        }
+      },
+      {
+        "type": "https",
+        "tag": "direct-doh-google-alt",
+        "server": "8.8.4.4",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "disable_sni": true,
+          "server_name": "dns.google"
         }
       },
       {
@@ -284,7 +309,9 @@
         "servers": [
           "direct-doh-google",
           "direct-doh-cloudflare",
-          "direct-doh-quad9"
+          "direct-doh-quad9",
+          "direct-doh-adguard",
+          "direct-doh-google-alt"
         ],
         "strategy": "parallel",
         "timeout": "3s"

@@ -10,6 +10,7 @@ from PyQt6.QtCore import QCoreApplication
 
 from xray_fluent.engines.zapret.blobs import lua_init_arguments
 from xray_fluent.engines.zapret.command import SERVER_PROFILE_NAME, ServerRule, build_arguments
+from xray_fluent.network.bootstrap_dns import BootstrapResolution
 from xray_fluent.engines.zapret.endpoint import (
     ResolvedEndpoint,
     ServerEndpoint,
@@ -133,23 +134,30 @@ class ServerRuleArgumentTests(unittest.TestCase):
 
 
 class ResolutionTests(unittest.TestCase):
-    def test_host_resolution_normalizes_and_deduplicates(self) -> None:
-        answers = [
-            (socket.AF_INET, socket.SOCK_DGRAM, 17, "", ("203.0.113.7", 0)),
-            (socket.AF_INET, socket.SOCK_DGRAM, 17, "", ("203.0.113.7", 0)),
-            (socket.AF_INET6, socket.SOCK_DGRAM, 17, "", ("2001:0db8::7", 0, 0, 0)),
-        ]
+    def test_host_resolution_uses_the_trusted_bootstrap_path(self) -> None:
+        answer = BootstrapResolution(frozenset({"203.0.113.7", "2001:db8::7"}), "doh")
         with (
-            patch("xray_fluent.engines.zapret.endpoint.socket.getaddrinfo", return_value=answers),
+            patch("xray_fluent.engines.zapret.endpoint.resolve_bootstrap", return_value=answer) as lookup,
             patch("xray_fluent.engines.zapret.endpoint.register_server_aliases") as aliases,
         ):
             resolved = resolve_host("proxy.example.com")
+        lookup.assert_called_once_with("proxy.example.com")
         self.assertEqual(resolved, {"203.0.113.7", "2001:db8::7"})
         # Log redaction learns the IPs before anything can print them.
         aliases.assert_called_once_with("proxy.example.com", resolved)
 
+    def test_spoofed_system_answer_does_not_break_the_server_rule(self) -> None:
+        # Провайдер отвечает «домена нет», защищённый путь недоступен: правило
+        # сервера строится по запомненному адресу, подключение не отменяется.
+        answer = BootstrapResolution(frozenset({"203.0.113.7"}), "cache")
+        with (
+            patch("xray_fluent.engines.zapret.endpoint.resolve_bootstrap", return_value=answer),
+            patch("xray_fluent.engines.zapret.endpoint.register_server_aliases"),
+        ):
+            self.assertEqual(resolve_host("proxy.example.com"), {"203.0.113.7"})
+
     def test_literal_ip_needs_no_dns(self) -> None:
-        with patch("xray_fluent.engines.zapret.endpoint.socket.getaddrinfo") as lookup:
+        with patch("xray_fluent.engines.zapret.endpoint.resolve_bootstrap") as lookup:
             self.assertEqual(resolve_host("[2001:db8::7]"), {"2001:db8::7"})
         lookup.assert_not_called()
 

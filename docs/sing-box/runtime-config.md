@@ -179,8 +179,26 @@ Runtime shape:
 
 | tag | транспорт | путь | для чего |
 |---|---|---|---|
-| `bootstrap-dns` | `direct-doh` (DoH к 8.8.8.8 / 1.1.1.1 / 9.9.9.9 по литеральному IP) → `local-system-dns` | **мимо туннеля** | разрешить адрес самого VPN-сервера до подключения |
+| `bootstrap-dns` | `direct-doh` (DoH к 8.8.8.8 / 1.1.1.1 / 9.9.9.9 / 94.140.14.14 / 8.8.4.4 по литеральному IP, без SNI: `tls.disable_sni`) → `local-system-dns` | **мимо туннеля** | разрешить адрес самого VPN-сервера до подключения |
 | `proxy-dns` | `vpn-node-dns-udp` → `vpn-node-dns-tcp` (обычный DNS на 53, `detour: "proxy"`) | **внутри туннеля** | все остальные имена |
+
+**Почему у прямого DoH нет SNI.** Имена `dns.google`, `cloudflare-dns.com` и
+`dns.quad9.net` ТСПУ обрывает по SNI. Серверы `direct-doh` поэтому заданы
+литеральным IP с `tls.disable_sni: true`: `server_name` остаётся только для
+проверки сертификата и в ClientHello не попадает. Адресов пять, чтобы
+блокировка одного IP не оставляла bootstrap без защищённого пути.
+
+**Запомненный адрес сервера.** `bootstrap-dns` заканчивается системным
+резолвером, а его NXDOMAIN окончателен. Приложение поэтому в фоне спрашивает
+адрес выбранного сервера по DoH (`xray_fluent/network/bootstrap_dns.py`, те же
+IP, без SNI) и хранит ответ до семи суток в `data/bootstrap-lkg.json`. Когда
+запомненный адрес есть, планировщик добавляет два app-тега —
+`app-bootstrap-lkg` (`hosts`) и `app-node-bootstrap` (`direct-doh` →
+`app-bootstrap-lkg`) — и назначает второй резолвером только самого узла. Это
+часть bootstrap-контракта конечной точки, как и `domain_resolver` узла: секции
+пользователя не переписываются, для остальных имён ничего не меняется. Адрес
+читается один раз за сеанс, поэтому фоновое обновление не меняет уже
+построенный план. Системному ответу кеш не доверяет и его не запоминает.
 
 `dns.final` и `route.default_domain_resolver` указывают на `proxy-dns`;
 `outbounds[direct].domain_resolver` — на `bootstrap-dns`.
