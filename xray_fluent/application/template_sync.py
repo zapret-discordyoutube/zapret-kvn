@@ -16,6 +16,9 @@ class TemplateSyncResult:
     templates_updated: tuple[str, ...] = ()
     configs_updated: tuple[str, ...] = ()
     configs_preserved: tuple[str, ...] = ()
+    # Разделы, которые шаблон обновил, а пользователь правил вручную: новая
+    # версия раздела к его конфигу не применена. ((ключ конфига, (разделы…)), …)
+    stale_sections: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -118,6 +121,7 @@ def sync_packaged_templates(
     templates_updated: list[str] = []
     configs_updated: list[str] = []
     configs_preserved: list[str] = []
+    stale_sections: list[tuple[str, tuple[str, ...]]] = []
 
     for engine in SUPPORTED_ENGINES:
         bundled_root = bundle_dir / engine
@@ -151,6 +155,13 @@ def sync_packaged_templates(
                             configs_updated.append(key)
                         if merged != current:
                             configs_preserved.append(key)
+                        stale = tuple(
+                            section for section in current
+                            if previous.get(section, _MISSING) != current[section]
+                            and merged.get(section, _MISSING) != current[section]
+                        )
+                        if stale:
+                            stale_sections.append((key, stale))
                     elif not _same_json_document(active_config, bundled_path):
                         configs_preserved.append(key)
 
@@ -161,4 +172,5 @@ def sync_packaged_templates(
         templates_updated=tuple(templates_updated),
         configs_updated=tuple(configs_updated),
         configs_preserved=tuple(configs_preserved),
+        stale_sections=tuple(stale_sections),
     )

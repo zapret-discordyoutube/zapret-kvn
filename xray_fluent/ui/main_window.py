@@ -565,6 +565,7 @@ class MainWindow(FluentWindow):
         self.controller.runtime_errors_changed.connect(self.logs_page.set_error_records)
         self.logs_page.set_error_records(self.controller.runtime_errors.snapshot())
         self.controller.status.connect(self._show_status)
+        self._connect_startup_diagnostics()
         self.controller.bulk_task_progress.connect(self._on_bulk_task_progress)
         self.controller.ping_updated.connect(self._on_ping_updated)
         self.controller.speed_progress_updated.connect(self._on_speed_progress_updated)
@@ -1008,6 +1009,30 @@ class MainWindow(FluentWindow):
         self._bulk_task_tip = None
         self._bulk_task_type = None
         tip.close()
+
+    def _connect_startup_diagnostics(self) -> None:
+        """Показать сообщения bootstrap и подписаться на признак подмены DNS."""
+
+        from ..application import startup_notices
+        from ..network import bootstrap_dns
+
+        status = self.controller.status
+
+        def tampering(_host: str) -> None:
+            # Вызывается из фонового потока: сигнал Qt доставит сообщение в GUI.
+            status.emit(
+                "warning",
+                "DNS вашего провайдера отвечает, что VPN-сервера не существует, хотя он есть: "
+                "ответы подменяются. Приложение использует защищённый DNS.",
+            )
+
+        bootstrap_dns.set_tampering_listener(tampering)
+
+        def show_pending() -> None:
+            for level, message in startup_notices.drain():
+                status.emit(level, message)
+
+        QTimer.singleShot(2000, show_pending)
 
     def _show_status(self, level: str, message: str) -> None:
         message = connection_message(message)

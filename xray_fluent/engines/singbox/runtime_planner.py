@@ -724,6 +724,10 @@ def _plan_hybrid_runtime(
         },
     )
     _ensure_hybrid_protect_route(runtime_config)
+    _ensure_hybrid_server_bootstrap(
+        runtime_config,
+        [node.server, *(str(getattr(pooled, "server", "") or "") for pooled in pool_nodes or [])],
+    )
     _validate_runtime_dns_contract(runtime_config)
 
     sidecar_config, sidecar_tags = _build_xray_sidecar_config(
@@ -959,6 +963,47 @@ def _ensure_proxy_server_bootstrap_contract(
             continue
         break
     rules.insert(insert_index, direct_rule)
+
+
+def _ensure_hybrid_server_bootstrap(payload: dict[str, Any], servers: Any) -> None:
+    """Дать гибридному пути тот же запас адреса сервера, что и нативному узлу.
+
+    В гибридном режиме имя сервера приходит от Xray через protect-inbound и
+    разрешается общим outbound `direct`, то есть цепочкой `bootstrap-dns` с
+    системным резолвером в конце. Менять резолвер у `direct` нельзя: он служит
+    всем прямым доменам пользователя. Поэтому для имён серверов, у которых есть
+    запомненный адрес, перед app-правилом protect-inbound ставится app-правило
+    `resolve` с цепочкой `direct-doh` → запомненный адрес. Правило действует
+    только на соединения самого sidecar и только на эти имена.
+    """
+
+    route = _ensure_dict(payload, "route")
+    rules = _ensure_list(route, "rules")
+    protect = [_APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG]
+    rules[:] = [
+        rule for rule in rules
+        if not (isinstance(rule, dict) and rule.get("action") == "resolve" and rule.get("inbound") == protect)
+    ]
+    domains: list[str] = []
+    for raw in servers:
+        server = str(raw or "").strip()
+        if not _is_domain_name(server) or server in domains:
+            continue
+        if _server_bootstrap_resolver(payload, server) == _APP_NODE_BOOTSTRAP_TAG:
+            domains.append(server)
+    if not domains:
+        return
+    position = next(
+        (index for index, rule in enumerate(rules)
+         if isinstance(rule, dict) and rule.get("inbound") == protect and rule.get("outbound") == "direct"),
+        0,
+    )
+    rules.insert(position, {
+        "inbound": protect,
+        "domain": domains,
+        "action": "resolve",
+        "server": _APP_NODE_BOOTSTRAP_TAG,
+    })
 
 
 def _ensure_hybrid_protect_route(payload: dict[str, Any]) -> None:

@@ -258,6 +258,17 @@ def _sync_packaged_templates() -> None:
                 "Preserved user-edited sections during template sync: %s",
                 list(result.configs_preserved),
             )
+        if any("dns" in sections for _key, sections in result.stale_sections):
+            from xray_fluent.application import startup_notices
+
+            # Раздел DNS приложение не переписывает никогда; но без подсказки
+            # пользователь не узнает, что исправление до него не дошло.
+            startup_notices.add(
+                "warning",
+                "В шаблоне обновился раздел DNS, а у вас он изменён вручную, поэтому новые "
+                "защищённые DNS-серверы не применены. Вернуть раздел к шаблону можно в "
+                "«Маршрутизация» → «DNS».",
+            )
     except Exception:
         # Keep the previous data/ contents as a runtime fallback and retry the
         # packaged sync on the next launch instead of blocking the whole app.

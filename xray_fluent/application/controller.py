@@ -3885,6 +3885,12 @@ class AppController(QObject):
         if "DNS_FALLBACK server=local-system-dns" in line:
             level = 2
             message = "DoH недоступен. Используется обычный DNS системы: запросы могут быть видны провайдеру."
+        elif "DNS_FALLBACK server=app-bootstrap-lkg" in line:
+            level = 2
+            message = (
+                "Защищённый DNS недоступен. Адрес сервера взят из запомненных: "
+                "если сервер переехал, подключение не состоится."
+            )
         elif "DNS_FALLBACK server=bootstrap-dns" in line:
             level = 1
             message = "DNS через VPN недоступен. Используется резервное разрешение DNS с устройства."

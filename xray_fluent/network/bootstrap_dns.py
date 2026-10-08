@@ -350,6 +350,45 @@ def resolve_bootstrap(
     raise system_error or BootstrapDnsError(f"имя сервера не разрешено: {trusted_error}")
 
 
+_tampering_listener: Callable[[str], None] | None = None
+_tampering_reported = False
+
+
+def set_tampering_listener(listener: Callable[[str], None] | None) -> None:
+    """Кому сообщить, что системный DNS отрицает существующее имя сервера."""
+
+    global _tampering_listener, _tampering_reported
+    _tampering_listener = listener
+    _tampering_reported = False
+
+
+def system_denies_name(host: str, lookup: Callable[..., object] = socket.getaddrinfo) -> bool:
+    """Системный резолвер отвечает «имени нет» (а не просто недоступен)."""
+
+    try:
+        lookup(host, None, type=socket.SOCK_DGRAM)
+    except socket.gaierror as exc:
+        # EAI_NONAME на POSIX, WSAHOST_NOT_FOUND (11001) на Windows.
+        return exc.errno in (socket.EAI_NONAME, 11001)
+    except OSError:
+        return False
+    return False
+
+
+def _report_tampering(host: str) -> None:
+    """Один раз за сеанс: доверенный DNS имя знает, системный — отрицает."""
+
+    global _tampering_reported
+    listener = _tampering_listener
+    if listener is None or _tampering_reported:
+        return
+    _tampering_reported = True
+    try:
+        listener(host)
+    except Exception:
+        pass
+
+
 def refresh_async(host: str) -> bool:
     """Обновить запомненный адрес в фоне; не чаще раза в десять минут на имя."""
 
@@ -371,6 +410,8 @@ def refresh_async(host: str) -> bool:
         cache = _cache
         if cache is not None and addresses:
             cache.remember(host, addresses)
+        if addresses and system_denies_name(host):
+            _report_tampering(host)
 
     threading.Thread(target=run, name="bootstrap-dns-refresh", daemon=True).start()
     return True

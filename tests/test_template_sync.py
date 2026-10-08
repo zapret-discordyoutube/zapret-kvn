@@ -147,6 +147,33 @@ class TemplateSyncTests(unittest.TestCase):
         self.assertEqual(json.loads(other.read_text(encoding="utf-8")), custom)
         self.assertEqual(stamp, active.stat().st_mtime_ns)
 
+    def test_template_update_reports_the_sections_the_user_keeps_stale(self):
+        previous = {"dns": {"servers": [{"type": "local", "tag": "local"}]}, "route": {"final": "proxy"}}
+        current = {"dns": {"servers": [{"type": "https", "tag": "doh", "server": "1.1.1.1"}]},
+                   "route": {"final": "proxy"}}
+        custom_dns = {"servers": [{"type": "tcp", "tag": "mine", "server": "9.9.9.9"}]}
+        _write_json(self.templates / "sing-box" / "default.json", previous)
+        _write_json(self.bundle / "sing-box" / "default.json", current)
+        active = self.configs / "sing-box" / "default.json"
+        _write_json(active, {**previous, "dns": custom_dns})
+
+        result = self._sync()
+
+        # Раздел пользователя не тронут, но о несостоявшемся обновлении известно.
+        self.assertEqual(json.loads(active.read_text(encoding="utf-8"))["dns"], custom_dns)
+        self.assertEqual(result.stale_sections, (("sing-box/default.json", ("dns",)),))
+
+    def test_untouched_sections_are_not_reported_as_stale(self):
+        previous = {"dns": {"servers": [{"type": "local", "tag": "local"}]}, "route": {"final": "proxy"}}
+        current = {"dns": {"servers": [{"type": "https", "tag": "doh", "server": "1.1.1.1"}]},
+                   "route": {"final": "proxy"}}
+        _write_json(self.templates / "sing-box" / "default.json", previous)
+        _write_json(self.bundle / "sing-box" / "default.json", current)
+        # Пользователь правил только route: dns следует за шаблоном.
+        _write_json(self.configs / "sing-box" / "default.json", {**previous, "route": {"final": "direct"}})
+
+        self.assertEqual(self._sync().stale_sections, ())
+
     def test_merge_keeps_user_removals_and_additions_and_adds_new_stock_sections(self):
         previous = {"log": {"level": "warn"}, "dns": {"final": "a"}, "ntp": {"enabled": False}}
         current = {"log": {"level": "info"}, "dns": {"final": "b"}, "experimental": {"cache_file": {"enabled": True}}}

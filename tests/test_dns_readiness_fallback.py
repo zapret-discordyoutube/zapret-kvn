@@ -83,6 +83,14 @@ class DnsWarningTests(unittest.TestCase):
         self.assertTrue(all(call.args[0] == 'warning' for call in controller.status.emit.call_args_list))
 
 
+    def test_remembered_address_fallback_is_reported(self):
+        controller = SimpleNamespace(_transition_generation=1, status=Mock())
+        AppController._report_dns_fallback(controller, 'WARN DNS_FALLBACK server=app-bootstrap-lkg')
+        level, message = controller.status.emit.call_args.args
+        self.assertEqual(level, 'warning')
+        self.assertIn('запомненных', message)
+
+
 class CountrySourceTests(unittest.TestCase):
     def test_explicit_flags_need_no_geoip_worker_and_ignore_late_geoip(self):
         node = Node(id='one', name='🇺🇸 Server', server='8.8.8.8')

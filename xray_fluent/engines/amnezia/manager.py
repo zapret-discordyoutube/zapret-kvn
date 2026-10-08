@@ -11,7 +11,8 @@ from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from ...constants import AMNEZIA_PATH_DEFAULT
 from ...diagnostics.export import capture_runtime_config
-from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log
+from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log, register_server_aliases
+from ...network.bootstrap_dns import resolve_bootstrap
 from ...application.async_steps import (
     TransitionSteps,
     run_in_worker,
@@ -45,6 +46,47 @@ def _first_peer_ipv4(config: dict) -> str | None:
                 return address
     except (ValueError, TypeError):
         return None
+    return None
+
+
+def _resolve_peer(host: str) -> str | None:
+    """Адрес WG/AWG-сервера доверенным путём; ``None`` — пусть пробует ядро."""
+
+    try:
+        addresses = resolve_bootstrap(host).addresses
+    except OSError:
+        return None
+    # Логи маскируют адреса сервера так же, как его имя: учим их до старта ядра.
+    register_server_aliases(host, addresses)
+    ordered = sorted(addresses, key=lambda value: (ipaddress.ip_address(value).version, value))
+    return ordered[0] if ordered else None
+
+
+def resolve_peers_steps(payload: dict) -> TransitionSteps:
+    """Заменить имена пиров адресами до запуска ядра.
+
+    Ядро разрешает имя пира открытым запросом к DNS физического адаптера —
+    ровно тем путём, который провайдер перехватывает и подменяет. Имя поэтому
+    разрешается здесь: DoH по IP без SNI, затем системный резолвер, затем
+    запомненный адрес. Если не удалось, имя остаётся как есть, и ядро делает
+    прежнюю попытку само.
+    """
+
+    peers = ((payload or {}).get("endpoint") or {}).get("peers") or []
+    for peer in peers:
+        if not isinstance(peer, dict):
+            continue
+        host = str(peer.get("address") or "").strip()
+        if not host:
+            continue
+        try:
+            ipaddress.ip_address(host)
+            continue
+        except ValueError:
+            pass
+        resolved = yield run_in_worker(lambda host=host: _resolve_peer(host))
+        if resolved:
+            peer["address"] = resolved
     return None
 
 
@@ -171,6 +213,9 @@ class AmneziaManager(QObject):
                               target_id=context.ref if context else "")
         payload = deepcopy(config)
         try:
+            yield from resolve_peers_steps(payload)
+            if self._cancelled():
+                return False
             payload.update((yield from physical_network_steps(_first_peer_ipv4(payload))))
             if self._cancelled():
                 return False

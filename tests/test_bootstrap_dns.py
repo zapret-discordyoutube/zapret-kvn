@@ -226,5 +226,126 @@ class PlannerBootstrapFallbackTests(unittest.TestCase):
         self.assertEqual(self._proxy(config)["domain_resolver"], "bootstrap-dns")
 
 
+class HybridAndAmneziaBootstrapTests(unittest.TestCase):
+    """Гибридный режим и WG/AWG получают тот же доверенный путь, что и узел."""
+
+    VLESS = (
+        "vless://11111111-1111-1111-1111-111111111111@vless.example.com:443"
+        "?type=xhttp&security=tls&sni=vless.example.com&path=%2F#hybrid"
+    )
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.path = Path(self._dir.name) / "bootstrap-lkg.json"
+        self.addCleanup(bootstrap_dns.configure_cache, None)
+        template = ROOT / "data" / "templates" / "sing-box" / "default.json"
+        self.document = parse_singbox_document(template, template.read_text(encoding="utf-8"))
+
+    def _hybrid_plan(self):
+        node = parse_single(self.VLESS)
+        plan = plan_singbox_runtime(self.document, node)
+        self.assertEqual(plan.outcome, "hybrid_xray_sidecar")
+        return plan.singbox_config
+
+    @staticmethod
+    def _resolve_rules(config: dict) -> list[dict]:
+        return [rule for rule in config["route"]["rules"] if rule.get("action") == "resolve"]
+
+    def test_hybrid_without_remembered_address_adds_nothing(self) -> None:
+        bootstrap_dns.configure_cache(self.path)
+        self.assertEqual(self._resolve_rules(self._hybrid_plan()), [])
+
+    def test_hybrid_server_resolves_through_the_trusted_chain(self) -> None:
+        BootstrapCache(self.path).remember("vless.example.com", ["203.0.113.9"])
+        bootstrap_dns.configure_cache(self.path)
+        config = self._hybrid_plan()
+        rules = config["route"]["rules"]
+        protect = ["__app_hybrid_protect_in"]
+
+        resolve = self._resolve_rules(config)
+        self.assertEqual(
+            resolve,
+            [{"inbound": protect, "domain": ["vless.example.com"], "action": "resolve",
+              "server": "app-node-bootstrap"}],
+        )
+        # resolve стоит перед правилом, отправляющим protect-inbound в direct:
+        # иначе соединение ушло бы раньше, чем имя разрешится.
+        self.assertLess(rules.index(resolve[0]), rules.index({"inbound": protect, "outbound": "direct"}))
+        servers = {server["tag"]: server for server in config["dns"]["servers"]}
+        self.assertEqual(servers["app-bootstrap-lkg"]["predefined"], {"vless.example.com": ["203.0.113.9"]})
+        # Резолвер общего direct не тронут: он служит всем прямым доменам.
+        direct = next(o for o in config["outbounds"] if o.get("tag") == "direct")
+        self.assertEqual(direct["domain_resolver"], "bootstrap-dns")
+
+    def test_amnezia_peer_name_is_replaced_before_the_core_starts(self) -> None:
+        from unittest.mock import patch
+
+        from xray_fluent.application.async_steps import run_steps_blocking
+        from xray_fluent.engines.amnezia import manager
+
+        payload = {"endpoint": {"peers": [
+            {"address": "wg.example.com", "port": 51820},
+            {"address": "203.0.113.5", "port": 51820},
+            {"address": "dead.example.com", "port": 51820},
+        ]}}
+
+        def lookup(host: str) -> bootstrap_dns.BootstrapResolution:
+            if host == "dead.example.com":
+                raise OSError("no answer anywhere")
+            return bootstrap_dns.BootstrapResolution(frozenset({"2001:db8::7", "203.0.113.7"}), "doh")
+
+        with (
+            patch.object(manager, "resolve_bootstrap", side_effect=lookup) as resolver,
+            patch.object(manager, "register_server_aliases") as aliases,
+        ):
+            run_steps_blocking(manager.resolve_peers_steps(payload))
+
+        peers = payload["endpoint"]["peers"]
+        # IPv4 предпочитается: по нему ищется физический интерфейс.
+        self.assertEqual(peers[0]["address"], "203.0.113.7")
+        self.assertEqual(peers[1]["address"], "203.0.113.5")
+        # Не удалось — имя остаётся, ядро делает прежнюю попытку само.
+        self.assertEqual(peers[2]["address"], "dead.example.com")
+        self.assertEqual([call.args[0] for call in resolver.call_args_list], ["wg.example.com", "dead.example.com"])
+        aliases.assert_called_once()
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_system_denial_is_told_apart_from_unreachable_dns(self) -> None:
+        import socket
+
+        def denies(*_args, **_kwargs):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        def windows_denies(*_args, **_kwargs):
+            raise socket.gaierror(11001, "getaddrinfo failed")
+
+        def unreachable(*_args, **_kwargs):
+            raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+        self.assertTrue(bootstrap_dns.system_denies_name("vpn.example.com", denies))
+        self.assertTrue(bootstrap_dns.system_denies_name("vpn.example.com", windows_denies))
+        self.assertFalse(bootstrap_dns.system_denies_name("vpn.example.com", unreachable))
+        self.assertFalse(bootstrap_dns.system_denies_name("vpn.example.com", lambda *_a, **_k: [("ok",)]))
+
+    def test_tampering_is_reported_once_per_session(self) -> None:
+        seen: list[str] = []
+        bootstrap_dns.set_tampering_listener(seen.append)
+        self.addCleanup(bootstrap_dns.set_tampering_listener, None)
+        bootstrap_dns._report_tampering("vpn.example.com")
+        bootstrap_dns._report_tampering("other.example.com")
+        self.assertEqual(seen, ["vpn.example.com"])
+
+    def test_startup_notices_are_shown_once(self) -> None:
+        from xray_fluent.application import startup_notices
+
+        startup_notices.drain()
+        startup_notices.add("warning", "раздел DNS изменён")
+        startup_notices.add("warning", "раздел DNS изменён")
+        self.assertEqual(startup_notices.drain(), [("warning", "раздел DNS изменён")])
+        self.assertEqual(startup_notices.drain(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
