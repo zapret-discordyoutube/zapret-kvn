@@ -16,3 +16,7 @@
 - When a build is explicitly requested, use the project builder `python build.py` from the repo root instead of calling PyInstaller directly.
 - Before building, make sure `dist/ZapretKVN/ZapretKVN.exe` is not running; if needed, stop `ZapretKVN.exe` first or the clean step can fail because the old binary is locked.
 - The builder is WSL-aware and converts paths for the Windows virtualenv automatically, so prefer it even when working from WSL.
+
+## Оформление ответа
+
+Правила оформления одинаковы для всех проектов и записаны в разделе «Оформление ответа» файла `/home/codex-pve/AGENTS.md`: прочитай его и соблюдай в каждом сеансе. Коротко: полностью завершённая задача начинается со строки `✔ ГОТОВО` и заканчивается подробным `TL;DR` (не меньше трёх-четырёх абзацев); всё незакрытое идёт чеклистом «Дальнейшие шаги» в конце каждого сообщения, пока не закрыто, с исполнителями «Ты», «Я», «Мои субагенты». Менять эти правила только в общем файле.
