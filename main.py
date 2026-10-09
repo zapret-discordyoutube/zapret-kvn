@@ -344,6 +344,13 @@ def main() -> int:
     _bootstrap_logger.info("parsed arguments: tray=%s", args.tray)
     _bootstrap_logger.info("Importing Qt and application modules")
 
+    from xray_fluent.diagnostics import qt_message_log
+
+    # До QApplication: фатальное сообщение Qt иначе теряется вместе с процессом.
+    qt_log = qt_message_log.install(STARTUP_LOG_DIR, _bootstrap_logger)
+    if qt_log is not None:
+        _bootstrap_logger.info("Qt message log: %s", qt_log.path)
+
     from PyQt6.QtCore import QTimer
     from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
