@@ -13,6 +13,8 @@ Responsibilities:
   main window (and any dialogs) are constructed.
 * ``sync_system_theme_listener(...)`` — starts/stops the qfluentwidgets
   ``SystemThemeListener`` when the theme mode is ``"system"``.
+* ``stop_system_theme_listener()`` — stops that thread and waits for it; must
+  run before the windows are destroyed on exit.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from qfluentwidgets import (
 )
 
 from ..constants import DEFAULT_ACCENT_COLOR
+from ..platform.windows.theme_watch import IS_WINDOWS, ThemeRegistryWatch
 
 # Re-export: the single default accent value lives in constants.py (D1).
 DEFAULT_ACCENT = DEFAULT_ACCENT_COLOR
@@ -322,6 +325,37 @@ def apply_initial_theme(storage=None) -> tuple[str, str]:
 
 _system_listener = None
 
+LISTENER_STOP_WAIT_MS = 3000
+
+
+class StoppableSystemThemeListener(SystemThemeListener):
+    """``SystemThemeListener``, который завершается по просьбе.
+
+    Исходный поток на Windows навсегда блокируется в ``darkdetect.listener``.
+    При выходе он оставался работать, окно-владелец разрушалось вместе с ним,
+    и Qt завершал процесс через ``qFatal`` («QThread: Destroyed while thread is
+    still running»).
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        self._watch = ThemeRegistryWatch()
+
+    def run(self):
+        if IS_WINDOWS:
+            self._watch.run(self._onThemeChanged)
+            return
+        super().run()
+
+    def stop(self, timeout_ms: int = LISTENER_STOP_WAIT_MS) -> bool:
+        """Остановить поток и дождаться его; ``True`` — поток завершён."""
+        self.requestInterruption()
+        self._watch.stop()
+        if not self.wait(timeout_ms):
+            return False
+        self._watch.close()
+        return True
+
 
 def system_theme_listener():
     """Currently running SystemThemeListener (or None)."""
@@ -332,36 +366,58 @@ def sync_system_theme_listener(theme_name: str, parent=None, listener_factory=No
     """Start the OS theme listener in "system" mode, stop it otherwise.
 
     ``listener_factory`` is injectable for tests (A6/C5); by default the
-    qfluentwidgets ``SystemThemeListener`` is used.
+    stoppable variant of the qfluentwidgets ``SystemThemeListener`` is used.
     """
     global _system_listener
     normalized = (theme_name or "system").lower().strip() or "system"
 
     if normalized == "system":
         if _system_listener is None:
-            factory = listener_factory or SystemThemeListener
+            factory = listener_factory or StoppableSystemThemeListener
             try:
                 listener = factory(parent)
                 listener.start()
             except Exception:
                 listener = None
             _system_listener = listener
-    elif _system_listener is not None:
-        listener, _system_listener = _system_listener, None
-        _stop_listener(listener)
+    else:
+        stop_system_theme_listener()
     return _system_listener
 
 
-def _stop_listener(listener) -> None:
-    try:
-        listener.requestInterruption()
-    except Exception:
-        pass
-    try:
-        listener.terminate()
-    except Exception:
-        pass
+def stop_system_theme_listener() -> bool:
+    """Stop the OS theme listener and wait for its thread to finish.
+
+    Returns ``False`` only when the thread is still running afterwards; its
+    parent window must then not be destroyed.
+    """
+    global _system_listener
+    if _system_listener is None:
+        return True
+    listener, _system_listener = _system_listener, None
+    return _stop_listener(listener)
+
+
+def _stop_listener(listener) -> bool:
+    stopped = True
+    stop = getattr(listener, "stop", None)
+    if stop is not None:
+        try:
+            stopped = bool(stop())
+        except Exception:
+            stopped = False
+    else:
+        # Чужой слушатель без stop(): прежний путь qfluentwidgets.
+        try:
+            listener.requestInterruption()
+        except Exception:
+            pass
+        try:
+            listener.terminate()
+        except Exception:
+            pass
     try:
         listener.deleteLater()
     except Exception:
         pass
+    return stopped

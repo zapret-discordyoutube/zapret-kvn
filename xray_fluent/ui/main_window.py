@@ -57,7 +57,7 @@ from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
-from .theme import apply_theme, sync_system_theme_listener
+from .theme import apply_theme, stop_system_theme_listener, sync_system_theme_listener
 from .tour import TOUR_STEPS, TourOverlay, TourStep, active_tour
 from .updates_page import UpdatesPage
 from .zapret_page import ZapretPage
@@ -274,6 +274,10 @@ class MainWindow(FluentWindow):
         self._init_zapret_page(result["presets"])
 
     def finish_background_shutdown(self):
+        # Слушатель системной темы — дочерний поток окна: пока он работает,
+        # окно нельзя разрушить (qFatal в Qt), а само оно не завершается.
+        if not stop_system_theme_listener():
+            logging.getLogger("xray_fluent.bootstrap").warning("System theme listener did not stop")
         if self._startup_loader:
             self._startup_loader.finish_shutdown()
         if self._metadata_worker and self._metadata_worker.isRunning():
