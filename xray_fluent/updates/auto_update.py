@@ -51,6 +51,10 @@ class UpdateAttempt:
     last_attempt: float
     reconnect: bool
     resume_pending: bool = True
+    # С какой версии шло обновление и когда сервер его разрешил: по ним новая
+    # версия сообщит серверу, что обновление дошло и сколько оно заняло.
+    from_version: str = ""
+    granted_at: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -59,6 +63,8 @@ class UpdateAttempt:
             "last_attempt": self.last_attempt,
             "reconnect": self.reconnect,
             "resume_pending": self.resume_pending,
+            "from_version": self.from_version,
+            "granted_at": self.granted_at,
         }
 
 
@@ -74,6 +80,9 @@ class StartupOutcome:
     version: str
     attempts: int
     resume: bool | None
+    # Что сказать серверу, который раздаёт версию по ступеням: «дошла, с
+    # такой-то версии, за столько-то секунд» либо «не вышло». Пусто — нечего.
+    report: dict | None = None
 
 
 def load_attempt(path: Path = ATTEMPT_FILE) -> UpdateAttempt | None:
@@ -85,6 +94,8 @@ def load_attempt(path: Path = ATTEMPT_FILE) -> UpdateAttempt | None:
             last_attempt=float(data.get("last_attempt", 0.0)),
             reconnect=bool(data.get("reconnect", False)),
             resume_pending=bool(data.get("resume_pending", False)),
+            from_version=str(data.get("from_version") or ""),
+            granted_at=max(float(data.get("granted_at") or 0.0), 0.0),
         )
     except FileNotFoundError:
         return None
@@ -117,6 +128,8 @@ def record_attempt(
     restarting: bool = True,
     now: float | None = None,
     path: Path = ATTEMPT_FILE,
+    from_version: str = "",
+    granted_at: float = 0.0,
 ) -> UpdateAttempt:
     """Записать попытку установки.
 
@@ -134,6 +147,8 @@ def record_attempt(
         last_attempt=time.time() if now is None else now,
         reconnect=reconnect,
         resume_pending=restarting,
+        from_version=str(from_version or ""),
+        granted_at=max(float(granted_at or 0.0), 0.0),
     )
     _write_attempt(record, path)
     return record
@@ -166,16 +181,35 @@ def resolve_startup(
 
     if not _is_newer_version(record.version, current_version):
         _remove(path)
-        return StartupOutcome(True, record.version, record.attempts, resume)
+        return StartupOutcome(True, record.version, record.attempts, resume, _success_report(record, current_version, moment))
 
-    # Откат: счётчик остаётся, а возврат подключения расходуется один раз.
+    # Откат: счётчик остаётся, а возврат подключения и сообщение серверу о
+    # неудаче расходуются один раз — на первом запуске после попытки.
+    report = None
     if record.resume_pending:
+        report = {"fail": record.version}
         record.resume_pending = False
         try:
             _write_attempt(record, path)
         except OSError:
             _log.warning("Failed to update update attempt record", exc_info=True)
-    return StartupOutcome(False, record.version, record.attempts, resume)
+    return StartupOutcome(False, record.version, record.attempts, resume, report)
+
+
+# Дольше недели от разрешения до запуска — это уже не «время обновления».
+_MAX_TOOK_S = 7 * 24 * 60 * 60
+
+
+def _success_report(record: UpdateAttempt, current_version: str, moment: float) -> dict | None:
+    """«Дошла»: с какой версии и за сколько секунд от разрешения сервера."""
+    previous = record.from_version
+    if not previous or _parse_semver(previous) is None or not _is_newer_version(current_version, previous):
+        return None
+    report = {"prev": previous}
+    took = moment - record.granted_at
+    if record.granted_at > 0 and 0 <= took <= _MAX_TOOK_S:
+        report["took"] = str(int(took))
+    return report
 
 
 def auto_install_block_reason(

@@ -76,6 +76,8 @@ _WINDOW_OWNED_SETTINGS = tuple(
 
 APP_UPDATE_INITIAL_DELAY_MS = 2500
 APP_UPDATE_INTERVAL_MS = 30 * 60 * 1000
+# Обновление ждёт, пока на экране игра или видео: заглядываем с этой паузой.
+UPDATE_BUSY_RECHECK_MS = 3 * 60 * 1000
 # Скачанное обновление ждёт конца переключения подключения не дольше этого.
 UPDATE_APPLY_MAX_WAIT_S = 120
 UPDATE_APPLY_RETRY_MS = 2000
@@ -136,6 +138,10 @@ class MainWindow(FluentWindow):
         self._app_update_timer = QTimer(self)
         self._app_update_timer.setSingleShot(True)
         self._app_update_timer.timeout.connect(self._on_app_update_timer_timeout)
+        # Слушатель сервера, который ведёт очередь обновлений (создаётся после запуска).
+        self._update_signal = None
+        self._previous_update_report: dict | None = None
+        self._app_update_first_check_done = False
         # Начатая экскурсия прячет плашку до конца запуска, но не навсегда.
         # Брошенная экскурсия не запускается снова до следующего запуска.
         self._tour_started_this_session = False
@@ -252,6 +258,7 @@ class MainWindow(FluentWindow):
             self.controller.resume_after_app_update(resume)
         self._app_update_scheduler_ready = True
         self._sync_app_update_timer(state.settings)
+        self._start_update_signal()
         self._consume_update_error_log()
         self.controller.repair_launch_on_startup()
         from ..application.startup_service import MetadataWorker
@@ -1691,7 +1698,13 @@ class MainWindow(FluentWindow):
         # _check_updates owns the concurrent-check guard.  Even if a user
         # started a manual check at the same moment, this timer callback cannot
         # create a second UpdateChecker thread.
-        self._check_updates(silent=True)
+        # Пока сервер с очередью на связи, о новой версии сообщает он: проверка
+        # раз в полчаса от каждой программы только нагружала бы Forgejo. Первая
+        # проверка после запуска идёт всегда.
+        signal = getattr(self, "_update_signal", None)
+        if not getattr(self, "_app_update_first_check_done", False) or signal is None or not signal.queue_reachable():
+            self._app_update_first_check_done = True
+            self._check_updates(silent=True)
 
         if self._quitting or not self.controller.state.settings.check_updates:
             return
@@ -1701,6 +1714,70 @@ class MainWindow(FluentWindow):
     def _stop_app_update_timer(self) -> None:
         self._app_update_scheduler_ready = False
         self._app_update_timer.stop()
+        signal = getattr(self, "_update_signal", None)
+        if signal is not None:
+            signal.stop()
+
+    def _start_update_signal(self) -> None:
+        """Запускает слушателя сервера: о новой версии сообщает он, он же
+        ведёт очередь на скачивание и раздаёт версию по ступеням."""
+        if self._update_signal is not None or self._quitting:
+            return
+        try:
+            from ..updates.update_signal import UpdateSignal
+
+            settings = self.controller.state.settings
+            signal = UpdateSignal(
+                is_enabled=lambda: bool(
+                    not self._quitting and settings.check_updates and settings.allow_updates
+                ),
+                window_shown=lambda: bool(self.isVisible() and not self.isMinimized()),
+                connected=lambda: bool(self.controller.connected),
+                parent=self,
+            )
+            signal.granted.connect(self._on_update_granted)
+            signal.set_report(self._previous_update_report)
+            signal.start()
+            self._update_signal = signal
+        except Exception:
+            # Без слушателя программа проверяет обновления сама, как раньше.
+            self.controller._logger.exception("[update] Слушатель сервера обновлений не запущен")
+
+    def _on_update_granted(self, version: str, attempt: int = 0) -> None:
+        """Сервер разрешил обновиться: проверяем выпуск и ставим его."""
+        if self._quitting or not self.controller.state.settings.check_updates:
+            return
+        if getattr(self, "_update_in_progress", False):
+            # Идёт другая проверка (она могла начаться до выхода версии).
+            if attempt < 4:
+                QTimer.singleShot(15000, lambda: self._on_update_granted(version, attempt + 1))
+            return
+        self._check_updates(silent=True)
+
+    def _update_wait_reason(self, update: AppUpdate) -> str:
+        """Почему фоновая установка ждёт; пустая строка — можно ставить.
+
+        Пока сервер ведёт очередь, программа ставит версию только с его
+        разрешения: иначе все пошли бы за архивом разом. Если сервера с
+        очередью нет, всё работает как раньше. Посреди игры или видео на весь
+        экран обновление ждёт в любом случае: перезапуск оборвал бы
+        подключение.
+        """
+        signal = self._update_signal
+        if signal is None:
+            return ""
+        if signal.queue_reachable() and not signal.is_granted(update.version):
+            return "версия раздаётся по очереди, ждём разрешения сервера"
+        busy = signal.busy_reason()
+        if busy:
+            QTimer.singleShot(UPDATE_BUSY_RECHECK_MS, self._recheck_update_when_free)
+            return f"{busy} — обновление поставится, когда освободитесь"
+        return ""
+
+    def _recheck_update_when_free(self) -> None:
+        if self._quitting or not self.controller.state.settings.check_updates:
+            return
+        self._check_updates(silent=True)
 
     def _active_update_proxy_url(self) -> str | None:
         if not self.controller.connected:
@@ -1777,7 +1854,7 @@ class MainWindow(FluentWindow):
         # Фоновая проверка ставит обновление сама, без окон. Модальное окно
         # здесь раньше и давало «вечную» просьбу обновиться: после каждого
         # отката или перезапуска оно появлялось снова.
-        reason = self._auto_install_block_reason(update)
+        reason = self._auto_install_block_reason(update) or self._update_wait_reason(update)
         if reason:
             self.controller._logger.info(
                 "[update] Автоустановка v%s отложена: %s", update.version, reason
@@ -1858,7 +1935,15 @@ class MainWindow(FluentWindow):
             return
         reconnect = bool(self.controller.connected or self.controller._desired_connected)
         try:
-            record_attempt(downloader.update.version, reconnect=reconnect)
+            signal = getattr(self, "_update_signal", None)
+            record_attempt(
+                downloader.update.version,
+                reconnect=reconnect,
+                # С какой версии и по какому разрешению идёт обновление: новая
+                # версия сообщит серверу, что оно дошло.
+                from_version=APP_VERSION,
+                granted_at=signal.granted_at(downloader.update.version) if signal is not None else 0.0,
+            )
             plan = self._install_plan(prepared)
             installer = launch_installer(plan)
         except Exception as exc:
@@ -1958,6 +2043,7 @@ class MainWindow(FluentWindow):
             return None
         if outcome is None:
             return None
+        self._previous_update_report = outcome.report
         if outcome.updated:
             self.controller._logger.info("[update] Приложение обновлено до v%s", APP_VERSION)
             self.updates_page.set_app_status(f"Приложение обновлено до v{APP_VERSION}")

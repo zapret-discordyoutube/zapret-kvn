@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 import unittest
 from types import SimpleNamespace
+
+from xray_fluent.constants import APP_VERSION
 from unittest.mock import Mock, patch
 
 
@@ -245,6 +247,8 @@ class UpdateNotificationTests(unittest.TestCase):
             updates_page=_FakeUpdatesPage(),
             _start_update_download=Mock(),
             _auto_install_block_reason=Mock(return_value=block_reason),
+            # Сервер с очередью обновлений в этих тестах не участвует.
+            _update_wait_reason=Mock(return_value=""),
         )
 
     def test_silent_check_installs_in_background_without_dialog(self) -> None:
@@ -398,7 +402,11 @@ class UpdateNotificationTests(unittest.TestCase):
             ) as launch:
                 MainWindow._apply_downloaded_update(window)
             self.assertEqual(order, ["record", "launch"])
-            record.assert_called_once_with("0.4.67", reconnect=True)
+            # Вместе с попыткой запоминается, с какой версии идёт обновление:
+            # новая версия сообщит серверу, что оно дошло.
+            record.assert_called_once_with(
+                "0.4.67", reconnect=True, from_version=APP_VERSION, granted_at=0.0
+            )
             launch.assert_called_once_with(window._install_plan.return_value)
             # Выход — только после подтверждения установщика.
             window._quit_for_update.assert_not_called()
@@ -519,3 +527,40 @@ class CoreUpdateStatusColorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PeriodicCheckWithQueueServerTests(unittest.TestCase):
+    """Пока сервер с очередью на связи, о версии сообщает он, а не расписание."""
+
+    def _window(self, *, reachable: bool, first_done: bool):
+        settings = SimpleNamespace(check_updates=True)
+        return SimpleNamespace(
+            _app_update_timer=_FakeTimer(),
+            _app_update_scheduler_ready=True,
+            _quitting=False,
+            _app_update_first_check_done=first_done,
+            _update_signal=SimpleNamespace(queue_reachable=lambda: reachable),
+            controller=SimpleNamespace(state=SimpleNamespace(settings=settings)),
+            _check_updates=Mock(),
+        )
+
+    def test_first_check_after_start_always_runs(self) -> None:
+        window = self._window(reachable=True, first_done=False)
+
+        MainWindow._on_app_update_timer_timeout(window)
+
+        window._check_updates.assert_called_once_with(silent=True)
+
+    def test_later_checks_are_skipped_while_the_server_is_reachable(self) -> None:
+        window = self._window(reachable=True, first_done=True)
+
+        MainWindow._on_app_update_timer_timeout(window)
+
+        window._check_updates.assert_not_called()
+
+    def test_without_the_server_program_checks_itself_as_before(self) -> None:
+        window = self._window(reachable=False, first_done=True)
+
+        MainWindow._on_app_update_timer_timeout(window)
+
+        window._check_updates.assert_called_once_with(silent=True)

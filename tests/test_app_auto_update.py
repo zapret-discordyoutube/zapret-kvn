@@ -37,6 +37,35 @@ class AttemptRecordTests(unittest.TestCase):
         self.assertIs(outcome.resume, True)
         self.assertFalse(self.path.exists())
 
+    def test_new_version_reports_where_it_came_from_and_how_long_it_took(self) -> None:
+        record_attempt(
+            "0.8.2", reconnect=True, now=NOW, path=self.path, from_version="0.8.1", granted_at=NOW - 10
+        )
+
+        outcome = resolve_startup("0.8.2", now=NOW + 20, path=self.path)
+
+        # Сервер раздаёт версию по ступеням и ждёт таких ответов.
+        self.assertEqual(outcome.report, {"prev": "0.8.1", "took": "30"})
+
+    def test_update_without_server_permission_reports_no_time(self) -> None:
+        record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path, from_version="0.8.1")
+
+        self.assertEqual(resolve_startup("0.8.2", now=NOW + 20, path=self.path).report, {"prev": "0.8.1"})
+
+    def test_record_of_an_older_build_gives_no_report(self) -> None:
+        record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path)
+
+        self.assertIsNone(resolve_startup("0.8.2", now=NOW + 20, path=self.path).report)
+
+    def test_rollback_reports_failure_once(self) -> None:
+        record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path, from_version="0.8.1")
+
+        first = resolve_startup("0.8.1", now=NOW + 20, path=self.path)
+        second = resolve_startup("0.8.1", now=NOW + 60, path=self.path)
+
+        self.assertEqual(first.report, {"fail": "0.8.2"})
+        self.assertIsNone(second.report)
+
     def test_disconnected_state_is_restored_as_disconnected(self) -> None:
         record_attempt("0.8.2", reconnect=False, now=NOW, path=self.path)
         outcome = resolve_startup("0.8.2", now=NOW + 20, path=self.path)
