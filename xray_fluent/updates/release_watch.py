@@ -70,9 +70,85 @@ ACTIVITY_TRAY = "tray"
 ACTIVITY_FULLSCREEN = "fullscreen"
 
 # Ответы Windows на вопрос «можно ли сейчас показывать уведомления»
-# (SHQueryUserNotificationState): окно на весь экран, игра Direct3D на весь
-# экран, режим презентации.
-_FULLSCREEN_STATES = (2, 3, 4)
+# (SHQueryUserNotificationState). Игра Direct3D на весь экран (3) и режим
+# презентации (4) — ответы однозначные. «Экран занят» (2) расплывчат: его
+# дают и невидимые окна поверх экрана, поэтому ему программа верит, только
+# если чужое окно на переднем плане и правда закрывает весь экран.
+_QUNS_BUSY = 2
+_SURE_STATES = (3, 4)
+FOREGROUND_FULL = "f"     # чужое окно закрывает весь экран
+FOREGROUND_PART = "p"     # окно занимает часть экрана
+FOREGROUND_SHELL = "s"    # рабочий стол или панель задач
+FOREGROUND_OWN = "o"      # окно самой программы
+_SHELL_CLASSES = ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+
+
+def _notification_state() -> int:
+    """Состояние экрана по мнению Windows; 0 — узнать не удалось."""
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+
+        state = ctypes.c_int(0)
+        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
+            return 0
+        return int(state.value)
+    except Exception:
+        return 0
+
+
+def _foreground() -> str:
+    """Что на переднем плане: одна буква ``FOREGROUND_*`` либо пусто — не узнать."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+        import os
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        window = user32.GetForegroundWindow()
+        if not window:
+            return FOREGROUND_SHELL
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(window, name, 64)
+        if name.value in _SHELL_CLASSES:
+            return FOREGROUND_SHELL
+        owner = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if owner.value == os.getpid():
+            return FOREGROUND_OWN
+
+        class _MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        rect = wintypes.RECT()
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        monitor = user32.MonitorFromWindow(window, 2)  # ближайший к окну экран
+        if not user32.GetWindowRect(window, ctypes.byref(rect)) or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return ""
+        screen = info.rcMonitor
+        covers = (
+            rect.left <= screen.left and rect.top <= screen.top
+            and rect.right >= screen.right and rect.bottom >= screen.bottom
+        )
+        return FOREGROUND_FULL if covers else FOREGROUND_PART
+    except Exception:
+        return ""
+
+
+def screen_state() -> str:
+    """Оба признака одной строкой, например ``2f`` или ``5p``: уходит серверу
+    общим счётом — по нему видно, насколько правилу «занят» можно верить."""
+    state = _notification_state()
+    return f"{state}{_foreground()}" if state else ""
 
 
 def fullscreen_app_active() -> bool:
@@ -81,17 +157,10 @@ def fullscreen_app_active() -> bool:
     Обновление перезапускает программу и на несколько секунд рвёт
     подключение: посреди игры это вылет из матча.
     """
-    if sys.platform != "win32":
-        return False
-    try:
-        import ctypes
-
-        state = ctypes.c_int(0)
-        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
-            return False
-        return int(state.value) in _FULLSCREEN_STATES
-    except Exception:
-        return False
+    state = _notification_state()
+    if state in _SURE_STATES:
+        return True
+    return state == _QUNS_BUSY and _foreground() == FOREGROUND_FULL
 
 
 def _ask_server(url: str, timeout: float) -> dict:
@@ -234,7 +303,7 @@ class ReleaseWatcher:
             params["ticket"] = str(self._ticket)
         told = self._call(self._activity, {})
         if isinstance(told, dict):
-            params.update({key: str(told[key]) for key in ("act", "run") if told.get(key) not in (None, "")})
+            params.update({key: str(told[key]) for key in ("act", "run", "scr") if told.get(key) not in (None, "")})
         report = self._call(self._pending_report, {})
         report = {str(key): str(value) for key, value in report.items()} if isinstance(report, dict) else {}
         params.update(report)

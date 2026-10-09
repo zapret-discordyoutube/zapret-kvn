@@ -172,6 +172,35 @@ class ReleaseWatcherTests(unittest.TestCase):
         self.assertEqual(len(harness.urls), 2)
 
 
+class ScreenBusyTests(unittest.TestCase):
+    """«Экран занят» — по двум независимым признакам, а не по одному ответу Windows."""
+
+    def _busy(self, state: int, foreground: str) -> bool:
+        with patch.object(release_watch, "_notification_state", return_value=state), patch.object(
+            release_watch, "_foreground", return_value=foreground
+        ):
+            return release_watch.fullscreen_app_active()
+
+    def test_game_and_presentation_mean_busy_whatever_is_in_front(self) -> None:
+        self.assertTrue(self._busy(3, release_watch.FOREGROUND_SHELL))
+        self.assertTrue(self._busy(4, release_watch.FOREGROUND_PART))
+
+    def test_vague_answer_needs_a_real_fullscreen_window_in_front(self) -> None:
+        self.assertTrue(self._busy(2, release_watch.FOREGROUND_FULL))
+        for foreground in (release_watch.FOREGROUND_PART, release_watch.FOREGROUND_SHELL, release_watch.FOREGROUND_OWN, ""):
+            self.assertFalse(self._busy(2, foreground), foreground)
+
+    def test_ordinary_work_is_not_busy(self) -> None:
+        self.assertFalse(self._busy(5, release_watch.FOREGROUND_FULL))
+        self.assertFalse(self._busy(0, ""))
+
+    def test_raw_state_is_told_as_code_and_foreground(self) -> None:
+        with patch.object(release_watch, "_notification_state", return_value=2), patch.object(
+            release_watch, "_foreground", return_value="p"
+        ):
+            self.assertEqual(release_watch.screen_state(), "2p")
+
+
 class UpdateSignalTests(unittest.TestCase):
     def _signal(self, **options):
         from xray_fluent.updates.update_signal import UpdateSignal
@@ -216,13 +245,15 @@ class UpdateSignalTests(unittest.TestCase):
 
         shown = [True]
         signal, hooks = self._signal(window_shown=lambda: shown[0], connected=lambda: True)
-        with patch.object(update_signal, "fullscreen_app_active", return_value=False):
+        with patch.object(update_signal, "fullscreen_app_active", return_value=False), patch.object(
+            update_signal, "screen_state", return_value="5p"
+        ):
             self.assertEqual(hooks["activity"](), {})  # окно о себе ещё не сказало
             signal.refresh_presence()
-            self.assertEqual(hooks["activity"](), {"act": "window", "run": "1"})
+            self.assertEqual(hooks["activity"](), {"act": "window", "run": "1", "scr": "5p"})
             shown[0] = False
             signal.refresh_presence()
-            self.assertEqual(hooks["activity"](), {"act": "tray", "run": "1"})
+            self.assertEqual(hooks["activity"](), {"act": "tray", "run": "1", "scr": "5p"})
         with patch.object(update_signal, "fullscreen_app_active", return_value=True):
             self.assertEqual(hooks["activity"]()["act"], "fullscreen")
             self.assertTrue(signal.busy_reason())

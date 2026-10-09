@@ -21,6 +21,7 @@ from .release_watch import (
     ACTIVITY_WINDOW,
     ReleaseWatcher,
     fullscreen_app_active,
+    screen_state,
 )
 
 # Как часто окно сообщает слушателю, видно ли оно и включено ли подключение.
@@ -123,7 +124,8 @@ class UpdateSignal(QObject):
             act = ACTIVITY_FULLSCREEN
         else:
             act = ACTIVITY_WINDOW if presence["window"] else ACTIVITY_TRAY
-        return {"act": act, "run": "1" if presence["connected"] else "0"}
+        # scr — сырой ответ Windows о занятости экрана, только общим счётом.
+        return {"act": act, "run": "1" if presence["connected"] else "0", "scr": screen_state()}
 
     def _pending_report(self) -> dict:
         with self._lock:

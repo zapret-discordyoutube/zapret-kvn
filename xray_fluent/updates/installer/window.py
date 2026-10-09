@@ -65,7 +65,9 @@ class UpdateWindow(QWidget):
         self._drag_offset = None
         self._deck = phrases.PhraseDeck()
 
-        flags = Qt.WindowType.FramelessWindowHint
+        # Окно обновления всегда поверх остальных окон: ход обновления виден,
+        # в какой бы программе человек ни был.
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         if plan.start_in_tray:
             # Приложение работало в трее: окно появляется рядом с ним и не
             # забирает фокус у программы, в которой сейчас пользователь.
