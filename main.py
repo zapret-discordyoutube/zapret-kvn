@@ -6,6 +6,7 @@ import faulthandler
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+import signal
 import sys
 import threading
 
@@ -206,6 +207,22 @@ def _can_start_in_tray() -> bool:
         return False
 
 
+def _ignore_console_interrupt() -> None:
+    """Ctrl+C в консоли собранного приложения не должен его завершать.
+
+    Приложение консольное и прячет своё окно консоли только после старта.
+    Пока окно на экране, оно получает фокус, и привычное Ctrl+C (копирование
+    в другой программе) приходит сюда как SIGINT. Так сорвалась установка
+    v0.8.18: KeyboardInterrupt посреди импорта, код 1, откат обновления.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError):
+        pass
+
+
 def _hide_console_if_needed() -> None:
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         return
@@ -326,6 +343,7 @@ def _show_after_update_window(show) -> None:
 def main() -> int:
     # Установщик работает из временного каталога, пока приложение закрыто:
     # ему не нужны ни журнал запуска, ни возврат системного прокси на выходе.
+    _ignore_console_interrupt()
     plan_path = _update_plan_argument()
     if plan_path is not None:
         from xray_fluent.updates.installer.entry import main as install_update
