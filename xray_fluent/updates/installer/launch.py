@@ -21,5 +21,4 @@ def launch_installer(plan: InstallPlan) -> subprocess.Popen:
     return processes.start_detached(
         [str(plan.installer_exe), APPLY_UPDATE_FLAG, str(plan_path)],
         cwd=plan.source_dir,
-        console=False,
     )

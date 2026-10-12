@@ -230,23 +230,35 @@ class RunnerTests(InstallerCase):
         )
         self.started: list[list[str]] = []
         self.exit_codes: list[int | None] = []
+        # Что каждый запуск допишет в startup.log (None — ничего).
+        self.startup_lines: list[list[str] | None] = []
         for target, replacement in (
             (runner.processes, {"wait_for_exit": Mock(return_value=True)}),
             (runner.processes, {"stop_processes_under": Mock(return_value=[])}),
             (runner.processes, {"lock_holders": Mock(return_value=["Antivirus (C:\\av.exe)"])}),
             (runner.processes, {"start_detached": self._start}),
             (runner, {"NEW_VERSION_READY_WAIT_S": 0.05, "OLD_VERSION_READY_WAIT_S": 0.05}),
-            (runner, {"_log": Mock()}),
+            (runner, {"_log": Mock(), "_show_fatal_message": Mock()}),
         ):
             patcher = patch.multiple(target, **replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def _start(self, command, *, cwd, console, env):
+    def _start(self, command, *, cwd, env):
         self.started.append(list(command))
         self.start_env = env
+        lines = self.startup_lines.pop(0) if self.startup_lines else None
+        if lines:
+            log = self.app_dir / "data" / "logs" / "startup.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open("a", encoding="utf-8") as stream:
+                stream.writelines(line + "\n" for line in lines)
         code = self.exit_codes.pop(0) if self.exit_codes else None
         return Mock(poll=Mock(return_value=code), returncode=code)
+
+    def logged(self, level: str) -> str:
+        calls = getattr(runner._log, level).call_args_list
+        return "\n".join(call.args[0] % call.args[1:] for call in calls)
 
     def error_log(self) -> Path:
         return self.app_dir / "data" / "logs" / "update_error.log"
@@ -313,6 +325,44 @@ class RunnerTests(InstallerCase):
         # Вторая попытка запуска — уже прежняя версия.
         self.assertEqual(len(self.started), 2)
         self.assertEqual(stages[-2:], [Stage.ROLLBACK, Stage.FAILED])
+        self.assertIn("Прежняя версия запущена", self.logged("info"))
+        runner._show_fatal_message.assert_not_called()
+
+    def test_both_failed_starts_leave_their_reasons_in_update_log(self) -> None:
+        # 09.10.2026: v0.8.18 оборвал Ctrl+C посреди импорта, прежняя версия
+        # после отката умерла, не написав ни строки, а в update.log не было
+        # ни её кода выхода, ни трассировки новой версии.
+        write_tree(self.app_dir, {"data/logs/startup.log": "старый запуск\n" * 50})
+        self.startup_lines = [
+            ["----- startup begin -----", "runtime app_version=9.9.9", "KeyboardInterrupt"],
+            None,
+        ]
+        self.exit_codes = [1, 0xC000013A]
+        self.assertFalse(run_install(self.plan))
+        errors = self.logged("error")
+        self.assertIn("Новая версия завершилась сразу после запуска (код 1)", errors)
+        self.assertIn("app_version=9.9.9\nKeyboardInterrupt", errors)
+        self.assertNotIn("старый запуск", errors)
+        self.assertIn(
+            "Прежняя версия завершилась сразу после запуска (код 0xC000013A, прерван Ctrl+C)",
+            errors,
+        )
+        self.assertIn("не оставил ни строки", errors)
+        runner._show_fatal_message.assert_called_once_with(self.plan)
+
+    def test_startup_log_rotated_by_the_failed_start_is_read_from_the_beginning(self) -> None:
+        log = self.app_dir / "data" / "logs" / "startup.log"
+        write_tree(self.app_dir, {"data/logs/startup.log": "старый запуск\n" * 50})
+
+        def rotate_and_crash(command, **kwargs):
+            log.replace(log.with_name("startup.log.1"))
+            log.write_text("----- startup begin -----\nTraceback\n", encoding="utf-8")
+            return Mock(poll=Mock(return_value=1), returncode=1)
+
+        with patch.object(runner.processes, "start_detached", rotate_and_crash):
+            with self.assertRaises(InstallError):
+                runner._start_and_verify(self.plan, lambda fraction: None)
+        self.assertIn("----- startup begin -----\nTraceback", self.logged("error"))
 
     def test_locked_file_is_reported_with_its_holder(self) -> None:
         real_replace = os.replace
@@ -384,7 +434,7 @@ class LaunchTests(InstallerCase):
         command = start.call_args.args[0]
         self.assertEqual(command[:2], [str(self.source_dir / "ZapretKVN.exe"), "--apply-update"])
         self.assertEqual(InstallPlan.load(Path(command[2])).app_dir, self.app_dir)
-        self.assertEqual(start.call_args.kwargs, {"cwd": self.source_dir, "console": False})
+        self.assertEqual(start.call_args.kwargs, {"cwd": self.source_dir})
 
 
 class HandoffTests(unittest.TestCase):
@@ -497,6 +547,30 @@ class WindowsProcessTests(InstallerCase):
         processes.terminate(child.pid)
         self.assertTrue(processes.wait_for_exit(child.pid, 10.0))
 
+    def test_detached_start_survives_ctrl_c_in_its_console(self) -> None:
+        # Регрессия 09.10.2026: v0.8.18 и затем прежняя версия при откате
+        # погибли от Ctrl+C в своём окне консоли (KeyboardInterrupt, код 1).
+        survived = self._ctrl_c_survives("detached")
+        # Контроль: без защиты тот же Ctrl+C процесс убивает. Иначе проверка
+        # ничего не доказывает — например, под sshd, где Ctrl+C отключён у всех.
+        self.assertFalse(self._ctrl_c_survives("unprotected"))
+        self.assertTrue(survived)
+
+    def _ctrl_c_survives(self, mode: str) -> bool:
+        launched = subprocess.run(
+            [sys.executable, "-c", _CTRL_C_LAUNCHER, str(Path(__file__).resolve().parents[1]), mode],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        pid = int(launched.stdout.split()[-1])
+        self.addCleanup(processes.terminate, pid)
+        self.assertFalse(processes.wait_for_exit(pid, 0.5), "процесс умер ещё до Ctrl+C")
+        sent = subprocess.run(
+            [sys.executable, "-c", _CTRL_C_SENDER, str(pid)],
+            creationflags=processes.CREATE_NO_WINDOW, timeout=30,
+        )
+        self.assertEqual(sent.returncode, 0, "Ctrl+C не отправлен")
+        return not processes.wait_for_exit(pid, 3.0)
+
     def test_processes_inside_the_app_directory_are_found_and_stopped(self) -> None:
         tool = self.app_dir / "core" / "ping.exe"
         shutil.copy2(Path(os.environ["SystemRoot"]) / "System32" / "ping.exe", tool)
@@ -512,6 +586,35 @@ class WindowsProcessTests(InstallerCase):
         self.assertEqual(processes.stop_processes_under(self.app_dir, 10.0), [])
         self.assertIsNotNone(child.wait(timeout=10))
         self.assertEqual(processes.processes_under(self.app_dir), [])
+
+
+# Запускает спящий Python так, как установщик запускает приложение
+# ("detached"), или в своей консоли без защиты ("unprotected"); печатает PID.
+_CTRL_C_LAUNCHER = """
+import ctypes, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from xray_fluent.updates.installer import processes
+# Запрет Ctrl+C наследуется (так под sshd); приложение из Проводника его не имеет.
+ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
+command = [sys.executable, "-c", "import time; time.sleep(60)"]
+if sys.argv[2] == "detached":
+    child = processes.start_detached(command, cwd=Path(sys.argv[1]))
+else:
+    child = subprocess.Popen(command, creationflags=processes.CREATE_NO_WINDOW)
+print(child.pid, flush=True)
+"""
+
+# Подключается к консоли процесса и посылает в неё Ctrl+C.
+_CTRL_C_SENDER = """
+import ctypes, sys
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.FreeConsole()
+attached = kernel32.AttachConsole(int(sys.argv[1]))
+kernel32.SetConsoleCtrlHandler(None, True)
+sent = attached and kernel32.GenerateConsoleCtrlEvent(0, 0)
+sys.exit(0 if sent else 1)
+"""
 
 
 if __name__ == "__main__":

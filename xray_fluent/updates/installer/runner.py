@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import traceback
 from enum import Enum
@@ -25,6 +26,9 @@ NEW_VERSION_READY_WAIT_S = 20.0
 # Прежняя версия при откате может не знать о handoff и не ответить вовсе:
 # для неё достаточно не упасть в первые секунды.
 OLD_VERSION_READY_WAIT_S = 5.0
+# Столько последних строк startup.log упавшего запуска попадает в update.log.
+STARTUP_LOG_TAIL_LINES = 40
+_STATUS_CONTROL_C_EXIT = 0xC000013A
 
 
 class Stage(Enum):
@@ -110,10 +114,12 @@ def _close_application(plan: InstallPlan) -> None:
 
 
 def _start_and_verify(plan: InstallPlan, progress: Callable[[float], None]) -> None:
+    log_mark = _startup_log_size(plan)
     process = _start_application(plan)
     if not _wait_until_started(plan, process, NEW_VERSION_READY_WAIT_S, progress):
+        _log_startup_tail(plan, log_mark)
         raise InstallError(
-            f"Новая версия завершилась сразу после запуска (код {process.returncode})"
+            f"Новая версия завершилась сразу после запуска ({_exit_code_text(process.returncode)})"
         )
 
 
@@ -123,7 +129,6 @@ def _start_application(plan: InstallPlan):
     return processes.start_detached(
         [str(plan.app_exe), *plan.restart_args],
         cwd=plan.app_dir,
-        console=True,
         env=handoff.arm(plan.hold_marker),
     )
 
@@ -179,12 +184,64 @@ def _recover(plan: InstallPlan, swap: FileSwap, details: list[str]) -> None:
     restarted = False
     if plan.app_exe.is_file():
         try:
+            log_mark = _startup_log_size(plan)
             process = _start_application(plan)
             restarted = _wait_until_started(plan, process, OLD_VERSION_READY_WAIT_S)
         except OSError:
             _log.exception("Не удалось запустить прежнюю версию")
+        else:
+            if restarted:
+                _log.info("Прежняя версия запущена")
+            else:
+                # 09.10.2026 этой строки не хватило: причину пришлось искать
+                # по косвенным следам.
+                _log.error(
+                    "Прежняя версия завершилась сразу после запуска (%s)",
+                    _exit_code_text(process.returncode),
+                )
+                _log_startup_tail(plan, log_mark)
     if not restarted:
         _show_fatal_message(plan)
+
+
+def _exit_code_text(code: int | None) -> str:
+    if code is None:
+        return "код неизвестен"
+    code &= 0xFFFFFFFF
+    text = f"код {code}" if code < 0x10000 else f"код 0x{code:08X}"
+    if code == _STATUS_CONTROL_C_EXIT:
+        text += ", прерван Ctrl+C"
+    return text
+
+
+def _startup_log(plan: InstallPlan) -> Path:
+    return plan.app_dir / "data" / "logs" / "startup.log"
+
+
+def _startup_log_size(plan: InstallPlan) -> int:
+    try:
+        return _startup_log(plan).stat().st_size
+    except OSError:
+        return 0
+
+
+def _log_startup_tail(plan: InstallPlan, offset: int) -> None:
+    """Переписать в update.log то, что упавший запуск успел сказать о себе."""
+
+    try:
+        with _startup_log(plan).open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            # Журнал короче отметки — значит, его сменила ротация: он весь новый.
+            start = offset if offset <= size else 0
+            stream.seek(max(start, size - 64 * 1024))
+            text = stream.read().decode("utf-8", "replace")
+    except OSError:
+        text = ""
+    lines = [line for line in text.splitlines() if line.strip()][-STARTUP_LOG_TAIL_LINES:]
+    if not lines:
+        _log.error("В startup.log этот запуск не оставил ни строки: процесс не дошёл до журнала")
+        return
+    _log.error("Последние строки startup.log этого запуска:\n%s", "\n".join(lines))
 
 
 def _write_error_log(plan: InstallPlan, details: list[str]) -> None:

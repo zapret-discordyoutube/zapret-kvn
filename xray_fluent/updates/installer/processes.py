@@ -14,7 +14,7 @@ from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
 
-CREATE_NEW_CONSOLE = 0x00000010
+CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
 
 if IS_WINDOWS:
@@ -219,12 +219,18 @@ def clean_environment() -> dict[str, str]:
 
 
 def start_detached(
-    command: list[str], *, cwd: Path, console: bool, env: dict[str, str] | None = None
+    command: list[str], *, cwd: Path, env: dict[str, str] | None = None
 ) -> subprocess.Popen:
-    """Запустить процесс, не привязанный к текущему.
+    """Запустить процесс, не привязанный к текущему: без окна и без Ctrl+C.
 
-    ``console=True`` — как запуск двойным щелчком: приложение собрано
-    консольным и само прячет своё окно консоли.
+    Приложение собрано консольным. Со своим окном консоли
+    (``CREATE_NEW_CONSOLE``) оно на старте забирало фокус, и Ctrl+C — с
+    клавиатуры или от чужой программы — обрывал запуск раньше, чем
+    приложение успевало защититься само. Так 09.10.2026 сорвалось обновление
+    до v0.8.18, а затем и запуск прежней версии после отката.
+    ``CREATE_NEW_PROCESS_GROUP`` отключает Ctrl+C с первой инструкции
+    процесса, но вместе с ``CREATE_NEW_CONSOLE`` Windows его не учитывает:
+    поэтому окна консоли нет вовсе.
     """
 
     return subprocess.Popen(
@@ -232,5 +238,5 @@ def start_detached(
         cwd=str(cwd),
         env={**clean_environment(), **(env or {})},
         close_fds=True,
-        creationflags=(CREATE_NEW_CONSOLE if console else CREATE_NO_WINDOW) if IS_WINDOWS else 0,
+        creationflags=(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP) if IS_WINDOWS else 0,
     )
