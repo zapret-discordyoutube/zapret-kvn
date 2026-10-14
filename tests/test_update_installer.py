@@ -319,6 +319,8 @@ class RunnerTests(InstallerCase):
         self.assertFalse(run_install(self.plan, lambda stage, fraction: stages.append(stage)))
         tree = self.tree()
         log = tree.pop("data/logs/update_error.log")
+        # Короткая причина для сервера обновлений: новая сборка упала на старте.
+        self.assertEqual(tree.pop("data/runtime/app_update_failure.txt"), "crash")
         self.assertEqual(tree, INSTALLED)
         self.assertIn("код 3", log)
         self.assertIn("Прежняя версия возвращена", log)
@@ -393,6 +395,15 @@ class RunnerTests(InstallerCase):
         runner.processes.wait_for_exit.assert_called()
         self.assertEqual(len(self.started), 1)
         self.assertTrue(self.error_log().exists())
+        self.assertEqual((self.app_dir / "data" / "runtime" / "app_update_failure.txt").read_text(), "prep")
+
+    def test_failure_code_names_the_step_that_broke(self) -> None:
+        locked = OSError("занят")
+        locked.path = Path("ZapretKVN.exe")
+        self.assertEqual(runner.failure_code(Stage.START, RuntimeError()), "crash")
+        self.assertEqual(runner.failure_code(Stage.SWAP, locked), "lock")
+        self.assertEqual(runner.failure_code(Stage.SWAP, RuntimeError()), "swap")
+        self.assertEqual(runner.failure_code(Stage.PREPARE, RuntimeError()), "prep")
 
 
 def _move_without_waiting(swap, source, destination):

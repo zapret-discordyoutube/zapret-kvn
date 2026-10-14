@@ -15,6 +15,7 @@ from collections.abc import Callable
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..constants import APP_VERSION
+from .auto_update import WHY_RE
 from .release_watch import (
     ACTIVITY_FULLSCREEN,
     ACTIVITY_TRAY,
@@ -107,6 +108,20 @@ class UpdateSignal(QObject):
         """Что сказать серверу об исходе прошлого обновления (один раз)."""
         with self._lock:
             self._report = {str(key): str(value) for key, value in (report or {}).items()}
+
+    def note_miss(self, version: str, why: str) -> None:
+        """Версия, которую программа взялась ставить сама, не скачалась.
+
+        Серверу уходит ``miss`` с причиной: раздачу это не держит, но видно,
+        почему у людей срывается скачивание. Неотправленный исход прошлого
+        обновления («дошла», «не вышло») не затирается.
+        """
+        code = str(why or "").strip().lower()
+        if not (version and WHY_RE.fullmatch(code)):
+            return
+        with self._lock:
+            if not self._report:
+                self._report = {"miss": str(version), "why": code}
 
     # --- для слушателя (его поток) ---
 

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -87,7 +88,31 @@ class PreparedUpdate:
 
 
 class UpdateRejected(Exception):
-    """Архив непригоден, и повторная загрузка этого не исправит."""
+    """Архив непригоден, и повторная загрузка этого не исправит.
+
+    ``code`` — короткая причина для сервера обновлений (``why``).
+    """
+
+    def __init__(self, message: str, code: str = "bad") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class DownloadFailed(RuntimeError):
+    """Архив не скачался ни одним путём."""
+
+
+def download_failure_code(exc: BaseException) -> str:
+    """Короткая причина, почему обновление не скачалось или не распаковалось."""
+    if isinstance(exc, UpdateRejected):
+        return exc.code
+    if isinstance(exc, zipfile.BadZipFile):
+        return "badzip"
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
+        return "disk"
+    if isinstance(exc, DownloadFailed):
+        return "net"
+    return "other"
 
 
 _SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
@@ -402,6 +427,8 @@ class UpdateDownloader(QThread):
         # Сбой, который повторится при любой следующей загрузке этого же
         # архива (контрольная сумма, содержимое). Сетевые ошибки — нет.
         self.failure_permanent = False
+        # Короткая причина неудачи для сервера обновлений.
+        self.failure_code = ""
 
     @property
     def update(self) -> AppUpdate:
@@ -564,6 +591,7 @@ class UpdateDownloader(QThread):
             self.prepared = PreparedUpdate(self._update.version, source_dir, work_dir)
         except Exception as exc:
             self.failure_permanent = isinstance(exc, (UpdateRejected, zipfile.BadZipFile))
+            self.failure_code = download_failure_code(exc)
             if work_dir is not None:
                 shutil.rmtree(work_dir, ignore_errors=True)
             self.error.emit(str(exc) or "Не удалось подготовить обновление")
@@ -586,11 +614,11 @@ class UpdateDownloader(QThread):
                 _log.warning("Update download failed (%s): %s", status, exc)
                 archive.unlink(missing_ok=True)
         if self._proxy_url:
-            raise RuntimeError(
+            raise DownloadFailed(
                 "Не удалось скачать обновление ни напрямую, ни через прокси.\n"
                 "Переключитесь на рабочий сервер и попробуйте снова."
             )
-        raise RuntimeError(
+        raise DownloadFailed(
             "Не удалось скачать обновление.\n"
             "Переключитесь на рабочий сервер и попробуйте снова."
         )
@@ -599,9 +627,9 @@ class UpdateDownloader(QThread):
         self.status.emit("Проверка архива...")
         expected = _extract_digest(self._update.digest_sha256)
         if not expected:
-            raise UpdateRejected("У релизного архива отсутствует SHA-256")
+            raise UpdateRejected("У релизного архива отсутствует SHA-256", "meta")
         if _sha256_file(archive).lower() != expected:
-            raise UpdateRejected("Контрольная сумма архива не совпадает")
+            raise UpdateRejected("Контрольная сумма архива не совпадает", "hash")
         self.progress.emit(100)
 
     def _unpack(self, archive: Path, destination: Path) -> Path:
@@ -610,5 +638,5 @@ class UpdateDownloader(QThread):
             bundle.extractall(destination)
         source_dir = _resolve_extracted_app_dir(destination, APP_EXE_NAME)
         if not (source_dir / APP_EXE_NAME).is_file():
-            raise UpdateRejected(f"Архив обновления не содержит {APP_EXE_NAME}")
+            raise UpdateRejected(f"Архив обновления не содержит {APP_EXE_NAME}", "badzip")
         return source_dir

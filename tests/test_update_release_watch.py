@@ -233,6 +233,35 @@ class UpdateSignalTests(unittest.TestCase):
         self.assertEqual(signal.granted_at("0.8.21"), 0.0)
         self.assertEqual(heard, ["0.8.20"])
 
+    def test_lost_download_is_told_to_the_server_without_hiding_an_older_report(self) -> None:
+        signal, hooks = self._signal()
+
+        signal.note_miss("0.8.22", "hash")
+        self.assertEqual(hooks["pending_report"](), {"miss": "0.8.22", "why": "hash"})
+        hooks["report_delivered"]({})
+        self.assertEqual(hooks["pending_report"](), {})
+
+        # Неотправленное «не вышло» прошлой установки важнее.
+        signal.set_report({"fail": "0.8.21", "why": "crash"})
+        signal.note_miss("0.8.22", "net")
+        self.assertEqual(hooks["pending_report"](), {"fail": "0.8.21", "why": "crash"})
+
+        hooks["report_delivered"]({})
+        signal.note_miss("0.8.22", "../x")
+        self.assertEqual(hooks["pending_report"](), {})
+
+    def test_download_failure_codes(self) -> None:
+        import errno
+        import zipfile
+
+        from xray_fluent.updates.app_updater import DownloadFailed, UpdateRejected, download_failure_code
+
+        self.assertEqual(download_failure_code(UpdateRejected("сумма", "hash")), "hash")
+        self.assertEqual(download_failure_code(zipfile.BadZipFile()), "badzip")
+        self.assertEqual(download_failure_code(OSError(errno.ENOSPC, "места нет")), "disk")
+        self.assertEqual(download_failure_code(DownloadFailed("нет сети")), "net")
+        self.assertEqual(download_failure_code(ValueError()), "other")
+
     def test_queue_counts_only_when_the_server_answered(self) -> None:
         signal, _hooks = self._signal()
 

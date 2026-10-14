@@ -66,6 +66,25 @@ class AttemptRecordTests(unittest.TestCase):
         self.assertEqual(first.report, {"fail": "0.8.2"})
         self.assertIsNone(second.report)
 
+    def test_rollback_tells_the_reason_left_by_the_installer(self) -> None:
+        record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path, from_version="0.8.1")
+        failure = self.path.parent / "app_update_failure.txt"
+        failure.write_text("crash", encoding="ascii")
+
+        outcome = resolve_startup("0.8.1", now=NOW + 20, path=self.path, failure_path=failure)
+
+        self.assertEqual(outcome.report, {"fail": "0.8.2", "why": "crash"})
+        self.assertFalse(failure.exists())
+
+    def test_strange_reason_from_the_installer_is_dropped(self) -> None:
+        record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path)
+        failure = self.path.parent / "app_update_failure.txt"
+        failure.write_text("код ошибки; DROP", encoding="utf-8")
+
+        outcome = resolve_startup("0.8.1", now=NOW + 20, path=self.path, failure_path=failure)
+
+        self.assertEqual(outcome.report, {"fail": "0.8.2"})
+
     def test_disconnected_state_is_restored_as_disconnected(self) -> None:
         record_attempt("0.8.2", reconnect=False, now=NOW, path=self.path)
         outcome = resolve_startup("0.8.2", now=NOW + 20, path=self.path)

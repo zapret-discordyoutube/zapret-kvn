@@ -43,6 +43,24 @@ class Stage(Enum):
 
 Report = Callable[[Stage, float], None]
 
+# Файл с короткой причиной неудачи для сервера обновлений (``why``). Его
+# читает версия, которая работает после отката (``auto_update.resolve_startup``).
+FAILURE_CODE_NAME = "app_update_failure.txt"
+
+
+def failure_code(stage: Stage, error: Exception) -> str:
+    """Короткая причина: на каком шаге и почему не поставилось обновление."""
+    if stage is Stage.START:
+        # Новая версия завершилась сразу после запуска: сломанная сборка.
+        return "crash"
+    if stage is Stage.SWAP:
+        return "lock" if getattr(error, "path", None) is not None else "swap"
+    if stage is Stage.PREPARE:
+        return "prep"
+    if stage is Stage.WAIT_APP:
+        return "close"
+    return "other"
+
 
 def setup_logging(app_dir: Path) -> None:
     if _log.handlers:
@@ -73,6 +91,7 @@ def run_install(plan: InstallPlan, report: Report | None = None) -> bool:
         on_locked=lambda path: processes.stop_processes_under(plan.app_dir, 5.0),
     )
     _log.info("Установка v%s в %s", plan.version, plan.app_dir)
+    stage = Stage.PREPARE
     try:
         report(Stage.PREPARE, 0.0)
         swap.prepare(lambda fraction: report(Stage.PREPARE, fraction))
@@ -80,17 +99,21 @@ def run_install(plan: InstallPlan, report: Report | None = None) -> bool:
             "Файлы: без изменений %d, заменить %d, добавить %d, убрать %d",
             swap.unchanged, swap.replaced, swap.added, swap.removed,
         )
+        stage = Stage.WAIT_APP
         report(Stage.WAIT_APP, 0.0)
         _close_application(plan)
+        stage = Stage.SWAP
         report(Stage.SWAP, 0.0)
         swap.commit()
         for path in swap.left_behind:
             _log.warning("Лишний файл занят и оставлен на месте: %s", path)
+        stage = Stage.START
         report(Stage.START, 0.0)
         _start_and_verify(plan, lambda fraction: report(Stage.START, fraction))
     except Exception as error:
         _log.exception("Установка не удалась")
         details = _describe_failure(plan, error)
+        _write_failure_code(plan, failure_code(stage, error))
         report(Stage.ROLLBACK, 0.0)
         try:
             _recover(plan, swap, details)
@@ -252,6 +275,15 @@ def _write_error_log(plan: InstallPlan, details: list[str]) -> None:
         (log_dir / "update_error.log").write_text("\n".join(details) + "\n", encoding="utf-8")
     except OSError:
         _log.exception("Не удалось записать update_error.log")
+
+
+def _write_failure_code(plan: InstallPlan, code: str) -> None:
+    try:
+        runtime_dir = plan.app_dir / "data" / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        (runtime_dir / FAILURE_CODE_NAME).write_text(code, encoding="ascii")
+    except OSError:
+        _log.exception("Не удалось записать причину неудачи обновления")
 
 
 def _show_fatal_message(plan: InstallPlan) -> None:

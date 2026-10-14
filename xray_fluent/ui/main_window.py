@@ -1948,7 +1948,7 @@ class MainWindow(FluentWindow):
             installer = launch_installer(plan)
         except Exception as exc:
             self.controller._logger.exception("[update] Не удалось запустить установку")
-            self._on_update_error(f"Не удалось запустить установку: {exc}")
+            self._on_update_error(f"Не удалось запустить установку: {exc}", why="handoff")
             return
         self.controller._logger.info(
             "[update] Установка v%s: перезапуск (подключение будет %s)",
@@ -1982,7 +1982,7 @@ class MainWindow(FluentWindow):
         else:
             reason = f"установщик завершился с кодом {exit_code}"
         self.controller._logger.error("[update] Установка не началась: %s", reason)
-        self._on_update_error(f"Не удалось запустить установку: {reason}")
+        self._on_update_error(f"Не удалось запустить установку: {reason}", why="handoff")
 
     def _install_plan(self, prepared: PreparedUpdate) -> InstallPlan:
         settings = self.controller.state.settings
@@ -2004,11 +2004,15 @@ class MainWindow(FluentWindow):
             ),
         )
 
-    def _on_update_error(self, err: str) -> None:
+    def _on_update_error(self, err: str, why: str = "") -> None:
         self._update_in_progress = False
         self.updates_page.show_idle()
         self.updates_page.set_app_error(f"Ошибка: {err}")
         downloader = getattr(self, "_update_downloader", None)
+        signal = getattr(self, "_update_signal", None)
+        if self._update_background and downloader is not None and signal is not None:
+            # Сервер обновлений узнает, почему версия не дошла до установки.
+            signal.note_miss(downloader.update.version, why or getattr(downloader, "failure_code", "") or "other")
         if downloader is not None and getattr(downloader, "failure_permanent", False):
             # Неисправный архив не исправится повторной загрузкой: такая
             # попытка идёт в тот же лимит, что и неудачная установка.

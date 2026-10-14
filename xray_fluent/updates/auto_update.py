@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -26,6 +27,10 @@ from .installer.plan import WORK_DIR_PREFIX
 _log = logging.getLogger(__name__)
 
 ATTEMPT_FILE = RUNTIME_DIR / "app_update_attempt.json"
+# Короткая причина неудачи, которую оставил установщик (installer.runner).
+FAILURE_FILE = RUNTIME_DIR / "app_update_failure.txt"
+# Вид кода причины: его же принимает сервер обновлений.
+WHY_RE = re.compile(r"\A[a-z][a-z0-9]{0,15}\Z")
 # Одна и та же версия ставится автоматически не больше трёх раз; дальше —
 # только кнопкой на странице «Обновления» (новый релиз сбрасывает счётчик).
 MAX_AUTO_ATTEMPTS = 3
@@ -154,11 +159,22 @@ def record_attempt(
     return record
 
 
+def _take_failure_code(path: Path) -> str:
+    """Причина, оставленная установщиком; файл читается один раз."""
+    try:
+        code = path.read_text(encoding="ascii", errors="replace").strip().lower()
+    except OSError:
+        return ""
+    _remove(path)
+    return code if WHY_RE.fullmatch(code) else ""
+
+
 def resolve_startup(
     current_version: str,
     *,
     now: float | None = None,
     path: Path = ATTEMPT_FILE,
+    failure_path: Path = FAILURE_FILE,
 ) -> StartupOutcome | None:
     """Разобрать запись о попытке после перезапуска.
 
@@ -168,6 +184,7 @@ def resolve_startup(
     """
 
     record = load_attempt(path)
+    why = _take_failure_code(failure_path)
     if record is None:
         return None
     if _parse_semver(record.version) is None or _parse_semver(current_version) is None:
@@ -188,6 +205,8 @@ def resolve_startup(
     report = None
     if record.resume_pending:
         report = {"fail": record.version}
+        if why:
+            report["why"] = why
         record.resume_pending = False
         try:
             _write_attempt(record, path)
