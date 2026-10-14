@@ -36,6 +36,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from ..constants import APP_VERSION, BASE_DIR
 from .delta_zip import DeltaUnavailable, HttpRangeSource, SignedFile, prepare_delta
 from .installer.plan import APP_EXE_NAME, WORK_DIR_PREFIX
+from .installer.runner import STAGE_ROOT_NAME
 from .signed_release import signed_asset_urls, verified_manifest
 from zapret_update.manifest import ManifestError
 
@@ -81,6 +82,9 @@ class AppUpdate:
     # Файлы сборки из подписанного списка выпуска (путь, размер, SHA-256).
     # Есть они — часть обновления можно докачать без полного архива.
     files: tuple[SignedFile, ...] = ()
+    # Проверенный список выпуска целиком (общее ядро zapret_update): в нём же
+    # размеры файлов в хранилище и заплатки от прежних версий.
+    manifest: object = None
 
 
 @dataclass(slots=True)
@@ -354,6 +358,7 @@ def _find_available_update(proxy_url: str | None = None) -> AppUpdate | None:
         notes=str(data.get("body") or ""),
         digest_sha256=archive.sha256,
         files=tuple(SignedFile(item.path, item.size, item.sha256) for item in manifest.files),
+        manifest=manifest,
     )
 
 
@@ -630,7 +635,9 @@ class UpdateDownloader(QThread):
             _purge_stale_update_dirs()
             work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX))
             archive = work_dir / "update.zip"
-            source_dir = self._try_delta(work_dir)
+            # Лестница: хранилище с заплатками (меньше всего байт) → куски
+            # архива по Range → архив целиком.
+            source_dir = self._try_store() or self._try_delta(work_dir)
             if source_dir is None:
                 self._fetch(archive)
                 self._verify(archive)
@@ -652,6 +659,64 @@ class UpdateDownloader(QThread):
         if self._proxy_url:
             routes.append(("Загрузка через прокси...", self._proxy_url))
         return routes
+
+    def _try_store(self) -> Path | None:
+        """Собрать новую версию из хранилища выпуска: изменившиеся файлы и заплатки.
+
+        Хранилище и порядок те же, что у Zapret 2 GUI (общее ядро
+        ``zapret_update``). Куски лежат в ``data/runtime/app_update/store-<версия>``:
+        оборванная загрузка продолжается и после перезапуска программы.
+        ``None`` — у выпуска нет хранилища или загрузка не удалась; тогда
+        следующая ступень — куски архива по Range.
+        """
+
+        manifest = self._update.manifest
+        files = getattr(manifest, "files", ())
+        if not files or not all(entry.zsize for entry in files):
+            return None
+        from zapret_update import fetch, plan as update_plan, stage, store
+
+        cache = self._app_dir / "data" / "runtime" / STAGE_ROOT_NAME / f"store-{self._update.version}"
+        try:
+            self.status.emit("Сравнение с установленной версией...")
+            planned = update_plan.make_plan(
+                manifest, self._app_dir, hashes=update_plan.HashCache(cache.parent / "hashes.json")
+            )
+        except (update_plan.PlanError, OSError) as exc:
+            _log.info("[update] Хранилище выпуска не подходит: %s", exc)
+            return None
+        url_for = lambda name: store.forgejo_url(f"https://{FORGEJO_HOST}", "zapretkvn", "zapret-kvn", name)  # noqa: E731
+        sources = [fetch.Source("Forgejo", url_for)]
+        if self._proxy_url:
+            sources.append(fetch.Source("Forgejo через прокси", url_for, proxy=self._proxy_url))
+        self.status.emit(
+            f"Загрузка изменений: {_format_megabytes(planned.download_size)} из {_format_megabytes(self._update.size)}..."
+        )
+        self.progress.emit(0)
+        try:
+            ready = fetch.fetch_plan(
+                planned,
+                root=self._app_dir,
+                work_dir=cache,
+                sources=sources,
+                timeout=_DOWNLOAD_TIMEOUT,
+                cancelled=self.isInterruptionRequested,
+                progress=lambda done, total: self.progress.emit(min(99, int(done * 100 / max(1, total)))),
+            )
+            tree = stage.build_stage(planned, root=self._app_dir, ready=ready, stage_dir=cache / "tree")
+        except Exception as exc:  # noqa: BLE001 — любой сбой ведёт на следующую ступень
+            _log.warning("[update] Загрузка из хранилища не удалась, пробуем куски архива: %s", exc)
+            return None
+        if not (tree / APP_EXE_NAME).is_file():
+            _log.warning("[update] В собранной из хранилища версии нет %s", APP_EXE_NAME)
+            return None
+        _log.info(
+            "[update] Из хранилища: скачано %d из %d байт (файлов %d, заплаток %d, без изменений %d)",
+            planned.download_size, self._update.size, len(planned.want),
+            sum(1 for item in planned.want if item.patch is not None), len(planned.keep),
+        )
+        self.progress.emit(100)
+        return tree
 
     def _try_delta(self, work_dir: Path) -> Path | None:
         """Собрать новую сборку, докачав только изменившиеся файлы.

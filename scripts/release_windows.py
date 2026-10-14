@@ -88,6 +88,23 @@ SIGNING_KEY_PATH = Path(
     )
 )
 SIGNED_ASSET_NAMES = ("update-manifest.json", "update-manifest.json.sig")
+# Хранилище выпуска (общее ядро, как у Zapret 2 GUI): каждый файл сборки по
+# SHA-256 и заплатки от трёх прежних выпусков. Программа качает из него только
+# изменившееся. Сжатие zstd есть только в Python 3.14 — сборщик хранилища
+# запускается им отдельным процессом.
+STORE_PYTHON = Path(
+    os.getenv(
+        "ZAPRET_UPDATE_STORE_PYTHON",
+        "/home/codex-pve/.local/share/uv/python/cpython-3.14.6-linux-x86_64-gnu/bin/python3.14",
+    )
+)
+STORE_CACHE = RELEASE_ROOT / "update-store"
+STORE_TOKEN_PATH = Path(
+    os.getenv("ZAPRET_UPDATE_STORE_TOKEN", "/home/codex-pve/.config/forgejo/zapret-update-store-token")
+)
+STORE_OWNER = "zapretkvn"
+STORE_PRODUCT = "zapret-kvn"
+STORE_NAMES_FILE = "store-names.json"
 PHASES = (
     "source_prepared",
     "dev_verified",
@@ -640,14 +657,16 @@ def sign_release(directory: Path, version: str) -> None:
                 bundle.extractall(tree)
         except (zipfile.BadZipFile, OSError) as exc:
             raise ReleaseError(f"release ZIP cannot be unpacked for the signed file list: {exc}") from exc
+        built = build_store(tree, directory, version, keys)
         raw_path, signature_path = update_sign.make(
             key_path=SIGNING_KEY_PATH,
             product=keys.PRODUCT,
             channel=keys.CHANNEL,
             version=version,
-            tree=tree,
             installer=installer,
             out_dir=directory,
+            files=built["files"],
+            patches=built["patches"],
         )
     try:
         loaded = update_manifest.load_signed(
@@ -662,6 +681,90 @@ def sign_release(directory: Path, version: str) -> None:
         signature_path.unlink(missing_ok=True)
         raise ReleaseError(f"release signature is not accepted by the app: {exc}") from exc
     log(f"signed release list with key {loaded.key}")
+
+
+def previous_manifests(keys, version: str, directory: Path, *, limit: int = 3) -> list[Path]:
+    """Подписанные списки прежних выпусков с хранилищем — основа для заплаток."""
+    from zapret_update import manifest as update_manifest
+
+    found: list[Path] = []
+    try:
+        with urllib.request.urlopen(f"{FORGEJO_BASE}/api/v1/repos/{FORGEJO_REPO}/releases?limit=20", timeout=60) as response:
+            releases = json.loads(response.read())
+    except (OSError, ValueError) as exc:
+        log(f"previous releases are unavailable, no patches this time: {exc}")
+        return found
+    for release in releases if isinstance(releases, list) else ():
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        tag = str(release.get("tag_name") or "").removeprefix("v")
+        try:
+            if update_manifest.compare_versions(tag, version) >= 0:
+                continue
+        except update_manifest.ManifestError:
+            continue
+        assets = {str(item.get("name")): str(item.get("browser_download_url") or "") for item in release.get("assets") or ()}
+        if not all(name in assets for name in SIGNED_ASSET_NAMES):
+            continue
+        try:
+            with urllib.request.urlopen(assets[SIGNED_ASSET_NAMES[0]], timeout=60) as response:
+                raw = response.read(update_manifest.MAX_MANIFEST_BYTES + 1)
+            with urllib.request.urlopen(assets[SIGNED_ASSET_NAMES[1]], timeout=60) as response:
+                signature = response.read(1024)
+            loaded = update_manifest.load_signed(
+                raw, signature, trusted=keys.TRUSTED_KEYS, product=keys.PRODUCT, channel=keys.CHANNEL
+            )
+        except (OSError, ValueError) as exc:
+            log(f"release list v{tag} is not accepted: {exc}")
+            continue
+        if loaded.files and all(entry.zsize for entry in loaded.files):
+            target = directory / f"previous-{tag}.json"
+            target.write_bytes(raw)
+            found.append(target)
+        if len(found) >= limit:
+            break
+    return found
+
+
+def build_store(tree: Path, directory: Path, version: str, keys) -> dict[str, Any]:
+    """Собрать хранилище выпуска общим ядром (``python3.14 -m zapret_update.builder``)."""
+    if not STORE_PYTHON.is_file():
+        raise ReleaseError(f"Python 3.14 for the update store is missing: {STORE_PYTHON}")
+    out = directory / "store-build.json"
+    previous = previous_manifests(keys, version, directory)
+    template = f"{FORGEJO_BASE}/api/packages/{STORE_OWNER}/generic/{STORE_PRODUCT}-store/1/{{name}}"
+    command: list[str | os.PathLike[str]] = [
+        STORE_PYTHON, "-m", "zapret_update.builder", "--tree", tree, "--cache", STORE_CACHE,
+        "--store-url", template, "--out", out,
+    ]
+    for path in previous:
+        command += ["--previous", path]
+    run(command, timeout=3600)
+    built = read_json(out)
+    (directory / STORE_NAMES_FILE).write_text(json.dumps(built["names"]), encoding="utf-8")
+    log(f"update store: {len(built['files'])} files, {len(built['patches'])} patches from {len(previous)} releases")
+    return built
+
+
+def upload_store(directory: Path) -> None:
+    """Залить хранилище выпуска в реестр пакетов Forgejo (общее ядро)."""
+    from zapret_update import publish
+
+    if not STORE_TOKEN_PATH.is_file():
+        raise ReleaseError(f"update store token is missing: {STORE_TOKEN_PATH}")
+    mode = stat.S_IMODE(STORE_TOKEN_PATH.stat().st_mode)
+    if mode != 0o600:
+        raise ReleaseError(f"update store token mode must be 0600, got {mode:o}")
+    names = json.loads((directory / STORE_NAMES_FILE).read_text(encoding="utf-8"))
+    publish.upload(
+        names,
+        cache_dir=STORE_CACHE,
+        owner=STORE_OWNER,
+        product=STORE_PRODUCT,
+        token=STORE_TOKEN_PATH.read_text(encoding="utf-8").strip(),
+        origin=FORGEJO_BASE,
+        log=log,
+    )
 
 
 def signed_assets(directory: Path) -> list[dict[str, Any]]:
@@ -1152,6 +1255,9 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         raise ReleaseError("Forgejo release is missing")
 
     if not phase_done(state, "assets_uploaded"):
+        # Хранилище — раньше файлов выпуска: программа, увидевшая выпуск,
+        # сразу находит всё, на что ссылается его подписанный список.
+        upload_store(release_dir)
         release = verify_and_upload_assets(forgejo, release, release_dir, manifest)
         mark_phase(state, "assets_uploaded")
 

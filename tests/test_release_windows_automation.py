@@ -494,6 +494,16 @@ def test_release_is_signed_with_a_key_the_app_knows(tmp_path, monkeypatch) -> No
         bundle.writestr("core/sing-box.exe", b"core")
         bundle.writestr("empty/", b"")
     monkeypatch.setattr(release, "SIGNING_KEY_PATH", key)
+    # Сборщик хранилища (Python 3.14, сеть) проверяется своими тестами ядра.
+    def fake_store(tree, directory, version, keys):
+        files = [
+            {"path": path.relative_to(tree).as_posix(), "size": path.stat().st_size,
+             "sha256": manifest.file_sha256(path), "zsize": 1}
+            for path in sorted(tree.rglob("*")) if path.is_file()
+        ]
+        return {"files": files, "patches": [], "names": []}
+
+    monkeypatch.setattr(release, "build_store", fake_store)
     keys = release._signed_release_module()
     monkeypatch.setattr(release, "_signed_release_module", lambda: type("K", (), {
         "PRODUCT": keys.PRODUCT, "CHANNEL": keys.CHANNEL, "TRUSTED_KEYS": {"kvn-test": public}})())

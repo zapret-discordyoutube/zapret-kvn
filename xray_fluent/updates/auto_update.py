@@ -259,15 +259,60 @@ def auto_install_block_reason(
     return ""
 
 
+# Замену, оборванную выключением, откатываем только если её журналу больше
+# этого: свежий журнал — это идущая прямо сейчас установка, и запущенная ею
+# для проверки новая версия не должна откатить саму себя.
+INTERRUPTED_SWAP_MIN_AGE_S = 10 * 60
+
+
+def recover_interrupted_swaps(*, runtime_dir: Path = RUNTIME_DIR, now: float | None = None) -> int:
+    """Откатить замену файлов, оборванную на полпути (журнал на диске).
+
+    Возвращает, сколько замен откачено. Программу под замком установщика
+    (``ZAPRET_UPDATE_HOLD``) не трогает вовсе.
+    """
+    from zapret_update import handoff, swap
+
+    if os.environ.get(handoff.HOLD_ENV):
+        return 0
+    moment = time.time() if now is None else now
+    recovered = 0
+    root = runtime_dir / STAGE_ROOT_NAME
+    try:
+        journals = list(root.glob(f"*/swap/{swap.JOURNAL_NAME}"))
+    except OSError:
+        return 0
+    for journal in journals:
+        try:
+            if moment - journal.stat().st_mtime < INTERRUPTED_SWAP_MIN_AGE_S:
+                continue
+        except OSError:
+            continue
+        errors = swap.recover(journal.parent)
+        if errors is None:
+            continue
+        if errors:
+            _log.error("Оборванная замена откачена не полностью: %s", "; ".join(errors))
+        else:
+            _log.warning("Оборванная замена файлов откачена: %s", journal.parent)
+            recovered += 1
+    return recovered
+
+
 def purge_update_leftovers(
     *,
     runtime_dir: Path = RUNTIME_DIR,
     temp_dir: Path | None = None,
     now: float | None = None,
 ) -> int:
-    """Удалить брошенные каталоги прошлых обновлений. Вызывать не из GUI-потока."""
+    """Удалить брошенные каталоги прошлых обновлений. Вызывать не из GUI-потока.
+
+    Сначала откатывается замена, оборванная выключением: её вынесенные файлы
+    лежат в тех же каталогах.
+    """
 
     moment = time.time() if now is None else now
+    recover_interrupted_swaps(runtime_dir=runtime_dir, now=moment)
     temp_root = Path(tempfile.gettempdir()) if temp_dir is None else temp_dir
     candidates: list[tuple[Path, float]] = []
     try:

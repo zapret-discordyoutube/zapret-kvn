@@ -48,11 +48,16 @@ class FetchError(Exception):
 
 @dataclass(frozen=True)
 class Source:
-    """Один сервер с хранилищем: как назвать ссылку на файл по его имени."""
+    """Один путь к хранилищу: как назвать ссылку на файл по его имени.
+
+    ``proxy`` — адрес прокси (``http://127.0.0.1:порт``) или пусто: напрямую.
+    Системный прокси Windows не берётся никогда — путь задаёт программа.
+    """
 
     label: str
     url_for: Callable[[str], str]
     verify_ssl: bool = True
+    proxy: str = ""
 
 
 class _Progress:
@@ -72,13 +77,13 @@ class _Progress:
             pass
 
 
-def _context(verify: bool) -> ssl.SSLContext | None:
-    if verify:
-        return None
+def _opener(source: Source) -> urllib.request.OpenerDirector:
     context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
+    if not source.verify_ssl:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    proxies = {"http": source.proxy, "https": source.proxy} if source.proxy else {}
+    return urllib.request.build_opener(urllib.request.ProxyHandler(proxies), urllib.request.HTTPSHandler(context=context))
 
 
 def _download_part(
@@ -102,7 +107,7 @@ def _download_part(
     if have:
         headers["Range"] = f"bytes={have}-"
     request = urllib.request.Request(source.url_for(name), headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout, context=_context(source.verify_ssl)) as response:
+    with _opener(source).open(request, timeout=timeout) as response:
         status = getattr(response, "status", 200)
         mode = "ab"
         if have and status != 206:

@@ -120,4 +120,82 @@ def prune_cache(cache_dir: Path, keep: Iterable[str]) -> int:
     return removed
 
 
-__all__ = ["StoreBuild", "build_store", "prune_cache"]
+def _read_old_from(template: str):
+    """Прежний файл из хранилища по шаблону ссылки ``…/{name}``."""
+    import urllib.request
+
+    def read_old(sha256: str, size: int) -> bytes | None:
+        try:
+            with urllib.request.urlopen(template.format(name=store.blob_name(sha256)), timeout=120) as response:
+                return store.unpack_blob(response.read(), sha256=sha256, size=size)
+        except (OSError, ValueError):
+            return None
+
+    return read_old
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Сборка хранилища из командной строки (сборке на Python старше 3.14).
+
+    ::
+
+        python3.14 -m zapret_update.builder --tree папка --cache кэш \
+            --previous прежний.json … --store-url "https://…/{name}" --out итог.json
+
+    ``--previous`` — уже проверенные списки прежних выпусков; в ``--out``
+    пишутся ``files``, ``patches`` и ``names``.
+    """
+    import argparse
+    import json
+
+    from . import manifest as manifest_module
+
+    parser = argparse.ArgumentParser(description="Сборка хранилища выпуска.")
+    parser.add_argument("--tree", type=Path, required=True)
+    parser.add_argument("--cache", type=Path, required=True)
+    parser.add_argument("--previous", type=Path, action="append", default=[])
+    parser.add_argument("--store-url", default="")
+    parser.add_argument("--exclude", action="append", default=[])
+    parser.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(argv)
+
+    skipped = tuple(item.strip("/") for item in args.exclude if item.strip("/"))
+    layout = {}
+    for path in sorted(args.tree.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(args.tree).as_posix()
+        if any(relative == item or relative.startswith(item + "/") for item in skipped):
+            continue
+        layout[relative] = path
+    previous = [manifest_module.parse(json.loads(path.read_text(encoding="utf-8"))) for path in args.previous]
+    result = build_store(
+        layout=layout,
+        cache_dir=args.cache,
+        previous=previous,
+        read_old=_read_old_from(args.store_url) if args.store_url else None,
+        log=print,
+    )
+    args.out.write_text(
+        json.dumps(
+            {
+                "files": result.files,
+                "patches": result.patches,
+                "names": sorted(result.names),
+                "compressed": result.compressed,
+                "patched": result.patched,
+            }
+        ),
+        encoding="utf-8",
+    )
+    print(f"файлов {len(result.files)}, сжато {result.compressed}, заплаток {len(result.patches)} (новых {result.patched})")
+    return 0
+
+
+__all__ = ["StoreBuild", "build_store", "main", "prune_cache"]
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

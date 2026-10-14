@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from xray_fluent.updates import auto_update
 from xray_fluent.updates.auto_update import (
@@ -240,3 +240,50 @@ class ResumeAfterUpdateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InterruptedSwapTests(unittest.TestCase):
+    """Замена, оборванная выключением, откатывается при обычном запуске."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.app = Path(self._tmp.name) / "app"
+        self.runtime = self.app / "data" / "runtime"
+        (self.app / "core").mkdir(parents=True)
+        (self.app / "core" / "xray.exe").write_text("old")
+        work = self.runtime / "app_update" / "attempt" / "swap"
+        (work / "old" / "core").mkdir(parents=True)
+        # Состояние «после первого переноса»: прежний файл уже вынесен.
+        os.replace(self.app / "core" / "xray.exe", work / "old" / "core" / "xray.exe")
+        import json as _json
+
+        (work / "journal.json").write_text(_json.dumps({
+            "app_dir": str(self.app),
+            "moves": [[str(work / "old" / "core" / "xray.exe"), str(self.app / "core" / "xray.exe")]],
+            "created_dirs": [],
+        }))
+        self.journal = work / "journal.json"
+
+    def test_old_journal_is_rolled_back(self) -> None:
+        from xray_fluent.updates.auto_update import recover_interrupted_swaps
+
+        moment = self.journal.stat().st_mtime + 11 * 60
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ZAPRET_UPDATE_HOLD", None)
+            self.assertEqual(recover_interrupted_swaps(runtime_dir=self.runtime, now=moment), 1)
+        self.assertEqual((self.app / "core" / "xray.exe").read_text(), "old")
+
+    def test_fresh_journal_of_a_running_install_is_left_alone(self) -> None:
+        from xray_fluent.updates.auto_update import recover_interrupted_swaps
+
+        moment = self.journal.stat().st_mtime + 60
+        self.assertEqual(recover_interrupted_swaps(runtime_dir=self.runtime, now=moment), 0)
+        self.assertFalse((self.app / "core" / "xray.exe").exists())
+
+    def test_program_started_by_the_installer_never_rolls_back(self) -> None:
+        from xray_fluent.updates.auto_update import recover_interrupted_swaps
+
+        moment = self.journal.stat().st_mtime + 3600
+        with patch.dict(os.environ, {"ZAPRET_UPDATE_HOLD": "x"}):
+            self.assertEqual(recover_interrupted_swaps(runtime_dir=self.runtime, now=moment), 0)
