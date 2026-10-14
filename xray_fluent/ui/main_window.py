@@ -1777,6 +1777,9 @@ class MainWindow(FluentWindow):
             return ""
         if signal.queue_reachable() and not signal.is_granted(update.version):
             return "версия раздаётся по очереди, ждём разрешения сервера"
+        if signal.is_urgent(update.version):
+            # Установленную версию сервер отозвал: сломанную меняем сразу.
+            return ""
         busy = signal.busy_reason()
         if busy:
             QTimer.singleShot(UPDATE_BUSY_RECHECK_MS, self._recheck_update_when_free)

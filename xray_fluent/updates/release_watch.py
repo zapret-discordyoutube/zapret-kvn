@@ -187,6 +187,7 @@ class ReleaseWatcher:
         current_version: str,
         on_release: Callable[[str], None],
         on_queued: Callable[[str], None] = lambda _version: None,
+        on_revoked: Callable[[str], None] | None = None,
         is_enabled: Callable[[], bool] = lambda: True,
         is_busy: Callable[[], bool] = fullscreen_app_active,
         activity: Callable[[], dict] = dict,
@@ -199,6 +200,9 @@ class ReleaseWatcher:
         self._known = str(current_version).lstrip("vV")
         self._on_release = on_release
         self._on_queued = on_queued
+        # Выключатель версии (как у Zapret 2 GUI): установленную версию сервер
+        # отозвал — новая ставится сразу, не дожидаясь, пока человек освободится.
+        self._on_revoked = on_revoked
         self._is_enabled = is_enabled
         self._is_busy = is_busy
         self._activity = activity
@@ -328,6 +332,10 @@ class ReleaseWatcher:
             self._known = version
             self._queued_version = ""
             self._ticket = 0
+            if answer.get("revoked") and self._on_revoked is not None:
+                _log.info("[update] Сервер отозвал установленную версию: ставим v%s сразу", version)
+                self._notify(self._on_revoked, version)
+                return True
             _log.info("[update] Сервер разрешил обновиться до v%s", version)
             self._notify(self._on_release, version)
             return True

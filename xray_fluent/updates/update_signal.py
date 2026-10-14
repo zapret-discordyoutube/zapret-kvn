@@ -53,11 +53,14 @@ class UpdateSignal(QObject):
         self._lock = threading.Lock()
         self._presence: dict[str, bool] = {}
         self._granted_at: dict[str, float] = {}
+        # Версии, которые надо поставить сразу: установленную сервер отозвал.
+        self._urgent: set[str] = set()
         self._report: dict[str, str] = {}
         self._watcher = watcher_factory(
             current_version=APP_VERSION,
             on_release=self._on_release,
             on_queued=lambda version: self.queued.emit(str(version)),
+            on_revoked=self._on_revoked,
             is_enabled=is_enabled,
             activity=self._activity,
             pending_report=self._pending_report,
@@ -124,6 +127,15 @@ class UpdateSignal(QObject):
                 self._report = {"miss": str(version), "why": code}
 
     # --- для слушателя (его поток) ---
+
+    def is_urgent(self, version: str) -> bool:
+        with self._lock:
+            return str(version) in self._urgent
+
+    def _on_revoked(self, version: str) -> None:
+        with self._lock:
+            self._urgent.add(str(version))
+        self._on_release(version)
 
     def _on_release(self, version: str) -> None:
         with self._lock:

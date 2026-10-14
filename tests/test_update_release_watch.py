@@ -300,13 +300,14 @@ class UpdateSignalTests(unittest.TestCase):
 class BackgroundInstallGateTests(unittest.TestCase):
     """Фоновая установка ждёт разрешения сервера и простоя."""
 
-    def _reason(self, *, reachable: bool, granted: bool, busy: str = "") -> str:
+    def _reason(self, *, reachable: bool, granted: bool, busy: str = "", urgent: bool = False) -> str:
         from xray_fluent.ui import main_window
         from xray_fluent.ui.main_window import MainWindow
 
         signal = SimpleNamespace(
             queue_reachable=lambda: reachable,
             is_granted=lambda _version: granted,
+            is_urgent=lambda _version: urgent,
             busy_reason=lambda: busy,
         )
         window = SimpleNamespace(_update_signal=signal, _recheck_update_when_free=Mock())
@@ -326,6 +327,12 @@ class BackgroundInstallGateTests(unittest.TestCase):
         self.assertIn("игра", reason)
         self.single_shot.assert_called_once()
 
+    def test_revoked_version_is_replaced_even_during_a_game(self) -> None:
+        reason = self._reason(reachable=True, granted=True, busy="на экране игра", urgent=True)
+
+        self.assertEqual(reason, "")
+        self.single_shot.assert_not_called()
+
     def test_no_listener_means_no_extra_waiting(self) -> None:
         from xray_fluent.ui.main_window import MainWindow
 
@@ -334,3 +341,31 @@ class BackgroundInstallGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RevokedVersionTests(unittest.TestCase):
+    """Выключатель версии: отозванная сервером версия ставится сразу, мимо «занят»."""
+
+    def test_revoked_answer_takes_the_urgent_path(self) -> None:
+        released, revoked = [], []
+        watcher = ReleaseWatcher(current_version="0.8.25", on_release=released.append, on_revoked=revoked.append)
+
+        self.assertTrue(watcher._accept({"channel": "stable", "version": "0.8.26", "changed": True, "revoked": True}))
+
+        self.assertEqual((released, revoked), ([], ["0.8.26"]))
+
+    def test_urgent_version_skips_the_busy_wait(self) -> None:
+        from xray_fluent.updates.update_signal import UpdateSignal
+
+        captured = {}
+
+        def factory(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(reachable=True, start=Mock(), stop=Mock())
+
+        signal = UpdateSignal(is_enabled=lambda: True, window_shown=lambda: True, connected=lambda: False, watcher_factory=factory)
+        captured["on_revoked"]("0.8.26")
+
+        self.assertTrue(signal.is_urgent("0.8.26"))
+        self.assertTrue(signal.is_granted("0.8.26"))
+        self.assertFalse(signal.is_urgent("0.8.27"))
