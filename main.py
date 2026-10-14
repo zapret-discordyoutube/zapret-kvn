@@ -11,6 +11,7 @@ import sys
 import threading
 
 from xray_fluent.constants import APP_VERSION
+from xray_fluent.diagnostics.startup_clock import since_process_start_ms
 from xray_fluent.platform.windows.subprocess_utils import result_output_text, run_text
 
 
@@ -103,7 +104,7 @@ def _setup_bootstrap_logging() -> None:
         except Exception:
             pass
 
-    _bootstrap_logger.info("----- startup begin -----")
+    _bootstrap_logger.info("----- startup begin ----- process_ms=%.0f", since_process_start_ms())
     _bootstrap_logger.info("argv=%s", sys.argv)
     _bootstrap_logger.info("frozen=%s executable=%s", getattr(sys, "frozen", False), sys.executable)
     _bootstrap_logger.info("runtime %s", _runtime_identity_message())
@@ -377,6 +378,7 @@ def main() -> int:
     from xray_fluent.ui.theme import apply_theme
     from xray_fluent.application.startup_service import StartupLoader
 
+    _bootstrap_logger.info("imports_done process_ms=%.0f", since_process_start_ms())
     app = QApplication(sys.argv)
     from xray_fluent.constants import DATA_DIR
     from xray_fluent.network.bootstrap_dns import configure_cache
@@ -419,7 +421,11 @@ def main() -> int:
             _show_after_update_window(window.show)
         else:
             _show_after_update_window(lambda: None)
-        _bootstrap_logger.info("main shell ready; tray=%s", args.tray and tray_available and not locked)
+        _bootstrap_logger.info(
+            "main shell ready; tray=%s process_ms=%.0f",
+            args.tray and tray_available and not locked,
+            since_process_start_ms(),
+        )
 
     def loaded(state, history):
         if windows:
@@ -440,7 +446,7 @@ def main() -> int:
     loader.password_needed.connect(need_password)
     loader.failed.connect(failed)
     QTimer.singleShot(0, loader.start)
-    _bootstrap_logger.info("Entering Qt event loop")
+    _bootstrap_logger.info("Entering Qt event loop process_ms=%.0f", since_process_start_ms())
     exit_code = app.exec()
     loader.finish_shutdown()
     for window in windows:

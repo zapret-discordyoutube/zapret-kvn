@@ -24,6 +24,7 @@ from qfluentwidgets import (
 
 from ..diagnostics.connection_message import connection_message
 from ..diagnostics.runtime_logging import redact_server_addresses
+from ..diagnostics.startup_clock import since_process_start_ms
 from ..application.controller import AppController
 from ..application.selection_source import SelectionSource
 from ..application.route_check import RouteCheck
@@ -270,7 +271,11 @@ class MainWindow(FluentWindow):
         self._metadata_worker.start()
         if state.settings.xray_auto_update:
             QTimer.singleShot(4500, lambda: self.controller.run_xray_core_update(True, silent=True) if not self._quitting else None)
-        logging.getLogger("xray_fluent.bootstrap").info("controls_ready_ms=%.1f", (time.perf_counter() - self._startup_started) * 1000)
+        logging.getLogger("xray_fluent.bootstrap").info(
+            "controls_ready_ms=%.1f process_ms=%.0f",
+            (time.perf_counter() - self._startup_started) * 1000,
+            since_process_start_ms(),
+        )
         self._schedule_tour_autostart()
 
     def _metadata_ready(self, result):
@@ -656,7 +661,11 @@ class MainWindow(FluentWindow):
         super().showEvent(event)
         if not getattr(self, "_first_show_logged", False):
             self._first_show_logged = True
-            QTimer.singleShot(0, lambda: logging.getLogger("xray_fluent.bootstrap").info("first_window_ms=%.1f", (time.perf_counter() - self._startup_started) * 1000))
+            QTimer.singleShot(0, lambda: logging.getLogger("xray_fluent.bootstrap").info(
+                "first_window_ms=%.1f process_ms=%.0f",
+                (time.perf_counter() - self._startup_started) * 1000,
+                since_process_start_ms(),
+            ))
         # Запуск в трей окно не показывает — экскурсия ждёт первого появления.
         self._schedule_tour_autostart()
         if not getattr(self, "_screen_signals_connected", False) and self.windowHandle():

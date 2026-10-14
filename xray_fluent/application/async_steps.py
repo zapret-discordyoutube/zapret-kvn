@@ -305,6 +305,84 @@ def wait_process_started(process: Any, timeout_ms: int) -> WaitProcessStartedSte
     return WaitProcessStartedStep(process, timeout_ms)
 
 
+def _step_origin(generator: Any) -> str:
+    """``function:line`` самого глубокого генератора в цепочке ``yield from``."""
+    frame = None
+    current = generator
+    for _ in range(64):
+        frame = getattr(current, "gi_frame", None) or frame
+        nested = getattr(current, "gi_yieldfrom", None)
+        if nested is None:
+            break
+        current = nested
+    if frame is None:
+        return "?"
+    return f"{frame.f_code.co_name}:{frame.f_lineno}"
+
+
+def _step_kind(step: TransitionStep) -> str:
+    if isinstance(step, RunInWorkerStep):
+        name = getattr(step._fn, "__name__", "") or type(step._fn).__name__
+        return f"worker {name}" if name != "<lambda>" else "worker"
+    if isinstance(step, SleepStep):
+        return f"sleep {step.ms}"
+    if isinstance(step, WaitProcessStartedStep):
+        return "process start"
+    if isinstance(step, WaitProcessFinishedStep):
+        return "process exit"
+    return type(step).__name__
+
+
+class TransitionProfile:
+    """Где переход провёл время: шаги (ожидание) и код между ними (GUI-поток).
+
+    Ничего не меняет в выполнении — только складывает длительности, чтобы
+    журнал показывал, какой шаг задержал подключение или переключение.
+    """
+
+    #: Шаги короче этого порога не печатаются поимённо, только суммой.
+    LIST_THRESHOLD_MS = 15.0
+
+    def __init__(self) -> None:
+        self.started = time.perf_counter()
+        self.finished: float | None = None
+        self.gui_ms = 0.0
+        self.steps: list[tuple[str, float]] = []
+        self._step_started = 0.0
+        self._step_label = ""
+
+    def begin_step(self, label: str) -> None:
+        self._step_label = label
+        self._step_started = time.perf_counter()
+
+    def end_step(self) -> None:
+        if self._step_label:
+            self.steps.append((self._step_label, (time.perf_counter() - self._step_started) * 1000.0))
+            self._step_label = ""
+
+    def add_gui(self, began: float) -> None:
+        self.gui_ms += (time.perf_counter() - began) * 1000.0
+
+    def close(self) -> None:
+        self.end_step()
+        if self.finished is None:
+            self.finished = time.perf_counter()
+
+    @property
+    def total_ms(self) -> float:
+        end = self.finished if self.finished is not None else time.perf_counter()
+        return (end - self.started) * 1000.0
+
+    def summary(self) -> str:
+        listed = [(label, ms) for label, ms in self.steps if ms >= self.LIST_THRESHOLD_MS]
+        rest = [ms for _label, ms in self.steps if ms < self.LIST_THRESHOLD_MS]
+        parts = [f"{label}={ms:.0f}" for label, ms in listed]
+        if rest:
+            parts.append(f"прочие {len(rest)} шагов={sum(rest):.0f}")
+        text = f"total={self.total_ms:.0f}ms gui={self.gui_ms:.0f}ms steps={len(self.steps)}"
+        return text + (" | " + ", ".join(parts) if parts else "")
+
+
 class TransitionRunner(QObject):
     """Drives a transition generator on the GUI thread.
 
@@ -339,6 +417,9 @@ class TransitionRunner(QObject):
         self.result: Any = None
         self.error: BaseException | None = None
         self.cancelled = False
+        self.profile = TransitionProfile()
+        #: perf_counter() запроса, ради которого запущен переход (для журнала).
+        self.requested_at: float | None = None
         self._step_completed.connect(self._handle_step_completed, Qt.ConnectionType.QueuedConnection)
 
     @property
@@ -364,9 +445,11 @@ class TransitionRunner(QObject):
         if self._done:
             return
         self._current_step = None
+        self.profile.end_step()
         if not self._is_current():
             self._cancel_run()
             return
+        gui_began = time.perf_counter()
         try:
             if error is not None:
                 step = self._gen.throw(error)
@@ -375,11 +458,14 @@ class TransitionRunner(QObject):
         except StopIteration as stop:
             # Synchronous steps can pump Qt events internally, including Stop
             # or a newer selection, without yielding back to this runner.
+            self.profile.add_gui(gui_began)
             self._finish(result=stop.value, cancelled=not self._is_current())
             return
         except BaseException as exc:  # noqa: BLE001 — transition errors surface via .error
+            self.profile.add_gui(gui_began)
             self._finish(error=exc)
             return
+        self.profile.add_gui(gui_began)
         if not isinstance(step, TransitionStep):
             bad = TypeError(f"Transition generator must yield TransitionStep, got {type(step)!r}")
             try:
@@ -391,6 +477,7 @@ class TransitionRunner(QObject):
         self._seq += 1
         seq = self._seq
         self._current_step = step
+        self.profile.begin_step(f"{_step_origin(self._gen)} {_step_kind(step)}")
 
         def _report(step_value: Any, step_error: BaseException | None) -> None:
             # May be invoked from a worker thread: the queued signal marshals
@@ -432,6 +519,7 @@ class TransitionRunner(QObject):
         if self._done:
             return
         self._done = True
+        self.profile.close()
         self.result = result
         self.error = error
         self.cancelled = cancelled

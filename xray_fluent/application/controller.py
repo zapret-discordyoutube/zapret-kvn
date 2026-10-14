@@ -298,6 +298,22 @@ def _process_alive(manager: object) -> bool:
     return getattr(manager, "process_alive", False) is True
 
 
+def _log_transition_profile(controller: Any, kind: str, runner: TransitionRunner) -> None:
+    """Одна строка [perf] на переход: где ушло время подключения/переключения."""
+    log = getattr(controller, "_log", None)
+    profile = getattr(runner, "profile", None)
+    if log is None or profile is None:
+        return
+    outcome = "cancelled" if runner.cancelled else ("error" if runner.error is not None else (
+        "ok" if runner.result else "failed"
+    ))
+    requested = getattr(runner, "requested_at", None)
+    waited = ""
+    if requested is not None:
+        waited = f" since_request={(time.perf_counter() - requested) * 1000.0:.0f}ms"
+    log(f"[perf] {kind} {outcome}{waited} {profile.summary()}")
+
+
 def _write_json_atomically(path: Path, payload: object) -> None:
     """Worker-only: serialize and atomically replace a runtime JSON file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2192,6 +2208,9 @@ class AppController(QObject):
         """
         if not keep_blocked:
             self._blocked_transition_signature = ""
+        if getattr(self, "_transition_requested_at", None) is None:
+            # Часы первого из слитых запросов: «нажал → готово» в [perf].
+            self._transition_requested_at = time.perf_counter()
         self._transition_pending = True
         self._transition_reason = reason
         self._transition_generation += 1
@@ -2249,6 +2268,7 @@ class AppController(QObject):
         if self._transition_runner is runner:
             self._transition_runner = None
         runner.deleteLater()
+        _log_transition_profile(self, "pre-stop", runner)
         self._transition_active = False
         if runner.cancelled:
             return
@@ -2431,6 +2451,8 @@ class AppController(QObject):
             ),
             parent=self,
         )
+        runner.requested_at = getattr(self, "_transition_requested_at", None)
+        self._transition_requested_at = None
         self._transition_runner = runner
         runner.start()
 
@@ -2443,6 +2465,7 @@ class AppController(QObject):
         if self._transition_runner is runner:
             self._transition_runner = None
         runner.deleteLater()
+        _log_transition_profile(self, f"transition {action}", runner)
         superseded = runner.cancelled or (
             generation is not None and generation != self._transition_generation
         )
@@ -3254,6 +3277,7 @@ class AppController(QObject):
         if self._hot_switch_runner is runner:
             self._hot_switch_runner = None
         runner.deleteLater()
+        _log_transition_profile(self, "core-switch", runner)
         pending = self._hot_switch_pending
         self._hot_switch_pending = False
         if runner.cancelled:

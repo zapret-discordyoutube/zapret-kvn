@@ -66,6 +66,32 @@ class TransitionRunnerTests(unittest.TestCase):
         self.assertFalse(runner.cancelled)
         self.assertEqual(events, [("worker", 42), "slept"])
 
+    def test_profile_names_each_step_by_its_innermost_origin(self) -> None:
+        def write_file() -> int:
+            return 1
+
+        def inner():
+            yield run_in_worker(write_file)
+            yield sleep_ms(20)
+            return True
+
+        def outer():
+            return (yield from inner())
+
+        runner = TransitionRunner(outer())
+        runner.start()
+
+        self.assertTrue(_drive_until(lambda: runner.done))
+        labels = [label for label, _ms in runner.profile.steps]
+        self.assertEqual(len(labels), 2)
+        self.assertTrue(labels[0].startswith("inner:"), labels)
+        self.assertTrue(labels[0].endswith("worker write_file"), labels)
+        self.assertTrue(labels[1].endswith("sleep 20"), labels)
+        self.assertGreaterEqual(runner.profile.steps[1][1], 15.0)
+        summary = runner.profile.summary()
+        self.assertIn("steps=2", summary)
+        self.assertIn("sleep 20=", summary)
+
     def test_stale_generation_cancels_mid_step_and_runs_finally(self) -> None:
         current = {"ok": True}
         trace: list[str] = []
