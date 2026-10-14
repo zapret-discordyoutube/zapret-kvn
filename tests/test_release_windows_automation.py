@@ -475,3 +475,52 @@ class BuildPayloadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_release_is_signed_with_a_key_the_app_knows(tmp_path, monkeypatch) -> None:
+    import base64 as _b64
+    import os as _os
+
+    release = release_windows
+    from zapret_update import manifest, sign
+
+    key = tmp_path / "k.key"
+    public = _b64.b64decode(sign.generate_key("kvn-test", key))
+    _os.chmod(key, 0o600)
+    (tmp_path / "ZapretKVN-v9.9.9-windows-x64.zip").write_bytes(b"zip")
+    monkeypatch.setattr(release, "SIGNING_KEY_PATH", key)
+    keys = release._signed_release_module()
+    monkeypatch.setattr(release, "_signed_release_module", lambda: type("K", (), {
+        "PRODUCT": keys.PRODUCT, "CHANNEL": keys.CHANNEL, "TRUSTED_KEYS": {"kvn-test": public}})())
+
+    release.sign_release(tmp_path, "9.9.9")
+
+    assets = release.signed_assets(tmp_path)
+    assert [item["name"] for item in assets] == ["update-manifest.json", "update-manifest.json.sig"]
+    loaded = manifest.load_signed(
+        (tmp_path / "update-manifest.json").read_bytes(), (tmp_path / "update-manifest.json.sig").read_text(),
+        trusted={"kvn-test": public}, product="zapret-kvn", channel="stable",
+    )
+    assert loaded.installer.name == "ZapretKVN-v9.9.9-windows-x64.zip"
+
+    # Ключ, которого программа не знает, выпуск останавливает.
+    monkeypatch.setattr(release, "_signed_release_module", lambda: keys)
+    import pytest as _pytest
+    with _pytest.raises(release.ReleaseError, match="not accepted"):
+        release.sign_release(tmp_path, "9.9.9")
+
+
+def test_app_keys_are_the_owner_keys_when_they_are_on_this_machine() -> None:
+    import base64 as _b64
+    from pathlib import Path as _Path
+
+    import pytest as _pytest
+    from xray_fluent.updates.signed_release import TRUSTED_KEYS
+    from zapret_update import sign
+
+    folder = _Path.home() / ".config" / "zapret-signing"
+    for key_id in ("kvn-2026a", "kvn-reserve-1"):
+        path = folder / f"{key_id}.key"
+        if not path.is_file():
+            _pytest.skip("ключей владельца на этой машине нет")
+        assert _b64.b64decode(sign.public_key_of(path)) == TRUSTED_KEYS[key_id]

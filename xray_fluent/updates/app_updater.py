@@ -34,6 +34,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..constants import APP_VERSION
 from .installer.plan import APP_EXE_NAME, WORK_DIR_PREFIX
+from .signed_release import signed_asset_urls, verified_manifest
+from zapret_update.manifest import ManifestError
 
 FORGEJO_RELEASE_API = (
     "https://git.zapret.moe/api/v1/repos/"
@@ -254,6 +256,14 @@ class _ReleaseClient:
             raise ValueError("Сервер обновлений вернул некорректный ответ")
         return payload
 
+    def fetch_signed(self, url: str, max_bytes: int) -> bytes:
+        if not _is_trusted_release_url(url):
+            raise ValueError("Forgejo вернул недоверенную ссылку на список выпуска")
+        response = self._fetch(Request(url, headers={"User-Agent": USER_AGENT}), max_bytes=max_bytes)
+        if not _is_trusted_release_url(response.final_url):
+            raise ValueError("Forgejo перенаправил список выпуска на недоверенный адрес")
+        return response.data
+
     def fetch_checksum(self, url: str) -> str:
         if not _is_trusted_release_url(url):
             raise ValueError("Forgejo вернул недоверенную ссылку на контрольную сумму")
@@ -307,13 +317,32 @@ def _find_available_update(proxy_url: str | None = None) -> AppUpdate | None:
     if not digest:
         raise ValueError(f"Релиз {tag} найден, но архив не содержит SHA-256")
 
+    # Что качать, подтверждает только подписанный список выпуска: сумма и
+    # размер из Forgejo лишь сверяются с ним.
+    version = tag.lstrip("v")
+    manifest_url, signature_url = signed_asset_urls(list(data.get("assets", [])), _is_trusted_release_url)
+    try:
+        manifest = verified_manifest(
+            version=version,
+            current_version=APP_VERSION,
+            manifest_url=manifest_url,
+            signature_url=signature_url,
+            fetch=client.fetch_signed,
+        )
+    except ManifestError as exc:
+        raise UpdateRejected(f"Релиз {tag} не прошёл проверку подписи: {exc}", exc.code) from None
+    archive = manifest.installer
+    size = int(asset.get("size") or 0)
+    if archive.name != str(asset.get("name") or "") or archive.sha256 != digest or (size and archive.size != size):
+        raise UpdateRejected(f"Forgejo описал архив {tag} иначе, чем подписанный список выпуска", "sign")
+
     return AppUpdate(
-        version=tag.lstrip("v"),
+        version=version,
         tag=tag,
         download_url=asset_url,
-        size=int(asset.get("size") or 0),
+        size=archive.size,
         notes=str(data.get("body") or ""),
-        digest_sha256=digest,
+        digest_sha256=archive.sha256,
     )
 
 

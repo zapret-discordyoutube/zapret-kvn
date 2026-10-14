@@ -5,12 +5,51 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 
-from xray_fluent.updates import app_updater
+import base64
+import hashlib
+
+from xray_fluent.updates import app_updater, signed_release
 from xray_fluent.network.http_utils import HttpFetchError, HttpResponseData
+from zapret_update import manifest as update_manifest
+from zapret_update.ed25519 import public_key_from_seed, sign_ed25519
+
+SEED = hashlib.sha256(b"kvn test key").digest()
+KEYS = {"kvn-test": public_key_from_seed(SEED)}
 
 
 def _response(payload: bytes, url: str) -> HttpResponseData:
     return HttpResponseData(payload, url, 200, "proxy")
+
+
+def _signed_release(digest, *, seed=SEED, listed_digest=None, with_list=True, listed_version="9.9.9"):
+    """Данные выпуска 9.9.9 и ответы сервера: выпуск, сумма архива, список, подпись."""
+    asset_name = "ZapretKVN-v9.9.9-windows-x64.zip"
+    base = "https://git.zapret.moe/zapretkvn/zapret-kvn/releases/download/v9.9.9/"
+    raw = update_manifest.dumps(
+        {
+            "schema": 1, "product": "zapret-kvn", "channel": "stable", "version": listed_version,
+            "created": 1, "key": "kvn-test", "files": [],
+            "installer": {"name": asset_name, "size": 10, "sha256": listed_digest or digest},
+        }
+    )
+    assets = [
+        {"name": asset_name, "browser_download_url": base + asset_name, "size": 10},
+        {"name": asset_name + ".sha256", "browser_download_url": base + asset_name + ".sha256"},
+    ]
+    if with_list:
+        for name in (update_manifest.MANIFEST_NAME, update_manifest.SIGNATURE_NAME):
+            assets.append({"name": name, "browser_download_url": base + name})
+    metadata = {"tag_name": "v9.9.9", "assets": assets}
+    responses = [
+        _response(json.dumps(metadata).encode(), app_updater.FORGEJO_RELEASE_API),
+        _response((digest + "  " + asset_name).encode(), base + asset_name + ".sha256"),
+    ]
+    if with_list:
+        responses += [
+            _response(raw, base + update_manifest.MANIFEST_NAME),
+            _response(base64.b64encode(sign_ed25519(seed, raw)), base + update_manifest.SIGNATURE_NAME),
+        ]
+    return metadata, responses
 
 
 class AppUpdateCheckTests(unittest.TestCase):
@@ -34,35 +73,35 @@ class AppUpdateCheckTests(unittest.TestCase):
         self.assertEqual(kwargs["fallback_http_statuses"], frozenset({451}))
 
     def test_checksum_sidecar_uses_same_transport_and_size_limit(self) -> None:
-        asset_name = "ZapretKVN-v9.9.9-windows-x64.zip"
-        asset_url = (
-            "https://git.zapret.moe/zapretkvn/zapret-kvn/"
-            f"releases/download/v9.9.9/{asset_name}"
-        )
-        checksum_url = asset_url + ".sha256"
-        metadata = {
-            "tag_name": "v9.9.9",
-            "assets": [
-                {"name": asset_name, "browser_download_url": asset_url, "size": 10},
-                {"name": asset_name + ".sha256", "browser_download_url": checksum_url},
-            ],
-        }
         digest = "a" * 64
-        responses = [
-            _response(json.dumps(metadata).encode(), app_updater.FORGEJO_RELEASE_API),
-            _response((digest + "  " + asset_name).encode(), checksum_url),
-        ]
+        metadata, responses = _signed_release(digest)
 
-        with patch.object(app_updater, "fetch_bytes", side_effect=responses) as fetch:
+        with patch.object(signed_release, "TRUSTED_KEYS", KEYS), patch.object(
+            app_updater, "fetch_bytes", side_effect=responses
+        ) as fetch:
             update = app_updater._find_available_update("http://127.0.0.1:1391")
 
         self.assertIsNotNone(update)
         self.assertEqual(update.digest_sha256, digest)
         self.assertEqual(fetch.call_args_list[1].kwargs["max_bytes"], 16 * 1024)
-        self.assertEqual(
-            fetch.call_args_list[1].kwargs["proxy_url"],
-            "http://127.0.0.1:1391",
-        )
+        for call in fetch.call_args_list:
+            self.assertEqual(call.kwargs["proxy_url"], "http://127.0.0.1:1391")
+
+    def test_archive_is_offered_only_with_a_valid_signed_list(self) -> None:
+        cases = {
+            "чужая подпись": dict(seed=hashlib.sha256(b"stranger").digest()),
+            "другая сумма у Forgejo": dict(listed_digest="b" * 64),
+            "нет списка": dict(with_list=False),
+            "старая версия в списке": dict(listed_version="0.0.1"),
+        }
+        for name, options in cases.items():
+            with self.subTest(name):
+                _metadata, responses = _signed_release("a" * 64, **options)
+                with patch.object(signed_release, "TRUSTED_KEYS", KEYS), patch.object(
+                    app_updater, "fetch_bytes", side_effect=responses
+                ):
+                    with self.assertRaises(app_updater.UpdateRejected):
+                        app_updater._find_available_update()
 
     def test_untrusted_release_api_redirect_is_rejected(self) -> None:
         payload = json.dumps({"tag_name": "v0.4.86", "assets": []}).encode()

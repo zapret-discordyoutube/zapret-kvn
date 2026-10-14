@@ -77,6 +77,15 @@ EXPECTED_ASSET_NAMES = (
     "ZapretKVN-v{version}-windows-x64.7z",
     "ZapretKVN-cores-v{version}-windows-x64.7z",
 )
+# Подписанный список выпуска (общее ядро обновления zapret_update): программа
+# ставит архив, только если его сумма есть в списке с верной подписью.
+SIGNING_KEY_PATH = Path(
+    os.getenv(
+        "ZAPRETKVN_UPDATE_SIGNING_KEY",
+        "/home/codex-pve/.config/zapret-signing/kvn-2026a.key",
+    )
+)
+SIGNED_ASSET_NAMES = ("update-manifest.json", "update-manifest.json.sig")
 PHASES = (
     "source_prepared",
     "dev_verified",
@@ -589,7 +598,67 @@ def collect_assets(version: str, commit: str) -> tuple[Path, dict[str, Any]]:
         raise ReleaseError("ZIP checksum file has an invalid format")
     if sha256(destination / zip_name) != expected_zip:
         raise ReleaseError("ZIP checksum mismatch after Windows transfer")
+    sign_release(destination, version)
     return destination, manifest
+
+
+def _signed_release_module():
+    """Ключи, которые знает программа этого коммита (xray_fluent/updates/signed_release.py)."""
+    import importlib.util
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    spec = importlib.util.spec_from_file_location(
+        "kvn_signed_release", ROOT / "xray_fluent" / "updates" / "signed_release.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def sign_release(directory: Path, version: str) -> None:
+    """Подписать архив выпуска и проверить подпись ключами программы."""
+    if not SIGNING_KEY_PATH.is_file():
+        raise ReleaseError(f"signing key is missing: {SIGNING_KEY_PATH}")
+    mode = stat.S_IMODE(SIGNING_KEY_PATH.stat().st_mode)
+    if mode != 0o600:
+        raise ReleaseError(f"signing key mode must be 0600, got {mode:o}")
+    keys = _signed_release_module()
+    from zapret_update import manifest as update_manifest
+    from zapret_update import sign as update_sign
+
+    raw_path, signature_path = update_sign.make(
+        key_path=SIGNING_KEY_PATH,
+        product=keys.PRODUCT,
+        channel=keys.CHANNEL,
+        version=version,
+        installer=directory / f"ZapretKVN-v{version}-windows-x64.zip",
+        out_dir=directory,
+    )
+    try:
+        loaded = update_manifest.load_signed(
+            raw_path.read_bytes(),
+            signature_path.read_text(encoding="ascii"),
+            trusted=keys.TRUSTED_KEYS,
+            product=keys.PRODUCT,
+            channel=keys.CHANNEL,
+        )
+    except update_manifest.ManifestError as exc:
+        raw_path.unlink(missing_ok=True)
+        signature_path.unlink(missing_ok=True)
+        raise ReleaseError(f"release signature is not accepted by the app: {exc}") from exc
+    log(f"signed release list with key {loaded.key}")
+
+
+def signed_assets(directory: Path) -> list[dict[str, Any]]:
+    """Список и подпись как файлы выпуска: имя, размер, SHA-256."""
+    assets = []
+    for name in SIGNED_ASSET_NAMES:
+        path = directory / name
+        if not path.is_file():
+            raise ReleaseError(f"signed release file is missing: {name}")
+        assets.append({"name": name, "size": path.stat().st_size, "sha256": sha256(path)})
+    return assets
 
 
 @dataclass
@@ -1025,6 +1094,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         mark_phase(state, "assets_verified", manifest=str(release_dir / "stable-manifest.json"))
     manifest = read_json(Path(state["manifest"]))
     verify_gate_manifest(manifest, "stable", version, commit)
+    # В выпуск идут файлы сборки и подписанный список выпуска.
+    manifest = {**manifest, "assets": [*manifest["assets"], *signed_assets(release_dir)]}
 
     if not phase_done(state, "tag_pushed"):
         ensure_tag(version, commit)
