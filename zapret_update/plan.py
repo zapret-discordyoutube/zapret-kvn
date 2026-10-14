@@ -106,6 +106,7 @@ def make_plan(
     *,
     installed: Manifest | None = None,
     hashes: HashCache | None = None,
+    codecs=None,
 ) -> UpdatePlan:
     """План обновления папки ``root`` до версии ``new``."""
     if not new.files:
@@ -113,6 +114,10 @@ def make_plan(
     missing_store = [entry.path for entry in new.files if not entry.zsize]
     if missing_store:
         raise PlanError(f"файлов выпуска нет в хранилище: {missing_store[0]}")
+    # Проверка до скачивания: без распаковщика скачанное всё равно не собрать.
+    usable = store.codecs() if codecs is None else frozenset(codecs)
+    if "zstd" not in usable:
+        raise PlanError("в программе нет распаковщика zstd (compression.zstd или zstandard)")
     cache = hashes or HashCache()
     base = Path(root)
     result = UpdatePlan(version=new.version)
@@ -121,7 +126,7 @@ def make_plan(
         if local == entry.sha256:
             result.keep.append(entry)
             continue
-        patch = new.patch_for(local, entry.sha256) if local else None
+        patch = new.patch_for(local, entry.sha256, kinds=usable) if local else None
         if patch is not None and patch.size < entry.zsize:
             result.want.append(Want(entry, patch))
         else:

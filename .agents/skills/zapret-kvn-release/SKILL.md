@@ -51,6 +51,30 @@ The runner owns the full release transaction:
 Do not manually repeat successful runner checks. Report the runner's final JSON,
 test totals, exact SHA, Release URL, asset count, and Telegram result.
 
+## Update store (since 0.8.26)
+
+After the Windows build the runner builds the update store with the shared
+update core (`windows/zapret_update`, a byte-for-byte copy of Zapret 2 GUI's
+`public_zapretgui/src/zapret_update`, synced by `scripts/sync_update_core.py`)
+and uploads only missing files to the Forgejo package
+`zapretkvn/generic/zapret-kvn-store`. Programs on 0.8.26+ download changed files
+and patches from it first; the zip is the fallback.
+
+- Needs Python 3.14 for `compression.zstd`: `ZAPRET_UPDATE_STORE_PYTHON`, default
+  `~/.local/share/uv/python/cpython-3.14.6-linux-x86_64-gnu/bin/python3.14`.
+  Missing interpreter stops the release before publication.
+- Needs the package-only Forgejo token
+  `~/.config/forgejo/zapret-update-store-token` (mode 600, scope
+  `write:package`; override `ZAPRET_UPDATE_STORE_TOKEN`). Never print it.
+- Cache lives in `~/releases/zapret-kvn/update-store`; patches are made from the
+  three previous signed releases.
+- bsdiff patches (`builder --bsdiff`, needs `bsdiff4` in that Python) are not
+  enabled for KVN: zstd patches of `ZapretKVN.exe` are already ~0.1 MB.
+- The app itself is built on Python 3.12, which has no `compression.zstd`; it
+  unpacks the store with the `zstandard` package from `requirements.txt`.
+  Without it the update plan refuses before downloading and the updater falls
+  back to zip ranges (0.8.26 shipped without it, so its store step never worked).
+
 ## Resume failures
 
 The runner stores its phase under `.git/zapret-kvn-release-state.json`. After a

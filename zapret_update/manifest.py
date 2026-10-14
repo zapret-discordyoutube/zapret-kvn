@@ -92,9 +92,13 @@ class Manifest:
     installer: InstallerEntry | None
     patches: tuple[PatchEntry, ...] = ()
 
-    def patch_for(self, from_sha256: str, to_sha256: str) -> PatchEntry | None:
-        """Самая маленькая заплатка от ``from`` к ``to`` любого вида."""
-        found = [item for item in self.patches if item.from_sha256 == from_sha256 and item.to_sha256 == to_sha256]
+    def patch_for(self, from_sha256: str, to_sha256: str, kinds=PATCH_KINDS) -> PatchEntry | None:
+        """Самая маленькая заплатка от ``from`` к ``to`` из видов ``kinds``."""
+        found = [
+            item
+            for item in self.patches
+            if item.from_sha256 == from_sha256 and item.to_sha256 == to_sha256 and item.kind in kinds
+        ]
         return min(found, key=lambda item: item.size) if found else None
 
 

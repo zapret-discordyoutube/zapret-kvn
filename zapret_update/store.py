@@ -19,7 +19,10 @@
 
 Сжатие — ``compression.zstd`` из стандартной библиотеки Python 3.14; модуль
 импортируется только при работе с содержимым, поэтому список выпуска и подпись
-работают и на более старом Python.
+работают и на более старом Python. Распаковать на старом Python (Zapret KVN
+собирается на 3.12) можно пакетом ``zstandard``; сжимает только сборка на 3.14.
+Что программа умеет распаковать, говорит ``codecs()`` — план обновления
+спрашивает об этом до скачивания.
 """
 
 from __future__ import annotations
@@ -104,8 +107,40 @@ def make_patch(old: bytes, new: bytes) -> bytes:
     return zstd.compress(bytes(new), options=options, zstd_dict=zstd.ZstdDict(bytes(old), is_raw=True))
 
 
-def _decompress(data: bytes, dictionary: bytes | None = None) -> bytes:
-    zstd = _zstd()
+def codecs() -> frozenset[str]:
+    """Что программа умеет распаковать: ``zstd`` (файлы и заплатки zstd), ``bsdiff``."""
+    found = set()
+    for kind, modules in (("zstd", ("compression.zstd", "zstandard")), ("bsdiff", ("bz2",))):
+        for module in modules:
+            try:
+                __import__(module)
+            except Exception:  # noqa: BLE001 — Nuitka поднимает своё «модуль вырезан»
+                continue
+            found.add(kind)
+            break
+    return frozenset(found)
+
+
+def _decompress_zstandard(data: bytes, dictionary: bytes | None, size: int | None) -> bytes:
+    import zstandard
+
+    zstd_dict = (
+        zstandard.ZstdCompressionDict(bytes(dictionary), dict_type=zstandard.DICT_TYPE_RAWCONTENT)
+        if dictionary is not None
+        else None
+    )
+    reader = zstandard.ZstdDecompressor(dict_data=zstd_dict, max_window_size=1 << (MAX_WINDOW_LOG + 1))
+    try:
+        return reader.decompress(bytes(data), max_output_size=size or 0)
+    except zstandard.ZstdError as exc:
+        raise StoreError(f"файл хранилища не распаковался: {exc}") from None
+
+
+def _decompress(data: bytes, dictionary: bytes | None = None, size: int | None = None) -> bytes:
+    try:
+        zstd = _zstd()
+    except ImportError:
+        return _decompress_zstandard(data, dictionary, size)
     options = {zstd.DecompressionParameter.window_log_max: MAX_WINDOW_LOG + 1}
     zstd_dict = zstd.ZstdDict(bytes(dictionary), is_raw=True) if dictionary is not None else None
     try:
@@ -122,7 +157,7 @@ def _checked(data: bytes, sha256: str, size: int) -> bytes:
 
 def unpack_blob(data: bytes, *, sha256: str, size: int) -> bytes:
     """Файл из ``<sha256>.zst``, проверенный по списку выпуска."""
-    return _checked(_decompress(data), sha256, size)
+    return _checked(_decompress(data, size=size), sha256, size)
 
 
 def apply_patch(old: bytes, data: bytes, *, sha256: str, size: int, kind: str = "zstd") -> bytes:
@@ -134,7 +169,7 @@ def apply_patch(old: bytes, data: bytes, *, sha256: str, size: int, kind: str = 
             return _checked(bsdiff.apply(old, data, expected_size=size), sha256, size)
         except bsdiff.BsdiffError as exc:
             raise StoreError(f"заплатка bsdiff не наложилась: {exc}") from None
-    return _checked(_decompress(data, old), sha256, size)
+    return _checked(_decompress(data, old, size), sha256, size)
 
 
 __all__ = [
@@ -143,6 +178,7 @@ __all__ = [
     "StoreError",
     "apply_patch",
     "blob_name",
+    "codecs",
     "compress",
     "forgejo_url",
     "is_store_name",

@@ -45,17 +45,28 @@ class StoreStepTests(unittest.TestCase):
 
         with patch("zapret_update.fetch.fetch_plan", return_value={}) as fetch, patch(
             "zapret_update.stage.build_stage", side_effect=build
-        ):
+        ), patch("zapret_update.store.codecs", return_value=frozenset({"zstd"})):
             self.assertEqual(self._downloader(_manifest(with_store=True))._try_store(), tree)
         # Скачанное лежит в постоянной папке: после перезапуска загрузка продолжится.
         self.assertEqual(fetch.call_args.kwargs["work_dir"], tree.parent)
         self.assertIn("zapretkvn/generic/zapret-kvn-store/1/", fetch.call_args.kwargs["sources"][0].url_for("x.zst"))
 
+    def test_without_zstd_unpacker_nothing_is_downloaded(self) -> None:
+        # 0.8.26 собрана на Python 3.12 без zstandard: качала файл и падала на распаковке.
+        with patch("zapret_update.fetch.fetch_plan") as fetch, patch(
+            "zapret_update.store.codecs", return_value=frozenset({"bsdiff"})
+        ):
+            self.assertIsNone(self._downloader(_manifest(with_store=True))._try_store())
+        fetch.assert_not_called()
+
     def test_failed_store_hands_over_to_the_next_step(self) -> None:
         from zapret_update.fetch import FetchError
 
-        with patch("zapret_update.fetch.fetch_plan", side_effect=FetchError("нет сети")):
+        with patch("zapret_update.fetch.fetch_plan", side_effect=FetchError("нет сети")) as fetch, patch(
+            "zapret_update.store.codecs", return_value=frozenset({"zstd"})
+        ):
             self.assertIsNone(self._downloader(_manifest(with_store=True))._try_store())
+        fetch.assert_called_once()
 
     def test_store_comes_before_archive_pieces(self) -> None:
         downloader = self._downloader(_manifest(with_store=True))
