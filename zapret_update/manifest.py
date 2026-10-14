@@ -57,13 +57,21 @@ class FileEntry:
     zsize: int = 0
 
 
+# Виды заплаток. ``zstd`` лежат в поле ``patches`` (его знают все версии),
+# ``bsdiff`` — в своём поле ``bsdiff``: версии, которые bsdiff не умеют,
+# это поле не читают и качают заплатку zstd или файл целиком.
+PATCH_KINDS = ("zstd", "bsdiff")
+_PATCH_FIELDS = {"zstd": "patches", "bsdiff": "bsdiff"}
+
+
 @dataclass(frozen=True, slots=True)
 class PatchEntry:
-    """Заплатка ``<from>-<to>.zst``: новый файл из прежнего."""
+    """Заплатка: новый файл из прежнего (``store.patch_file_name``)."""
 
     from_sha256: str
     to_sha256: str
     size: int
+    kind: str = "zstd"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,10 +93,9 @@ class Manifest:
     patches: tuple[PatchEntry, ...] = ()
 
     def patch_for(self, from_sha256: str, to_sha256: str) -> PatchEntry | None:
-        return next(
-            (item for item in self.patches if item.from_sha256 == from_sha256 and item.to_sha256 == to_sha256),
-            None,
-        )
+        """Самая маленькая заплатка от ``from`` к ``to`` любого вида."""
+        found = [item for item in self.patches if item.from_sha256 == from_sha256 and item.to_sha256 == to_sha256]
+        return min(found, key=lambda item: item.size) if found else None
 
 
 # ── версии ──────────────────────────────────────────────────────────────────
@@ -206,13 +213,14 @@ def parse(payload: object) -> Manifest:
 
     targets = {entry.sha256 for entry in files}
     patches = []
-    for item in payload.get("patches") or ():
-        if not isinstance(item, dict):
-            raise ManifestError("в списке выпуска неверная запись заплатки", "format")
-        patch = PatchEntry(_sha(item.get("from")), _sha(item.get("to")), _size(item.get("size")))
-        if patch.to_sha256 not in targets:
-            raise ManifestError("заплатка ведёт к файлу, которого нет в выпуске", "format")
-        patches.append(patch)
+    for kind in PATCH_KINDS:
+        for item in payload.get(_PATCH_FIELDS[kind]) or ():
+            if not isinstance(item, dict) or item.get("kind", kind) != kind:
+                raise ManifestError("в списке выпуска неверная запись заплатки", "format")
+            patch = PatchEntry(_sha(item.get("from")), _sha(item.get("to")), _size(item.get("size")), kind)
+            if patch.to_sha256 not in targets:
+                raise ManifestError("заплатка ведёт к файлу, которого нет в выпуске", "format")
+            patches.append(patch)
     return Manifest(product, channel, version, created, key, tuple(files), installer, tuple(patches))
 
 
@@ -281,7 +289,8 @@ def build(
 
     ``exclude`` — пути внутри папки (с ``/``), которые в выпуск не входят:
     файл или папка целиком. ``files`` — готовый список файлов (уже с
-    ``zsize`` из хранилища) вместо обхода ``tree``; ``patches`` — заплатки.
+    ``zsize`` из хранилища) вместо обхода ``tree``; ``patches`` — заплатки
+    (``{"from", "to", "size"}``, у bsdiff ещё ``"kind": "bsdiff"``).
     """
     skipped = tuple(str(item).strip("/") for item in exclude if str(item).strip("/"))
     listed = [dict(item) for item in files] if files is not None else None
@@ -309,9 +318,15 @@ def build(
     if installer is not None:
         target = Path(installer)
         payload["installer"] = {"name": target.name, "size": target.stat().st_size, "sha256": file_sha256(target)}
-    patch_list = [dict(item) for item in patches]
-    if patch_list:
-        payload["patches"] = sorted(patch_list, key=lambda item: (item["to"], item["from"]))
+    grouped: dict[str, list[dict]] = {}
+    for item in patches:
+        record = dict(item)
+        kind = str(record.pop("kind", "zstd"))
+        if kind not in PATCH_KINDS:
+            raise ManifestError(f"неизвестный вид заплатки: {kind}", "format")
+        grouped.setdefault(_PATCH_FIELDS[kind], []).append(record)
+    for name, records in grouped.items():
+        payload[name] = sorted(records, key=lambda item: (item["to"], item["from"]))
     parse(payload)  # собранный список обязан проходить свой же разбор
     return payload
 
@@ -323,6 +338,7 @@ def dumps(payload: dict) -> bytes:
 
 __all__ = [
     "MANIFEST_NAME",
+    "PATCH_KINDS",
     "SIGNATURE_NAME",
     "FileEntry",
     "InstallerEntry",

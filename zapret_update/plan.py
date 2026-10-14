@@ -4,7 +4,7 @@
 
 - на диске уже лежит файл с той же контрольной суммой — он остаётся;
 - на диске прежняя версия файла и в хранилище есть заплатка от неё — качается
-  заплатка (если она меньше файла целиком);
+  самая маленькая из заплаток (если она меньше файла целиком);
 - иначе качается файл целиком.
 
 Контрольные суммы файлов на диске считаются один раз и запоминаются по
@@ -41,7 +41,7 @@ class Want:
     @property
     def name(self) -> str:
         if self.patch is not None:
-            return store.patch_name(self.patch.from_sha256, self.patch.to_sha256)
+            return store.patch_file_name(self.patch)
         return store.blob_name(self.entry.sha256)
 
     @property

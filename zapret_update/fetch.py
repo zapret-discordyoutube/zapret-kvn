@@ -137,7 +137,9 @@ def _finish(want: Want, part: Path, ready: Path, root: Path) -> None:
         content = store.unpack_blob(data, sha256=entry.sha256, size=entry.size)
     else:
         base = Path(root).joinpath(*safe_relative_path(entry.path).split("/"))
-        content = store.apply_patch(base.read_bytes(), data, sha256=entry.sha256, size=entry.size)
+        content = store.apply_patch(
+            base.read_bytes(), data, sha256=entry.sha256, size=entry.size, kind=want.patch.kind
+        )
     temporary = ready.with_name(ready.name + ".tmp")
     temporary.write_bytes(content)
     os.replace(temporary, ready)

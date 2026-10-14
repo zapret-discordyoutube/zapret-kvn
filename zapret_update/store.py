@@ -8,7 +8,9 @@
 ``<sha256 прежнего>-<sha256 нового>.zst`` — новый файл, сжатый zstd с прежним
 файлом в роли словаря (как ``zstd --patch-from``). Программа, у которой на
 диске лежит прежний файл, качает заплатку: замер на Zapret KVN 0.8.21 → 0.8.22
-— ``ZapretKVN.exe`` 0,09 МБ вместо 5,8 МБ.
+— ``ZapretKVN.exe`` 0,09 МБ вместо 5,8 МБ. Где zstd помогает плохо (у
+``Zapret.exe`` сдвигаются адреса по всему файлу), рядом лежит заплатка bsdiff
+``<прежний>-<новый>.bsdiff`` (``zapret_update.bsdiff``).
 
 Где лежит хранилище (одинаково для всех источников, имя файла — то же):
 
@@ -35,7 +37,8 @@ PATCH_FROM_VERSIONS = 3
 MAX_WINDOW_LOG = 30
 COMPRESSION_LEVEL = 19
 
-_NAME_RE = re.compile(r"\A[0-9a-f]{64}(?:-[0-9a-f]{64})?\.zst\Z")
+_NAME_RE = re.compile(r"\A(?:[0-9a-f]{64}(?:-[0-9a-f]{64})?\.zst|[0-9a-f]{64}-[0-9a-f]{64}\.bsdiff)\Z")
+_PATCH_SUFFIX = {"zstd": ".zst", "bsdiff": ".bsdiff"}
 
 
 class StoreError(ValueError):
@@ -48,8 +51,13 @@ def blob_name(sha256: str) -> str:
     return f"{sha256}.zst"
 
 
-def patch_name(from_sha256: str, to_sha256: str) -> str:
-    return f"{from_sha256}-{to_sha256}.zst"
+def patch_name(from_sha256: str, to_sha256: str, kind: str = "zstd") -> str:
+    return f"{from_sha256}-{to_sha256}{_PATCH_SUFFIX[kind]}"
+
+
+def patch_file_name(patch) -> str:
+    """Имя заплатки из записи списка выпуска (``manifest.PatchEntry``)."""
+    return patch_name(patch.from_sha256, patch.to_sha256, getattr(patch, "kind", "zstd"))
 
 
 def is_store_name(name: str) -> bool:
@@ -117,8 +125,15 @@ def unpack_blob(data: bytes, *, sha256: str, size: int) -> bytes:
     return _checked(_decompress(data), sha256, size)
 
 
-def apply_patch(old: bytes, data: bytes, *, sha256: str, size: int) -> bytes:
+def apply_patch(old: bytes, data: bytes, *, sha256: str, size: int, kind: str = "zstd") -> bytes:
     """Новый файл из заплатки и прежнего файла, проверенный по списку выпуска."""
+    if kind == "bsdiff":
+        from . import bsdiff
+
+        try:
+            return _checked(bsdiff.apply(old, data, expected_size=size), sha256, size)
+        except bsdiff.BsdiffError as exc:
+            raise StoreError(f"заплатка bsdiff не наложилась: {exc}") from None
     return _checked(_decompress(data, old), sha256, size)
 
 
@@ -133,6 +148,7 @@ __all__ = [
     "is_store_name",
     "make_patch",
     "mirror_url",
+    "patch_file_name",
     "patch_name",
     "unpack_blob",
 ]

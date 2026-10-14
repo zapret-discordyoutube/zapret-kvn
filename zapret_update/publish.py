@@ -102,7 +102,7 @@ def upload(
 def manifest_names(manifest) -> set[str]:
     """Имена файлов хранилища, на которые ссылается список выпуска."""
     names = {store.blob_name(entry.sha256) for entry in manifest.files}
-    names.update(store.patch_name(item.from_sha256, item.to_sha256) for item in manifest.patches)
+    names.update(store.patch_file_name(item) for item in manifest.patches)
     return names
 
 

@@ -8,6 +8,11 @@
 
 Прежний файл для заплатки берётся из кэша, а если его там нет — через
 ``read_old(sha256, size)`` (сборка качает его из хранилища и проверяет).
+
+Заплатку bsdiff делает ``make_bsdiff(прежний, новый) → байты BSDIFF40`` — её
+даёт машина сборки (``bsdiff4``, в ядре только применение). Делается она лишь
+там, где заплатка zstd вышла большой: bsdiff долгий (полминуты на
+``Zapret.exe``) и прожорливый, а маленькую заплатку zstd ему не обогнать.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ from .manifest import Manifest, file_sha256, safe_relative_path
 
 # Заплатка нужна, только если она заметно меньше файла целиком.
 PATCH_WORTH_SHARE = 0.8
+# bsdiff пробуется, только если заплатка zstd не меньше этого.
+BSDIFF_WHEN_ZSTD_FROM = 1024 * 1024
 
 
 @dataclass
@@ -61,6 +68,7 @@ def build_store(
     cache_dir: Path,
     previous: Iterable[Manifest] = (),
     read_old: Callable[[str, int], bytes | None] | None = None,
+    make_bsdiff: Callable[[bytes, bytes], bytes] | None = None,
     log: Callable[[str], None] = lambda _message: None,
 ) -> StoreBuild:
     """Файлы выпуска с ``zsize`` и заплатки; файлы хранилища — в ``cache_dir``."""
@@ -91,6 +99,7 @@ def build_store(
                 bases.append(old)
         new_bytes: bytes | None = None
         for base in bases:
+            old_bytes: bytes | None = None
             name = store.patch_name(base.sha256, sha256)
             patch_path = cache / name
             if not patch_path.is_file():
@@ -106,6 +115,34 @@ def build_store(
             if patch_size < zsize * PATCH_WORTH_SHARE:
                 result.patches.append({"from": base.sha256, "to": sha256, "size": patch_size})
                 result.names.add(name)
+            if make_bsdiff is None or patch_size < BSDIFF_WHEN_ZSTD_FROM:
+                continue
+            bs_name = store.patch_name(base.sha256, sha256, "bsdiff")
+            bs_path = cache / bs_name
+            if not bs_path.is_file():
+                if old_bytes is None:
+                    old_bytes = _old_bytes(cache, base.sha256, base.size, read_old)
+                if old_bytes is None:
+                    continue
+                if new_bytes is None:
+                    new_bytes = source.read_bytes()
+                try:
+                    made = make_bsdiff(old_bytes, new_bytes)
+                except Exception as exc:  # noqa: BLE001 — без bsdiff выпуск всё равно годен
+                    log(f"заплатка bsdiff для {path} от {base.sha256[:12]} не сделана: {exc}")
+                    continue
+                # Сборка проверяет заплатку тем же кодом, что программа.
+                try:
+                    store.apply_patch(old_bytes, made, sha256=sha256, size=size, kind="bsdiff")
+                except store.StoreError as exc:
+                    log(f"заплатка bsdiff для {path} от {base.sha256[:12]} не прошла проверку: {exc}")
+                    continue
+                _write_atomic(bs_path, made)
+                result.patched += 1
+            bs_size = bs_path.stat().st_size
+            if bs_size < min(patch_size, zsize) * PATCH_WORTH_SHARE:
+                result.patches.append({"from": base.sha256, "to": sha256, "size": bs_size, "kind": "bsdiff"})
+                result.names.add(bs_name)
     return result
 
 
@@ -113,8 +150,8 @@ def prune_cache(cache_dir: Path, keep: Iterable[str]) -> int:
     """Убирает из кэша файлы, на которые не ссылаются последние выпуски."""
     wanted = set(keep)
     removed = 0
-    for path in Path(cache_dir).glob("*.zst"):
-        if path.name not in wanted:
+    for path in Path(cache_dir).iterdir():
+        if store.is_store_name(path.name) and path.name not in wanted:
             path.unlink(missing_ok=True)
             removed += 1
     return removed
@@ -156,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--previous", type=Path, action="append", default=[])
     parser.add_argument("--store-url", default="")
     parser.add_argument("--exclude", action="append", default=[])
+    parser.add_argument("--bsdiff", action="store_true", help="делать заплатки bsdiff (нужен пакет bsdiff4)")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -174,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         cache_dir=args.cache,
         previous=previous,
         read_old=_read_old_from(args.store_url) if args.store_url else None,
+        make_bsdiff=__import__("bsdiff4").diff if args.bsdiff else None,
         log=print,
     )
     args.out.write_text(
