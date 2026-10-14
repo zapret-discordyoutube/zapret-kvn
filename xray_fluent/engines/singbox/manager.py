@@ -50,6 +50,14 @@ def _write_config(
     return capture_runtime_config(exe, config)
 
 
+#: Новый TUN не раньше, чем через столько секунд после остановки прежнего.
+#: Windows создаёт Wintun-адаптер вслед за только что снятым медленно, а
+#: «родной» sing-box, поднятый сразу, на win10 оставался без TCP-трафика
+#: через туннель (1 с паузы — сбой 1 из 4, 2 с — 4 из 4 без сбоев).
+#: Прежде эту паузу случайно давало 10-секундное ожидание любого xftun.
+TUN_RESTART_GAP_S = 2.0
+
+
 def _kill_orphaned_blocking(exe: Path) -> bool:
     """Worker-only: kill orphaned sing-box processes that hold ports/TUN."""
     try:
@@ -83,6 +91,7 @@ class SingBoxManager(QObject):
         self._last_exit_status = QProcess.ExitStatus.NormalExit
         self._uses_tun = False
         self._tun_interface_name = ""
+        self._tun_stopped_at: float | None = None
         self._defer_startup_failure = False
         self._deferred_startup_failure: str | None = None
         self._last_start_failure_retryable = False
@@ -216,6 +225,14 @@ class SingBoxManager(QObject):
             self._mark_running()
             return True
 
+        if self._tun_stopped_at is not None:
+            remaining = TUN_RESTART_GAP_S - (time.monotonic() - self._tun_stopped_at)
+            if remaining > 0:
+                yield sleep_ms(int(remaining * 1000))
+            if not _still_wanted(should_continue):
+                self._starting = False
+                return False
+
         # TUN mode retries while Windows releases a previous wintun adapter.
         for attempt in range(3):
             self._spawn(exe, core_dir, config_file)
@@ -312,6 +329,7 @@ class SingBoxManager(QObject):
         self._starting = False
         if used_tun:
             yield from self._wait_tun_released_steps(tun_name)
+            self._tun_stopped_at = time.monotonic()
         return True
 
     @staticmethod

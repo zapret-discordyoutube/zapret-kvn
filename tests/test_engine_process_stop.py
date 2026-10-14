@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PyQt6.QtCore import QCoreApplication, QProcess
@@ -394,3 +395,40 @@ class SingBoxProxyReadinessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SingBoxTunRestartGapTests(unittest.TestCase):
+    """Новый TUN — не раньше TUN_RESTART_GAP_S после остановки прежнего."""
+
+    def _sleeps_before_spawn(self, stopped_ago: float | None) -> list[int]:
+        from xray_fluent.engines.singbox import manager as singbox_manager
+
+        manager = SingBoxManager()
+        fake = Mock()
+        fake.state.return_value = _NOT_RUNNING
+        manager._process = fake
+        now = 100.0
+        manager._tun_stopped_at = None if stopped_ago is None else now - stopped_ago
+        sleeps: list[int] = []
+
+        class Spawned(Exception):
+            pass
+
+        with patch.object(singbox_manager, "_kill_orphaned_blocking", return_value=False), patch.object(
+            singbox_manager.time, "monotonic", return_value=now
+        ), patch.object(manager, "_spawn", side_effect=Spawned):
+            with self.assertRaises(Spawned):
+                drive(
+                    manager._launch_steps(Path("sing-box.exe"), {}, Path("c.json"), "xftun0", None),
+                    sleeps=sleeps,
+                )
+        return sleeps
+
+    def test_waits_only_the_rest_of_the_gap_after_a_tun_stop(self) -> None:
+        from xray_fluent.engines.singbox.manager import TUN_RESTART_GAP_S
+
+        self.assertEqual(self._sleeps_before_spawn(0.5), [int((TUN_RESTART_GAP_S - 0.5) * 1000)])
+
+    def test_no_wait_long_after_or_without_a_previous_tun(self) -> None:
+        self.assertEqual(self._sleeps_before_spawn(10.0), [])
+        self.assertEqual(self._sleeps_before_spawn(None), [])
