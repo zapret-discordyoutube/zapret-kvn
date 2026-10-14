@@ -1841,9 +1841,12 @@ class MainWindow(FluentWindow):
             self.updates_page.download_btn.clicked.disconnect()
         except TypeError:
             pass
-        # Кнопка на странице — ручной путь в обход лимита автопопыток.
+        # Кнопка на странице — ручной путь в обход лимита автопопыток. Она
+        # запоминает свою версию: новая проверка обнуляет _pending_update, а
+        # кнопка всё ещё на экране — 14.10.2026 нажатие в этот миг запускало
+        # загрузку «ничего» с ошибкой «ни напрямую, ни через прокси».
         self.updates_page.download_btn.clicked.connect(
-            lambda: self._start_update_download(self._pending_update)
+            lambda _checked=False, chosen=update: self._start_update_download(chosen)
         )
 
         # Ручная проверка — уже действие пользователя: ставим сразу.
@@ -1873,7 +1876,9 @@ class MainWindow(FluentWindow):
             return "включена защита паролем, установите вручную"
         return auto_install_block_reason(update.version, APP_VERSION)
 
-    def _start_update_download(self, update: AppUpdate, *, background: bool = False) -> None:
+    def _start_update_download(self, update: AppUpdate | None, *, background: bool = False) -> None:
+        if update is None:
+            return
         if not self.controller.state.settings.allow_updates:
             self.updates_page.show_idle()
             self.updates_page.set_app_status("Установка обновлений отключена в настройках")

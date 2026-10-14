@@ -275,6 +275,21 @@ class UpdateNotificationTests(unittest.TestCase):
         window.updates_page.download_btn.clicked.callback()
         window._start_update_download.assert_called_once_with(window._pending_update)
 
+    def test_download_button_keeps_its_version_while_a_new_check_runs(self) -> None:
+        """14.10.2026: новая проверка обнулила версию, а кнопка на экране качала «ничего»."""
+        window = self._check_result_window("версия раздаётся по очереди")
+        update = _update()
+        MainWindow._on_update_check_result(window, update, silent=True)
+
+        window._pending_update = None  # так начинается каждая проверка
+        window.updates_page.download_btn.clicked.callback()
+
+        window._start_update_download.assert_called_once_with(update)
+
+    def test_download_without_a_version_does_nothing(self) -> None:
+        # У «окна» нет ничего: любое обращение дальше первой строки упало бы.
+        MainWindow._start_update_download(SimpleNamespace(), None)
+
     def test_manual_check_installs_without_dialog_and_ignores_attempt_limit(self) -> None:
         window = self._check_result_window("установка не удалась уже 3 раза")
         update = _update()

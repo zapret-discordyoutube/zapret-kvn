@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import http.client
 import json
 import logging
 import re
@@ -98,6 +99,11 @@ class UpdateRejected(Exception):
     def __init__(self, message: str, code: str = "bad") -> None:
         super().__init__(message)
         self.code = code
+
+
+# Сбои, от которых помогает другой путь скачивания (напрямую / через прокси):
+# сеть, ответ сервера, обрыв или неполный кусок архива.
+_NETWORK_ERRORS = (OSError, http.client.HTTPException, ValueError, RuntimeError)
 
 
 class DownloadFailed(RuntimeError):
@@ -639,8 +645,10 @@ class UpdateDownloader(QThread):
             try:
                 self._download(archive, proxy_url)
                 return
-            except Exception as exc:
-                _log.warning("Update download failed (%s): %s", status, exc)
+            except _NETWORK_ERRORS as exc:
+                # Другой путь помогает только от сетевых сбоев; ошибка в самой
+                # программе поднимается как есть, а не выдаётся за «нет сети».
+                _log.warning("[update] Архив не скачался (%s): %s", status, exc)
                 archive.unlink(missing_ok=True)
         if self._proxy_url:
             raise DownloadFailed(
