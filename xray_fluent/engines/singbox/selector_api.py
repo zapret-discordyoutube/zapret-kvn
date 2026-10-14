@@ -11,6 +11,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 from ...application.async_steps import TransitionSteps, run_in_worker, sleep_ms
 from ...constants import PROXY_HOST
+from ...network.proxy_readiness import LISTENER_POLL_MS, ports_listening
 
 
 # Вызов идёт на loopback, но ядро отвечает не мгновенно: под нагрузкой диска или
@@ -155,12 +156,17 @@ def select_outbound_when_ready_steps(
         if remaining <= 0:
             return False, last_error or "Clash API sing-box не стал доступен вовремя"
         attempt_timeout = min(STARTUP_REQUEST_TIMEOUT_SEC, remaining)
-        ok, last_error, retryable = yield run_in_worker(
-            lambda: _send_selector_request(request, attempt_timeout)
+        # Порт Clash API ещё не открыт (таблица TCP) — запрос рано: на Windows
+        # он выждал бы повторные SYN к закрытому порту (~0,5 с) впустую.
+        closed, (ok, last_error, retryable) = yield run_in_worker(
+            lambda: (True, (False, "Clash API sing-box ещё не слушает порт", True))
+            if ports_listening((api_port,)) is False
+            else (False, _send_selector_request(request, attempt_timeout))
         )
         if ok or not retryable:
             return ok, last_error
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False, last_error
-        yield sleep_ms(int(min(STARTUP_RETRY_DELAY_SEC, remaining) * 1000))
+        delay = LISTENER_POLL_MS / 1000 if closed else STARTUP_RETRY_DELAY_SEC
+        yield sleep_ms(int(min(delay, remaining) * 1000))

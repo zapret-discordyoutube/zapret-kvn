@@ -8,6 +8,7 @@ from typing import Callable
 
 from ...application.async_steps import TransitionSteps, run_in_worker, sleep_ms
 from ...constants import PROXY_HOST
+from ...network.proxy_readiness import LISTENER_POLL_MS, ports_listening
 from ...platform.windows.subprocess_utils import sleep_with_events
 
 
@@ -39,11 +40,15 @@ def wait_for_loopback_relay_steps(
     while time.monotonic() < deadline:
         if should_continue is not None and not should_continue():
             return False
-        if (yield run_in_worker(
-            lambda: probe_loopback_relay(port, host=host, connect_timeout=connect_timeout)
-        )):
+        # Порт ещё не открыт (таблица TCP) — подключаться рано: на Windows
+        # такая попытка выжидает весь connect_timeout.
+        ready = yield run_in_worker(
+            lambda: None if ports_listening((port,)) is False
+            else probe_loopback_relay(port, host=host, connect_timeout=connect_timeout)
+        )
+        if ready:
             return True
-        yield sleep_ms(int(step * 1000))
+        yield sleep_ms(LISTENER_POLL_MS if ready is None else int(step * 1000))
     return False
 
 

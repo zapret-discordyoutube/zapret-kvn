@@ -23,7 +23,7 @@ from ...platform.windows import win_netinfo
 from ...diagnostics.export import capture_runtime_config
 from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from ...profiles.path_utils import resolve_configured_path
-from ...network.proxy_readiness import probe_listener_role
+from ...network.proxy_readiness import LISTENER_POLL_MS, ports_listening, probe_listener_role
 from .config_check import check_config
 from ...platform.windows.subprocess_utils import (
     decode_output,
@@ -38,17 +38,16 @@ def _still_wanted(should_continue: Callable[[], bool] | None) -> bool:
     return should_continue is None or bool(should_continue())
 
 
-def _write_and_check_config(
+def _write_config(
     exe: Path,
     config: dict[str, Any],
     runtime_dir: Path,
     config_file: Path,
-) -> tuple[dict[str, Any], tuple[bool, str]]:
-    """Worker-only: persist the runtime JSON and ask the core to validate it."""
+) -> dict[str, Any]:
+    """Worker-only: persist the runtime JSON; return its redacted diagnostic copy."""
     runtime_dir.mkdir(parents=True, exist_ok=True)
     config_file.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
-    diagnostic = capture_runtime_config(exe, config)
-    return diagnostic, check_config(exe, config_file)
+    return capture_runtime_config(exe, config)
 
 
 def _kill_orphaned_blocking(exe: Path) -> bool:
@@ -83,6 +82,9 @@ class SingBoxManager(QObject):
         self._last_exit_code: int | None = None
         self._last_exit_status = QProcess.ExitStatus.NormalExit
         self._uses_tun = False
+        self._tun_interface_name = ""
+        self._defer_startup_failure = False
+        self._deferred_startup_failure: str | None = None
         self._last_start_failure_retryable = False
         self.diagnostic_config: dict[str, Any] | None = None
 
@@ -115,6 +117,11 @@ class SingBoxManager(QObject):
 
         File writes, ``sing-box check``, the orphan scan and every readiness
         probe run in the worker pool; waits are timer-driven steps.
+        ``sing-box check`` runs only after a failed launch, once the process is
+        gone: a good config no longer waits for a separate core process, and a
+        bad one still reports the core's own explanation of the rejected field.
+        Never alongside a running core — for a TUN config the check builds the
+        same named Wintun interface and broke the live tunnel's TCP.
         ``should_continue`` is polled between steps: once it turns false the
         half-started process is stopped and the start returns ``False``
         without reporting a failure (a newer transition owns the outcome).
@@ -134,24 +141,40 @@ class SingBoxManager(QObject):
             return False
 
         tun_interface_name = self._extract_tun_interface_name(config)
-        uses_tun = bool(tun_interface_name)
         config_file = SINGBOX_CONFIG_FILE
         runtime_dir = RUNTIME_DIR
 
-        # Ядро отвергает негодную конфигурацию уже после старта процесса, печатая
-        # её причину в свой лог вперемешку с ANSI-кодами. Спросим его заранее,
-        # чтобы пользователь увидел, какое именно поле не принято.
-        diagnostic, (config_ok, config_problem) = yield run_in_worker(
-            lambda: _write_and_check_config(exe, config, runtime_dir, config_file)
+        self.diagnostic_config = yield run_in_worker(
+            lambda: _write_config(exe, config, runtime_dir, config_file)
         )
-        self.diagnostic_config = diagnostic
-        if not config_ok:
-            self.error.emit(config_problem)
-            return False
-        if config_problem:
-            self.log_received.emit(f"[singbox] {config_problem}")
         if not _still_wanted(should_continue):
             return False
+        self._deferred_startup_failure = None
+        self._defer_startup_failure = True
+        try:
+            started = yield from self._launch_steps(
+                exe, config, config_file, tun_interface_name, should_continue
+            )
+        finally:
+            self._defer_startup_failure = False
+        deferred, self._deferred_startup_failure = self._deferred_startup_failure, None
+        if started or deferred is None:
+            return started
+        if self._process.state() != QProcess.ProcessState.NotRunning:
+            yield from self.stop_steps(expected=True)
+        config_ok, config_problem = yield run_in_worker(lambda: check_config(exe, config_file))
+        self.error.emit(deferred if config_ok else config_problem)
+        return False
+
+    def _launch_steps(
+        self,
+        exe: Path,
+        config: dict[str, Any],
+        config_file: Path,
+        tun_interface_name: str,
+        should_continue: Callable[[], bool] | None,
+    ) -> TransitionSteps:
+        uses_tun = bool(tun_interface_name)
 
         if self._process.state() != QProcess.ProcessState.NotRunning:
             if not (yield from self.stop_steps(expected=True)):
@@ -168,6 +191,7 @@ class SingBoxManager(QObject):
         if not _still_wanted(should_continue):
             return False
         self._uses_tun = uses_tun
+        self._tun_interface_name = tun_interface_name or ""
 
         # Set working directory to core/ so sing-box can find wintun.dll
         core_dir = exe.parent
@@ -218,7 +242,7 @@ class SingBoxManager(QObject):
                 yield from self.stop_steps(expected=True)
 
             if retryable and attempt < 2:
-                yield from self._wait_tun_released_steps()
+                yield from self._wait_tun_released_steps(tun_interface_name)
                 self._starting = True
                 continue
 
@@ -270,13 +294,14 @@ class SingBoxManager(QObject):
             return True
 
         used_tun = self._uses_tun
+        tun_name = self._tun_interface_name
         self._stop_requested = expected
-        # Короткий grace на снятие TUN-адаптера: на Windows консольный sing-box
-        # игнорирует terminate() (WM_CLOSE), поэтому ждём не дольше 500мс и убиваем.
-        self._process.terminate()
-        if not (yield wait_process_finished(self._process, 500)):
-            self._process.kill()
-            yield wait_process_finished(self._process, 2000)
+        # На Windows консольный sing-box игнорирует terminate() (WM_CLOSE):
+        # прежние 500 мс «мягкой» остановки истекали всегда и только задерживали
+        # каждое отключение и переключение. Адаптер Wintun исчезает вместе с
+        # процессом, его освобождение ждёт _wait_tun_released_steps ниже.
+        self._process.kill()
+        yield wait_process_finished(self._process, 2000)
 
         if self._process.state() != QProcess.ProcessState.NotRunning:
             self._stop_requested = False
@@ -286,38 +311,48 @@ class SingBoxManager(QObject):
         self._uses_tun = False
         self._starting = False
         if used_tun:
-            yield from self._wait_tun_released_steps()
+            yield from self._wait_tun_released_steps(tun_name)
         return True
 
     @staticmethod
-    def _wait_tun_released_steps(max_wait: float = 10.0) -> TransitionSteps:
-        """Poll until the TUN adapter is gone, up to max_wait seconds."""
-        if os.name != "nt":
+    def _wait_tun_released_steps(interface_name: str = "", max_wait: float = 10.0) -> TransitionSteps:
+        """Poll until this session's TUN adapter is released, up to max_wait seconds.
+
+        Ждём только свой адаптер: имя у каждого запуска новое (xftun + hex),
+        а «призраки» прежних сессий (Wintun убитого ядра остаётся в списке
+        выключенным) раньше держали здесь каждое отключение все 10 секунд.
+        """
+        if os.name != "nt" or not interface_name:
             return None
         deadline = time.monotonic() + max(0.0, max_wait)
         while time.monotonic() < deadline:
-            gone, fast_probe = yield run_in_worker(SingBoxManager._probe_tun_adapter_gone)
+            gone, fast_probe = yield run_in_worker(
+                lambda: SingBoxManager._probe_tun_adapter_gone(interface_name)
+            )
             if gone:
                 return None
-            yield sleep_ms(100 if fast_probe else 300)
+            yield sleep_ms(LISTENER_POLL_MS if fast_probe else 300)
         return None
 
     @staticmethod
-    def _probe_tun_adapter_gone() -> tuple[bool, bool]:
-        """Return (adapter is gone, fast ctypes path was used). Worker-only."""
+    def _probe_tun_adapter_gone(interface_name: str) -> tuple[bool, bool]:
+        """Return (adapter is released, fast ctypes path was used). Worker-only."""
         if win_netinfo.is_available():
             try:
-                return (not win_netinfo.any_adapter_name_contains("xftun")), True
+                return (not win_netinfo.adapter_is_up(interface_name)), True
             except Exception:
                 pass  # fall back to netsh below
         try:
             result = run_text(
-                ["netsh", "interface", "show", "interface"],
+                ["netsh", "interface", "show", "interface", f"name={interface_name}"],
                 timeout=3,
                 creationflags=_CREATE_NO_WINDOW,
             )
-            # Check if any xftun* adapter still exists
-            return ("xftun" not in result_output_text(result)), False
+            # Нет такого интерфейса (ненулевой код) или он уже не подключён.
+            text = result_output_text(result).lower()
+            if result.returncode != 0 or interface_name.lower() not in text:
+                return True, False
+            return any(word in text for word in ("disconnected", "отключ")), False
         except Exception:
             return True, False  # can't check, proceed anyway
 
@@ -471,7 +506,10 @@ class SingBoxManager(QObject):
             )
             return False
 
-        def probe_all() -> bool:
+        def probe_all() -> bool | None:
+            # None — порты ещё не открыты: подключаться рано, ответ дала таблица TCP.
+            if ports_listening(port_roles) is False:
+                return None
             return all(
                 probe_listener_role(port, role, **(port_credentials.get(port) or {}))
                 for port, role in port_roles.items()
@@ -500,9 +538,10 @@ class SingBoxManager(QObject):
                 yield from self.stop_steps(expected=True)
                 return False
             # Пробные connect'ы (до 0.35с на порт) — в worker-пуле.
-            if (yield run_in_worker(probe_all)):
+            ready = yield run_in_worker(probe_all)
+            if ready:
                 return True
-            yield sleep_ms(100)
+            yield sleep_ms(LISTENER_POLL_MS if ready is None else 100)
 
         self._last_start_failure_retryable = True
         pending = yield run_in_worker(pending_listeners)
@@ -611,6 +650,13 @@ class SingBoxManager(QObject):
         if self._startup_failure_reported:
             return
         self._startup_failure_reported = True
+        if getattr(self, "_defer_startup_failure", False):
+            # Ядро отвергает негодную конфигурацию уже после старта процесса,
+            # печатая причину в свой лог вперемешку с ANSI-кодами. Сообщение
+            # отдаст start_steps, сверив его с ответом `sing-box check`: там
+            # объяснение (какое поле не принято) понятнее кода выхода.
+            self._deferred_startup_failure = message
+            return
         self.error.emit(message)
 
 

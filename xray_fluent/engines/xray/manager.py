@@ -25,7 +25,7 @@ from ...application.port_allocator import is_tcp_port_bindable
 from ...constants import PROXY_HOST, RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
 from ...diagnostics.export import capture_runtime_config
 from ...profiles.path_utils import resolve_configured_path
-from ...network.proxy_readiness import probe_listener_role
+from ...network.proxy_readiness import LISTENER_POLL_MS, ports_listening, probe_listener_role
 from ...platform.windows.subprocess_utils import (
     decode_output,
     kill_processes_by_path,
@@ -458,16 +458,19 @@ class XrayManager(QObject):
             if self._process.state() == QProcess.ProcessState.NotRunning:
                 self._report_startup_failure(self._unexpected_exit_message(self._last_exit_code, self._last_exit_status, startup=True))
                 return False
-            # Пробные connect'ы (до 0.2с на порт) уходят в worker-пул.
+            # Пробные connect'ы (до 0.2с на порт) уходят в worker-пул; пока
+            # таблица TCP говорит «порт закрыт» (None), подключаться рано.
             ready = yield run_in_worker(
-                lambda probe=ports, roles=port_roles, creds=port_credentials: all(
+                lambda probe=ports, roles=port_roles, creds=port_credentials: None
+                if ports_listening(probe) is False
+                else all(
                     probe_listener_role(port, roles[port], **(creds.get(port) or {}))
                     for port in probe
                 )
             )
             if ready:
                 return True
-            yield sleep_ms(100)
+            yield sleep_ms(LISTENER_POLL_MS if ready is None else 100)
         pending = yield run_in_worker(
             lambda probe=ports, roles=port_roles, creds=port_credentials: [
                 port

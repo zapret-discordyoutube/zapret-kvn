@@ -331,6 +331,17 @@ def adapter_exists(name: str) -> bool:
     return find_adapter(name) is not None
 
 
+def adapter_is_up(name: str) -> bool:
+    """Адаптер есть и работает.
+
+    Адаптер Wintun завершённого (убитого) ядра не исчезает из списка: он
+    остаётся «призраком» в состоянии Down/NotPresent, поэтому «освобождён»
+    значит «не поднят», а не «отсутствует».
+    """
+    adapter = find_adapter(name)
+    return adapter is not None and adapter.oper_status == _IF_OPER_STATUS_UP
+
+
 def _has_routable_ipv4(adapter: AdapterInfo) -> bool:
     return any(not addr.startswith("169.254.") for addr in adapter.ipv4_addresses)
 

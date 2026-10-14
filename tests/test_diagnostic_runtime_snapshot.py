@@ -112,3 +112,38 @@ class DiagnosticRuntimeSnapshotTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SingboxParallelCheckTests(unittest.TestCase):
+    """`sing-box check` идёт параллельно с запуском, а не перед ним."""
+
+    def _start(self, check_result):
+        config = {'log': {'level': 'warn'}, 'inbounds': [], 'outbounds': [{'type': 'direct', 'tag': 'direct'}]}
+        errors: list[str] = []
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            exe = root / 'sing-box.exe'
+            exe.touch()
+            manager = SingBoxManager()
+            manager.error.connect(errors.append)
+            with (
+                patch('xray_fluent.engines.singbox.manager.resolve_configured_path', return_value=exe),
+                patch('xray_fluent.engines.singbox.manager.RUNTIME_DIR', root),
+                patch('xray_fluent.engines.singbox.manager.SINGBOX_CONFIG_FILE', root / 'runtime.json'),
+                patch('xray_fluent.engines.singbox.manager._kill_orphaned_blocking', return_value=False),
+                patch('xray_fluent.engines.singbox.manager.check_config', return_value=check_result) as check,
+            ):
+                started = manager.start(str(exe), config)
+        return started, errors, check
+
+    def test_failed_launch_reports_core_check_explanation(self):
+        started, errors, check = self._start((False, 'Ядро не знает поле «Tag»'))
+        self.assertFalse(started)
+        self.assertEqual(errors, ['Ядро не знает поле «Tag»'])
+        check.assert_called_once()
+
+    def test_failed_launch_with_valid_config_reports_launch_failure_once(self):
+        started, errors, _check = self._start((True, ''))
+        self.assertFalse(started)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('sing-box process', errors[0])

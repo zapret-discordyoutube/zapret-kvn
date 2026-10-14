@@ -7,9 +7,8 @@ import hashlib
 import os
 import sys
 
-from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
+# cryptography (≈10 МБ нативного кода) импортируется только там, где нужен
+# пароль данных: без него запуск до окна читал и проверял её с диска зря.
 
 
 if sys.platform == "win32":
@@ -127,6 +126,9 @@ ENCRYPTED_PREFIX = "XFENC1"
 
 
 def _derive_fernet_key(passphrase: str, salt: bytes) -> bytes:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=480_000)
     return base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
 
@@ -142,6 +144,8 @@ def encrypt_with_derived_key(data: bytes, key: bytes, salt: bytes) -> str:
     Fernet сам берёт случайный IV на каждое шифрование, поэтому повторное
     использование пары (salt, key) в пределах сессии безопасно.
     """
+    from cryptography.fernet import Fernet
+
     token = Fernet(key).encrypt(data)
     salt_b64 = base64.b64encode(salt).decode("ascii")
     return f"{ENCRYPTED_PREFIX}:{salt_b64}:{token.decode('ascii')}"
@@ -159,6 +163,8 @@ def decrypt_with_passphrase(encrypted: str, passphrase: str) -> bytes:
     salt = base64.b64decode(parts[1])
     token = parts[2].encode("ascii")
     key = _derive_fernet_key(passphrase, salt)
+    from cryptography.fernet import Fernet, InvalidToken
+
     try:
         return Fernet(key).decrypt(token)
     except InvalidToken:

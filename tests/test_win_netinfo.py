@@ -262,35 +262,58 @@ class SingBoxTunProbeTests(unittest.TestCase):
 
         fast_mock.assert_not_called()
 
-    def test_tun_gone_fast_path(self) -> None:
+    def test_tun_gone_fast_path_checks_only_this_session_adapter(self) -> None:
         with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.platform.windows.win_netinfo.any_adapter_name_contains", return_value=False
+            "xray_fluent.platform.windows.win_netinfo.adapter_is_up", return_value=False
         ) as fast_mock, patch(
+            "xray_fluent.platform.windows.win_netinfo.any_adapter_name_contains", return_value=True
+        ) as any_mock, patch(
             "xray_fluent.engines.singbox.manager.run_text"
         ) as netsh_mock:
-            self.assertEqual(SingBoxManager._probe_tun_adapter_gone(), (True, True))
+            # Призраки прежних xftun* в списке остаются, но ждём только свой адаптер.
+            self.assertEqual(SingBoxManager._probe_tun_adapter_gone("xftunabc123"), (True, True))
 
-        fast_mock.assert_called_once_with("xftun")
+        fast_mock.assert_called_once_with("xftunabc123")
+        any_mock.assert_not_called()
         netsh_mock.assert_not_called()
 
+    def test_ghost_adapter_of_killed_core_counts_as_released(self) -> None:
+        ghost = _adapter("xftunabc123")
+        ghost.oper_status = 6  # NotPresent: Wintun убитого процесса
+        up = _adapter("xftunabc123")
+        up.oper_status = 1
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[ghost]):
+            self.assertFalse(win_netinfo.adapter_is_up("xftunabc123"))
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[up]):
+            self.assertTrue(win_netinfo.adapter_is_up("xftunabc123"))
+        with patch("xray_fluent.platform.windows.win_netinfo.list_adapters", return_value=[]):
+            self.assertFalse(win_netinfo.adapter_is_up("xftunabc123"))
+
     def test_tun_gone_falls_back_to_netsh(self) -> None:
-        completed = Mock(returncode=0, stdout=b"Ethernet\n", stderr=b"")
+        completed = Mock(returncode=1, stdout=b"", stderr=b"not found")
         with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=True), patch(
-            "xray_fluent.platform.windows.win_netinfo.any_adapter_name_contains",
+            "xray_fluent.platform.windows.win_netinfo.adapter_is_up",
             side_effect=win_netinfo.WinNetInfoError("boom"),
         ), patch(
             "xray_fluent.engines.singbox.manager.run_text", return_value=completed
         ) as netsh_mock:
-            self.assertEqual(SingBoxManager._probe_tun_adapter_gone(), (True, False))
+            self.assertEqual(SingBoxManager._probe_tun_adapter_gone("xftun0"), (True, False))
 
         netsh_mock.assert_called_once()
 
-    def test_tun_gone_netsh_still_lists_adapter(self) -> None:
-        completed = Mock(returncode=0, stdout=b"xftun0\n", stderr=b"")
+    def test_tun_gone_netsh_still_lists_connected_adapter(self) -> None:
+        completed = Mock(returncode=0, stdout=b"xftun0\n   Connect state: Connected\n", stderr=b"")
         with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=False), patch(
             "xray_fluent.engines.singbox.manager.run_text", return_value=completed
         ):
-            self.assertEqual(SingBoxManager._probe_tun_adapter_gone(), (False, False))
+            self.assertEqual(SingBoxManager._probe_tun_adapter_gone("xftun0"), (False, False))
+
+    def test_tun_gone_netsh_disconnected_adapter_is_released(self) -> None:
+        completed = Mock(returncode=0, stdout=b"xftun0\n   Connect state: Disconnected\n", stderr=b"")
+        with patch("xray_fluent.platform.windows.win_netinfo.is_available", return_value=False), patch(
+            "xray_fluent.engines.singbox.manager.run_text", return_value=completed
+        ):
+            self.assertEqual(SingBoxManager._probe_tun_adapter_gone("xftun0"), (True, False))
 
 
 class XrayTunRouteProbeTests(unittest.TestCase):

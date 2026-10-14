@@ -149,6 +149,23 @@ def is_same_path(left: str | Path | None, right: str | Path | None) -> bool:
         return False
 
 
+def _kill_processes_native(target: Path, timeout: float) -> bool:
+    """WinAPI-снимок процессов вместо PowerShell/WMI: миллисекунды, а не секунды.
+
+    Тот же отбор, что у PowerShell-варианта: имя и полный путь exe совпадают.
+    Завершённые процессы ждём до ``timeout``, чтобы порты и адаптер освободились.
+    """
+    from ...updates.installer import processes as win_processes
+
+    pids = win_processes.processes_at(target)
+    for pid in pids:
+        win_processes.terminate(pid)
+    deadline = time.monotonic() + max(0.0, timeout)
+    for pid in pids:
+        win_processes.wait_for_exit(pid, max(0.0, deadline - time.monotonic()))
+    return bool(pids)
+
+
 def kill_processes_by_path(
     process_name: str,
     executable_path: str | Path,
@@ -162,6 +179,10 @@ def kill_processes_by_path(
     if os.name != "nt":
         return False
     target = Path(executable_path)
+    try:
+        return _kill_processes_native(target, timeout)
+    except Exception:
+        pass  # WinAPI-путь не сработал — прежний PowerShell ниже.
     target_text = str(target).replace("'", "''")
     script = (
         "$matches = @(Get-CimInstance Win32_Process | "

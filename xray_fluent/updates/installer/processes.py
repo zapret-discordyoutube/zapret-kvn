@@ -129,6 +129,34 @@ def processes_under(root: Path) -> list[tuple[int, str]]:
     return found
 
 
+def processes_at(executable: Path) -> list[int]:
+    """Процессы (кроме своего), запущенные именно из этого исполняемого файла."""
+
+    if not IS_WINDOWS:
+        return []
+    target = os.path.normcase(os.path.abspath(str(executable)))
+    name = os.path.basename(target)
+    snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if not snapshot or snapshot == _INVALID_HANDLE:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+    found: list[int] = []
+    try:
+        entry = _ProcessEntry()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry)
+        more = _kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            pid = int(entry.th32ProcessID)
+            # Имя из снимка дешёвое: путь спрашиваем только у тёзок.
+            if pid and pid != os.getpid() and os.path.normcase(entry.szExeFile) == name:
+                path = _image_path(pid)
+                if path and os.path.normcase(path) == target:
+                    found.append(pid)
+            more = _kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        _kernel32.CloseHandle(snapshot)
+    return found
+
+
 def stop_processes_under(root: Path, timeout_s: float = 20.0) -> list[str]:
     """Завершить ядра и прочие процессы приложения; вернуть тех, кто выжил.
 

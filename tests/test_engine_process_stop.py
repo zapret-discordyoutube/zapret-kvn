@@ -232,7 +232,9 @@ class XrayStopStepsAsyncTests(unittest.TestCase):
 class SingBoxStopTests(unittest.TestCase):
     # stop() — синхронный драйвер stop_steps() (только shutdown/тесты); ожидания
     # выхода процесса — шаги WaitProcessFinishedStep, не waitForFinished в GUI.
-    def test_stop_grace_is_at_most_500ms_before_kill(self) -> None:
+    def test_stop_kills_immediately_without_terminate_grace(self) -> None:
+        # terminate() (WM_CLOSE) консольный sing-box не обрабатывает: ожидание
+        # «мягкой» остановки только задерживало каждое переключение.
         manager = SingBoxManager()
         fake = Mock()
         fake.state.side_effect = [_RUNNING, _NOT_RUNNING]
@@ -240,14 +242,14 @@ class SingBoxStopTests(unittest.TestCase):
 
         with patch(
             "xray_fluent.application.async_steps.wait_for_qprocess_finished",
-            side_effect=[False, True],
+            return_value=True,
         ) as wait_mock:
             self.assertTrue(manager.stop())
 
-        fake.terminate.assert_called_once_with()
+        fake.terminate.assert_not_called()
         fake.kill.assert_called_once_with()
         timeouts = [call.args[1] for call in wait_mock.call_args_list]
-        self.assertEqual(timeouts, [500, 2000])
+        self.assertEqual(timeouts, [2000])
 
     def test_stop_waits_for_tun_release_after_tun_session(self) -> None:
         manager = SingBoxManager()
@@ -255,6 +257,7 @@ class SingBoxStopTests(unittest.TestCase):
         fake.state.side_effect = [_RUNNING, _NOT_RUNNING]
         manager._process = fake
         manager._uses_tun = True
+        manager._tun_interface_name = "xftunabc123"
         released_mock = Mock()
 
         with patch(
@@ -263,7 +266,7 @@ class SingBoxStopTests(unittest.TestCase):
         ), patch.object(SingBoxManager, "_wait_tun_released_steps", staticmethod(steps_via(released_mock))):
             self.assertTrue(manager.stop())
 
-        released_mock.assert_called_once_with()
+        released_mock.assert_called_once_with("xftunabc123")
 
     def test_request_stop_kills_without_waiting(self) -> None:
         manager = SingBoxManager()

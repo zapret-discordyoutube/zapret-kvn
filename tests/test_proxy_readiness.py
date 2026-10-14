@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
+import struct
+
+from xray_fluent.network import proxy_readiness
 from xray_fluent.network.proxy_readiness import (
+    listening_ports_from_table,
+    ports_listening,
     probe_http_proxy_listener,
     probe_listener_role,
     probe_socks5_listener,
@@ -121,3 +126,39 @@ class ProxyReadinessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _row4(port: int) -> bytes:
+    # MIB_TCPROW_OWNER_PID: state, local addr, local port (сетевой порядок), ...
+    return struct.pack("<II", 2, 0) + struct.pack(">H", port) + b"\0\0" + struct.pack("<III", 0, 0, 1234)
+
+
+def _row6(port: int) -> bytes:
+    # MIB_TCP6ROW_OWNER_PID: addr[16], scope, local port, raddr[16], scope, rport, state, pid
+    return (
+        b"\0" * 16 + struct.pack("<I", 0) + struct.pack(">H", port) + b"\0\0"
+        + b"\0" * 16 + struct.pack("<IIII", 0, 0, 2, 1234)
+    )
+
+
+class ListeningTableTests(unittest.TestCase):
+    def test_ipv4_and_ipv6_rows_decode_network_order_ports(self) -> None:
+        v4 = struct.pack("<I", 2) + _row4(1391) + _row4(10808)
+        v6 = struct.pack("<I", 1) + _row6(19090)
+        self.assertEqual(listening_ports_from_table(v4, 2), {1391, 10808})
+        self.assertEqual(listening_ports_from_table(v6, 23), {19090})
+
+    def test_ports_listening_answers_from_table_without_connecting(self) -> None:
+        tables = {2: {1391}, 23: {1390}}
+        with patch.object(proxy_readiness.os, "name", "nt"), patch.object(
+            proxy_readiness, "_listening_ports_of_family", side_effect=lambda family: tables[family]
+        ), patch("xray_fluent.network.proxy_readiness.socket.create_connection") as connect:
+            self.assertTrue(ports_listening({1391: "HTTP", 1390: "SOCKS"}))
+            self.assertFalse(ports_listening((1391, 4000)))
+        connect.assert_not_called()
+
+    def test_ports_listening_unknown_when_table_fails(self) -> None:
+        with patch.object(proxy_readiness.os, "name", "nt"), patch.object(
+            proxy_readiness, "_listening_ports_of_family", side_effect=OSError(5, "denied")
+        ):
+            self.assertIsNone(ports_listening((1391,)))

@@ -20,12 +20,8 @@ import base64
 import binascii
 import re
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.hazmat.primitives.serialization import load_der_private_key
-
-from .happ_keys import CRYPT1_4_KEYS, CRYPT5_KEYS
+# cryptography и таблица ключей нужны только при расшифровке ссылки Happ:
+# они импортируются внутри функций, а не при запуске программы.
 
 
 #: Схемы в порядке убывания длины префикса — важно, чтобы ``crypt5`` не был
@@ -85,6 +81,8 @@ def _b64decode(value: str | bytes) -> bytes:
 
 
 def _load_key(encoded: str):
+    from cryptography.hazmat.primitives.serialization import load_der_private_key
+
     try:
         return load_der_private_key(base64.b64decode(encoded), None)
     except Exception as exc:  # pragma: no cover - таблица ключей проверяется тестом
@@ -111,6 +109,10 @@ def _swap_block_halves(data: bytes) -> bytes:
 
 
 def _decrypt_crypt1to4(payload: str, ordinal: int) -> str:
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    from .happ_keys import CRYPT1_4_KEYS
+
     key = _load_key(CRYPT1_4_KEYS[ordinal])
     ciphertext = _b64decode(payload)
     block_size = key.key_size // 8
@@ -126,6 +128,8 @@ def _decrypt_crypt1to4(payload: str, ordinal: int) -> str:
 
 
 def _decrypt_crypt5(payload: str) -> str:
+    from .happ_keys import CRYPT5_KEYS
+
     swapped = _swap_block_halves(payload.encode("latin-1", "ignore"))
     if len(swapped) < _MARKER_SIZE * 2 + _CRYPT5_NONCE_SIZE:
         raise HappCryptError("Ссылка happ://crypt5 слишком короткая")
@@ -156,6 +160,10 @@ def _is_digit(data: bytes, index: int) -> bool:
 
 
 def _decrypt_crypt5_body(body: bytes, key, *, salted: bool) -> str:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
     nonce = body[:_CRYPT5_NONCE_SIZE]
     if salted:
         salt = body[_CRYPT5_SALT_OFFSET : _CRYPT5_SALT_OFFSET + _CRYPT5_SALT_SIZE]

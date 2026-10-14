@@ -1,6 +1,68 @@
 from __future__ import annotations
 
+import os
 import socket
+import struct
+
+#: Шаг опроса, пока порт ещё не открыт: проверка таблицы почти бесплатна.
+LISTENER_POLL_MS = 25
+#: GetExtendedTcpTable: TCP_TABLE_OWNER_PID_LISTENER (для IPv6 «basic» не бывает).
+_TCP_TABLE_OWNER_PID_LISTENER = 3
+#: Смещение dwLocalPort в MIB_TCPROW_OWNER_PID / MIB_TCP6ROW_OWNER_PID и размер строки.
+_TCP_TABLE_LAYOUT = {2: (8, 24), 23: (20, 56)}  # AF_INET, AF_INET6
+_ERROR_INSUFFICIENT_BUFFER = 122
+
+
+def _listening_ports_of_family(family: int) -> set[int]:
+    import ctypes
+
+    iphlpapi = ctypes.WinDLL("iphlpapi")
+    size = ctypes.c_ulong(0)
+    iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, family, _TCP_TABLE_OWNER_PID_LISTENER, 0)
+    for _attempt in range(3):
+        buffer = ctypes.create_string_buffer(size.value + 4096)
+        size = ctypes.c_ulong(len(buffer))
+        result = iphlpapi.GetExtendedTcpTable(
+            buffer, ctypes.byref(size), False, family, _TCP_TABLE_OWNER_PID_LISTENER, 0
+        )
+        if result == 0:
+            break
+        if result != _ERROR_INSUFFICIENT_BUFFER:
+            raise OSError(result, "GetExtendedTcpTable failed")
+    else:
+        raise OSError(_ERROR_INSUFFICIENT_BUFFER, "GetExtendedTcpTable keeps growing")
+    return listening_ports_from_table(buffer.raw, family)
+
+
+def listening_ports_from_table(raw: bytes, family: int) -> set[int]:
+    """Локальные порты из MIB_TCP(6)TABLE_OWNER_PID (порт — в сетевом порядке)."""
+
+    port_offset, row_size = _TCP_TABLE_LAYOUT[family]
+    (count,) = struct.unpack_from("<I", raw, 0)
+    ports: set[int] = set()
+    for index in range(count):
+        (value,) = struct.unpack_from("<I", raw, 4 + index * row_size + port_offset)
+        ports.add(((value & 0xFF) << 8) | ((value >> 8) & 0xFF))
+    return ports
+
+
+def ports_listening(ports) -> bool | None:
+    """Слушаются ли все ``ports`` (таблица TCP Windows, без подключения).
+
+    ``None`` — ответа нет (не Windows или WinAPI отказал): тогда решает
+    обычная проба подключением.  На Windows подключение к ещё не открытому
+    локальному порту не отбивается сразу — система повторяет SYN, и ранняя
+    проба готовности всегда выжидала весь свой таймаут; таблица отвечает
+    за миллисекунду.
+    """
+
+    if os.name != "nt":
+        return None
+    try:
+        listening = _listening_ports_of_family(2) | _listening_ports_of_family(23)
+    except Exception:
+        return None
+    return all(int(port) in listening for port in ports)
 
 
 def probe_tcp_listener(port: int, *, timeout: float = 0.25) -> bool:
