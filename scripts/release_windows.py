@@ -904,6 +904,31 @@ def telegram_has_version(version: str) -> bool:
     )
 
 
+# Пасхалка в духе «Removed Herobrine» из Minecraft (просьба владельца
+# 2026-10-15, так же в Zapret 2 GUI): примерно в трёх выпусках из десяти
+# последней строкой изменений идёт «Удалена буква «О»». Решение зависит только
+# от версии, поэтому возобновлённый выпуск говорит то же, что начатый.
+EASTER_EGG_LINE = "Удалена буква «О»"
+EASTER_EGG_CHANCE = 0.30
+
+
+def has_easter_egg(version: str) -> bool:
+    import random
+
+    return random.Random(f"zapret-easter-egg:stable:{version}").random() < EASTER_EGG_CHANCE
+
+
+def published_changes(version: str, changes: list[str]) -> list[str]:
+    """Строки изменений для Forgejo и Telegram; шутка — только если есть место."""
+    if not has_easter_egg(version):
+        return list(changes)
+    joked = [*changes, EASTER_EGG_LINE]
+    # Пределы публикатора в Telegram: до 6 строк и 700 знаков вместе.
+    if len(joked) > 6 or len("; ".join(joked)) > 700:
+        return list(changes)
+    return joked
+
+
 def publish_telegram(version: str, changes: list[str]) -> None:
     if telegram_has_version(version):
         log(f"Telegram already contains v{version}")
@@ -1118,7 +1143,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     release = forgejo.release_by_tag(version)
     if not phase_done(state, "draft_created"):
         if release is None:
-            release = forgejo.create_draft(version, commit, changes)
+            release = forgejo.create_draft(version, commit, published_changes(version, changes))
         if not release.get("draft") or release.get("prerelease"):
             raise ReleaseError("existing Forgejo release is not the expected draft")
         mark_phase(state, "draft_created", release_id=int(release["id"]))
@@ -1139,7 +1164,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         verify_published_release(forgejo, release, version, commit, manifest)
 
     if telegram and not phase_done(state, "telegram_published"):
-        publish_telegram(version, changes)
+        publish_telegram(version, published_changes(version, changes))
         mark_phase(state, "telegram_published")
     elif not telegram and not phase_done(state, "telegram_published"):
         mark_phase(state, "telegram_published", telegram_skipped=True)
