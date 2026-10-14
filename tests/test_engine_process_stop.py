@@ -71,6 +71,13 @@ class XrayStopTests(unittest.TestCase):
 
 
 class XrayEnsurePortsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Таблица TCP на Windows настоящая: без подмены «порт закрыт» и пробы
+        # (подменённые ниже) не вызываются. Здесь проверяется логика проб.
+        patcher = patch("xray_fluent.engines.xray.manager.ports_listening", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_bindable_port_skips_netstat_diagnostics(self) -> None:
         manager = XrayManager()
         owner_lookup = Mock()
@@ -304,6 +311,13 @@ class SingBoxTunReadinessTests(unittest.TestCase):
 
 
 class SingBoxProxyReadinessTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Таблица TCP на Windows настоящая: без подмены «порт закрыт» и пробы
+        # (подменённые ниже) не вызываются. Здесь проверяется логика проб.
+        patcher = patch("xray_fluent.engines.singbox.manager.ports_listening", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def _config() -> dict:
         return {
