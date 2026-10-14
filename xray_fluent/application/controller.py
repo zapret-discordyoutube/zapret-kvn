@@ -3219,6 +3219,13 @@ class AppController(QObject):
             # successful cut-over.
             self._log("[core-switch] fallback: Xray cannot interrupt existing connections")
             return None
+        if session.tun_mode and not session.hybrid:
+            # Переключение selector'а «родного» sing-box под TUN давало
+            # «подключено» без TCP-трафика через туннель (замер на win10,
+            # 2026-10-14; и до правила Zapret на весь набор). Полный переход
+            # здесь стоит ~0,9 с и проверен трафиком.
+            self._log("[core-switch] full transition: native sing-box TUN selector switch is not trusted")
+            return None
         if not self.bypass.ready_for(node):
             self._log(f"[core-switch] full transition: Zapret rule for node {node.id} is not applied")
             return None

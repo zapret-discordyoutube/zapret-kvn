@@ -306,6 +306,7 @@ class LiveConnectionCutoverTests(unittest.TestCase):
             node_id=nodes[0].id,
             active_core="singbox" if hybrid else "xray",
             hybrid=hybrid,
+            tun_mode=False,
             outbound_pool_tags=tags,
             hybrid_relay_selector_tags=("relay-a", "relay-b") if hybrid else (),
             hybrid_relay_selected_tag="relay-a" if hybrid else "",
@@ -375,6 +376,17 @@ class LiveConnectionCutoverTests(unittest.TestCase):
 
         self.assertEqual(controller._apply_core_calls, [])
         controller._capture_hot_switched_session.assert_not_called()
+
+    def test_native_singbox_tun_session_switches_by_full_transition(self) -> None:
+        controller, _nodes, _tags, _session = self._controller(hybrid=False)
+        controller._active_session.active_core = "singbox"
+        controller._active_session.tun_mode = True
+        self.assertIsNone(AppController._hot_switch_precheck(controller))
+
+    def test_hybrid_tun_session_keeps_the_hot_switch(self) -> None:
+        controller, _nodes, _tags, _session = self._controller(hybrid=True)
+        controller._active_session.tun_mode = True
+        self.assertIsNotNone(AppController._hot_switch_precheck(controller))
 
     def test_hot_switch_needs_the_zapret_rule_of_the_new_node(self) -> None:
         controller, nodes, _tags, _session = self._controller(hybrid=True)
