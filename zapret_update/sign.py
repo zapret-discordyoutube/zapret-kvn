@@ -71,11 +71,25 @@ def make(
     tree: Path | None = None,
     installer: Path | None = None,
     exclude: tuple[str, ...] = (),
+    files: list[dict] | None = None,
+    patches: list[dict] = (),
 ) -> tuple[Path, Path]:
-    """Собирает, подписывает и сверяет список выпуска; возвращает пути двух файлов."""
+    """Собирает, подписывает и сверяет список выпуска; возвращает пути двух файлов.
+
+    ``files`` и ``patches`` — готовые записи из сборщика хранилища
+    (``builder.build_store``) вместо обхода ``tree``.
+    """
     key_id, seed = read_key(key_path)
     payload = manifest_module.build(
-        product=product, channel=channel, version=version, key=key_id, tree=tree, installer=installer, exclude=exclude
+        product=product,
+        channel=channel,
+        version=version,
+        key=key_id,
+        tree=tree,
+        installer=installer,
+        exclude=exclude,
+        files=files,
+        patches=patches,
     )
     raw = manifest_module.dumps(payload)
     _same_key_id, signature = sign_bytes(raw, key_path)

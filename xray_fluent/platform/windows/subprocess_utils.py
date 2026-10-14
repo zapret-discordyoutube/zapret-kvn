@@ -155,7 +155,7 @@ def _kill_processes_native(target: Path, timeout: float) -> bool:
     Тот же отбор, что у PowerShell-варианта: имя и полный путь exe совпадают.
     Завершённые процессы ждём до ``timeout``, чтобы порты и адаптер освободились.
     """
-    from ...updates.installer import processes as win_processes
+    from zapret_update import processes as win_processes
 
     pids = win_processes.processes_at(target)
     for pid in pids:

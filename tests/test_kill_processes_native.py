@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xray_fluent.platform.windows import subprocess_utils
-from xray_fluent.updates.installer import processes as win_processes
+from zapret_update import processes as win_processes
 
 
 class KillProcessesByPathTests(unittest.TestCase):

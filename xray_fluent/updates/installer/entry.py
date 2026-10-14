@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import handoff, processes
+from zapret_update import handoff, processes
 from .plan import WORK_DIR_PREFIX, InstallPlan
 from .runner import Stage, run_install, setup_logging
 

@@ -1,7 +1,7 @@
-"""Процессы Windows, от которых зависит замена файлов.
+"""Процессы Windows, от которых зависит замена файлов (из Zapret KVN).
 
-Модуль импортируется и вне Windows (юнит-тесты установщика идут на любой
-ОС), но сами вызовы WinAPI там недоступны: функции возвращают «пусто».
+Модуль импортируется и вне Windows (тесты ядра идут на любой ОС), но сами
+вызовы WinAPI там недоступны: функции возвращают «пусто».
 """
 
 from __future__ import annotations
@@ -233,7 +233,7 @@ def _lock_holders(path: Path) -> list[str]:
 
 
 def clean_environment() -> dict[str, str]:
-    """Окружение без служебных переменных PyInstaller.
+    """Окружение без служебных переменных сборщиков (PyInstaller, Nuitka).
 
     Установщик и приложение — разные сборки одного exe; унаследованные
     ``_PYI_*`` заставили бы дочерний процесс считать себя частью чужой.
@@ -242,7 +242,7 @@ def clean_environment() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
-        if not key.upper().startswith(("_PYI_", "_MEIPASS"))
+        if not key.upper().startswith(("_PYI_", "_MEIPASS", "NUITKA_"))
     }
 
 

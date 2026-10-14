@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import subprocess
 
-from . import APPLY_UPDATE_FLAG, processes
+from zapret_update import processes
+
+from . import APPLY_UPDATE_FLAG
 from .plan import PLAN_FILE_NAME, InstallPlan
 
 

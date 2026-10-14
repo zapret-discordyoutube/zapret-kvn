@@ -52,6 +52,18 @@ class FileEntry:
     path: str
     size: int
     sha256: str
+    # Размер ``<sha256>.zst`` в хранилище; 0 — файла в хранилище нет
+    # (выпуски до хранилища), его можно взять только из установщика.
+    zsize: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PatchEntry:
+    """Заплатка ``<from>-<to>.zst``: новый файл из прежнего."""
+
+    from_sha256: str
+    to_sha256: str
+    size: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +82,13 @@ class Manifest:
     key: str
     files: tuple[FileEntry, ...]
     installer: InstallerEntry | None
+    patches: tuple[PatchEntry, ...] = ()
+
+    def patch_for(self, from_sha256: str, to_sha256: str) -> PatchEntry | None:
+        return next(
+            (item for item in self.patches if item.from_sha256 == from_sha256 and item.to_sha256 == to_sha256),
+            None,
+        )
 
 
 # ── версии ──────────────────────────────────────────────────────────────────
@@ -184,7 +203,17 @@ def parse(payload: object) -> Manifest:
         if not name or "/" in name or "\\" in name or name in (".", ".."):
             raise ManifestError("в списке выпуска неверное имя установщика", "format")
         installer = InstallerEntry(name, _size(raw_installer.get("size")), _sha(raw_installer.get("sha256")))
-    return Manifest(product, channel, version, created, key, tuple(files), installer)
+
+    targets = {entry.sha256 for entry in files}
+    patches = []
+    for item in payload.get("patches") or ():
+        if not isinstance(item, dict):
+            raise ManifestError("в списке выпуска неверная запись заплатки", "format")
+        patch = PatchEntry(_sha(item.get("from")), _sha(item.get("to")), _size(item.get("size")))
+        if patch.to_sha256 not in targets:
+            raise ManifestError("заплатка ведёт к файлу, которого нет в выпуске", "format")
+        patches.append(patch)
+    return Manifest(product, channel, version, created, key, tuple(files), installer, tuple(patches))
 
 
 def safe_relative_path(text: str) -> str:
@@ -205,7 +234,10 @@ def safe_relative_path(text: str) -> str:
 def _file_entry(item: object) -> FileEntry:
     if not isinstance(item, dict):
         raise ManifestError("в списке выпуска неверная запись файла", "format")
-    return FileEntry(safe_relative_path(item.get("path")), _size(item.get("size")), _sha(item.get("sha256")))
+    zsize = item.get("zsize", 0)
+    return FileEntry(
+        safe_relative_path(item.get("path")), _size(item.get("size")), _sha(item.get("sha256")), _size(zsize)
+    )
 
 
 def _size(value: object) -> int:
@@ -242,15 +274,21 @@ def build(
     installer: Path | None = None,
     exclude: Iterable[str] = (),
     created: int | None = None,
+    files: Iterable[dict] | None = None,
+    patches: Iterable[dict] = (),
 ) -> dict:
     """Список выпуска для папки сборки и установщика.
 
     ``exclude`` — пути внутри папки (с ``/``), которые в выпуск не входят:
-    файл или папка целиком.
+    файл или папка целиком. ``files`` — готовый список файлов (уже с
+    ``zsize`` из хранилища) вместо обхода ``tree``; ``patches`` — заплатки.
     """
     skipped = tuple(str(item).strip("/") for item in exclude if str(item).strip("/"))
+    listed = [dict(item) for item in files] if files is not None else None
     files = []
-    if tree is not None:
+    if listed is not None:
+        files = sorted(listed, key=lambda item: item["path"])
+    elif tree is not None:
         root = Path(tree)
         for path in sorted(root.rglob("*")):
             if not path.is_file():
@@ -271,6 +309,9 @@ def build(
     if installer is not None:
         target = Path(installer)
         payload["installer"] = {"name": target.name, "size": target.stat().st_size, "sha256": file_sha256(target)}
+    patch_list = [dict(item) for item in patches]
+    if patch_list:
+        payload["patches"] = sorted(patch_list, key=lambda item: (item["to"], item["from"]))
     parse(payload)  # собранный список обязан проходить свой же разбор
     return payload
 
@@ -285,6 +326,7 @@ __all__ = [
     "SIGNATURE_NAME",
     "FileEntry",
     "InstallerEntry",
+    "PatchEntry",
     "Manifest",
     "ManifestError",
     "build",

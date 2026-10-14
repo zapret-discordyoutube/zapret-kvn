@@ -11,8 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from xray_fluent.updates.installer import file_swap, handoff, phrases, processes, runner
-from xray_fluent.updates.installer.file_swap import FileSwap, InstallError
+from xray_fluent.updates.installer import phrases, runner
+from zapret_update import apply, handoff, processes
+from zapret_update import swap as file_swap
+from zapret_update.swap import FileSwap, InstallError
 from xray_fluent.updates.installer.plan import InstallPlan
 from xray_fluent.updates.installer.runner import Stage, run_install
 
@@ -73,7 +75,8 @@ class InstallerCase(unittest.TestCase):
 
     def swap(self, **kwargs) -> FileSwap:
         kwargs.setdefault("lock_wait_s", 0.0)
-        return FileSwap(self.source_dir, self.app_dir, "attempt", **kwargs)
+        work = self.app_dir / "data" / "runtime" / "app_update" / "attempt"
+        return FileSwap(self.source_dir, self.app_dir, work, preserve=("data",), **kwargs)
 
 
 class FileSwapTests(InstallerCase):
@@ -232,13 +235,16 @@ class RunnerTests(InstallerCase):
         self.exit_codes: list[int | None] = []
         # Что каждый запуск допишет в startup.log (None — ничего).
         self.startup_lines: list[list[str] | None] = []
+        self.show_fatal = Mock()
         for target, replacement in (
-            (runner.processes, {"wait_for_exit": Mock(return_value=True)}),
-            (runner.processes, {"stop_processes_under": Mock(return_value=[])}),
-            (runner.processes, {"lock_holders": Mock(return_value=["Antivirus (C:\\av.exe)"])}),
-            (runner.processes, {"start_detached": self._start}),
-            (runner, {"NEW_VERSION_READY_WAIT_S": 0.05, "OLD_VERSION_READY_WAIT_S": 0.05}),
-            (runner, {"_log": Mock(), "_show_fatal_message": Mock()}),
+            (processes, {"wait_for_exit": Mock(return_value=True)}),
+            (processes, {"stop_processes_under": Mock(return_value=[])}),
+            (processes, {"lock_holders": Mock(return_value=["Antivirus (C:\\av.exe)"])}),
+            (processes, {"start_detached": self._start}),
+            (apply, {"NEW_VERSION_READY_WAIT_S": 0.05, "OLD_VERSION_READY_WAIT_S": 0.05}),
+            (apply, {"_log": Mock()}),
+            (runner, {"_log": Mock()}),
+            (runner.KvnHooks, {"show_fatal": self.show_fatal}),
         ):
             patcher = patch.multiple(target, **replacement)
             patcher.start()
@@ -257,7 +263,7 @@ class RunnerTests(InstallerCase):
         return Mock(poll=Mock(return_value=code), returncode=code)
 
     def logged(self, level: str) -> str:
-        calls = getattr(runner._log, level).call_args_list
+        calls = getattr(apply._log, level).call_args_list + getattr(runner._log, level).call_args_list
         return "\n".join(call.args[0] % call.args[1:] for call in calls)
 
     def error_log(self) -> Path:
@@ -283,7 +289,7 @@ class RunnerTests(InstallerCase):
         self.assertFalse(self.error_log().exists())
 
     def test_install_finishes_as_soon_as_the_new_version_reports_ready(self) -> None:
-        patcher = patch.multiple(runner, NEW_VERSION_READY_WAIT_S=60.0)
+        patcher = patch.multiple(apply, NEW_VERSION_READY_WAIT_S=60.0)
         patcher.start()
         self.addCleanup(patcher.stop)
         real_start = self._start
@@ -294,15 +300,15 @@ class RunnerTests(InstallerCase):
             handoff.confirm_ready(hold)
             return process
 
-        with patch.object(runner.processes, "start_detached", start_and_report):
+        with patch.object(processes, "start_detached", start_and_report):
             started = time.monotonic()
             self.assertTrue(run_install(self.plan))
         self.assertLess(time.monotonic() - started, 30.0)
 
     def test_application_is_closed_before_files_are_replaced(self) -> None:
         order: list[str] = []
-        runner.processes.wait_for_exit.side_effect = lambda *a: order.append("wait") or True
-        runner.processes.stop_processes_under.side_effect = lambda *a: order.append("stop") or []
+        processes.wait_for_exit.side_effect = lambda *a: order.append("wait") or True
+        processes.stop_processes_under.side_effect = lambda *a: order.append("stop") or []
         real_commit = FileSwap.commit
 
         def commit(swap):
@@ -328,7 +334,7 @@ class RunnerTests(InstallerCase):
         self.assertEqual(len(self.started), 2)
         self.assertEqual(stages[-2:], [Stage.ROLLBACK, Stage.FAILED])
         self.assertIn("Прежняя версия запущена", self.logged("info"))
-        runner._show_fatal_message.assert_not_called()
+        self.show_fatal.assert_not_called()
 
     def test_both_failed_starts_leave_their_reasons_in_update_log(self) -> None:
         # 09.10.2026: v0.8.18 оборвал Ctrl+C посреди импорта, прежняя версия
@@ -350,7 +356,7 @@ class RunnerTests(InstallerCase):
             errors,
         )
         self.assertIn("не оставил ни строки", errors)
-        runner._show_fatal_message.assert_called_once_with(self.plan)
+        self.show_fatal.assert_called_once()
 
     def test_startup_log_rotated_by_the_failed_start_is_read_from_the_beginning(self) -> None:
         log = self.app_dir / "data" / "logs" / "startup.log"
@@ -361,9 +367,9 @@ class RunnerTests(InstallerCase):
             log.write_text("----- startup begin -----\nTraceback\n", encoding="utf-8")
             return Mock(poll=Mock(return_value=1), returncode=1)
 
-        with patch.object(runner.processes, "start_detached", rotate_and_crash):
+        with patch.object(processes, "start_detached", rotate_and_crash):
             with self.assertRaises(InstallError):
-                runner._start_and_verify(self.plan, lambda fraction: None)
+                apply._start_and_verify(runner.core_plan(self.plan), runner.KvnHooks(), lambda fraction: None)
         self.assertIn("----- startup begin -----\nTraceback", self.logged("error"))
 
     def test_locked_file_is_reported_with_its_holder(self) -> None:
@@ -378,7 +384,7 @@ class RunnerTests(InstallerCase):
         with patch.object(file_swap.os, "replace", replace), \
                 patch.object(file_swap.FileSwap, "_move", _move_without_waiting):
             self.assertFalse(run_install(self.plan))
-        runner.processes.lock_holders.assert_called_once_with(locked)
+        processes.lock_holders.assert_called_once_with(locked)
         log = self.error_log().read_text(encoding="utf-8")
         self.assertIn(os.path.join("_internal", "app.pyd"), log)
         self.assertIn("Antivirus", log)
@@ -392,7 +398,7 @@ class RunnerTests(InstallerCase):
         shutil.rmtree(self.source_dir)
         self.source_dir.mkdir()
         self.assertFalse(run_install(self.plan))
-        runner.processes.wait_for_exit.assert_called()
+        processes.wait_for_exit.assert_called()
         self.assertEqual(len(self.started), 1)
         self.assertTrue(self.error_log().exists())
         self.assertEqual((self.app_dir / "data" / "runtime" / "app_update_failure.txt").read_text(), "prep")
@@ -605,7 +611,7 @@ _CTRL_C_LAUNCHER = """
 import ctypes, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from xray_fluent.updates.installer import processes
+from zapret_update import processes
 # Запрет Ctrl+C наследуется (так под sshd); приложение из Проводника его не имеет.
 ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
 command = [sys.executable, "-c", "import time; time.sleep(60)"]

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ..constants import RUNTIME_DIR
 from .app_updater import _is_newer_version, _parse_semver
-from .installer.file_swap import STAGE_ROOT_NAME
+from .installer.runner import STAGE_ROOT_NAME
 from .installer.plan import WORK_DIR_PREFIX
 
 _log = logging.getLogger(__name__)

@@ -322,7 +322,7 @@ def _show_after_update_window(show) -> None:
     import time
 
     from PyQt6.QtCore import QTimer
-    from xray_fluent.updates.installer import handoff
+    from zapret_update import handoff
 
     hold = handoff.claim()
     if hold is None:
