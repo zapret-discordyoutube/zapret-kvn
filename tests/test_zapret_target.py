@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PyQt6.QtCore import QCoreApplication
 
 from xray_fluent.application.server_bypass import ServerBypass
-from xray_fluent.engines.zapret.command import ServerRule
+from xray_fluent.engines.zapret.command import (
+    POOL_PROFILE_NAME,
+    SERVER_PROFILE_NAME,
+    ServerRule,
+    build_arguments,
+)
 from xray_fluent.engines.zapret.endpoint import ResolvedEndpoint, ServerEndpoint, endpoint_for_node
 from xray_fluent.engines.zapret.manager import ZapretManager, ZapretPlan
 from xray_fluent.engines.zapret.strategies import (
@@ -18,6 +24,7 @@ from xray_fluent.engines.zapret.strategies import (
 )
 from xray_fluent.importer.link_parser import parse_single
 from xray_fluent.profiles.models import AppSettings, Node, ZapretTargetSettings
+from tests.step_fakes import drive
 
 _APP = QCoreApplication.instance() or QCoreApplication([])
 
@@ -450,6 +457,106 @@ class GateTests(unittest.TestCase):
         controller.zapret.process_started()
         self.assertFalse(self._bypass(controller).ready_for(node))
 
+
+
+class PoolRuleTests(unittest.TestCase):
+    """One winws2 rule for the whole running pool: a switch inside it keeps the tunnel."""
+
+    def setUp(self) -> None:
+        patcher = patch("xray_fluent.application.server_bypass.EndpointResolver")
+        self.resolver = patcher.start()
+        self.addCleanup(patcher.stop)
+        remember = patch("xray_fluent.application.node_runtime_service.remember_country_addresses")
+        remember.start()
+        self.addCleanup(remember.stop)
+        self.strategy = server_strategy(ZapretTargetSettings(), endpoint_for_node(_vless()))
+        self.a = _vless("one.example")
+        self.b = Node(
+            name="b", scheme="vless", server="two.example", port=8443,
+            outbound={"protocol": "vless", "streamSettings": {"network": "tcp"}},
+        )
+
+    def _rule(self, node: Node, *ips: str, strategy=None) -> ServerRule:
+        return ServerRule(ResolvedEndpoint(endpoint_for_node(node), ips), strategy or self.strategy)
+
+    def _running(self, controller: Mock, plan: ZapretPlan) -> None:
+        controller.zapret.apply(plan)
+        controller.zapret.process_started()
+
+    def test_same_strategy_merges_into_the_selected_server_profile(self) -> None:
+        args = build_arguments(
+            ["--filter-tcp=80", "--lua-desync=fake"],
+            self._rule(self.a, "203.0.113.1"),
+            (self._rule(self.b, "203.0.113.2"),),
+        )
+        self.assertEqual(args.count(SERVER_PROFILE_NAME), 1)
+        self.assertNotIn(POOL_PROFILE_NAME, args)
+        self.assertIn("--filter-tcp=443,8443", args)
+        self.assertIn("--ipset-ip=203.0.113.1,203.0.113.2", args)
+
+    def test_another_strategy_gets_its_own_pool_profile_after_the_selected_one(self) -> None:
+        other = next(
+            strategy for key, strategy in load_strategy_catalog("tcp").items()
+            if key not in ("pass", self.strategy.strategy_id)
+        )
+        args = build_arguments(
+            ["--filter-tcp=80", "--lua-desync=fake"],
+            self._rule(self.a, "203.0.113.1"),
+            (self._rule(self.b, "203.0.113.2", strategy=other),),
+        )
+        selected, pool = args.index(SERVER_PROFILE_NAME), args.index(POOL_PROFILE_NAME)
+        self.assertLess(selected, pool)
+        self.assertEqual(args[pool - 1], "--new")
+        self.assertIn("--ipset-ip=203.0.113.2", args[pool:])
+
+    def test_pool_member_is_ready_but_a_switch_needs_its_fresh_ips_in_the_rule(self) -> None:
+        controller = _controller(self.a, connected=True)
+        self._running(controller, ZapretPlan(
+            "Default", self._rule(self.a, "203.0.113.1"), (self._rule(self.b, "203.0.113.2"),),
+        ))
+        bypass = ServerBypass(controller)
+        self.assertTrue(bypass.ready_for(self.b))
+        fresh = ResolvedEndpoint(endpoint_for_node(self.b), ("203.0.113.2",))
+        with patch("xray_fluent.application.server_bypass.resolve_endpoint", return_value=fresh):
+            self.assertTrue(drive(bypass.verify_switch_target_steps(self.b)))
+        moved = ResolvedEndpoint(endpoint_for_node(self.b), ("198.51.100.7",))
+        with patch("xray_fluent.application.server_bypass.resolve_endpoint", return_value=moved):
+            self.assertFalse(drive(bypass.verify_switch_target_steps(self.b)))
+        with patch("xray_fluent.application.server_bypass.resolve_endpoint") as dns:
+            self.assertTrue(drive(bypass.verify_switch_target_steps(self.a)))
+        dns.assert_not_called()
+
+    def test_reconnect_to_a_covered_pool_member_keeps_winws_running(self) -> None:
+        controller = _controller(self.b)
+        self._running(controller, ZapretPlan(
+            "Default", self._rule(self.a, "203.0.113.1"), (self._rule(self.b, "203.0.113.2"),),
+        ))
+        bypass = ServerBypass(controller)
+        self.assertTrue(bypass.prepare(5))
+        fresh = ResolvedEndpoint(endpoint_for_node(self.b), ("203.0.113.2",))
+        bypass._on_resolved(5, endpoint_for_node(self.b), (fresh, ()), None)
+        self.assertEqual(len(controller.zapret.launches), 1)
+        controller._schedule_transition_drain.assert_called_once()
+
+    def test_prepare_adds_known_addresses_of_the_planner_pool(self) -> None:
+        controller = _controller(self.a)
+        controller.state.nodes = [self.a, self.b]
+        controller._singbox_plan_facts.return_value = SimpleNamespace(
+            selector_tags={self.a.id: "proxy-a", self.b.id: "proxy-b"},
+        )
+        bypass = ServerBypass(controller)
+        self.assertTrue(bypass.prepare(5))
+        resolver = self.resolver.call_args.args[2]
+        fresh = ResolvedEndpoint(endpoint_for_node(self.a), ("203.0.113.1",))
+        with patch("xray_fluent.application.server_bypass.resolve_endpoint", return_value=fresh), patch(
+            "xray_fluent.application.server_bypass.cached_addresses", return_value=["203.0.113.2"]
+        ):
+            selected, pool = resolver(endpoint_for_node(self.a))
+        self.assertEqual(selected, fresh)
+        self.assertEqual(pool, (ResolvedEndpoint(endpoint_for_node(self.b), ("203.0.113.2",)),))
+        bypass._on_resolved(5, endpoint_for_node(self.a), (selected, pool), None)
+        plan, _revision = controller.zapret.launches[-1]
+        self.assertEqual([rule.target for rule in plan.pool], list(pool))
 
 
 class ApplyTargetSettingsTests(unittest.TestCase):

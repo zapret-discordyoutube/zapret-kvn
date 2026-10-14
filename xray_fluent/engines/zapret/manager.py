@@ -27,6 +27,8 @@ from ...application.async_steps import (
 from ...platform.windows.subprocess_utils import decode_output, kill_processes_by_path
 from . import presets
 from .command import ServerRule, build_arguments
+from .endpoint import ResolvedEndpoint, ServerEndpoint
+from .strategies import Strategy
 from .presets import ZAPRET_DIR
 
 log = logging.getLogger(__name__)
@@ -63,10 +65,34 @@ def _kill_orphaned_blocking() -> list[str]:
 
 @dataclass(frozen=True, slots=True)
 class ZapretPlan:
-    """What winws2 should run: a preset and, maybe, the VPN-server rule."""
+    """What winws2 should run: a preset and, maybe, the VPN-server rule.
+
+    ``pool`` — rules for the other servers of the running pool.  With them
+    in place a switch inside the pool keeps winws2 (and the tunnel) running.
+    """
 
     preset: str
     rule: ServerRule | None = None
+    pool: tuple[ServerRule, ...] = ()
+
+    def _rules(self) -> tuple[ServerRule, ...]:
+        return (self.rule, *self.pool) if self.rule is not None else ()
+
+    def covers_endpoint(self, endpoint: ServerEndpoint, strategy: Strategy) -> bool:
+        """Some rule targets exactly this endpoint with this strategy."""
+        return any(
+            rule.target.endpoint == endpoint and rule.strategy == strategy
+            for rule in self._rules()
+        )
+
+    def covers(self, resolved: ResolvedEndpoint, strategy: Strategy) -> bool:
+        """A rule for this endpoint and strategy already holds all of its fresh IPs."""
+        return any(
+            rule.target.endpoint == resolved.endpoint
+            and rule.strategy == strategy
+            and set(resolved.ips) <= set(rule.target.ips)
+            for rule in self._rules()
+        )
 
 
 class ZapretManager(QObject):
@@ -154,6 +180,8 @@ class ZapretManager(QObject):
         self._pending = revision
         if plan.rule is not None:
             self.log_line.emit(f"[zapret] Правило для VPN-сервера: {plan.rule.describe()}")
+            if plan.pool:
+                self.log_line.emit(f"[zapret] Правило для остальных серверов набора: {len(plan.pool)}")
         elif self._process_plan is not None and self._process_plan.rule is not None:
             self.log_line.emit("[zapret] Правило для VPN-сервера снято")
         self.plan_changed.emit(plan)
@@ -225,7 +253,7 @@ class ZapretManager(QObject):
         if not presets.preset_path(plan.preset).is_file():
             self._fail(f"Пресет не найден: {plan.preset}", "missing_preset")
             return False
-        args = build_arguments(presets.preset_arguments(plan.preset), plan.rule)
+        args = build_arguments(presets.preset_arguments(plan.preset), plan.rule, plan.pool)
         if not args:
             self._fail(f"Пресет пустой: {plan.preset}", "empty_preset")
             return False

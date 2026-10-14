@@ -17,6 +17,7 @@ from .strategies import Strategy
 log = logging.getLogger(__name__)
 
 SERVER_PROFILE_NAME = "--name=ZapretKVN: выбранный сервер"
+POOL_PROFILE_NAME = "--name=ZapretKVN: серверы набора"
 _CORE_LUA = (
     "--lua-init=@lua/zapret-lib.lua",
     "--lua-init=@lua/zapret-antidpi.lua",
@@ -68,18 +69,45 @@ def _merge_capture_filter(global_args: list[str], transport: str, ports: str) ->
         global_args.pop(index)
 
 
-def build_arguments(preset_args: list[str], rule: ServerRule | None) -> list[str]:
+def _sorted_ips(values) -> list[str]:
+    return sorted(
+        {str(ipaddress.ip_address(value)) for value in values},
+        key=lambda value: (ipaddress.ip_address(value).version, value),
+    )
+
+
+def _merged_ports(endpoints) -> str:
+    tokens = dict.fromkeys(port for endpoint in endpoints for port in endpoint.ports)
+    return ",".join(sorted(tokens, key=lambda item: int(item.split("-", 1)[0])))
+
+
+def build_arguments(
+    preset_args: list[str],
+    rule: ServerRule | None,
+    pool: tuple[ServerRule, ...] = (),
+) -> list[str]:
     """Preset arguments with the server rule as the very first profile.
 
     winws2 applies the first matching profile, so the server's exact
     IP/transport/port rule placed first wins over any broad preset profile.
     The preset list itself is never modified.
+
+    ``pool`` — the other servers of the running pool.  Their rules follow
+    the selected server's profile, one profile per transport and strategy
+    (IPs and ports merged), so switching to any of them needs no winws2
+    restart and therefore no tunnel stop.
     """
 
     if rule is None or not rule.target.ips:
         return list(preset_args)
-    strategy = rule.strategy
-    endpoint = rule.target.endpoint
+    # Profile groups: (transport, strategy) -> rules.  The selected server's
+    # group goes first and keeps its name; its own exact rule is always in it.
+    groups: dict[tuple[str, Strategy], list[ServerRule]] = {}
+    for item in (rule, *pool):
+        if item is None or not item.target.ips:
+            continue
+        key = (item.target.endpoint.transport, item.strategy)
+        groups.setdefault(key, []).append(item)
 
     first_profile = next(
         (
@@ -94,35 +122,37 @@ def build_arguments(preset_args: list[str], rule: ServerRule | None) -> list[str
     for init in reversed(_CORE_LUA):
         if not _loads_lua(global_args, init):
             global_args.insert(0, init)
-    # Extension lua builds on the core API, so it loads after the last lua-init.
-    lua_tail = max(
-        (index for index, arg in enumerate(global_args) if arg.startswith("--lua-init=")),
-        default=-1,
-    )
-    for init in reversed(lua_init_arguments(strategy.args)):
-        if not _loads_lua(global_args, init):
-            global_args.insert(lua_tail + 1, init)
-    for definition in blob_arguments(strategy.blob_dependencies):
-        name = definition.removeprefix("--blob=").split(":", 1)[0]
-        if not any(arg.startswith(f"--blob={name}:") for arg in global_args):
-            global_args.append(definition)
-    unresolved = unresolved_blob_names(strategy.blob_dependencies)
-    if unresolved:
-        log.warning(
-            "Стратегия %s ссылается на неизвестные блобы: %s",
-            strategy.strategy_id, ", ".join(unresolved),
-        )
 
-    _merge_capture_filter(global_args, endpoint.transport, endpoint.port_filter)
-    ips = sorted(
-        {str(ipaddress.ip_address(value)) for value in rule.target.ips},
-        key=lambda value: (ipaddress.ip_address(value).version, value),
-    )
-    server_profile = [
-        SERVER_PROFILE_NAME,
-        f"--filter-{endpoint.transport}={endpoint.port_filter}",
-        "--ipset-ip=" + ",".join(ips),
-        *strategy.args,
-    ]
+    server_profiles: list[str] = []
+    for index, ((transport, strategy), members) in enumerate(groups.items()):
+        # Extension lua builds on the core API, so it loads after the last lua-init.
+        lua_tail = max(
+            (position for position, arg in enumerate(global_args) if arg.startswith("--lua-init=")),
+            default=-1,
+        )
+        for init in reversed(lua_init_arguments(strategy.args)):
+            if not _loads_lua(global_args, init):
+                global_args.insert(lua_tail + 1, init)
+        for definition in blob_arguments(strategy.blob_dependencies):
+            name = definition.removeprefix("--blob=").split(":", 1)[0]
+            if not any(arg.startswith(f"--blob={name}:") for arg in global_args):
+                global_args.append(definition)
+        unresolved = unresolved_blob_names(strategy.blob_dependencies)
+        if unresolved:
+            log.warning(
+                "Стратегия %s ссылается на неизвестные блобы: %s",
+                strategy.strategy_id, ", ".join(unresolved),
+            )
+
+        ports = _merged_ports(member.target.endpoint for member in members)
+        _merge_capture_filter(global_args, transport, ports)
+        if server_profiles:
+            server_profiles.append("--new")
+        server_profiles.extend([
+            SERVER_PROFILE_NAME if index == 0 else POOL_PROFILE_NAME,
+            f"--filter-{transport}={ports}",
+            "--ipset-ip=" + ",".join(_sorted_ips(ip for member in members for ip in member.target.ips)),
+            *strategy.args,
+        ])
     separator = ["--new"] if profiles else []
-    return [*global_args, *server_profile, *separator, *profiles]
+    return [*global_args, *server_profiles, *separator, *profiles]

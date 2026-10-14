@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.step_fakes import steps_via
+
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -313,6 +315,7 @@ class LiveConnectionCutoverTests(unittest.TestCase):
         controller._active_session = session
         controller.connected = True
         controller.bypass.ready_for.return_value = True
+        controller.bypass.verify_switch_target_steps = steps_via(lambda _node: True)
 
         apply_calls: list[unittest.mock._Call] = []
         results = list(apply_results) if apply_results is not None else None

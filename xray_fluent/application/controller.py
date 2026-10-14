@@ -3360,6 +3360,11 @@ class AppController(QObject):
 
         started_at = time.perf_counter()
         node, session, tags, tag = plan.node, plan.session, plan.tags, plan.tag
+        # Сервер из правила набора (не тот, под который оно строилось): его
+        # свежий DNS обязан попасть в правило winws2, иначе — полный переход.
+        verify = getattr(self.bypass, "verify_switch_target_steps", None)
+        if verify is not None and not (yield from verify(node)):
+            return False
         if not (yield from self._apply_core_outbound_tag_steps(plan.control_core, tag)):
             return False
 

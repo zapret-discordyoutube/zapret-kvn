@@ -32,6 +32,7 @@ Safety rules kept from the previous implementation:
 
 from __future__ import annotations
 
+import ipaddress
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -40,11 +41,20 @@ from PyQt6.QtCore import QObject
 
 from ..engines.zapret import presets
 from ..engines.zapret.command import ServerRule
-from ..engines.zapret.endpoint import ServerEndpoint, endpoint_for_node, resolve_endpoint, resolve_host
+from ..diagnostics.runtime_logging import register_server_aliases
+from ..engines.zapret.endpoint import (
+    ResolvedEndpoint,
+    ServerEndpoint,
+    endpoint_for_node,
+    resolve_endpoint,
+    resolve_host,
+)
+from ..network.bootstrap_dns import cached_addresses
 from ..engines.zapret.manager import ZapretPlan
 from ..engines.zapret.strategies import server_strategy
 from ..network.background_workers import EndpointResolver
 from ..profiles.models import ZapretTargetSettings
+from .async_steps import TransitionSteps, run_in_worker
 from .transition_engine import transition_request_delay_ms
 
 if TYPE_CHECKING:
@@ -54,6 +64,33 @@ if TYPE_CHECKING:
 #: Background lookups of pool servers: one thread, never the transition pool.
 _POOL_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xray_fluent_pool_dns")
 _POOL_THROTTLE_SEC = 0.05
+
+
+def _known_addresses(endpoints: tuple[ServerEndpoint, ...]) -> tuple[ResolvedEndpoint, ...]:
+    """Worker-only: pool endpoints with already known IPs, without network.
+
+    IP literals as they are, names from the trusted bootstrap cache.  These
+    addresses only widen the winws2 rule to the rest of the pool; a server
+    is used only after its own fresh lookup confirms the rule covers it.
+    """
+    known: list[ResolvedEndpoint] = []
+    for endpoint in endpoints:
+        ips: set[str] = set()
+        for host in endpoint.hosts:
+            try:
+                ips.add(str(ipaddress.ip_address(host)))
+            except ValueError:
+                addresses = cached_addresses(host)
+                register_server_aliases(host, addresses)
+                ips.update(addresses)
+        if ips:
+            known.append(ResolvedEndpoint(endpoint, tuple(sorted(ips))))
+    return tuple(known)
+
+
+def _resolve_with_pool(endpoint: ServerEndpoint, pool: tuple[ServerEndpoint, ...]):
+    """Worker-only: fresh DNS of the selected server, known IPs of the pool."""
+    return resolve_endpoint(endpoint), _known_addresses(pool)
 
 
 class ServerBypass(QObject):
@@ -106,12 +143,11 @@ class ServerBypass(QObject):
             return True
         if not self.settings.enabled(endpoint.kind) and not self._zapret.active:
             return True  # "pass" with no winws2 at all: nothing touches the server
-        rule = self._zapret.rule
+        plan = self._zapret.plan
         return (
             self._zapret.is_applied()
-            and rule is not None
-            and rule.target.endpoint == endpoint
-            and rule.strategy == strategy
+            and plan is not None
+            and plan.covers_endpoint(endpoint, strategy)
         )
 
     @property
@@ -214,10 +250,103 @@ class ServerBypass(QObject):
         self._wait_generation = generation
         self._wait_revision = None
         self._controller.transition_state_changed.emit(True, "DNS выбранного VPN-сервера...")
-        self._start_worker(generation, endpoint, self._on_resolved)
+        pool = self._pool_endpoints(self._controller._runtime_selected_node(), endpoint)
+        self._start_worker(
+            generation,
+            endpoint,
+            self._on_resolved,
+            resolver=lambda target: _resolve_with_pool(target, pool),
+        )
 
-    def _start_worker(self, generation: int, endpoint: ServerEndpoint, slot) -> None:
-        worker = EndpointResolver(generation, endpoint, resolve_endpoint, parent=self)
+    def _pool_endpoints(self, node: Node | None, selected: ServerEndpoint) -> tuple[ServerEndpoint, ...]:
+        """Endpoints of the other servers the running pool can switch to.
+
+        The pool is the planner's selector set for this node and mode — the
+        same members a hot switch may later select without a restart.
+        """
+        c = self._controller
+        if node is None:
+            return ()
+        try:
+            facts = c._singbox_plan_facts(node, tun=bool(c.state.settings.tun_mode))
+        except Exception:
+            return ()
+        tags = getattr(facts, "selector_tags", None)
+        if not isinstance(tags, dict):
+            return ()
+        members = set(tags)
+        members.discard(node.id)
+        endpoints: list[ServerEndpoint] = []
+        for other in c.state.nodes:
+            if other.id not in members:
+                continue
+            endpoint = endpoint_for_node(other)
+            if endpoint is None or endpoint == selected or endpoint in endpoints:
+                continue
+            try:
+                if server_strategy(self.settings, endpoint) is None:
+                    continue
+            except ValueError:
+                continue
+            endpoints.append(endpoint)
+        return tuple(endpoints)
+
+    def _pool_rules(self, known: tuple[ResolvedEndpoint, ...]) -> tuple[ServerRule, ...]:
+        rules: list[ServerRule] = []
+        for resolved in known:
+            try:
+                strategy = server_strategy(self.settings, resolved.endpoint)
+            except ValueError:
+                continue
+            if strategy is not None:
+                rules.append(ServerRule(resolved, strategy))
+        return tuple(rules)
+
+    def _applied_plan_covers(self, resolved: ResolvedEndpoint, strategy) -> bool:
+        """The running winws2 already protects this server's fresh IPs."""
+        plan = self._zapret.plan
+        return (
+            plan is not None
+            and self._zapret.is_applied(plan)
+            and plan.preset == self._controller.state.settings.zapret_preset
+            and plan.covers(resolved, strategy)
+        )
+
+    def verify_switch_target_steps(self, node: Node | None) -> TransitionSteps:
+        """Hot switch fence: fresh DNS proves the running rule covers ``node``.
+
+        The selected server's own rule was resolved for this session; a pool
+        member's IPs in the rule are only known ones, so its name is looked up
+        again before the core is pointed at it.  ``False`` sends the switch
+        to the full transition, which rebuilds the rule.
+        """
+        endpoint = endpoint_for_node(node)
+        if endpoint is None:
+            return True
+        try:
+            strategy = server_strategy(self.settings, endpoint)
+        except ValueError:
+            return False
+        if strategy is None or (not self.settings.enabled(endpoint.kind) and not self._zapret.active):
+            return True
+        plan = self._zapret.plan
+        if plan is None or not self._zapret.is_applied(plan):
+            return False
+        if plan.rule is not None and plan.rule.target.endpoint == endpoint and plan.rule.strategy == strategy:
+            return True
+        try:
+            resolved = yield run_in_worker(lambda: resolve_endpoint(endpoint))
+        except (OSError, UnicodeError):
+            return False
+        covered = self._zapret.is_applied(plan) and plan.covers(resolved, strategy)
+        if not covered:
+            self._controller._log(
+                "[zapret] свежий DNS сервера вне правила набора: переключение с перезапуском"
+            )
+        return covered
+
+    def _start_worker(self, generation: int, endpoint: ServerEndpoint, slot, *, resolver=None) -> None:
+        worker = EndpointResolver(generation, endpoint, resolver or resolve_endpoint, parent=self)
         self._workers.add(worker)
         worker.resolved.connect(slot)
         worker.finished.connect(lambda: self._forget_worker(worker))
@@ -229,6 +358,7 @@ class ServerBypass(QObject):
 
     def _on_resolved(self, generation: int, endpoint: ServerEndpoint, resolved, error) -> None:
         c = self._controller
+        resolved, known_pool = resolved if isinstance(resolved, tuple) else (resolved, ())
         if generation != c._transition_generation:
             return  # superseded: the newer request prepares for itself
         self.cancel_wait()
@@ -269,8 +399,14 @@ class ServerBypass(QObject):
             return
         # The chosen preset is what runs: a restart on another one goes
         # through here, so a protected tunnel is stopped first.
-        plan = ZapretPlan(c.state.settings.zapret_preset, ServerRule(resolved, strategy))
-        if self._zapret.is_applied(plan):
+        plan = ZapretPlan(
+            c.state.settings.zapret_preset,
+            ServerRule(resolved, strategy),
+            self._pool_rules(known_pool),
+        )
+        if self._zapret.is_applied(plan) or self._applied_plan_covers(resolved, strategy):
+            # The running winws2 (its pool rule included) already protects the
+            # server's fresh IPs: no restart, so no tunnel stop either.
             self._resume(transition_request_delay_ms(c._transition_reason))
             return
         if c.connected:
