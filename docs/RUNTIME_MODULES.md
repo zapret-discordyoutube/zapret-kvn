@@ -77,6 +77,23 @@ Windows runner and Android stable publisher. The Windows runner reuses a matchin
 freeze; the Android publisher requires its tagged source to match the freeze.
 Installed apps receive these built cores with the app update only.
 
+### Partial (delta) app updates
+
+The release signer (`sign_release` in `scripts/release_windows.py`) puts every file
+of the release ZIP (path, size, SHA-256) into the signed `update-manifest.json`.
+`xray_fluent/updates/delta_zip.py` uses that list: the updater reads the ZIP
+central directory by HTTP Range, reuses installed files whose SHA-256 equals the
+signed one, downloads only the other entries and accepts each of them only if its
+size, CRC-32 and SHA-256 match the signed list. Any doubt (no Range, other file set,
+bad hash, more than 60% of the archive) falls back to the whole-ZIP download that
+is checked against the signed archive SHA-256 as before.
+
+The patched `sing-box.exe` must stay byte-identical when its sources are unchanged,
+otherwise ~33 MB are downloaded in every update. `build_singbox_front.py` therefore
+passes the patched `sing` dependency to `go mod edit -replace` as a path relative to
+the source tree (Go writes that path into the executable) and refuses a binary that
+embeds its temporary build directory.
+
 ## Android audit observations
 
 The existing Hysteria adapter emits `server certificate SHA-256 mismatch` but

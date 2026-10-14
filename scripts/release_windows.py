@@ -15,11 +15,13 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -627,14 +629,26 @@ def sign_release(directory: Path, version: str) -> None:
     from zapret_update import manifest as update_manifest
     from zapret_update import sign as update_sign
 
-    raw_path, signature_path = update_sign.make(
-        key_path=SIGNING_KEY_PATH,
-        product=keys.PRODUCT,
-        channel=keys.CHANNEL,
-        version=version,
-        installer=directory / f"ZapretKVN-v{version}-windows-x64.zip",
-        out_dir=directory,
-    )
+    installer = directory / f"ZapretKVN-v{version}-windows-x64.zip"
+    # Список файлов сборки (путь, размер, SHA-256) собирается из того же zip,
+    # который подписывается: по нему программа докачивает только изменившиеся
+    # файлы (частичное обновление) и проверяет каждый файл подписанным хешем.
+    with tempfile.TemporaryDirectory(prefix="zapretkvn-sign-tree-") as scratch:
+        tree = Path(scratch) / "tree"
+        try:
+            with zipfile.ZipFile(installer) as bundle:
+                bundle.extractall(tree)
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise ReleaseError(f"release ZIP cannot be unpacked for the signed file list: {exc}") from exc
+        raw_path, signature_path = update_sign.make(
+            key_path=SIGNING_KEY_PATH,
+            product=keys.PRODUCT,
+            channel=keys.CHANNEL,
+            version=version,
+            tree=tree,
+            installer=installer,
+            out_dir=directory,
+        )
     try:
         loaded = update_manifest.load_signed(
             raw_path.read_bytes(),

@@ -74,6 +74,20 @@ def assert_process_lookup_patch_needed(*roots: Path) -> None:
                             f"есть upstream-признак «{marker}» — проверьте upstream-исправление и удалите или перенесите патч")
 
 
+def assert_no_build_paths(binary: Path, *paths: Path) -> None:
+    """Stop when the binary embeds a temporary build directory.
+
+    Such a path differs per build, so the core would change in every release
+    even when no source changed, and delta updates could not skip it.
+    """
+    data = binary.read_bytes()
+    for path in paths:
+        text = str(path.resolve())
+        for needle in {text, text.replace("\\", "/")}:
+            if needle.encode() in data or needle.encode("utf-16-le") in data:
+                raise ValueError(f"{binary.name} embeds the build directory {needle}: build is not reproducible")
+
+
 def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     pin = lock["singbox_build"]
@@ -103,7 +117,13 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     shutil.copyfile(manifest.parent / 'singbox_process_lookup_test.go', source / 'common/process/zapret_pid_table_cache_test.go')
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
-    subprocess.run([go, "mod", "edit", f"-replace=github.com/sagernet/sing={dependency}"], cwd=source, check=True)
+    # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
+    # временной папки делал каждую сборку sing-box.exe уникальной (~33 МБ в каждом
+    # обновлении); относительный от source одинаков при любой временной папке.
+    replacement = os.path.relpath(dependency, source).replace(os.sep, "/")
+    if not replacement.startswith("../"):
+        raise ValueError(f"patched dependency must sit next to the source tree, got {replacement}")
+    subprocess.run([go, "mod", "edit", f"-replace=github.com/sagernet/sing={replacement}"], cwd=source, check=True)
     subprocess.run([go, 'test', '-mod=readonly', './dns/transport/fallback', '-run', '^TestZapret', '-count=1'], cwd=source, check=True)
     subprocess.run([go, 'test', '-mod=readonly', './common/process', '-run', '^TestZapret', '-count=1'], cwd=source, check=True)
     for tags in ("", "with_low_memory"):
@@ -113,8 +133,12 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     tags = (source / "release/DEFAULT_BUILD_TAGS").read_text().strip() + ",with_purego"
     flags = (source / "release/LDFLAGS").read_text().strip()
     flags += f' -X github.com/sagernet/sing-box/constant.Version={pin["version"].removeprefix("v")} -s -w -buildid='
+    # Воспроизводимая сборка: без путей, без VCS-меток, без build ID, без cgo.
+    reproducible_env = {**os.environ, "CGO_ENABLED": "0", "GOFLAGS": "", "GOTOOLCHAIN": "local"}
     subprocess.run([go, "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-tags", tags,
-                    "-ldflags", flags, "-o", str(output.resolve()), "./cmd/sing-box"], cwd=source, check=True)
+                    "-ldflags", flags, "-o", str(output.resolve()), "./cmd/sing-box"],
+                   cwd=source, check=True, env=reproducible_env)
+    assert_no_build_paths(output, stage, work)
     provenance = {**pin, "go": subprocess.check_output([go, "env", "GOVERSION"], text=True).strip(),
                   "goos": os.environ.get("GOOS", ""), "goarch": os.environ.get("GOARCH", ""),
                   "build_tags": tags, "binary_sha256": sha256(output),

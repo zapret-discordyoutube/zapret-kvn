@@ -487,7 +487,12 @@ def test_release_is_signed_with_a_key_the_app_knows(tmp_path, monkeypatch) -> No
     key = tmp_path / "k.key"
     public = _b64.b64decode(sign.generate_key("kvn-test", key))
     _os.chmod(key, 0o600)
-    (tmp_path / "ZapretKVN-v9.9.9-windows-x64.zip").write_bytes(b"zip")
+    import zipfile as _zipfile
+
+    with _zipfile.ZipFile(tmp_path / "ZapretKVN-v9.9.9-windows-x64.zip", "w") as bundle:
+        bundle.writestr("ZapretKVN.exe", b"exe")
+        bundle.writestr("core/sing-box.exe", b"core")
+        bundle.writestr("empty/", b"")
     monkeypatch.setattr(release, "SIGNING_KEY_PATH", key)
     keys = release._signed_release_module()
     monkeypatch.setattr(release, "_signed_release_module", lambda: type("K", (), {
@@ -502,6 +507,8 @@ def test_release_is_signed_with_a_key_the_app_knows(tmp_path, monkeypatch) -> No
         trusted={"kvn-test": public}, product="zapret-kvn", channel="stable",
     )
     assert loaded.installer.name == "ZapretKVN-v9.9.9-windows-x64.zip"
+    # Список файлов сборки совпадает с содержимым zip: по нему идёт частичное обновление.
+    assert {(item.path, item.size) for item in loaded.files} == {("ZapretKVN.exe", 3), ("core/sing-box.exe", 4)}
 
     # Ключ, которого программа не знает, выпуск останавливает.
     monkeypatch.setattr(release, "_signed_release_module", lambda: keys)

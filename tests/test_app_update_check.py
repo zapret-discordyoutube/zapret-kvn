@@ -21,14 +21,14 @@ def _response(payload: bytes, url: str) -> HttpResponseData:
     return HttpResponseData(payload, url, 200, "proxy")
 
 
-def _signed_release(digest, *, seed=SEED, listed_digest=None, with_list=True, listed_version="9.9.9"):
+def _signed_release(digest, *, seed=SEED, listed_digest=None, with_list=True, listed_version="9.9.9", files=()):
     """Данные выпуска 9.9.9 и ответы сервера: выпуск, сумма архива, список, подпись."""
     asset_name = "ZapretKVN-v9.9.9-windows-x64.zip"
     base = "https://git.zapret.moe/zapretkvn/zapret-kvn/releases/download/v9.9.9/"
     raw = update_manifest.dumps(
         {
             "schema": 1, "product": "zapret-kvn", "channel": "stable", "version": listed_version,
-            "created": 1, "key": "kvn-test", "files": [],
+            "created": 1, "key": "kvn-test", "files": list(files),
             "installer": {"name": asset_name, "size": 10, "sha256": listed_digest or digest},
         }
     )
@@ -86,6 +86,17 @@ class AppUpdateCheckTests(unittest.TestCase):
         self.assertEqual(fetch.call_args_list[1].kwargs["max_bytes"], 16 * 1024)
         for call in fetch.call_args_list:
             self.assertEqual(call.kwargs["proxy_url"], "http://127.0.0.1:1391")
+
+    def test_signed_file_list_travels_with_the_offered_update(self) -> None:
+        listed = [{"path": "ZapretKVN.exe", "size": 3, "sha256": "c" * 64}]
+        _metadata, responses = _signed_release("a" * 64, files=listed)
+        with patch.object(signed_release, "TRUSTED_KEYS", KEYS), patch.object(
+            app_updater, "fetch_bytes", side_effect=responses
+        ):
+            update = app_updater._find_available_update()
+        self.assertEqual(
+            [(item.path, item.size, item.sha256) for item in update.files], [("ZapretKVN.exe", 3, "c" * 64)]
+        )
 
     def test_archive_is_offered_only_with_a_valid_signed_list(self) -> None:
         cases = {

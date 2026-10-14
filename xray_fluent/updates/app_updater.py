@@ -33,7 +33,8 @@ from ..network.http_utils import (
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ..constants import APP_VERSION
+from ..constants import APP_VERSION, BASE_DIR
+from .delta_zip import DeltaUnavailable, HttpRangeSource, SignedFile, prepare_delta
 from .installer.plan import APP_EXE_NAME, WORK_DIR_PREFIX
 from .signed_release import signed_asset_urls, verified_manifest
 from zapret_update.manifest import ManifestError
@@ -77,6 +78,9 @@ class AppUpdate:
     size: int
     notes: str
     digest_sha256: str = ""
+    # Файлы сборки из подписанного списка выпуска (путь, размер, SHA-256).
+    # Есть они — часть обновления можно докачать без полного архива.
+    files: tuple[SignedFile, ...] = ()
 
 
 @dataclass(slots=True)
@@ -349,6 +353,7 @@ def _find_available_update(proxy_url: str | None = None) -> AppUpdate | None:
         size=archive.size,
         notes=str(data.get("body") or ""),
         digest_sha256=archive.sha256,
+        files=tuple(SignedFile(item.path, item.size, item.sha256) for item in manifest.files),
     )
 
 
@@ -416,6 +421,10 @@ _NUM_SEGMENTS = 4       # parallel download segments
 _CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
+def _format_megabytes(size: int) -> str:
+    return f"{size / (1024 * 1024):.1f}".replace(".", ",") + " МБ"
+
+
 def _purge_stale_update_dirs(prefix: str = WORK_DIR_PREFIX, keep: int = 0) -> int:
     """Удалить каталоги прошлых загрузок.
 
@@ -454,10 +463,13 @@ class UpdateDownloader(QThread):
         update: AppUpdate,
         proxy_url: str | None = None,
         parent=None,
+        app_dir: Path | None = None,
     ):
         super().__init__(parent)
         self._update = update
         self._proxy_url = proxy_url
+        # Установленная копия: из неё берутся файлы, не изменившиеся в новой версии.
+        self._app_dir = BASE_DIR if app_dir is None else app_dir
         self.prepared: PreparedUpdate | None = None
         # Сбой, который повторится при любой следующей загрузке этого же
         # архива (контрольная сумма, содержимое). Сетевые ошибки — нет.
@@ -618,11 +630,13 @@ class UpdateDownloader(QThread):
             _purge_stale_update_dirs()
             work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX))
             archive = work_dir / "update.zip"
-            self._fetch(archive)
-            self._verify(archive)
-            source_dir = self._unpack(archive, work_dir / "extracted")
-            # Дальше архив не нужен, а места занимает столько же, сколько сборка.
-            archive.unlink(missing_ok=True)
+            source_dir = self._try_delta(work_dir)
+            if source_dir is None:
+                self._fetch(archive)
+                self._verify(archive)
+                source_dir = self._unpack(archive, work_dir / "extracted")
+                # Дальше архив не нужен, а места занимает столько же, сколько сборка.
+                archive.unlink(missing_ok=True)
             self.prepared = PreparedUpdate(self._update.version, source_dir, work_dir)
         except Exception as exc:
             self.failure_permanent = isinstance(exc, (UpdateRejected, zipfile.BadZipFile))
@@ -633,12 +647,75 @@ class UpdateDownloader(QThread):
             return
         self.finished_ok.emit()
 
-    def _fetch(self, archive: Path) -> None:
-        """Скачать архив напрямую, а при неудаче — через активный прокси."""
-
+    def _routes(self) -> list[tuple[str, str | None]]:
         routes: list[tuple[str, str | None]] = [("Загрузка напрямую...", None)]
         if self._proxy_url:
             routes.append(("Загрузка через прокси...", self._proxy_url))
+        return routes
+
+    def _try_delta(self, work_dir: Path) -> Path | None:
+        """Собрать новую сборку, докачав только изменившиеся файлы.
+
+        ``None`` — частичная загрузка не получилась по любой причине, и вызывающий
+        код скачивает архив целиком. Целостность держится на подписанном
+        списке выпуска, см. ``delta_zip``.
+        """
+
+        update = self._update
+        if not update.files or update.size <= 0:
+            return None
+        destination = work_dir / "extracted"
+        for status, proxy_url in self._routes():
+            self.status.emit("Сравнение с установленной версией...")
+            self.progress.emit(0)
+            source = HttpRangeSource(
+                update.download_url,
+                self._build_opener(proxy_url),
+                total=update.size,
+                user_agent=USER_AGENT,
+                timeout=_DOWNLOAD_TIMEOUT,
+            )
+            try:
+                stats = prepare_delta(
+                    source=source,
+                    total_size=update.size,
+                    signed=update.files,
+                    local_root=self._app_dir,
+                    destination=destination,
+                    work_dir=work_dir / "_delta",
+                    announce=lambda wanted, full: self.status.emit(
+                        f"Загрузка изменений: {_format_megabytes(wanted)} из {_format_megabytes(full)}..."
+                    ),
+                    progress=lambda done, wanted: self.progress.emit(min(99, int(done * 100 / max(1, wanted)))),
+                )
+                source_dir = _resolve_extracted_app_dir(destination, APP_EXE_NAME)
+                if not (source_dir / APP_EXE_NAME).is_file():
+                    raise DeltaUnavailable(f"в собранной версии нет {APP_EXE_NAME}")
+            except _NETWORK_ERRORS as exc:
+                _log.warning("[update] Частичная загрузка не удалась (%s): %s", status, exc)
+                shutil.rmtree(destination, ignore_errors=True)
+                continue
+            except DeltaUnavailable as exc:
+                _log.info("[update] Частичная загрузка не подходит, качаем архив целиком: %s", exc)
+                shutil.rmtree(destination, ignore_errors=True)
+                return None
+            except Exception:
+                _log.warning("[update] Частичная загрузка сорвалась, качаем архив целиком", exc_info=True)
+                shutil.rmtree(destination, ignore_errors=True)
+                return None
+            _log.info(
+                "[update] Частичная загрузка: скачано %d из %d байт (файлов из архива %d, из установленной копии %d, запросов %d)",
+                stats.downloaded, stats.full_size, stats.fetched_files, stats.reused_files, stats.requests,
+            )
+            self.progress.emit(100)
+            return source_dir
+        shutil.rmtree(destination, ignore_errors=True)
+        return None
+
+    def _fetch(self, archive: Path) -> None:
+        """Скачать архив напрямую, а при неудаче — через активный прокси."""
+
+        routes = self._routes()
         for status, proxy_url in routes:
             self.status.emit(status)
             self.progress.emit(0)
