@@ -17,6 +17,13 @@
 - Before building, make sure `dist/ZapretKVN/ZapretKVN.exe` is not running; if needed, stop `ZapretKVN.exe` first or the clean step can fail because the old binary is locked.
 - The builder is WSL-aware and converts paths for the Windows virtualenv automatically, so prefer it even when working from WSL.
 
+## Пользовательские гайды следуют за приложением
+
+- Zapret KVN для Windows пересказывают заметки хранилища wiki `/home/codex-pve/Privacy`: `Zapret/premium.md` (гайд для новичка, https://wiki.zapret.moe/Zapret/premium), `premium/apps.md` (раздел Windows), `premium/discord.md` (локальный прокси на порту `1390`, discord-drover) и `premium/v2rayn.md` (режим прокси и TUN).
+- Изменил видимое пользователю — добавление подписки, названия страниц и кнопок, порт локального прокси, режимы прокси и TUN, шаблоны маршрутизации, установку и обновление, — в той же задаче обнови эти заметки и затронутые скриншоты. Задача не закрыта, пока гайд описывает старое приложение (решение владельца 15.10.2026).
+- Скриншоты Windows снимаются на машине `win10` (VM 100); личные данные и ссылки подписок на снимках закрашиваются.
+- Правка заметок — по навыку хранилища `/home/codex-pve/Privacy/.claude/skills/vault-note/SKILL.md`; публикация — коммит и `git push` хранилища (сайт пересобирается сам) и `"$HOME/.local/bin/obsidian" vault="Privacy" publish:add path=<файл>` для зеркала. Подробная процедура и проверка сайта — навык `vpnbot-maintain-user-guides` в `/home/codex-pve/vpnbot/vpnbot_codex/.claude/skills/`.
+
 ## Оформление ответа
 
 Правила оформления ответа общие для всех проектов: раздел «Оформление ответа» в `/home/codex-pve/AGENTS.md`. Прочитай его и соблюдай в каждом сеансе; менять правила только там.
