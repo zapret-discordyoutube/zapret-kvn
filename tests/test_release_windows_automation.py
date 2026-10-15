@@ -543,14 +543,17 @@ def test_app_keys_are_the_owner_keys_when_they_are_on_this_machine() -> None:
         assert _b64.b64decode(sign.public_key_of(path)) == TRUSTED_KEYS[key_id]
 
 
-def test_easter_egg_closes_about_three_releases_of_ten() -> None:
-    versions = [f"{a}.{b}.{c}" for a in range(3) for b in range(40) for c in range(100)]
-    share = sum(release_windows.has_easter_egg(version) for version in versions) / len(versions)
-    assert abs(share - release_windows.EASTER_EGG_CHANCE) < 0.02
+def test_easter_egg_follows_the_shared_rule() -> None:
+    # Само правило — общее ядро zapret_update.release_notes (свои тесты в Zapret 2 GUI).
+    from zapret_update import release_notes
 
-    joked = next(v for v in versions if release_windows.has_easter_egg(v))
-    plain = next(v for v in versions if not release_windows.has_easter_egg(v))
+    versions = [f"0.{b}.{c}" for b in range(9, 40) for c in range(60)]
+    joked = next(v for v in versions if release_notes.lucky("stable", v))
+    plain = next(v for v in versions if not release_notes.lucky("stable", v))
     assert release_windows.published_changes(joked, ["Первое"]) == ["Первое", "Удалена буква «О»"]
     assert release_windows.published_changes(plain, ["Первое"]) == ["Первое"]
-    # Шесть пунктов — предел публикатора в Telegram: шутка уступает место.
-    assert release_windows.published_changes(joked, [str(n) for n in range(6)]) == [str(n) for n in range(6)]
+    # Большой список — без шутки: настоящие изменения важнее.
+    assert release_windows.published_changes(joked, ["Первое", "Второе"]) == ["Первое", "Второе"]
+    # Длинный единственный пункт не влезает в предел публикатора — шутка уступает место.
+    assert release_windows.published_changes(joked, ["x" * 700]) == ["x" * 700]
+

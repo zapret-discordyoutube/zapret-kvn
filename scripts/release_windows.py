@@ -1007,25 +1007,23 @@ def telegram_has_version(version: str) -> bool:
     )
 
 
-# Пасхалка в духе «Removed Herobrine» из Minecraft (просьба владельца
-# 2026-10-15, так же в Zapret 2 GUI): примерно в трёх выпусках из десяти
-# последней строкой изменений идёт «Удалена буква «О»». Решение зависит только
-# от версии, поэтому возобновлённый выпуск говорит то же, что начатый.
-EASTER_EGG_LINE = "Удалена буква «О»"
-EASTER_EGG_CHANCE = 0.30
+# Пасхалка «Удалена буква «О»»: правило одно на Zapret KVN и Zapret 2 GUI —
+# общее ядро ``zapret_update.release_notes`` (только выпуск из одного пункта,
+# ~3 из 10, перерыв после шутки). Здесь — только вписать её в пределы Telegram.
+def _release_notes():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from zapret_update import release_notes
 
-
-def has_easter_egg(version: str) -> bool:
-    import random
-
-    return random.Random(f"zapret-easter-egg:stable:{version}").random() < EASTER_EGG_CHANCE
+    return release_notes
 
 
 def published_changes(version: str, changes: list[str]) -> list[str]:
     """Строки изменений для Forgejo и Telegram; шутка — только если есть место."""
-    if not has_easter_egg(version):
+    notes = _release_notes()
+    if not notes.wants_joke("stable", version, len(changes)):
         return list(changes)
-    joked = [*changes, EASTER_EGG_LINE]
+    joked = [*changes, notes.LINE]
     # Пределы публикатора в Telegram: до 6 строк и 700 знаков вместе.
     if len(joked) > 6 or len("; ".join(joked)) > 700:
         return list(changes)
