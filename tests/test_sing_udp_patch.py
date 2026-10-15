@@ -26,7 +26,7 @@ class SingPacketPatchTests(unittest.TestCase):
             shutil.copytree(ROOT / "core-patches", root / "core-patches")
             shutil.copytree(ROOT / "runtime/amnezia", root / "runtime/amnezia")
             previous = fingerprint(root)
-            for name in ("runtime/amnezia/relay.go", "core-patches/sing-udp-v8.patch", "scripts/core-lock.windows-x64.json"):
+            for name in ("runtime/amnezia/relay.go", "core-patches/sing-udp-v9.patch", "scripts/core-lock.windows-x64.json"):
                 path = root / name
                 path.write_bytes(path.read_bytes() + b"\n")
                 current = fingerprint(root)
