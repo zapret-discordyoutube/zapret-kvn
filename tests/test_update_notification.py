@@ -375,7 +375,7 @@ class UpdateNotificationTests(unittest.TestCase):
         window.updates_page.show_up_to_date.assert_not_called()
 
     def _apply_window(self, *, busy: bool, deadline_passed: bool = False):
-        downloader = SimpleNamespace(update=_update(), prepared=object())
+        downloader = SimpleNamespace(update=_update(), prepared=object(), via="files", downloaded=196_000)
         return SimpleNamespace(
             _quitting=False,
             _update_downloader=downloader,
@@ -419,8 +419,9 @@ class UpdateNotificationTests(unittest.TestCase):
             self.assertEqual(order, ["record", "launch"])
             # Вместе с попыткой запоминается, с какой версии идёт обновление:
             # новая версия сообщит серверу, что оно дошло.
+            # и какой ступенью и сколько скачано — это тоже уйдёт серверу.
             record.assert_called_once_with(
-                "0.4.67", reconnect=True, from_version=APP_VERSION, granted_at=0.0
+                "0.4.67", reconnect=True, from_version=APP_VERSION, granted_at=0.0, via="files", downloaded=196_000
             )
             launch.assert_called_once_with(window._install_plan.return_value)
             # Выход — только после подтверждения установщика.
