@@ -106,6 +106,10 @@ commit stays; the next fresh release follows the cancelled version (e.g.
 cancelled 0.7.6 → next 0.7.7). Its changelog must also cover what the
 cancelled version would have shipped. Never delete the state file by hand.
 
+## Update the user guides
+
+A release with user-visible changes is not finished until the wiki guides describe it (owner decision 15.10.2026). Before or right after publishing, compare the change list with the guide notes in the wiki vault `/home/codex-pve/Privacy` and update them in the same task: `Zapret/premium.md`, `premium/apps.md` (Windows section), `premium/discord.md` (local proxy port, discord-drover), `premium/v2rayn.md`. Retake screenshots whose screens changed. Follow the `AGENTS.md` section «Пользовательские гайды следуют за приложением» and the procedure in `/home/codex-pve/vpnbot/vpnbot_codex/.claude/skills/vpnbot-maintain-user-guides/SKILL.md`. In the final report, name the guide commit or state that no user-visible behaviour changed.
+
 ## Preserve safety boundaries
 
 - Use the trusted `win10` workspace; Forgejo Actions remain source validation.
