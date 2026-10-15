@@ -538,6 +538,72 @@ class WindowProgressTests(unittest.TestCase):
         self.assertIsNone(overall_progress(Stage.ROLLBACK, 0.0))
 
 
+class UpdateWindowPutAwayTests(unittest.TestCase):
+    """Жалоба 15.10.2026: окно обновления нельзя было ни закрыть, ни свернуть."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _window(self, *, tray: bool = False):
+        from xray_fluent.updates.installer.window import UpdateWindow
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        plan = InstallPlan(
+            version="9.9.9",
+            app_pid=1,
+            app_dir=root / "app",
+            source_dir=root / "src",
+            work_dir=root / "work",
+            start_in_tray=tray,
+        )
+        window = UpdateWindow(plan)
+        self.addCleanup(window.deleteLater)
+        window.show()
+        return window
+
+    def test_corner_button_minimizes_and_install_goes_on(self) -> None:
+        window = self._window()
+        self.assertIn("Свернуть", window._hide_button.toolTip())
+        with patch.object(window, "showMinimized") as minimize, patch.object(window, "close") as close:
+            window._hide_button.click()
+            minimize.assert_called_once()
+            close.assert_not_called()
+        # Ход установки по-прежнему доходит до окна.
+        window.on_progress(Stage.SWAP, 0.5)
+        self.assertGreater(window._progress.value(), 0)
+
+    def test_escape_puts_window_away(self) -> None:
+        from PyQt6.QtCore import QEvent, Qt
+        from PyQt6.QtGui import QKeyEvent
+
+        window = self._window()
+        with patch.object(window, "showMinimized") as minimize:
+            window.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+            minimize.assert_called_once()
+
+    def test_window_from_tray_is_hidden_not_minimized(self) -> None:
+        # Из трея у окна нет значка на панели задач: свернуть его некуда.
+        window = self._window(tray=True)
+        self.assertIn("Скрыть", window._hide_button.toolTip())
+        window._hide_button.click()
+        self.assertFalse(window.isVisible())
+
+    def test_put_away_window_leaves_at_once_when_install_ends(self) -> None:
+        # Убранное окно не держит приложение прощальной фразой: установщик
+        # выходит сразу, и приложение открывается.
+        window = self._window(tray=True)
+        window.put_away()
+        with patch.object(self.app, "quit") as quit_app, patch("PyQt6.QtCore.QTimer.singleShot") as later:
+            window.on_progress(Stage.DONE, 1.0)
+            quit_app.assert_called_once()
+            later.assert_not_called()
+
+
 @unittest.skipUnless(sys.platform == "win32", "WinAPI")
 class WindowsProcessTests(InstallerCase):
     def _hold_open(self, path: Path) -> subprocess.Popen:

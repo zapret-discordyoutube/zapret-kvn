@@ -6,8 +6,18 @@ import time
 
 from PyQt6.QtCore import QPropertyAnimation, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QLabel, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, ProgressBar, SubtitleLabel, isDarkTheme
+from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    FluentIcon,
+    ProgressBar,
+    SubtitleLabel,
+    ToolTipFilter,
+    ToolTipPosition,
+    TransparentToolButton,
+    isDarkTheme,
+)
 
 from ...constants import APP_ICON_PATH
 from ...ui.theme import surface_color, token_pair
@@ -61,12 +71,16 @@ class UpdateWindow(QWidget):
         super().__init__()
         self._plan = plan
         self._finished = False
+        # Человек убрал окно кнопкой в углу или Esc: обновление идёт дальше,
+        # а окно больше не показывается и уходит сразу по окончании.
+        self._put_away = False
         self._shown_at = time.monotonic()
         self._drag_offset = None
         self._deck = phrases.PhraseDeck()
 
         # Окно обновления всегда поверх остальных окон: ход обновления виден,
-        # в какой бы программе человек ни был.
+        # в какой бы программе человек ни был. Мешает — его сворачивают
+        # кнопкой в углу или Esc (решение владельца 15.10.2026).
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         if plan.start_in_tray:
             # Приложение работало в трее: окно появляется рядом с ним и не
@@ -74,7 +88,9 @@ class UpdateWindow(QWidget):
             flags |= Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         else:
-            flags |= Qt.WindowType.Window
+            # С кнопкой свёртывания Windows разворачивает и сворачивает окно
+            # щелчком по его значку на панели задач.
+            flags |= Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint
         self.setWindowFlags(flags)
         # Отдельное маленькое окно без рамки: прозрачность нужна только для
         # скруглённых углов, фон рисуется в paintEvent.
@@ -108,6 +124,19 @@ class UpdateWindow(QWidget):
         self._version_label.setTextColor(*self._muted_pair())
         titles.addWidget(self._version_label)
         header.addLayout(titles, 1)
+        # Окно только показывает ход: установка идёт в рабочем потоке, поэтому
+        # убрать окно можно в любой момент. Из трея у окна нет значка на панели
+        # задач — свернуть его некуда, оно просто скрывается.
+        if plan.start_in_tray:
+            self._hide_button = TransparentToolButton(FluentIcon.CLOSE, self)
+            self._hide_button.setToolTip("Скрыть — обновление продолжится")
+        else:
+            self._hide_button = TransparentToolButton(FluentIcon.MINIMIZE, self)
+            self._hide_button.setToolTip("Свернуть — обновление продолжится (Esc)")
+        self._hide_button.setAccessibleName(self._hide_button.toolTip())
+        self._hide_button.installEventFilter(ToolTipFilter(self._hide_button, 300, ToolTipPosition.BOTTOM))
+        self._hide_button.clicked.connect(self.put_away)
+        header.addWidget(self._hide_button, 0, Qt.AlignmentFlag.AlignTop)
         root.addLayout(header)
         root.addSpacing(18)
 
@@ -186,8 +215,31 @@ class UpdateWindow(QWidget):
         if stage in (Stage.DONE, Stage.FAILED):
             self._finish(stage)
 
+    def put_away(self) -> None:
+        if self._put_away:
+            return
+        self._put_away = True
+        if self._finished:
+            self._leave()
+        elif self._plan.start_in_tray:
+            self.hide()
+        else:
+            self.showMinimized()
+
+    def _leave(self) -> None:
+        self.close()
+        # Скрытое окно при закрытии не завершает цикл событий, а установщик
+        # выходит только по нему: без выхода приложение не открылось бы.
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def _finish(self, stage: Stage) -> None:
         self._finished = True
+        if self._put_away:
+            # Окно убрали: прощальная фраза никому не видна, приложение не ждёт.
+            self._leave()
+            return
         farewell = _FAREWELL_MS[stage]
         shown_ms = int((time.monotonic() - self._shown_at) * 1000)
         # До прощальной фразы продолжают сменяться обычные.
@@ -196,6 +248,8 @@ class UpdateWindow(QWidget):
         )
 
     def _say_farewell(self, stage: Stage) -> None:
+        if self._put_away:
+            return
         self._phrase_timer.stop()
         self._show_phrase(phrases.farewell(stage is Stage.DONE))
         # Главное окно приложения появится, когда закроется это.
@@ -240,6 +294,12 @@ class UpdateWindow(QWidget):
             event.accept()
         else:
             event.ignore()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.put_away()
+            return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
