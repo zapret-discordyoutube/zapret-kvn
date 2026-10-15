@@ -181,8 +181,19 @@ function Get-CoreProof([string]$Root) {
 # lock if the holder dies. Wait at most 40 minutes, then continue without it.
 function Enter-HeavyLock([string]$Label) {
     $path = Join-Path $env:ProgramData 'ZapretBuild\heavy.lock'
-    New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
-    $stream = [IO.File]::Open($path, 'OpenOrCreate', 'ReadWrite', 'ReadWrite')
+    # Read access is enough for LockFile. The file may belong to the other
+    # participant (Zapret GUI build task): ProgramData gives others read only.
+    try {
+        if (Test-Path -LiteralPath $path) {
+            $stream = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+        } else {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+            $stream = [IO.File]::Open($path, 'OpenOrCreate', 'ReadWrite', 'ReadWrite')
+        }
+    } catch {
+        Write-Host "${Label}: heavy work lock file is not available, continuing without it"
+        return $null
+    }
     $deadline = (Get-Date).AddMinutes(40)
     $announced = $false
     while ($true) {
