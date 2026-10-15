@@ -74,11 +74,20 @@ class ApplyPlan:
     blocker_file: str = ""  # при «lock» — код программы, державшей файл (msmpeng, explorer…)
     error_log: str = ""  # сюда — подробности для человека
     hold_file: str = ""  # замок окна обновления (пусто — в рабочей папке)
+    # Программы из папки (пути через «/»), которые переживают обновление: их
+    # файлы в нём не меняются, а остановка что-то оборвала бы (движок обхода
+    # посреди игры). Их не останавливают ни при закрытии, ни при занятом файле.
+    keep_running: list[str] = field(default_factory=list)
     extra: dict = field(default_factory=dict)  # для окна обновления программы
 
     @property
     def app_path(self) -> Path:
         return Path(self.app_dir)
+
+    @property
+    def kept_paths(self) -> list[Path]:
+        """Полные пути программ, которые переживают обновление (``keep_running``)."""
+        return [self.app_path.joinpath(*str(item).split("/")) for item in self.keep_running or ()]
 
     @property
     def exe_path(self) -> Path:
@@ -106,11 +115,11 @@ class Hooks:
             _log.warning("Программа не закрылась за %.0f с — завершаем", APP_EXIT_WAIT_S)
             processes.terminate(plan.app_pid)
             processes.wait_for_exit(plan.app_pid, 10.0)
-        for survivor in processes.stop_processes_under(plan.app_path, CORE_STOP_WAIT_S):
+        for survivor in processes.stop_processes_under(plan.app_path, CORE_STOP_WAIT_S, spare=plan.kept_paths):
             _log.warning("Процесс не завершился: %s", survivor)
 
     def on_locked(self, plan: ApplyPlan, path: Path) -> None:
-        processes.stop_processes_under(plan.app_path, 5.0)
+        processes.stop_processes_under(plan.app_path, 5.0, spare=plan.kept_paths)
 
     def before_swap(self, plan: ApplyPlan) -> None:
         pass

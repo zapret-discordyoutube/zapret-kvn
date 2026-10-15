@@ -159,16 +159,21 @@ def processes_at(executable: Path) -> list[int]:
     return found
 
 
-def stop_processes_under(root: Path, timeout_s: float = 20.0) -> list[str]:
+def stop_processes_under(root: Path, timeout_s: float = 20.0, spare=()) -> list[str]:
     """Завершить ядра и прочие процессы приложения; вернуть тех, кто выжил.
 
     Ядра живут отдельными процессами внутри каталога приложения и держат
-    свои файлы открытыми и после выхода главного окна.
+    свои файлы открытыми и после выхода главного окна. ``spare`` — пути
+    исполняемых файлов, чьи процессы переживают обновление (их файлы в нём
+    не меняются): их не трогаем.
     """
 
+    kept = {os.path.normcase(os.path.abspath(str(path))) for path in spare}
     deadline = time.monotonic() + timeout_s
     while True:
-        running = processes_under(root)
+        running = [
+            (pid, path) for pid, path in processes_under(root) if os.path.normcase(os.path.abspath(path)) not in kept
+        ]
         if not running:
             return []
         for pid, _ in running:
