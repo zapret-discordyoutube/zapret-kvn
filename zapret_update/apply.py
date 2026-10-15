@@ -33,7 +33,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from . import handoff, processes
+from . import handoff, processes, rescue
 from .swap import FileSwap, InstallError
 
 _log = logging.getLogger("zapret_update.apply")
@@ -87,6 +87,9 @@ class ApplyPlan:
     # Папки поставки (через «/»), где человек хранит свои файлы рядом с её
     # (пресеты Zapret KVN): лишнее в них новая версия не убирает.
     keep_files: list[str] = field(default_factory=list)
+    # Каталог страховки (``rescue``), закрытый от записи обычными
+    # пользователями; пусто — страховка не ставится.
+    rescue_dir: str = ""
     extra: dict = field(default_factory=dict)  # для окна обновления программы
 
     @property
@@ -207,6 +210,7 @@ def run_apply(plan: ApplyPlan, hooks: Hooks | None = None, report: Report | None
         hooks.before_swap(plan)
         stage = Stage.SWAP
         report(Stage.SWAP, 0.0)
+        _arm_rescue(plan, hooks, files)
         files.commit()
         for path in files.left_behind:
             _log.warning("Лишний файл занят и оставлен на месте: %s", path)
@@ -236,6 +240,7 @@ def run_apply(plan: ApplyPlan, hooks: Hooks | None = None, report: Report | None
         report(Stage.FAILED, 1.0)
         return False
     files.discard()
+    _disarm_rescue(plan)
     _log.info("Установка %s завершена", plan.version)
     report(Stage.DONE, 1.0)
     return True
@@ -297,12 +302,16 @@ def _recover(plan: ApplyPlan, hooks: Hooks, files: FileSwap, details: list[str])
             _log.exception("Не удалось остановить процессы перед повтором отката")
         errors = files.rollback()
     if errors:
+        # Страховка остаётся: при следующем входе она доведёт откат и
+        # запустит программу, а та сообщит серверу «откат не доведён».
+        _write(plan.failure_file, "rback")
         details.append("Прежнюю версию не удалось вернуть полностью:")
         details.extend(errors)
         details.append(f"Её файлы сохранены в {files.work_dir}")
     else:
         details.append("Прежняя версия возвращена.")
         files.discard()
+        _disarm_rescue(plan)
     try:
         hooks.after_rollback(plan)
     except Exception:
@@ -331,6 +340,24 @@ def _recover(plan: ApplyPlan, hooks: Hooks, files: FileSwap, details: list[str])
         _log.info("Прежняя версия запущена")
     else:
         hooks.show_fatal(plan, details)
+
+
+def _arm_rescue(plan: ApplyPlan, hooks: Hooks, files: FileSwap) -> None:
+    if not plan.rescue_dir:
+        return
+    try:
+        rescue.arm(plan.rescue_dir, app_dir=plan.app_dir, swap_dir=files.work_dir, start=hooks.start_command(plan))
+    except Exception:  # страховка — не повод не обновляться
+        _log.exception("Страховка замены не поставлена")
+
+
+def _disarm_rescue(plan: ApplyPlan) -> None:
+    if not plan.rescue_dir:
+        return
+    try:
+        rescue.disarm(plan.rescue_dir, plan.app_dir)
+    except Exception:
+        _log.exception("Страховка замены не снята")
 
 
 def _write(path: str, text: str) -> None:

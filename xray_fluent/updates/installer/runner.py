@@ -49,6 +49,14 @@ def setup_logging(app_dir: Path) -> None:
         logger.propagate = False
 
 
+def rescue_dir() -> str:
+    """Каталог страховки замены (``zapret_update.rescue``): в ProgramData, закрыт от записи."""
+    if os.name != "nt":
+        return ""
+    base = os.environ.get("ProgramData") or r"C:\ProgramData"
+    return str(Path(base) / "ZapretKVN" / "update-rescue")
+
+
 def core_plan(plan: InstallPlan) -> apply.ApplyPlan:
     """План ядра из плана Zapret KVN."""
     app_dir = Path(plan.app_dir)
@@ -69,6 +77,7 @@ def core_plan(plan: InstallPlan) -> apply.ApplyPlan:
         # Свои пресеты человек сохраняет рядом со встроенными: встроенные
         # обновляются, свои не убираются как «лишние».
         keep_files=["zapret/presets"],
+        rescue_dir=rescue_dir(),
         failure_file=str(app_dir / "data" / "runtime" / FAILURE_CODE_NAME),
         blocker_file=str(app_dir / "data" / "runtime" / BLOCKER_CODE_NAME),
         error_log=str(app_dir / "data" / "logs" / "update_error.log"),

@@ -294,7 +294,7 @@ def recover_interrupted_swaps(*, runtime_dir: Path = RUNTIME_DIR, now: float | N
     Возвращает, сколько замен откачено. Программу под замком установщика
     (``ZAPRET_UPDATE_HOLD``) не трогает вовсе.
     """
-    from zapret_update import handoff, swap
+    from zapret_update import handoff, rescue, swap
 
     if os.environ.get(handoff.HOLD_ENV):
         return 0
@@ -319,6 +319,11 @@ def recover_interrupted_swaps(*, runtime_dir: Path = RUNTIME_DIR, now: float | N
         else:
             _log.warning("Оборванная замена файлов откачена: %s", journal.parent)
             recovered += 1
+            # Страховка при входе в систему больше не нужна.
+            from xray_fluent.constants import BASE_DIR
+            from xray_fluent.updates.installer.runner import rescue_dir
+
+            rescue.disarm(rescue_dir(), BASE_DIR)
     return recovered
 
 
