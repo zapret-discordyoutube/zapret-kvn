@@ -39,8 +39,8 @@
       "runtime/amnezia/go.sum": "b6e8c738a3eec160d0cc58d10ea6dbbf17886b122ed140a379bd9a29eec8df82"
     },
     "android": {
-      "core.properties": "90657f32f732f5fe4103bcb3537e9b1cf441a056fea581c4f7df4939d2ed8207",
-      "core-patches/series.sha256": "3392c3ff7caba72e571b395aa313f0fe9cfca9a4410bd2f8ae88e485c0ee427c",
+      "core.properties": "7b464401c04bae1fa1e04ef0cd3348ed8a52ca44757347659f8e41dc59a949c3",
+      "core-patches/series.sha256": "c6c0a352d83a1cb19e731369c531a0f17bb85dba9bf8ea21ecc1377a1d976502",
       "core-patches/0005-official-amnezia-wg-unified.patch": "e788a9d18e11c3484fa6375d02f1b31e22c6d44abce9fa1762d7d1e99280d898"
     }
   }

@@ -3,6 +3,11 @@
   "unknown_code": "CORE_UNCLASSIFIED",
   "rules": [
     {
+      "code": "CORE_STREAM_CANCELED",
+      "action": "record_only",
+      "pattern": "connection (?:upload|download) closed(?::\\s*(?:stream \\d+ )?canceled by (?:local|remote) with error code 0)?(?:\\x1b\\[[0-9;]*m|\\s)*$"
+    },
+    {
       "code": "TARGET_DESTINATION_UNREACHABLE",
       "action": "record_only",
       "pattern": "(?:\"error\":\\s*\"dial error: |remote error: (?!tls: ))"
