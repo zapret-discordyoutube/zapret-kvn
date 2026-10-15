@@ -228,6 +228,32 @@ class LeftoverPurgeTests(unittest.TestCase):
             for kept in (fresh_temp, foreign, fresh_backup, fresh_stage):
                 self.assertTrue(kept.exists(), kept)
 
+    def test_attempt_with_an_unfinished_rollback_is_kept(self) -> None:
+        from zapret_update import swap
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            app = root / "app"
+            app.mkdir()
+            work = runtime / "app_update" / "zapretkvn_update_x" / "swap"
+            (work / "old").mkdir(parents=True)
+            (work / "old" / "ZapretKVN.exe").write_bytes(b"old exe")
+            (work / swap.JOURNAL_NAME).write_text(json.dumps({
+                "app_dir": str(app),
+                "moves": [[str(work / "old" / "ZapretKVN.exe"), str(app / "ZapretKVN.exe")]],
+                "created_dirs": [],
+            }))
+            age = auto_update.BACKUP_LEFTOVER_MIN_AGE_S + 5
+            for path in (work / swap.JOURNAL_NAME, work.parent):
+                os.utime(path, (NOW - age, NOW - age))
+            locked = PermissionError(13, "занят антивирусом")
+            with patch.object(swap.FileSwap, "_move", side_effect=locked):
+                purge_update_leftovers(runtime_dir=runtime, temp_dir=root / "temp", now=NOW)
+
+            # Раньше через сутки папка стиралась вместе с последней копией программы.
+            self.assertEqual((work / "old" / "ZapretKVN.exe").read_bytes(), b"old exe")
+
 
 class ResumeAfterUpdateTests(unittest.TestCase):
     def _controller(self, auto_connect_last: bool = False):

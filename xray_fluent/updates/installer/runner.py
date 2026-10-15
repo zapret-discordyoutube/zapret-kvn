@@ -66,6 +66,9 @@ def core_plan(plan: InstallPlan) -> apply.ApplyPlan:
         # поставка, и лишнее в ней убирается (как и прежде).
         preserve=["data"],
         remove=None,
+        # Свои пресеты человек сохраняет рядом со встроенными: встроенные
+        # обновляются, свои не убираются как «лишние».
+        keep_files=["zapret/presets"],
         failure_file=str(app_dir / "data" / "runtime" / FAILURE_CODE_NAME),
         blocker_file=str(app_dir / "data" / "runtime" / BLOCKER_CODE_NAME),
         error_log=str(app_dir / "data" / "logs" / "update_error.log"),

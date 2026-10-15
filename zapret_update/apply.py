@@ -15,7 +15,9 @@
    отметиться «готова» за ``ready_wait_s``; молчащий, но живой процесс тоже
    считается запустившимся — медленный диск не повод откатывать;
 7. любой сбой — откат по журналу, запуск прежней версии, код причины для
-   сервера очереди в ``failure_file``.
+   сервера очереди в ``failure_file``. Файл, который держит антивирус, не
+   повод бросить откат: он повторяется (``ROLLBACK_ATTEMPTS``), а что так и
+   не вернулось, остаётся в журнале, и уборка эту папку не тронет.
 
 Окно обновления у каждой программы своё: шаги приходят в ``report``.
 """
@@ -40,6 +42,10 @@ APP_EXIT_WAIT_S = 60.0
 CORE_STOP_WAIT_S = 20.0
 NEW_VERSION_READY_WAIT_S = 20.0
 OLD_VERSION_READY_WAIT_S = 5.0
+# Откат, споткнувшийся о занятый файл, повторяется: антивирус обычно держит
+# только что переименованный exe секунды. Пауза растёт: 3, 6, 9 с.
+ROLLBACK_ATTEMPTS = 4
+ROLLBACK_RETRY_PAUSE_S = 3.0
 
 
 class Stage(Enum):
@@ -78,6 +84,9 @@ class ApplyPlan:
     # файлы в нём не меняются, а остановка что-то оборвала бы (движок обхода
     # посреди игры). Их не останавливают ни при закрытии, ни при занятом файле.
     keep_running: list[str] = field(default_factory=list)
+    # Папки поставки (через «/»), где человек хранит свои файлы рядом с её
+    # (пресеты Zapret KVN): лишнее в них новая версия не убирает.
+    keep_files: list[str] = field(default_factory=list)
     extra: dict = field(default_factory=dict)  # для окна обновления программы
 
     @property
@@ -180,6 +189,7 @@ def run_apply(plan: ApplyPlan, hooks: Hooks | None = None, report: Report | None
         Path(plan.work_dir) / "swap",
         preserve=plan.preserve,
         remove=plan.remove,
+        keep=plan.keep_files,
         on_locked=lambda path: hooks.on_locked(plan, path),
     )
     _log.info("Установка %s %s → %s в %s", plan.product, plan.from_version, plan.version, plan.app_dir)
@@ -271,8 +281,21 @@ def _wait_until_started(plan: ApplyPlan, process, wait_s: float, progress=lambda
 def _recover(plan: ApplyPlan, hooks: Hooks, files: FileSwap, details: list[str]) -> None:
     # Прежняя версия могла ещё не выйти (сбой на подготовке), а новая — успеть
     # запустить свои процессы: до отката не должно остаться ни той, ни другой.
-    hooks.close_application(plan)
+    try:
+        hooks.close_application(plan)
+    except Exception:
+        _log.exception("Не удалось закрыть программу перед откатом")
     errors = files.rollback()
+    for attempt in range(1, ROLLBACK_ATTEMPTS):
+        if not errors:
+            break
+        _log.warning("Откат не вернул всё (%s) — попытка %d", "; ".join(errors), attempt + 1)
+        time.sleep(ROLLBACK_RETRY_PAUSE_S * attempt)
+        try:
+            processes.stop_processes_under(plan.app_path, CORE_STOP_WAIT_S, spare=plan.kept_paths)
+        except Exception:
+            _log.exception("Не удалось остановить процессы перед повтором отката")
+        errors = files.rollback()
     if errors:
         details.append("Прежнюю версию не удалось вернуть полностью:")
         details.extend(errors)

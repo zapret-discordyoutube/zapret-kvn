@@ -288,6 +288,16 @@ class RunnerTests(InstallerCase):
         )
         self.assertFalse(self.error_log().exists())
 
+    def test_own_zapret_presets_survive_the_update(self) -> None:
+        own = self.app_dir / "zapret" / "presets" / "Мой пресет.txt"
+        own.parent.mkdir(parents=True, exist_ok=True)
+        own.write_text("--new\n", encoding="utf-8")
+
+        self.assertTrue(run_install(self.plan, lambda stage, fraction: None))
+
+        # Раньше свой пресет считался «лишним» и пропадал при каждом обновлении.
+        self.assertEqual(own.read_text(encoding="utf-8"), "--new\n")
+
     def test_install_finishes_as_soon_as_the_new_version_reports_ready(self) -> None:
         patcher = patch.multiple(apply, NEW_VERSION_READY_WAIT_S=60.0)
         patcher.start()

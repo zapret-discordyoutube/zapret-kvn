@@ -358,6 +358,8 @@ def purge_update_leftovers(
     if legacy.exists():
         candidates.append((legacy, BACKUP_LEFTOVER_MIN_AGE_S))
 
+    from zapret_update import swap
+
     removed = 0
     for item, min_age in candidates:
         try:
@@ -365,6 +367,9 @@ def purge_update_leftovers(
         except OSError:
             continue
         if age < min_age:
+            continue
+        # Откат не вернул всё — в swap/old единственная копия прежних файлов.
+        if item.is_dir() and swap.pending(item / "swap"):
             continue
         if item.is_dir():
             shutil.rmtree(item, ignore_errors=True)

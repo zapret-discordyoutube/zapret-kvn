@@ -9,12 +9,16 @@
 1. ``prepare`` сравнивает пробное дерево новой версии с программой и копирует
    изменённые файлы в ``<рабочая папка>/new`` — на тот же диск. Программа при
    этом не затрагивается.
-2. ``commit`` выносит заменяемые и лишние файлы в ``<рабочая папка>/old`` и
-   ставит на их место подготовленные. Это одни переименования; каждое сразу
-   пишется в журнал ``journal.json``.
-3. ``rollback`` проходит журнал в обратном порядке. Журнал на диске: если
+2. ``commit`` выносит лишние файлы в ``<рабочая папка>/old``, а каждый
+   заменяемый — парой «прежний в ``old`` → сразу новый на его место»: без
+   exe программа остаётся на одно переименование, а не на всю замену. Это
+   одни переименования; каждое сразу пишется в журнал ``journal.json`` вместе
+   с размером и временем файла.
+3. ``rollback`` проходит журнал в обратном порядке. Что вернуть не вышло
+   (файл держит антивирус), остаётся в журнале — откат можно повторить, и
+   уборка не сотрёт последнюю копию прежней версии. Журнал на диске: если
    питание пропало посреди замены, ``recover`` вернёт всё при следующем
-   запуске.
+   запуске; файл, который с тех пор заменили (переустановка), не трогается.
 
 Чужого замена не трогает: убираются только файлы прежней версии, которые
 поставила сама программа (``remove``), а папки из ``preserve`` (настройки и
@@ -36,6 +40,11 @@ JOURNAL_NAME = "journal.json"
 _CHUNK = 1024 * 1024
 _FREE_SPACE_MARGIN = 32 * 1024 * 1024
 _RETRY_PAUSE_S = 0.25
+
+
+# Запись журнала: где файл сейчас, где был, его размер и время изменения
+# (None — журнал прежнего вида, без них).
+Entry = tuple[Path, Path, "tuple[int, int] | None"]
 
 
 class InstallError(Exception):
@@ -87,12 +96,15 @@ class FileSwap:
         *,
         preserve: Iterable[str] = (),
         remove: Iterable[str] | None = None,
+        keep: Iterable[str] = (),
         lock_wait_s: float = 30.0,
         on_locked: Callable[[Path], None] | None = None,
     ) -> None:
         """``remove`` — пути прежней версии, которых нет в новой (``None`` —
         считать лишним всё в папке программы, чего нет в новой, кроме
-        ``preserve``)."""
+        ``preserve``). ``keep`` — папки поставки (через «/»), куда человек
+        кладёт свои файлы рядом с её файлами (пресеты): поставку в них новая
+        версия меняет, но чужого не убирает."""
         self._source_dir = Path(source_dir)
         self._app_dir = Path(app_dir)
         self._work_dir = Path(work_dir)
@@ -100,12 +112,13 @@ class FileSwap:
         self._old_dir = self._work_dir / "old"
         self._preserve = frozenset(name.casefold() for name in preserve)
         self._remove = None if remove is None else [str(item) for item in remove]
+        self._keep = tuple(os.path.normcase(str(Path(*str(item).split("/")))) + os.sep for item in keep)
         self._lock_wait_s = lock_wait_s
         self._on_locked = on_locked
         self._wait_left = 0.0
         self._outgoing: list[tuple[Path, bool]] = []
         self._incoming: list[Path] = []
-        self._journal: list[tuple[Path, Path]] = []
+        self._journal: list[Entry] = []
         self._created_dirs: list[Path] = []
         self.unchanged = 0
         self.replaced = 0
@@ -121,6 +134,11 @@ class FileSwap:
 
     def prepare(self, progress: Callable[[float], None] | None = None) -> None:
         report = progress or (lambda fraction: None)
+        # Прошлая попытка в этой же папке могла не вернуть всё: тогда в ``old``
+        # лежит единственная копия прежней версии — вернуть её до сравнения.
+        leftover = recover(self._work_dir)
+        if leftover:
+            raise InstallError("Прошлое обновление не откачено до конца: " + "; ".join(leftover))
         # Папки данных человека новая версия не несёт, а если несёт (Zapret KVN
         # кладёт в архив data/ с шаблонами), то не трогает: шаблоны программа
         # переносит сама при запуске.
@@ -155,6 +173,7 @@ class FileSwap:
         else:
             extra = [os.path.normcase(str(Path(*item.split("/")))) for item in self._remove]
             extra = [key for key in extra if key in installed and key not in source]
+        extra = [key for key in extra if not key.startswith(self._keep)]
         for key in replaced_keys:
             self._outgoing.append((installed[key], True))
         for key in extra:
@@ -196,20 +215,15 @@ class FileSwap:
     def commit(self) -> None:
         self._wait_left = self._lock_wait_s
         self._save_journal()
+        # Сначала лишние файлы: среди них и содержимое каталога, на месте
+        # которого в новой версии файл. Потом каждый заменяемый — парой.
         for current, required in self._outgoing:
-            relative = current.relative_to(self._app_dir)
-            try:
-                self._move(current, self._old_dir / relative)
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                if required:
-                    raise InstallError(f"Файл занят другой программой: {relative}", path=current) from error
-                self.left_behind.append(current)
-                continue
-            self._record(self._old_dir / relative, current)
-
+            if not required:
+                self._take_out(current, required)
+        replacing = {current.relative_to(self._app_dir) for current, required in self._outgoing if required}
         for relative in self._incoming:
+            if relative in replacing:
+                self._take_out(self._app_dir / relative, True)
             target = self._app_dir / relative
             try:
                 self._make_room(target)
@@ -220,14 +234,29 @@ class FileSwap:
 
         self._prune_emptied_dirs()
 
+    def _take_out(self, current: Path, required: bool) -> None:
+        relative = current.relative_to(self._app_dir)
+        try:
+            self._move(current, self._old_dir / relative)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if required:
+                raise InstallError(f"Файл занят другой программой: {relative}", path=current) from error
+            self.left_behind.append(current)
+            return
+        self._record(self._old_dir / relative, current)
+
     def _record(self, current: Path, origin: Path) -> None:
-        self._journal.append((current, origin))
+        self._journal.append((current, origin, _signature(current)))
         self._save_journal()
 
     def _save_journal(self) -> None:
         payload = {
             "app_dir": str(self._app_dir),
-            "moves": [[str(current), str(origin)] for current, origin in self._journal],
+            "moves": [
+                [str(current), str(origin), *(signature or ())] for current, origin, signature in self._journal
+            ],
             "created_dirs": [str(path) for path in self._created_dirs],
         }
         self._work_dir.mkdir(parents=True, exist_ok=True)
@@ -293,11 +322,16 @@ class FileSwap:
     # ── откат и уборка ──────────────────────────────────────────
 
     def rollback(self) -> list[str]:
-        """Вернуть программу к исходному виду; вернуть список сбоев."""
+        """Вернуть программу к исходному виду; вернуть список сбоев.
+
+        Что вернуть не вышло, остаётся в журнале: повторный ``rollback`` или
+        ``recover`` доделает именно это, а уборка не сотрёт ``old``.
+        """
         self._wait_left = self._lock_wait_s
-        errors = _undo(self._journal, self._created_dirs, self._move, self._remove_empty_tree)
-        self._journal.clear()
-        self._created_dirs.clear()
+        errors, remaining = _undo(self._journal, self._created_dirs, self._move, self._remove_empty_tree)
+        self._journal = remaining
+        if not remaining:
+            self._created_dirs.clear()
         self._save_journal()
         return errors
 
@@ -306,20 +340,63 @@ class FileSwap:
         shutil.rmtree(self._work_dir, ignore_errors=True)
 
 
-def _undo(journal, created_dirs, move, remove_empty_tree) -> list[str]:
+def _signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_size, stat.st_mtime_ns
+
+
+def _undo(journal, created_dirs, move, remove_empty_tree) -> tuple[list[str], list[Entry]]:
+    """Пройти журнал назад. Вернуть сбои и записи, которые стоит повторить."""
     errors: list[str] = []
-    for current, origin in reversed(list(journal)):
+    remaining: list[Entry] = []
+    stuck: set[Path] = set()  # где остался файл, который не удалось вынести
+    for current, origin, signature in reversed(list(journal)):
+        current, origin = Path(current), Path(origin)
+        if not current.exists():
+            continue  # шаг сделан прошлым откатом (или файла нет — повтор не поможет)
+        if signature is not None and _signature(current) != signature:
+            continue  # файл с тех пор заменили (переустановка) — не наш
+        if origin.is_file():
+            if origin in stuck:
+                remaining.append((current, origin, signature))
+                errors.append(f"{origin}: место занято файлом, который не удалось вынести")
+            continue  # место занял чужой файл (переустановка) — не трогаем
         try:
-            remove_empty_tree(Path(origin))
-            move(Path(current), Path(origin))
+            remove_empty_tree(origin)
+            move(current, origin)
         except OSError as error:
+            remaining.append((current, origin, signature))
+            stuck.add(current)
             errors.append(f"{origin}: {error}")
+    remaining.reverse()
     for created in reversed(list(created_dirs)):
         try:
             os.rmdir(created)
         except OSError:
             pass
-    return errors
+    return errors, remaining
+
+
+def _load_journal(journal_path: Path) -> tuple[Path, list[Entry], list[Path]] | None:
+    try:
+        payload = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    moves: list[Entry] = []
+    for item in payload.get("moves") or ():
+        signature = (int(item[2]), int(item[3])) if len(item) >= 4 else None
+        moves.append((Path(item[0]), Path(item[1]), signature))
+    app_dir = Path(payload.get("app_dir") or journal_path.parent)
+    return app_dir, moves, [Path(item) for item in payload.get("created_dirs") or ()]
+
+
+def pending(work_dir: Path) -> bool:
+    """В журнале замены остались невозвращённые файлы: папку убирать нельзя."""
+    loaded = _load_journal(Path(work_dir) / JOURNAL_NAME)
+    return bool(loaded and loaded[1])
 
 
 def recover(work_dir: Path) -> list[str] | None:
@@ -329,20 +406,23 @@ def recover(work_dir: Path) -> list[str] | None:
     всё возвращено); журнал после этого убирается.
     """
     journal_path = Path(work_dir) / JOURNAL_NAME
-    try:
-        payload = json.loads(journal_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    loaded = _load_journal(journal_path)
+    if loaded is None:
         return None
-    moves = [(Path(a), Path(b)) for a, b in payload.get("moves") or ()]
+    app_dir, moves, created_dirs = loaded
     if not moves:
         journal_path.unlink(missing_ok=True)
         return None
-    swap = FileSwap(Path(work_dir), Path(payload.get("app_dir") or work_dir), Path(work_dir))
+    swap = FileSwap(Path(work_dir), app_dir, Path(work_dir))
     swap._wait_left = 30.0
-    errors = _undo(moves, [Path(item) for item in payload.get("created_dirs") or ()], swap._move, swap._remove_empty_tree)
-    if not errors:
+    errors, remaining = _undo(moves, created_dirs, swap._move, swap._remove_empty_tree)
+    if remaining:
+        # Повторять только то, что не вышло: сделанные шаги второй раз не идут.
+        swap._journal, swap._created_dirs = remaining, created_dirs
+        swap._save_journal()
+    else:
         journal_path.unlink(missing_ok=True)
     return errors
 
 
-__all__ = ["FileSwap", "InstallError", "JOURNAL_NAME", "recover"]
+__all__ = ["FileSwap", "InstallError", "JOURNAL_NAME", "pending", "recover"]
