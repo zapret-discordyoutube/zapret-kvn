@@ -557,3 +557,28 @@ def test_easter_egg_follows_the_shared_rule() -> None:
     # Длинный единственный пункт не влезает в предел публикатора — шутка уступает место.
     assert release_windows.published_changes(joked, ["x" * 700]) == ["x" * 700]
 
+
+
+def test_store_prune_keeps_this_and_recent_releases(tmp_path, monkeypatch) -> None:
+    import json as _json
+
+    from zapret_update import publish
+
+    payload = {"schema": 1, "product": "zapret-kvn", "channel": "stable", "version": "0.8.28", "created": 1, "key": "k",
+               "files": [{"path": "ZapretKVN.exe", "size": 1, "sha256": "a" * 64, "zsize": 1}]}
+    (tmp_path / "update-manifest.json").write_text(_json.dumps(payload), encoding="utf-8")
+    previous = tmp_path / "previous-0.8.27.json"
+    previous.write_text(_json.dumps({**payload, "version": "0.8.27", "files": [{**payload["files"][0], "sha256": "b" * 64}]}), encoding="utf-8")
+    token = tmp_path / "token"
+    token.write_text("secret", encoding="utf-8")
+    asked, kept = [], {}
+    monkeypatch.setattr(release_windows, "STORE_TOKEN_PATH", token)
+    monkeypatch.setattr(release_windows, "_signed_release_module", lambda: object())
+    monkeypatch.setattr(release_windows, "previous_manifests", lambda keys, version, directory, **kw: asked.append(kw) or [previous])
+    monkeypatch.setattr(publish, "prune", lambda keep, **kw: kept.update(keep=keep, **kw) or 0)
+
+    release_windows.prune_store(tmp_path, "0.8.28")
+
+    assert asked == [{"limit": release_windows.KEEP_RELEASES, "strict": True}]
+    assert [m.version for m in kept["keep"]] == ["0.8.28", "0.8.27"]
+    assert kept["owner"] == "zapretkvn" and kept["product"] == "zapret-kvn" and kept["token"] == "secret"

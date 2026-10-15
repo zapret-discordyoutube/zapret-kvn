@@ -8,6 +8,11 @@ HEAD у реестра пакетов размера не сообщает, по
 каждого — размер и SHA-256. Не тот файл перезаливается, после заливки весь
 набор сверяется.
 
+Уборка (``prune``): файлы, на которые не ссылается ни один из переданных
+подписанных списков выпусков, удаляются — так же, как на зеркалах. Списки
+передаёт сценарий выпуска своей программы: текущий и несколько прежних
+каждого канала, хранилище которого общее.
+
 Ключ доступа — отдельный, только на запись пакетов.
 """
 
@@ -99,6 +104,50 @@ def upload(
     return uploaded
 
 
+def prune(
+    keep_manifests: Iterable,
+    *,
+    owner: str,
+    product: str,
+    token: str,
+    origin: str = ORIGIN,
+    log: Callable[[str], None] = lambda _message: None,
+    listing: Callable[[], dict[str, tuple[int, str]]] | None = None,
+) -> int:
+    """Убирает из реестра файлы хранилища, не нужные ни одному из ``keep_manifests``.
+
+    Без списков ничего не удаляется: пустой набор «что оставить» значил бы
+    «удалить всё», а это скорее сбой получения выпусков, чем намерение.
+    """
+    if not token:
+        raise RuntimeError("нет ключа доступа к хранилищу выпуска")
+    manifests = list(keep_manifests)
+    if not manifests:
+        raise ValueError("уборка хранилища без списков выпусков удалила бы всё")
+    keep: set[str] = set()
+    for listed in manifests:
+        keep |= manifest_names(listed)
+    present = (listing or (lambda: remote_files(owner, product, origin)))()
+    missing = sorted(keep - set(present))
+    if any(name in missing for name in manifest_names(manifests[0])):
+        raise RuntimeError("текущий выпуск ещё не весь в хранилище — уборка отложена")
+    headers = {"Authorization": f"token {token}", "User-Agent": "ZapretRelease"}
+    removed = 0
+    for name in sorted(present):
+        if name in keep or not store.is_store_name(name):
+            continue
+        request = urllib.request.Request(store.forgejo_url(origin, owner, product, name), method="DELETE", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT):
+                pass
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:  # уже убрал параллельный выпуск
+                raise RuntimeError(f"хранилище не отдало на удаление {name}: HTTP {exc.code}") from None
+        removed += 1
+    log(f"из хранилища убрано ненужных файлов: {removed}, осталось {len(present) - removed}")
+    return removed
+
+
 def manifest_names(manifest) -> set[str]:
     """Имена файлов хранилища, на которые ссылается список выпуска."""
     names = {store.blob_name(entry.sha256) for entry in manifest.files}
@@ -106,4 +155,4 @@ def manifest_names(manifest) -> set[str]:
     return names
 
 
-__all__ = ["files_api", "manifest_names", "remote_files", "upload"]
+__all__ = ["files_api", "manifest_names", "prune", "remote_files", "upload"]

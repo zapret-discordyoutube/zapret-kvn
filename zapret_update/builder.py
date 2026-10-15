@@ -143,6 +143,15 @@ def build_store(
             if bs_size < min(patch_size, zsize) * PATCH_WORTH_SHARE:
                 result.patches.append({"from": base.sha256, "to": sha256, "size": bs_size, "kind": "bsdiff"})
                 result.names.add(bs_name)
+                # Заплатка zstd той же пары больше никому не нужна: программы,
+                # которые умеют zstd (Zapret 2 GUI 158+, Zapret KVN 0.8.27+),
+                # умеют и bsdiff и берут меньшую. Не выкладываем лишние мегабайты.
+                result.patches = [
+                    item
+                    for item in result.patches
+                    if not (item["from"] == base.sha256 and item["to"] == sha256 and item.get("kind", "zstd") == "zstd")
+                ]
+                result.names.discard(name)
     return result
 
 

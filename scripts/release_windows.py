@@ -683,8 +683,12 @@ def sign_release(directory: Path, version: str) -> None:
     log(f"signed release list with key {loaded.key}")
 
 
-def previous_manifests(keys, version: str, directory: Path, *, limit: int = 3) -> list[Path]:
-    """Подписанные списки прежних выпусков с хранилищем — основа для заплаток."""
+def previous_manifests(keys, version: str, directory: Path, *, limit: int = 3, strict: bool = False) -> list[Path]:
+    """Подписанные списки прежних выпусков с хранилищем — основа для заплаток.
+
+    ``strict`` — список выпусков не получен → ошибка, а не пустой ответ
+    (уборке хранилища нельзя путать «выпусков нет» со «сервер не ответил»).
+    """
     from zapret_update import manifest as update_manifest
 
     found: list[Path] = []
@@ -692,6 +696,8 @@ def previous_manifests(keys, version: str, directory: Path, *, limit: int = 3) -
         with urllib.request.urlopen(f"{FORGEJO_BASE}/api/v1/repos/{FORGEJO_REPO}/releases?limit=20", timeout=60) as response:
             releases = json.loads(response.read())
     except (OSError, ValueError) as exc:
+        if strict:
+            raise ReleaseError(f"previous releases are unavailable: {exc}") from exc
         log(f"previous releases are unavailable, no patches this time: {exc}")
         return found
     for release in releases if isinstance(releases, list) else ():
@@ -759,6 +765,28 @@ def upload_store(directory: Path) -> None:
     publish.upload(
         names,
         cache_dir=STORE_CACHE,
+        owner=STORE_OWNER,
+        product=STORE_PRODUCT,
+        token=STORE_TOKEN_PATH.read_text(encoding="utf-8").strip(),
+        origin=FORGEJO_BASE,
+        log=log,
+    )
+
+
+# Сколько прежних выпусков держать в хранилище Forgejo (их файлы и заплатки).
+KEEP_RELEASES = 3
+
+
+def prune_store(directory: Path, version: str) -> int:
+    """Убрать из реестра Forgejo файлы, не нужные ни этому, ни прежним выпускам (общее ядро)."""
+    from zapret_update import manifest as update_manifest
+    from zapret_update import publish
+
+    keys = _signed_release_module()
+    paths = [directory / SIGNED_ASSET_NAMES[0], *previous_manifests(keys, version, directory, limit=KEEP_RELEASES, strict=True)]
+    keep = [update_manifest.parse(json.loads(path.read_text(encoding="utf-8"))) for path in paths]
+    return publish.prune(
+        keep,
         owner=STORE_OWNER,
         product=STORE_PRODUCT,
         token=STORE_TOKEN_PATH.read_text(encoding="utf-8").strip(),
@@ -1266,6 +1294,11 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         mark_phase(state, "release_published", release_url=release["html_url"])
     else:
         verify_published_release(forgejo, release, version, commit, manifest)
+    # Уборка хранилища — после выпуска; её сбой выпуску не мешает.
+    try:
+        prune_store(release_dir, version)
+    except Exception as exc:  # noqa: BLE001
+        log(f"update store prune skipped: {exc}")
 
     if telegram and not phase_done(state, "telegram_published"):
         publish_telegram(version, published_changes(version, changes))
