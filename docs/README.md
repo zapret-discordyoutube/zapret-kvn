@@ -2,7 +2,7 @@
 
 Простой VPN-клиент для Windows с обходом блокировок от создателей [Zapret 2 GUI](https://git.zapret.moe/zapretdiscordyoutube/zapret). Работает из коробки.
 
-### [Получить ключи можно тут](https://t.me/zapretvpns_bot) | [Скачать](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases) | [Android](https://git.zapret.moe/zapretdiscordyoutube/ZapretKVN-android)
+### [Получить ключи можно тут](https://t.me/zapretvpns_bot?start=kvnwin_readme_keys) | [Скачать](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases) | [Android](https://git.zapret.moe/zapretdiscordyoutube/ZapretKVN-android)
 
 <img width="200" alt="Список серверов Zapret KVN" src="assets/zapret-kvn-server-list.png"><img width="200" alt="Подключение Zapret KVN" src="assets/zapret-kvn-connection.png"><img width="200" alt="Настройки Zapret KVN" src="assets/zapret-kvn-settings.png">
 
@@ -197,7 +197,7 @@ dev/stable. Перед повторным использованием пров�
 
 ## Где взять ключ
 
-Если у вас нет VPN-ключа, получите его в боте: [@zapretvpns_bot](https://t.me/zapretvpns_bot)
+Если у вас нет VPN-ключа, получите его в боте: [@zapretvpns_bot](https://t.me/zapretvpns_bot?start=kvnwin_readme_nokey)
 
 ## Обратная связь
 

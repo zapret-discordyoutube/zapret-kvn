@@ -17,6 +17,9 @@ from qfluentwidgets import (
 from ..constants import APP_VERSION
 from .theme import token_pair
 
+# Рекламная метка deep-link бота: источник kvnwin + место about.
+BOT_ABOUT_URL = "https://t.me/zapretvpns_bot?start=kvnwin_about"
+
 
 def _muted_caption_qss(extra: str = "") -> tuple[str, str]:
     light, dark = token_pair("text_muted")
@@ -98,7 +101,7 @@ class AboutPage(QWidget):
 
         tg_bot_btn = PushButton(FIF.SHOPPING_CART, "Купить подписку", self)
         tg_bot_btn.clicked.connect(
-            lambda: webbrowser.open("https://t.me/zapretvpns_bot")
+            lambda: webbrowser.open(BOT_ABOUT_URL)
         )
         btn_row.addWidget(tg_bot_btn)
 
