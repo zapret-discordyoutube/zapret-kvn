@@ -51,6 +51,30 @@ class StoreStepTests(unittest.TestCase):
         self.assertEqual(fetch.call_args.kwargs["work_dir"], tree.parent)
         self.assertIn("zapretkvn/generic/zapret-kvn-store/1/", fetch.call_args.kwargs["sources"][0].url_for("x.zst"))
 
+    def test_log_names_patch_kinds(self) -> None:
+        import hashlib
+
+        old = b"old"
+        (self.app / "ZapretKVN.exe").write_bytes(old)
+        listed = update_manifest.parse({
+            "schema": 1, "product": "zapret-kvn", "channel": "stable", "version": "9.9.9", "created": 1, "key": "k",
+            "files": [{"path": "ZapretKVN.exe", "size": 3, "sha256": "a" * 64, "zsize": 50}],
+            "patches": [{"from": hashlib.sha256(old).hexdigest(), "to": "a" * 64, "size": 7}],
+        })
+
+        def build(planned, *, root, ready, stage_dir):
+            stage_dir.mkdir(parents=True)
+            (stage_dir / "ZapretKVN.exe").write_bytes(b"new")
+            return stage_dir
+
+        with patch("zapret_update.fetch.fetch_plan", return_value={}), patch(
+            "zapret_update.stage.build_stage", side_effect=build
+        ), patch("zapret_update.store.codecs", return_value=frozenset({"zstd"})), self.assertLogs(
+            app_updater._log, "INFO"
+        ) as logs:
+            self.assertIsNotNone(self._downloader(listed)._try_store())
+        self.assertIn("скачано 7 из 100 байт (файлов 1, заплаток 1 (zstd 1), без изменений 0)", "\n".join(logs.output))
+
     def test_without_zstd_unpacker_nothing_is_downloaded(self) -> None:
         # 0.8.26 собрана на Python 3.12 без zstandard: качала файл и падала на распаковке.
         with patch("zapret_update.fetch.fetch_plan") as fetch, patch(

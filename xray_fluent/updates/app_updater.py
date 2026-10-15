@@ -710,10 +710,15 @@ class UpdateDownloader(QThread):
         if not (tree / APP_EXE_NAME).is_file():
             _log.warning("[update] В собранной из хранилища версии нет %s", APP_EXE_NAME)
             return None
+        kinds: dict[str, int] = {}
+        for item in planned.want:
+            if item.patch is not None:
+                kinds[item.patch.kind] = kinds.get(item.patch.kind, 0) + 1
+        detail = f" ({', '.join(f'{kind} {count}' for kind, count in sorted(kinds.items()))})" if kinds else ""
         _log.info(
-            "[update] Из хранилища: скачано %d из %d байт (файлов %d, заплаток %d, без изменений %d)",
+            "[update] Из хранилища: скачано %d из %d байт (файлов %d, заплаток %d%s, без изменений %d)",
             planned.download_size, self._update.size, len(planned.want),
-            sum(1 for item in planned.want if item.patch is not None), len(planned.keep),
+            sum(kinds.values()), detail, len(planned.keep),
         )
         self.progress.emit(100)
         return tree
