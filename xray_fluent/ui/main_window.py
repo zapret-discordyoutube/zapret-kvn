@@ -58,6 +58,7 @@ from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
+from .window_reveal import cloak_until_painted, is_system_show_event
 from .theme import apply_theme, stop_system_theme_listener, sync_system_theme_listener
 from .tour import TOUR_STEPS, TourOverlay, TourStep, active_tour
 from .updates_page import UpdatesPage
@@ -661,6 +662,10 @@ class MainWindow(FluentWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if not is_system_show_event(event):
+            # Наш show() (запуск, значок в трее): окно ещё не на экране. Прячем его
+            # до отрисовки, иначе Windows выведет его пустым и белым.
+            cloak_until_painted(self)
         if not getattr(self, "_first_show_logged", False):
             self._first_show_logged = True
             QTimer.singleShot(0, lambda: logging.getLogger("xray_fluent.bootstrap").info(
