@@ -308,7 +308,7 @@ class RunnerTests(InstallerCase):
     def test_application_is_closed_before_files_are_replaced(self) -> None:
         order: list[str] = []
         processes.wait_for_exit.side_effect = lambda *a: order.append("wait") or True
-        processes.stop_processes_under.side_effect = lambda *a: order.append("stop") or []
+        processes.stop_processes_under.side_effect = lambda *a, **k: order.append("stop") or []
         real_commit = FileSwap.commit
 
         def commit(swap):
