@@ -535,7 +535,7 @@ def powershell_bootstrap(mode: str, commit: str, version: str) -> None:
             "-EncodedCommand",
             encoded,
         ],
-        timeout=3600,
+        timeout=7200,  # с запасом на ожидание общего замка тяжёлой работы (до 40 мин)
     )
 
 

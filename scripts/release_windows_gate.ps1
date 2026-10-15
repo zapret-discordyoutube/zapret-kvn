@@ -175,6 +175,41 @@ function Get-CoreProof([string]$Root) {
     }
 }
 
+# Shared heavy-work lock of the build machine. Zapret 2 GUI takes the same lock
+# (build_zapret/heavy_lock.py, Nuitka and Inno Setup): timing tests failed under
+# a concurrent build and broke the release. Byte 0 of the file; Windows drops the
+# lock if the holder dies. Wait at most 40 minutes, then continue without it.
+function Enter-HeavyLock([string]$Label) {
+    $path = Join-Path $env:ProgramData 'ZapretBuild\heavy.lock'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+    $stream = [IO.File]::Open($path, 'OpenOrCreate', 'ReadWrite', 'ReadWrite')
+    $deadline = (Get-Date).AddMinutes(40)
+    $announced = $false
+    while ($true) {
+        try {
+            $stream.Lock(0, 1)
+            return $stream
+        } catch {
+            if ((Get-Date) -ge $deadline) {
+                Write-Host "${Label}: heavy work lock is busy for 40 min, continuing without it"
+                $stream.Close()
+                return $null
+            }
+            if (-not $announced) {
+                Write-Host "${Label}: another heavy build is running on this machine (Zapret GUI), waiting"
+                $announced = $true
+            }
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+
+function Exit-HeavyLock($Stream) {
+    if ($null -eq $Stream) { return }
+    try { $Stream.Unlock(0, 1) } catch { }
+    $Stream.Close()
+}
+
 function Ensure-DependenciesAndTests([string]$Root) {
     $python = Join-Path $Root ".venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $python)) {
@@ -182,13 +217,23 @@ function Ensure-DependenciesAndTests([string]$Root) {
     }
     Invoke-Native $python @("-m", "pip", "install", "-r", (Join-Path $Root "requirements.txt"))
     Invoke-Native $python @("-m", "pip", "check")
-    Invoke-Native $python @("-m", "unittest", "discover", "-s", "tests", "-v")
+    $lock = Enter-HeavyLock "tests"
+    try {
+        Invoke-Native $python @("-m", "unittest", "discover", "-s", "tests", "-v")
+    } finally {
+        Exit-HeavyLock $lock
+    }
 }
 
 function Build-Application([string]$Root) {
     Stop-ReleaseProcesses $Root
     $python = Join-Path $Root ".venv\Scripts\python.exe"
-    Invoke-Native $python @((Join-Path $Root "build.py"), "--no-zip")
+    $lock = Enter-HeavyLock "build"
+    try {
+        Invoke-Native $python @((Join-Path $Root "build.py"), "--no-zip")
+    } finally {
+        Exit-HeavyLock $lock
+    }
     $exe = Join-Path $Root "dist\ZapretKVN\ZapretKVN.exe"
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
         throw "Built ZapretKVN.exe is missing"

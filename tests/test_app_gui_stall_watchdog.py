@@ -48,17 +48,31 @@ class GuiStallWatchdogTests(unittest.TestCase):
         self.watchdog.stop()
 
     def test_idle_loop_has_no_stalls(self) -> None:
-        _spin(300)
+        # Ложная тревога сторожа видна в каждой попытке; разовая пауза потока,
+        # когда машину грузит соседняя сборка, — нет.
+        for _attempt in range(3):
+            self.watchdog.reset()
+            _spin(300)
+            if not self.watchdog.records:
+                break
         self.assertEqual(self.watchdog.records, [])
 
     def test_blocking_call_is_measured_with_stack(self) -> None:
         QTimer.singleShot(0, lambda: _blocking_culprit(0.2))
-        _spin(150)
-        _spin(150)
-        self.assertEqual(len(self.watchdog.records), 1)
-        record = self.watchdog.records[0]
+        deadline = time.monotonic() + 5.0
+        culprits = []
+        while time.monotonic() < deadline:
+            _spin(50)
+            culprits = [r for r in self.watchdog.records if "_blocking_culprit" in r.stack]
+            if culprits:
+                break
+        # Ровно одна запись о самой блокировке; паузы нагрузки — короче неё.
+        self.assertEqual(len(culprits), 1)
+        record = culprits[0]
         self.assertGreaterEqual(record.duration_ms, 180)
-        self.assertIn("_blocking_culprit", record.stack)
+        for other in self.watchdog.records:
+            if other is not record:
+                self.assertLess(other.duration_ms, record.duration_ms)
         self.assertGreaterEqual(self.watchdog.max_stall_ms, 180)
 
 

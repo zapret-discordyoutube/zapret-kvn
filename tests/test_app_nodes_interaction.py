@@ -127,16 +127,24 @@ class NodesInteractionTests(unittest.TestCase):
             for _ in range(50):
                 self.page._queue_viewport_layout()
             self.assertEqual(layout.call_count, 0)
-            for _ in range(50):
+            # Срок — с запасом на нагруженную машину: проверяется одна раскладка, а не скорость.
+            for _ in range(500):
                 QTest.qWait(10)
                 if layout.call_count:
                     break
+            QTest.qWait(30)
             self.assertEqual(layout.call_count, 1)
         self.page.resize(1500, 550)
-        QTest.qWait(50)
         header = self.table.horizontalHeader()
-        width = sum(header.sectionSize(i) for i in range(header.count()) if not header.isSectionHidden(i))
-        self.assertEqual(width, self.table.viewport().width())
+
+        def width():
+            return sum(header.sectionSize(i) for i in range(header.count()) if not header.isSectionHidden(i))
+
+        for _ in range(500):
+            QTest.qWait(10)
+            if width() == self.table.viewport().width():
+                break
+        self.assertEqual(width(), self.table.viewport().width())
 
     def test_mouse_multiselection_keyboard_navigation_and_copy_links(self):
         self.click('1')
