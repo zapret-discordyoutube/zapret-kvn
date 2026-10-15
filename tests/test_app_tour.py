@@ -154,6 +154,29 @@ class StepsTests(unittest.TestCase):
         found = on_page("some_page", "button", "rows.tcp", "rows.missing", "nope.deeper")(window)
         self.assertEqual(found, [page.button, page.rows["tcp"]])
 
+    def test_on_page_first_visible_falls_back_while_main_target_is_hidden(self) -> None:
+        window = QWidget()
+        page = QWidget(window)
+        page.label = QPushButton(page)
+        page.row = QPushButton(page)
+        window.some_page = page
+        target = on_page("some_page", "label", "row", first_visible=True)
+        window.show()
+        page.label.hide()
+        self.assertEqual(target(window), [page.row])
+        page.label.show()
+        self.assertEqual(target(window), [page.label])
+        window.hide()
+
+    def test_proxy_address_step_follows_proxy_mode_and_names_telegram(self) -> None:
+        keys = [step.key for step in TOUR_STEPS]
+        self.assertEqual(keys.index("proxy_address"), keys.index("mode_proxy") + 1)
+        step = TOUR_STEPS[keys.index("proxy_address")]
+        self.assertIn("127.0.0.1:1390", step.body)
+        self.assertIn("Telegram", step.body)
+        paths = next(c.cell_contents for c in step.target.__closure__ if isinstance(c.cell_contents, tuple))
+        self.assertEqual(paths[0], "connection_ports_label")
+
 
 class SettingsTests(unittest.TestCase):
     def test_tour_flag_round_trips_and_defaults_to_false(self) -> None:
