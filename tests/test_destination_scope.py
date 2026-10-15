@@ -103,8 +103,14 @@ class DestinationScopeCatalogTests(unittest.TestCase):
 
     def test_destination_rule_precedes_every_recovering_rule(self):
         catalog = json.loads(Path(runtime_errors.__file__).with_name("runtime-errors.json").read_text("utf-8"))
-        self.assertEqual(catalog["rules"][0]["code"], DESTINATION_UNREACHABLE_CODE)
-        self.assertEqual(catalog["rules"][0]["action"], "record_only")
+        codes = [rule["code"] for rule in catalog["rules"]]
+        position = codes.index(DESTINATION_UNREACHABLE_CODE)
+        self.assertEqual(catalog["rules"][position]["action"], "record_only")
+        # Раньше могут стоять только правила, которые лишь записывают (штатное
+        # закрытие QUIC-потока): ни одно восстановление не перехватит отказ цели.
+        for rule in catalog["rules"][:position]:
+            with self.subTest(code=rule["code"]):
+                self.assertEqual(rule["action"], "record_only")
 
 
 class HysteriaDestinationRefusalTests(unittest.TestCase):
