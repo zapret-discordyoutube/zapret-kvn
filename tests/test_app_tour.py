@@ -175,7 +175,7 @@ class StepsTests(unittest.TestCase):
         self.assertIn("127.0.0.1:1390", step.body)
         self.assertIn("Telegram", step.body)
         paths = next(c.cell_contents for c in step.target.__closure__ if isinstance(c.cell_contents, tuple))
-        self.assertEqual(paths[0], "connection_ports_label")
+        self.assertEqual(paths[0], "proxy_address_row")
 
 
 class SettingsTests(unittest.TestCase):

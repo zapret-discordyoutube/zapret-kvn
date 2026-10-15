@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -121,6 +121,54 @@ class DashboardWordWrapTest(unittest.TestCase):
         page.set_tun_mode(True)
         page._do_refresh_dashboard()
         self.assertTrue(page.connection_ports_label.isHidden())
+        page.deleteLater()
+        QApplication.processEvents()
+
+    def test_add_to_telegram_opens_socks_link_with_effective_port(self) -> None:
+        page = DashboardPage()
+        page.set_settings_snapshot(AppSettings(tun_mode=False, proxy_engine="singbox"))
+        page.set_proxy_ports(1392, 1393)
+        page.set_connection(True)
+        page._do_refresh_dashboard()
+        self.assertFalse(page.proxy_address_row.isHidden())
+        self.assertFalse(page.telegram_proxy_btn.isHidden())
+
+        with patch("xray_fluent.ui.dashboard_page.QDesktopServices.openUrl", return_value=True) as open_url:
+            page.telegram_proxy_btn.click()
+        open_url.assert_called_once()
+        self.assertEqual(open_url.call_args.args[0].toString(), "tg://socks?server=127.0.0.1&port=1392")
+
+        page.set_tun_mode(True)
+        page._do_refresh_dashboard()
+        self.assertTrue(page.proxy_address_row.isHidden())
+        page.deleteLater()
+        QApplication.processEvents()
+
+    def test_add_to_telegram_without_telegram_explains_manual_setup(self) -> None:
+        page = DashboardPage()
+        page.set_settings_snapshot(AppSettings(tun_mode=False, proxy_engine="singbox"))
+        page.set_proxy_ports(1390, 1391)
+        page.set_connection(True)
+        page._do_refresh_dashboard()
+
+        with (
+            patch("xray_fluent.ui.dashboard_page.QDesktopServices.openUrl", return_value=False),
+            patch("xray_fluent.ui.dashboard_page.InfoBar.warning") as warning,
+        ):
+            page.telegram_proxy_btn.click()
+        warning.assert_called_once()
+        self.assertIn("порт 1390", warning.call_args.args[1])
+        page.deleteLater()
+        QApplication.processEvents()
+
+    def test_add_to_telegram_does_nothing_without_live_proxy(self) -> None:
+        page = DashboardPage()
+        page.set_settings_snapshot(AppSettings(tun_mode=False, proxy_engine="singbox"))
+        page._do_refresh_dashboard()
+        self.assertTrue(page.proxy_address_row.isHidden())
+        with patch("xray_fluent.ui.dashboard_page.QDesktopServices.openUrl") as open_url:
+            page._add_proxy_to_telegram()
+        open_url.assert_not_called()
         page.deleteLater()
         QApplication.processEvents()
 

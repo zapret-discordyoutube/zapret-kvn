@@ -22,8 +22,8 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtCore import Qt, QTimer, QEvent, QUrl, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
@@ -44,6 +44,8 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon as FIF,
     IndeterminateProgressBar,
+    InfoBar,
+    InfoBarPosition,
     PushButton,
     StrongBodyLabel,
     SubtitleLabel,
@@ -143,6 +145,12 @@ def _card_header(parent: QWidget, title: str) -> tuple[QHBoxLayout, StrongBodyLa
     row.addWidget(label)
     row.addStretch(1)
     return row, label
+
+
+def telegram_socks_url(port: int) -> str:
+    """Ссылка, по которой Telegram сам предлагает подключить локальный SOCKS5."""
+
+    return f"tg://socks?server=127.0.0.1&port={int(port)}"
 
 
 class DashboardPage(StackedSection):
@@ -385,11 +393,27 @@ class DashboardPage(StackedSection):
         options.addWidget(self.proxy_switch, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.proxy_options)
 
-        self.connection_ports_label = CaptionLabel("", card)
+        # Адрес локального прокси и кнопка, которая отдаёт его Telegram одной
+        # ссылкой tg://socks: вписывать адрес руками пользователи не находили,
+        # и Telegram молча шёл мимо сервера (16.10.2026).
+        self.proxy_address_row = QWidget(card)
+        address = QHBoxLayout(self.proxy_address_row)
+        address.setContentsMargins(0, 0, 0, 0)
+        address.setSpacing(12)
+        self.connection_ports_label = CaptionLabel("", self.proxy_address_row)
         self.connection_ports_label.setWordWrap(True)
         self.connection_ports_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        address.addWidget(self.connection_ports_label, 1)
+        self.telegram_proxy_btn = PushButton(FIF.SEND, "Добавить в Telegram", self.proxy_address_row)
+        self.telegram_proxy_btn.setToolTip(
+            "Откроет Telegram и предложит подключить этот прокси (SOCKS5). "
+            "Тогда Telegram пойдёт через сервер"
+        )
+        self.telegram_proxy_btn.clicked.connect(self._add_proxy_to_telegram)
+        address.addWidget(self.telegram_proxy_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self.connection_ports_label.setVisible(False)
-        layout.addWidget(self.connection_ports_label)
+        self.proxy_address_row.setVisible(False)
+        layout.addWidget(self.proxy_address_row)
 
     def _build_traffic_card(self, container: QWidget) -> None:
         card = CardWidget(container)
@@ -867,6 +891,7 @@ class DashboardPage(StackedSection):
         self.connection_ports_label.setText(ports_text)
         self.connection_ports_label.setToolTip(self._proxy_ports_tooltip())
         self.connection_ports_label.setVisible(bool(ports_text))
+        self.proxy_address_row.setVisible(bool(ports_text))
 
     def _color_state_title(self, *_args) -> None:
         """Заголовок состояния в цвет сферы: зелёный — есть защита, красный — ошибка."""
@@ -1099,6 +1124,20 @@ class DashboardPage(StackedSection):
         return (
             f"SOCKS5: 127.0.0.1:{self._proxy_socks_port}  ·  "
             f"HTTP: 127.0.0.1:{self._proxy_http_port}"
+        )
+
+    def _add_proxy_to_telegram(self) -> None:
+        if not self._proxy_ports_text():
+            return
+        if QDesktopServices.openUrl(QUrl(telegram_socks_url(self._proxy_socks_port))):
+            return
+        InfoBar.warning(
+            "Telegram не открылся",
+            "Похоже, Telegram на компьютере не установлен. Впишите прокси вручную: "
+            f"SOCKS5, адрес 127.0.0.1, порт {self._proxy_socks_port}.",
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=8000,
+            parent=self.window(),
         )
 
     def _proxy_ports_tooltip(self) -> str:
