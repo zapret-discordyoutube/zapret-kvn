@@ -29,6 +29,9 @@ _log = logging.getLogger(__name__)
 ATTEMPT_FILE = RUNTIME_DIR / "app_update_attempt.json"
 # Короткая причина неудачи, которую оставил установщик (installer.runner).
 FAILURE_FILE = RUNTIME_DIR / "app_update_failure.txt"
+# Установщик при «lock» пишет сюда код программы, державшей файл.
+BLOCKER_FILE = RUNTIME_DIR / "app_update_blocker.txt"
+VIA_CODES = ("files", "parts", "setup")
 # Вид кода причины: его же принимает сервер обновлений.
 WHY_RE = re.compile(r"\A[a-z][a-z0-9]{0,15}\Z")
 # Одна и та же версия ставится автоматически не больше трёх раз; дальше —
@@ -60,6 +63,10 @@ class UpdateAttempt:
     # версия сообщит серверу, что обновление дошло и сколько оно заняло.
     from_version: str = ""
     granted_at: float = 0.0
+    # Какой ступенью скачано обновление (files — хранилище, parts — куски
+    # архива, setup — архив целиком) и сколько, КиБ: уходит серверу вместе с «дошла».
+    via: str = ""
+    dl_kib: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -70,6 +77,8 @@ class UpdateAttempt:
             "resume_pending": self.resume_pending,
             "from_version": self.from_version,
             "granted_at": self.granted_at,
+            "via": self.via,
+            "dl_kib": self.dl_kib,
         }
 
 
@@ -101,6 +110,8 @@ def load_attempt(path: Path = ATTEMPT_FILE) -> UpdateAttempt | None:
             resume_pending=bool(data.get("resume_pending", False)),
             from_version=str(data.get("from_version") or ""),
             granted_at=max(float(data.get("granted_at") or 0.0), 0.0),
+            via=str(data.get("via") or "") if str(data.get("via") or "") in VIA_CODES else "",
+            dl_kib=max(int(data.get("dl_kib") or 0), 0),
         )
     except FileNotFoundError:
         return None
@@ -135,6 +146,8 @@ def record_attempt(
     path: Path = ATTEMPT_FILE,
     from_version: str = "",
     granted_at: float = 0.0,
+    via: str = "",
+    downloaded: int = 0,
 ) -> UpdateAttempt:
     """Записать попытку установки.
 
@@ -154,6 +167,8 @@ def record_attempt(
         resume_pending=restarting,
         from_version=str(from_version or ""),
         granted_at=max(float(granted_at or 0.0), 0.0),
+        via=via if via in VIA_CODES else "",
+        dl_kib=max(int(downloaded or 0), 0) // 1024,
     )
     _write_attempt(record, path)
     return record
@@ -175,6 +190,7 @@ def resolve_startup(
     now: float | None = None,
     path: Path = ATTEMPT_FILE,
     failure_path: Path = FAILURE_FILE,
+    blocker_path: Path = BLOCKER_FILE,
 ) -> StartupOutcome | None:
     """Разобрать запись о попытке после перезапуска.
 
@@ -185,6 +201,7 @@ def resolve_startup(
 
     record = load_attempt(path)
     why = _take_failure_code(failure_path)
+    who = _take_failure_code(blocker_path)
     if record is None:
         return None
     if _parse_semver(record.version) is None or _parse_semver(current_version) is None:
@@ -207,6 +224,9 @@ def resolve_startup(
         report = {"fail": record.version}
         if why:
             report["why"] = why
+        if who:
+            # При «lock» — кто держал файл программы (msmpeng, explorer…).
+            report["who"] = who
         record.resume_pending = False
         try:
             _write_attempt(record, path)
@@ -228,6 +248,9 @@ def _success_report(record: UpdateAttempt, current_version: str, moment: float) 
     took = moment - record.granted_at
     if record.granted_at > 0 and 0 <= took <= _MAX_TOOK_S:
         report["took"] = str(int(took))
+    if record.via:
+        report["via"] = record.via
+        report["dl"] = str(record.dl_kib)
     return report
 
 

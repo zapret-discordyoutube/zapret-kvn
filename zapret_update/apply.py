@@ -71,6 +71,7 @@ class ApplyPlan:
     preserve: list[str] = field(default_factory=list)  # папки данных человека
     remove: list[str] | None = None  # файлы прежней версии, которых нет в новой
     failure_file: str = ""  # сюда пишется код причины неудачи
+    blocker_file: str = ""  # при «lock» — код программы, державшей файл (msmpeng, explorer…)
     error_log: str = ""  # сюда — подробности для человека
     hold_file: str = ""  # замок окна обновления (пусто — в рабочей папке)
     extra: dict = field(default_factory=dict)  # для окна обновления программы
@@ -202,6 +203,9 @@ def run_apply(plan: ApplyPlan, hooks: Hooks | None = None, report: Report | None
             holders = processes.lock_holders(path)
             if holders:
                 details.append("Файл удерживают: " + "; ".join(holders))
+            codes = processes.lock_holder_codes(path)
+            if codes:
+                _write(plan.blocker_file, codes[0])
         if not isinstance(error, InstallError):
             details.append(traceback.format_exc().strip())
         _write(plan.failure_file, failure_code(stage, error))

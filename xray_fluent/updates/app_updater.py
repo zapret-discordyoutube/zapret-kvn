@@ -476,6 +476,9 @@ class UpdateDownloader(QThread):
         # Установленная копия: из неё берутся файлы, не изменившиеся в новой версии.
         self._app_dir = BASE_DIR if app_dir is None else app_dir
         self.prepared: PreparedUpdate | None = None
+        # Какой ступенью скачано (files/parts/setup) и сколько байт — для отчёта серверу.
+        self.via = ""
+        self.downloaded = 0
         # Сбой, который повторится при любой следующей загрузке этого же
         # архива (контрольная сумма, содержимое). Сетевые ошибки — нет.
         self.failure_permanent = False
@@ -639,6 +642,7 @@ class UpdateDownloader(QThread):
             # архива по Range → архив целиком.
             source_dir = self._try_store() or self._try_delta(work_dir)
             if source_dir is None:
+                self.via, self.downloaded = "setup", int(self._update.size)
                 self._fetch(archive)
                 self._verify(archive)
                 source_dir = self._unpack(archive, work_dir / "extracted")
@@ -710,6 +714,7 @@ class UpdateDownloader(QThread):
         if not (tree / APP_EXE_NAME).is_file():
             _log.warning("[update] В собранной из хранилища версии нет %s", APP_EXE_NAME)
             return None
+        self.via, self.downloaded = "files", int(planned.download_size)
         kinds: dict[str, int] = {}
         for item in planned.want:
             if item.patch is not None:
@@ -777,6 +782,7 @@ class UpdateDownloader(QThread):
                 "[update] Частичная загрузка: скачано %d из %d байт (файлов из архива %d, из установленной копии %d, запросов %d)",
                 stats.downloaded, stats.full_size, stats.fetched_files, stats.reused_files, stats.requests,
             )
+            self.via, self.downloaded = "parts", int(stats.downloaded)
             self.progress.emit(100)
             return source_dir
         shutil.rmtree(destination, ignore_errors=True)

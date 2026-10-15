@@ -76,6 +76,33 @@ class AttemptRecordTests(unittest.TestCase):
         self.assertEqual(outcome.report, {"fail": "0.8.2", "why": "crash"})
         self.assertFalse(failure.exists())
 
+    def test_lock_tells_who_held_the_file(self) -> None:
+        record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path, from_version="0.8.1")
+        failure = self.path.parent / "app_update_failure.txt"
+        blocker = self.path.parent / "app_update_blocker.txt"
+        failure.write_text("lock", encoding="ascii")
+        blocker.write_text("msmpeng", encoding="ascii")
+
+        outcome = resolve_startup("0.8.1", now=NOW + 20, path=self.path, failure_path=failure, blocker_path=blocker)
+
+        self.assertEqual(outcome.report, {"fail": "0.8.2", "why": "lock", "who": "msmpeng"})
+        self.assertFalse(blocker.exists())
+
+    def test_success_tells_the_download_step_and_size(self) -> None:
+        record_attempt(
+            "0.8.2", reconnect=True, now=NOW, path=self.path, from_version="0.8.1", granted_at=NOW - 10,
+            via="files", downloaded=196_000,
+        )
+
+        outcome = resolve_startup("0.8.2", now=NOW + 20, path=self.path)
+
+        self.assertEqual(outcome.report, {"prev": "0.8.1", "took": "30", "via": "files", "dl": "191"})
+
+    def test_unknown_download_step_is_not_recorded(self) -> None:
+        record = record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path, via="ftp", downloaded=5)
+
+        self.assertEqual((record.via, auto_update.load_attempt(self.path).via), ("", ""))
+
     def test_strange_reason_from_the_installer_is_dropped(self) -> None:
         record_attempt("0.8.2", reconnect=True, now=NOW, path=self.path)
         failure = self.path.parent / "app_update_failure.txt"

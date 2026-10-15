@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
+import re
 import subprocess
 import sys
 import time
@@ -178,7 +180,36 @@ def stop_processes_under(root: Path, timeout_s: float = 20.0) -> list[str]:
 
 def lock_holders(path: Path) -> list[str]:
     """Названия программ, которые держат файл открытым (Restart Manager)."""
+    return [f"{name} ({image})" if image else name for name, _service, image in _holder_records(path)]
 
+
+def lock_holder_codes(path: Path) -> list[str]:
+    """Короткие коды держателей файла для сервера: ``msmpeng``, ``explorer``, ``wsearch``…"""
+    codes = []
+    for name, service, image in _holder_records(path):
+        code = holder_code(image, name, service)
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def holder_code(image: str = "", name: str = "", service: str = "") -> str:
+    """Код держателя в виде кода причины (``[a-z][a-z0-9]{0,15}``).
+
+    У службы — её короткое имя (под одной svchost.exe их много), у программы —
+    имя exe без «.exe»: путь и имя пользователя на сервер не уходят.
+    """
+    base = service or ntpath.basename(str(image or "")) or str(name or "")
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    text = re.sub(r"[^a-z0-9]", "", base.lower())
+    if text and not text[0].isalpha():
+        text = "p" + text
+    return text[:16]
+
+
+def _holder_records(path: Path) -> list[tuple[str, str, str]]:
+    """``(название, короткое имя службы, путь к exe)`` каждого держателя файла."""
     if not IS_WINDOWS:
         return []
     try:
@@ -188,7 +219,7 @@ def lock_holders(path: Path) -> list[str]:
         return []
 
 
-def _lock_holders(path: Path) -> list[str]:
+def _lock_holders(path: Path) -> list[tuple[str, str, str]]:
     class _UniqueProcess(ctypes.Structure):
         _fields_ = [("dwProcessId", wintypes.DWORD), ("ProcessStartTime", wintypes.FILETIME)]
 
@@ -224,9 +255,8 @@ def _lock_holders(path: Path) -> list[str]:
             return []
         holders = []
         for item in info[: min(count.value, 16)]:
-            name = item.strAppName or item.strServiceShortName
-            image = _image_path(int(item.Process.dwProcessId))
-            holders.append(f"{name} ({image})" if image else str(name))
+            name = str(item.strAppName or item.strServiceShortName or "")
+            holders.append((name, str(item.strServiceShortName or ""), _image_path(int(item.Process.dwProcessId))))
         return holders
     finally:
         manager.RmEndSession(session)

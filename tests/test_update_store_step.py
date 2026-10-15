@@ -72,8 +72,11 @@ class StoreStepTests(unittest.TestCase):
         ), patch("zapret_update.store.codecs", return_value=frozenset({"zstd"})), self.assertLogs(
             app_updater._log, "INFO"
         ) as logs:
-            self.assertIsNotNone(self._downloader(listed)._try_store())
+            downloader = self._downloader(listed)
+            self.assertIsNotNone(downloader._try_store())
         self.assertIn("скачано 7 из 100 байт (файлов 1, заплаток 1 (zstd 1), без изменений 0)", "\n".join(logs.output))
+        # Ступень и объём уходят серверу вместе с «дошла».
+        self.assertEqual((downloader.via, downloader.downloaded), ("files", 7))
 
     def test_without_zstd_unpacker_nothing_is_downloaded(self) -> None:
         # 0.8.26 собрана на Python 3.12 без zstandard: качала файл и падала на распаковке.

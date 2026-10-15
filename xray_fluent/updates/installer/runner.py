@@ -23,6 +23,7 @@ _log = logging.getLogger("xray_fluent.update_installer")
 # Файл с короткой причиной неудачи для сервера обновлений (``why``). Его
 # читает версия, которая работает после отката (``auto_update.resolve_startup``).
 FAILURE_CODE_NAME = "app_update_failure.txt"
+BLOCKER_CODE_NAME = "app_update_blocker.txt"
 # Подготовленные и вынесенные файлы замены лежат рядом с программой.
 STAGE_ROOT_NAME = "app_update"
 # Столько последних строк startup.log упавшего запуска попадает в update.log.
@@ -66,6 +67,7 @@ def core_plan(plan: InstallPlan) -> apply.ApplyPlan:
         preserve=["data"],
         remove=None,
         failure_file=str(app_dir / "data" / "runtime" / FAILURE_CODE_NAME),
+        blocker_file=str(app_dir / "data" / "runtime" / BLOCKER_CODE_NAME),
         error_log=str(app_dir / "data" / "logs" / "update_error.log"),
         hold_file=str(plan.hold_marker),
     )

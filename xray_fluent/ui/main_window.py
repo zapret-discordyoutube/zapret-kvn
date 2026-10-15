@@ -1960,6 +1960,9 @@ class MainWindow(FluentWindow):
                 # версия сообщит серверу, что оно дошло.
                 from_version=APP_VERSION,
                 granted_at=signal.granted_at(downloader.update.version) if signal is not None else 0.0,
+                # Какой ступенью и сколько скачано: сервер видит, как работает хранилище.
+                via=str(getattr(downloader, "via", "") or ""),
+                downloaded=int(getattr(downloader, "downloaded", 0) or 0),
             )
             plan = self._install_plan(prepared)
             installer = launch_installer(plan)
