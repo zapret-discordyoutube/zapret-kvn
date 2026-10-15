@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from xray_fluent.updates import release_watch
 from xray_fluent.updates.release_watch import ReleaseWatcher
+from zapret_update import screen
 
 
 def _quiet(version: str = "0.8.19") -> dict:
@@ -152,7 +153,8 @@ class ReleaseWatcherTests(unittest.TestCase):
 
         harness.watcher.run()
 
-        self.assertEqual(harness.pauses[:3], [60.0, 120.0, 240.0])
+        # Паузы растут, но не дольше трёх минут: вернулась сеть — программа узнаёт быстро.
+        self.assertEqual(harness.pauses[:3], [60.0, 120.0, 180.0])
         self.assertIs(harness.watcher.reachable, False)
 
     def test_quick_empty_answer_is_followed_by_a_pause(self) -> None:
@@ -176,9 +178,11 @@ class ScreenBusyTests(unittest.TestCase):
     """«Экран занят» — по двум независимым признакам, а не по одному ответу Windows."""
 
     def _busy(self, state: int, foreground: str) -> bool:
-        with patch.object(release_watch, "_notification_state", return_value=state), patch.object(
-            release_watch, "_foreground", return_value=foreground
-        ):
+        # Определение экрана — общее ядро zapret_update.screen; память об игре
+        # каждый случай начинает пустой.
+        with patch.object(screen, "_last_fullscreen", 0.0), patch.object(
+            screen, "_notification_state", return_value=state
+        ), patch.object(screen, "_foreground", return_value=foreground):
             return release_watch.fullscreen_app_active()
 
     def test_game_and_presentation_mean_busy_whatever_is_in_front(self) -> None:
@@ -195,10 +199,25 @@ class ScreenBusyTests(unittest.TestCase):
         self.assertFalse(self._busy(0, ""))
 
     def test_raw_state_is_told_as_code_and_foreground(self) -> None:
-        with patch.object(release_watch, "_notification_state", return_value=2), patch.object(
-            release_watch, "_foreground", return_value="p"
+        with patch.object(screen, "_notification_state", return_value=2), patch.object(
+            screen, "_foreground", return_value="p"
         ):
             self.assertEqual(release_watch.screen_state(), "2p")
+
+    def test_borderless_game_and_alt_tab_keep_the_update_waiting(self) -> None:
+        # Игра «окно без рамки»: Windows говорит «можно», выдаёт само окно.
+        self.assertTrue(self._busy(5, release_watch.FOREGROUND_BARE))
+        with patch.object(screen, "_last_fullscreen", 0.0):
+            with patch.object(screen, "_notification_state", return_value=5), patch.object(
+                screen, "_foreground", return_value=release_watch.FOREGROUND_BARE
+            ):
+                self.assertTrue(screen.fullscreen_active(now=1000.0))
+            # Свернул игру, ушёл в Discord — обновление всё равно ждёт.
+            with patch.object(screen, "_notification_state", return_value=5), patch.object(
+                screen, "_foreground", return_value=release_watch.FOREGROUND_PART
+            ):
+                self.assertTrue(screen.fullscreen_active(now=1300.0))
+                self.assertFalse(screen.fullscreen_active(now=1000.0 + screen.GAME_MEMORY_SECONDS + 1))
 
 
 class UpdateSignalTests(unittest.TestCase):
@@ -326,6 +345,29 @@ class BackgroundInstallGateTests(unittest.TestCase):
 
         self.assertIn("игра", reason)
         self.single_shot.assert_called_once()
+
+    def test_while_in_game_only_the_screen_is_watched_then_the_release_is_checked(self) -> None:
+        from xray_fluent.ui import main_window
+        from xray_fluent.ui.main_window import MainWindow
+
+        busy = ["на экране игра", ""]
+        window = SimpleNamespace(
+            _quitting=False,
+            _busy_recheck_pending=True,
+            controller=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(check_updates=True))),
+            _update_signal=SimpleNamespace(busy_reason=lambda: busy.pop(0)),
+            _check_updates=Mock(),
+        )
+        window._recheck_update_when_free = lambda: MainWindow._recheck_update_when_free(window)
+        with patch.object(main_window.QTimer, "singleShot") as single_shot:
+            MainWindow._recheck_update_when_free(window)
+            # Всё ещё в игре: через пять секунд взглянуть снова, выпуск не трогать.
+            window._check_updates.assert_not_called()
+            self.assertEqual(single_shot.call_args.args[0], main_window.UPDATE_BUSY_RECHECK_MS)
+            single_shot.call_args.args[1]()
+        # Освободился: теперь проверка выпуска и установка.
+        window._check_updates.assert_called_once_with(silent=True)
+        self.assertFalse(window._busy_recheck_pending)
 
     def test_revoked_version_is_replaced_even_during_a_game(self) -> None:
         reason = self._reason(reachable=True, granted=True, busy="на экране игра", urgent=True)

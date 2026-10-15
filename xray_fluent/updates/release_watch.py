@@ -37,6 +37,8 @@ from collections.abc import Callable
 from urllib.parse import urlencode
 from urllib.request import Request
 
+from zapret_update import screen
+
 from ..network.http_utils import urlopen
 from .app_updater import USER_AGENT, _is_newer_version, _parse_semver
 
@@ -54,11 +56,12 @@ READ_TIMEOUT_S = 330
 QUICK_ANSWER_S = 20.0
 QUICK_ANSWER_PAUSE_S = 120.0
 FIRST_FAILURE_PAUSE_S = 60.0
-MAX_FAILURE_PAUSE_S = 15 * 60.0
+# Сеть вернулась — программа узнаёт это не позже чем через три минуты.
+MAX_FAILURE_PAUSE_S = 3 * 60.0
 DISABLED_RECHECK_S = 60.0
-# Занятая программа спрашивает короче: освободилась — и через минуту уже
-# просит разрешение по-настоящему.
-BUSY_HOLD_S = 60
+# Занятая программа спрашивает короче: вышла из игры — и через несколько
+# секунд уже просит разрешение по-настоящему.
+BUSY_HOLD_S = 15
 # В первые минуты после запуска состояние быстро меняется (подключение ещё
 # поднимается), поэтому вопрос держится недолго — иначе сервер несколько
 # минут помнил бы состояние первых секунд.
@@ -69,98 +72,25 @@ ACTIVITY_WINDOW = "window"
 ACTIVITY_TRAY = "tray"
 ACTIVITY_FULLSCREEN = "fullscreen"
 
-# Ответы Windows на вопрос «можно ли сейчас показывать уведомления»
-# (SHQueryUserNotificationState). Игра Direct3D на весь экран (3) и режим
-# презентации (4) — ответы однозначные. «Экран занят» (2) расплывчат: его
-# дают и невидимые окна поверх экрана, поэтому ему программа верит, только
-# если чужое окно на переднем плане и правда закрывает весь экран.
-_QUNS_BUSY = 2
-_SURE_STATES = (3, 4)
-FOREGROUND_FULL = "f"     # чужое окно закрывает весь экран
-FOREGROUND_PART = "p"     # окно занимает часть экрана
-FOREGROUND_SHELL = "s"    # рабочий стол или панель задач
-FOREGROUND_OWN = "o"      # окно самой программы
-_SHELL_CLASSES = ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
-
-
-def _notification_state() -> int:
-    """Состояние экрана по мнению Windows; 0 — узнать не удалось."""
-    if sys.platform != "win32":
-        return 0
-    try:
-        import ctypes
-
-        state = ctypes.c_int(0)
-        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
-            return 0
-        return int(state.value)
-    except Exception:
-        return 0
-
-
-def _foreground() -> str:
-    """Что на переднем плане: одна буква ``FOREGROUND_*`` либо пусто — не узнать."""
-    if sys.platform != "win32":
-        return ""
-    try:
-        import ctypes
-        import os
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-        window = user32.GetForegroundWindow()
-        if not window:
-            return FOREGROUND_SHELL
-        name = ctypes.create_unicode_buffer(64)
-        user32.GetClassNameW(window, name, 64)
-        if name.value in _SHELL_CLASSES:
-            return FOREGROUND_SHELL
-        owner = wintypes.DWORD(0)
-        user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
-        if owner.value == os.getpid():
-            return FOREGROUND_OWN
-
-        class _MonitorInfo(ctypes.Structure):
-            _fields_ = [
-                ("cbSize", wintypes.DWORD),
-                ("rcMonitor", wintypes.RECT),
-                ("rcWork", wintypes.RECT),
-                ("dwFlags", wintypes.DWORD),
-            ]
-
-        rect = wintypes.RECT()
-        info = _MonitorInfo()
-        info.cbSize = ctypes.sizeof(_MonitorInfo)
-        monitor = user32.MonitorFromWindow(window, 2)  # ближайший к окну экран
-        if not user32.GetWindowRect(window, ctypes.byref(rect)) or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
-            return ""
-        screen = info.rcMonitor
-        covers = (
-            rect.left <= screen.left and rect.top <= screen.top
-            and rect.right >= screen.right and rect.bottom >= screen.bottom
-        )
-        return FOREGROUND_FULL if covers else FOREGROUND_PART
-    except Exception:
-        return ""
-
-
-def screen_state() -> str:
-    """Оба признака одной строкой, например ``2f`` или ``5p``: уходит серверу
-    общим счётом — по нему видно, насколько правилу «занят» можно верить."""
-    state = _notification_state()
-    return f"{state}{_foreground()}" if state else ""
+# Что на экране — общее ядро (одно правило с Zapret 2 GUI): игра Direct3D,
+# презентация, окно на весь экран без рамки (игры «окно без рамки» Windows
+# называет обычными окнами) и память об игре на 10 минут — свернул игру и
+# ушёл в Discord, а обновление всё равно ждёт.
+FOREGROUND_FULL = screen.FOREGROUND_FULL
+FOREGROUND_BARE = screen.FOREGROUND_BARE
+FOREGROUND_PART = screen.FOREGROUND_PART
+FOREGROUND_SHELL = screen.FOREGROUND_SHELL
+FOREGROUND_OWN = screen.FOREGROUND_OWN
+screen_state = screen.screen_state
 
 
 def fullscreen_app_active() -> bool:
-    """На экране игра, видео или презентация во весь экран.
+    """На экране игра, видео или презентация во весь экран — сейчас или недавно.
 
     Обновление перезапускает программу и на несколько секунд рвёт
     подключение: посреди игры это вылет из матча.
     """
-    state = _notification_state()
-    if state in _SURE_STATES:
-        return True
-    return state == _QUNS_BUSY and _foreground() == FOREGROUND_FULL
+    return screen.fullscreen_active()
 
 
 def _ask_server(url: str, timeout: float) -> dict:

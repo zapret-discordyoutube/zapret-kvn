@@ -28,6 +28,9 @@ from .release_watch import (
 # Как часто окно сообщает слушателю, видно ли оно и включено ли подключение.
 # Слушатель читает это из своего потока и Qt не трогает.
 PRESENCE_REFRESH_MS = 15 * 1000
+# Сколько действует разрешение сервера: в этот срок программа повторяет
+# сорвавшуюся установку сама (второго разрешения сервер не пришлёт).
+GRANT_LIFETIME_S = 60 * 60
 
 
 class UpdateSignal(QObject):
@@ -71,9 +74,13 @@ class UpdateSignal(QObject):
         self._timer.timeout.connect(self.refresh_presence)
 
     def start(self) -> None:
+        from zapret_update import screen
+
         self.refresh_presence()
         self._timer.start()
         self._watcher.start()
+        # Память об игре: экран проверяется и между вопросами серверу.
+        screen.start_sampler()
 
     def stop(self) -> None:
         self._timer.stop()
@@ -97,6 +104,12 @@ class UpdateSignal(QObject):
     def is_granted(self, version: str) -> bool:
         with self._lock:
             return str(version) in self._granted_at
+
+    def has_live_grant(self, now: float | None = None) -> bool:
+        """Есть ли разрешение сервера, которое ещё действует (час с момента выдачи)."""
+        moment = time.time() if now is None else now
+        with self._lock:
+            return any(0 <= moment - granted < GRANT_LIFETIME_S for granted in self._granted_at.values())
 
     def granted_at(self, version: str) -> float:
         with self._lock:

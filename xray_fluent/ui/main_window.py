@@ -78,7 +78,9 @@ _WINDOW_OWNED_SETTINGS = tuple(
 APP_UPDATE_INITIAL_DELAY_MS = 2500
 APP_UPDATE_INTERVAL_MS = 30 * 60 * 1000
 # Обновление ждёт, пока на экране игра или видео: заглядываем с этой паузой.
-UPDATE_BUSY_RECHECK_MS = 3 * 60 * 1000
+# Пока человек в игре, программа раз в несколько секунд смотрит на экран
+# (дёшево) и проверяет выпуск, только когда он освободился.
+UPDATE_BUSY_RECHECK_MS = 5 * 1000
 # Скачанное обновление ждёт конца переключения подключения не дольше этого.
 UPDATE_APPLY_MAX_WAIT_S = 120
 UPDATE_APPLY_RETRY_MS = 2000
@@ -1711,7 +1713,15 @@ class MainWindow(FluentWindow):
         # раз в полчаса от каждой программы только нагружала бы Forgejo. Первая
         # проверка после запуска идёт всегда.
         signal = getattr(self, "_update_signal", None)
-        if not getattr(self, "_app_update_first_check_done", False) or signal is None or not signal.queue_reachable():
+        # Разрешение сервера ещё действует, а версия не встала (сорвалось
+        # скачивание или установка): повторяем здесь же — второго разрешения
+        # сервер не пришлёт. Паузы и лимит попыток держит auto_update.
+        if (
+            not getattr(self, "_app_update_first_check_done", False)
+            or signal is None
+            or not signal.queue_reachable()
+            or signal.has_live_grant()
+        ):
             self._app_update_first_check_done = True
             self._check_updates(silent=True)
 
@@ -1782,12 +1792,21 @@ class MainWindow(FluentWindow):
             return ""
         busy = signal.busy_reason()
         if busy:
-            QTimer.singleShot(UPDATE_BUSY_RECHECK_MS, self._recheck_update_when_free)
+            if not getattr(self, "_busy_recheck_pending", False):
+                self._busy_recheck_pending = True
+                QTimer.singleShot(UPDATE_BUSY_RECHECK_MS, self._recheck_update_when_free)
             return f"{busy} — обновление поставится, когда освободитесь"
         return ""
 
     def _recheck_update_when_free(self) -> None:
+        self._busy_recheck_pending = False
         if self._quitting or not self.controller.state.settings.check_updates:
+            return
+        signal = getattr(self, "_update_signal", None)
+        if signal is not None and signal.busy_reason():
+            # Всё ещё в игре: смотрим на экран дальше, выпуск не трогаем.
+            self._busy_recheck_pending = True
+            QTimer.singleShot(UPDATE_BUSY_RECHECK_MS, self._recheck_update_when_free)
             return
         self._check_updates(silent=True)
 

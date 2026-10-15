@@ -548,14 +548,14 @@ if __name__ == "__main__":
 class PeriodicCheckWithQueueServerTests(unittest.TestCase):
     """Пока сервер с очередью на связи, о версии сообщает он, а не расписание."""
 
-    def _window(self, *, reachable: bool, first_done: bool):
+    def _window(self, *, reachable: bool, first_done: bool, live_grant: bool = False):
         settings = SimpleNamespace(check_updates=True)
         return SimpleNamespace(
             _app_update_timer=_FakeTimer(),
             _app_update_scheduler_ready=True,
             _quitting=False,
             _app_update_first_check_done=first_done,
-            _update_signal=SimpleNamespace(queue_reachable=lambda: reachable),
+            _update_signal=SimpleNamespace(queue_reachable=lambda: reachable, has_live_grant=lambda: live_grant),
             controller=SimpleNamespace(state=SimpleNamespace(settings=settings)),
             _check_updates=Mock(),
         )
@@ -573,6 +573,15 @@ class PeriodicCheckWithQueueServerTests(unittest.TestCase):
         MainWindow._on_app_update_timer_timeout(window)
 
         window._check_updates.assert_not_called()
+
+    def test_failed_install_is_retried_while_the_permission_lasts(self) -> None:
+        # Сервер разрешил, а версия не встала: второго разрешения не будет,
+        # поэтому получасовая проверка повторяет установку сама.
+        window = self._window(reachable=True, first_done=True, live_grant=True)
+
+        MainWindow._on_app_update_timer_timeout(window)
+
+        window._check_updates.assert_called_once_with(silent=True)
 
     def test_without_the_server_program_checks_itself_as_before(self) -> None:
         window = self._window(reachable=False, first_done=True)
