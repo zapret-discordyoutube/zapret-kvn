@@ -20,7 +20,7 @@ from ...application.async_steps import (
     wait_process_started,
 )
 from ...platform.windows import win_netinfo
-from ...diagnostics.export import capture_runtime_config
+from ...diagnostics.export import capture_runtime_config, route_history_entry
 from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from ...profiles.path_utils import resolve_configured_path
 from ...network.proxy_readiness import LISTENER_POLL_MS, ports_listening, probe_listener_role
@@ -97,6 +97,8 @@ class SingBoxManager(QObject):
         self._deferred_startup_failure: str | None = None
         self._last_start_failure_retryable = False
         self.diagnostic_config: dict[str, Any] | None = None
+        # Правила route последних запусков: диагностика видит и конфиг до правки.
+        self.diagnostic_route_history: deque[dict[str, Any]] = deque(maxlen=8)
 
     @property
     def is_running(self) -> bool:
@@ -157,6 +159,13 @@ class SingBoxManager(QObject):
         self.diagnostic_config = yield run_in_worker(
             lambda: _write_config(exe, config, runtime_dir, config_file)
         )
+        entry = route_history_entry(self.diagnostic_config)
+        if entry is not None and (
+            not self.diagnostic_route_history
+            or self.diagnostic_route_history[-1]["route_rules"] != entry["route_rules"]
+            or self.diagnostic_route_history[-1]["route_final"] != entry["route_final"]
+        ):
+            self.diagnostic_route_history.append(entry)
         if not _still_wanted(should_continue):
             return False
         self._deferred_startup_failure = None

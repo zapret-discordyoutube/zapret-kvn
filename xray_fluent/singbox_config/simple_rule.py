@@ -18,6 +18,12 @@ v2rayN понимается как есть. Результат — обычно
 В ядре условия разных видов складываются через И (сайт И программа). В форме
 пользователь ждёт «что-нибудь из списка», поэтому сайты/IP и программы
 собираются в логическое правило ИЛИ.
+
+«Кроме российских сайтов» — то же правило И НЕ российское назначение: обычное
+логическое правило ядра с ``invert``, видимое в редакторе. Правило пользователя
+встаёт выше стоковых, и без этого «браузер → VPN» уводит в туннель и VK, Яндекс,
+банки — а они с зарубежного адреса часто не открываются. Российское назначение
+не совпадает с правилом и идёт дальше по списку, обычно в стоковое «РФ напрямую».
 """
 
 from __future__ import annotations
@@ -30,6 +36,11 @@ from . import list_values
 
 #: Куда отправить: выход ``route`` или блокировка (``reject`` не зависит от outbound block).
 BLOCK = "__block__"
+#: Признаки российского назначения для «кроме российских сайтов»: наборы берутся,
+#: только если они есть в документе; суффиксы работают и без наборов (в режиме
+#: прокси назначение — имя, и наборы IP по нему не срабатывают).
+RUSSIAN_RULE_SETS = ("geosite-category-ru", "geoip-ru")
+RUSSIAN_DOMAIN_SUFFIXES = ("ru", "xn--p1ai", "su")
 #: Служебные правила, которые должны идти до пользовательских (sniff даёт домен).
 _SERVICE_ACTIONS = ("sniff", "hijack-dns")
 #: Метасимволы регулярных выражений Go (RE2); остальное — буквально.
@@ -190,8 +201,36 @@ def _action(target: str) -> dict:
     return {"action": "reject"} if target == BLOCK else {"action": "route", "outbound": target}
 
 
-def build_rule(target: str, sites: str, ips: str, programs: str, rule_sets: set[str]) -> ParsedRule:
-    """Правило из трёх текстовых полей; ``rule`` — None, если ничего не задано или есть ошибки."""
+def routes_through_tunnel(target: str) -> bool:
+    """Ведёт ли выход в туннель: всё, кроме «Напрямую» и «Блокировать»."""
+    return target not in ("direct", BLOCK)
+
+
+def russian_exclusion(rule_sets: set[str]) -> dict:
+    """Условие «назначение не российское» для логического И."""
+    exclusion: dict = {}
+    present = [tag for tag in RUSSIAN_RULE_SETS if tag in rule_sets]
+    if present:
+        exclusion["rule_set"] = present
+    exclusion["domain_suffix"] = list(RUSSIAN_DOMAIN_SUFFIXES)
+    exclusion["invert"] = True
+    return exclusion
+
+
+def build_rule(
+    target: str,
+    sites: str,
+    ips: str,
+    programs: str,
+    rule_sets: set[str],
+    *,
+    except_russian: bool = False,
+) -> ParsedRule:
+    """Правило из трёх текстовых полей; ``rule`` — None, если ничего не задано или есть ошибки.
+
+    ``except_russian`` действует только для выхода в туннель (для «Напрямую» и
+    «Блокировать» исключение не нужно).
+    """
     errors: list[str] = []
     address: dict = {}
     parse_sites(sites, rule_sets, address, errors)
@@ -203,10 +242,21 @@ def build_rule(target: str, sites: str, ips: str, programs: str, rule_sets: set[
     if errors:
         return ParsedRule(None, errors)
     if address and process:
-        rule = {"type": "logical", "mode": "or", "rules": [address, process], **_action(target)}
+        matcher = {"type": "logical", "mode": "or", "rules": [address, process]}
     else:
-        rule = {**(address or process), **_action(target)}
-    return ParsedRule(rule, [], _summary(address, process))
+        matcher = dict(address or process)
+    summary = _summary(address, process)
+    if except_russian and routes_through_tunnel(target):
+        rule = {
+            "type": "logical",
+            "mode": "and",
+            "rules": [matcher, russian_exclusion(rule_sets)],
+            **_action(target),
+        }
+        summary += ", кроме российских сайтов"
+    else:
+        rule = {**matcher, **_action(target)}
+    return ParsedRule(rule, [], summary)
 
 
 def display_domain(domain: str) -> str:

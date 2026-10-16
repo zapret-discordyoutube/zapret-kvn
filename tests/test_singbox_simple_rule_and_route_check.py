@@ -254,3 +254,63 @@ class RuleSetMatchCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExceptRussianSitesTests(unittest.TestCase):
+    """«Программа → VPN, кроме российских сайтов»: правило встаёт выше стокового
+    «РФ напрямую», поэтому без исключения уводило бы в туннель VK и Яндекс."""
+
+    sets = staticmethod(_matcher({"geosite-category-ru": {"vk.com"}, "geoip-ru": set()}))
+
+    def test_tunnel_rule_gets_inverted_russian_condition(self) -> None:
+        rule = build_rule("proxy", "", "", "chrome", SETS, except_russian=True).rule
+        self.assertEqual(rule["type"], "logical")
+        self.assertEqual(rule["mode"], "and")
+        self.assertEqual((rule["action"], rule["outbound"]), ("route", "proxy"))
+        program, exclusion = rule["rules"]
+        self.assertEqual(program, {"process_path_regex": ["(?i)(^|[\\\\/])chrome\\.exe$"]})
+        self.assertEqual(
+            exclusion,
+            {"rule_set": ["geosite-category-ru", "geoip-ru"], "domain_suffix": ["ru", "xn--p1ai", "su"], "invert": True},
+        )
+
+    def test_missing_rule_sets_keep_only_domain_suffixes(self) -> None:
+        rule = build_rule("proxy", "", "", "chrome", set(), except_russian=True).rule
+        self.assertEqual(rule["rules"][1], {"domain_suffix": ["ru", "xn--p1ai", "su"], "invert": True})
+
+    def test_direct_and_block_ignore_the_exclusion(self) -> None:
+        for target in ("direct", BLOCK):
+            rule = build_rule(target, "", "", "chrome", SETS, except_russian=True).rule
+            self.assertNotIn("type", rule)
+            self.assertIn("process_path_regex", rule)
+
+    def test_sites_and_programs_stay_or_inside_the_and(self) -> None:
+        rule = build_rule("proxy", "example.com", "", "chrome", SETS, except_russian=True).rule
+        inner = rule["rules"][0]
+        self.assertEqual((inner["type"], inner["mode"]), ("logical", "or"))
+
+    def _document_with(self, rule: dict) -> dict:
+        document = json.loads(json.dumps(STOCK))
+        rules = document["route"]["rules"]
+        index = insert_index(rules)
+        rules.insert(index, rule)
+        return document, index
+
+    def test_russian_sites_fall_through_to_stock_direct(self) -> None:
+        rule = build_rule("proxy", "example.com, vk.com, ya.ru", "", "", SETS, except_russian=True).rule
+        document, index = self._document_with(rule)
+        run = lambda host: explain_route(document, host, tun=False, match_set=self.sets, resolve=lambda _h: [])  # noqa: E731
+        foreign = run("example.com")
+        self.assertEqual((foreign.target, foreign.rule_index), ("proxy", index))
+        for host in ("ya.ru", "vk.com", "госуслуги.рф"):
+            verdict = run(host)
+            self.assertNotEqual(verdict.rule_index, index, host)
+        self.assertEqual(run("ya.ru").target, "direct")
+
+    def test_program_rule_is_not_even_a_maybe_for_russian_sites(self) -> None:
+        rule = build_rule("proxy", "", "", "chrome", SETS, except_russian=True).rule
+        document, index = self._document_with(rule)
+        run = lambda host: explain_route(document, host, tun=False, match_set=self.sets, resolve=lambda _h: [])  # noqa: E731
+        self.assertIn(index, [item.index for item in run("example.com").maybe])
+        self.assertNotIn(index, [item.index for item in run("ya.ru").maybe])
+        self.assertNotIn(index, [item.index for item in run("vk.com").maybe])

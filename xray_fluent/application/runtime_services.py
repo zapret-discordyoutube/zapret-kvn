@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 def start_metrics_worker(controller: AppController) -> None:
     # Ленивая загрузка: live_metrics_worker тянет Windows-only win_proc_monitor.
     from ..diagnostics.live_metrics_worker import LiveMetricsWorker
+    from ..diagnostics.route_decisions import RouteDecisionLog
 
     session = controller._active_session
     node = controller.selected_node
@@ -32,6 +33,14 @@ def start_metrics_worker(controller: AppController) -> None:
         mode = "xray"
     socks_port, http_port = controller.get_effective_proxy_ports()
     inbound_tags = controller._active_session.xray_inbound_tags if controller._active_session else ()
+    # Журнал решений маршрута живёт у контроллера: переподключение начинает в нём
+    # новую сессию, но не стирает ту, где была проблема.
+    route_decisions = getattr(controller, "_route_decisions", None)
+    if route_decisions is None:
+        route_decisions = RouteDecisionLog()
+        controller._route_decisions = route_decisions
+    if mode == "singbox":
+        route_decisions.begin_session(f"{mode} {getattr(node, 'name', '') or ''}".strip())
     controller._metrics_worker = LiveMetricsWorker(
         controller.state.settings.xray_path,
         controller._xray_api_port,
@@ -43,6 +52,7 @@ def start_metrics_worker(controller: AppController) -> None:
         http_port=http_port,
         xray_inbound_tags=list(inbound_tags),
         transport_kind=transport_kind,
+        route_decisions=route_decisions if mode == "singbox" else None,
     )
     controller._metrics_worker.metrics.connect(controller._on_live_metrics)
     controller._metrics_worker.start()

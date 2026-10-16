@@ -91,6 +91,20 @@ def capture_runtime_config(executable: Path, config: dict) -> dict:
     }
 
 
+def route_history_entry(snapshot: dict | None) -> dict | None:
+    """Правила route из снимка конфига (уже без секретов) — запись истории."""
+    if not isinstance(snapshot, dict):
+        return None
+    route = (snapshot.get("config") or {}).get("route")
+    if not isinstance(route, dict):
+        return None
+    return {
+        "captured_at": snapshot.get("captured_at"),
+        "route_rules": route.get("rules") or [],
+        "route_final": route.get("final"),
+    }
+
+
 def collect_runtime_diagnostics(controller) -> dict:
     """Use manager-owned snapshots, never reconstruct a supposed active config."""
     contexts = getattr(controller, "_core_log_contexts", {})
@@ -103,11 +117,14 @@ def collect_runtime_diagnostics(controller) -> dict:
             "log_context": asdict(context) if context is not None else None,
             "last_written_config": getattr(manager, "diagnostic_config", None),
             "transport_stats": getattr(manager, "stats", None) if component in {"amnezia", "hysteria"} else None,
+            "route_history": list(getattr(manager, "diagnostic_route_history", None) or ()),
         }
+    route_decisions = getattr(controller, "_route_decisions", None)
     return _redact({
         "schema": 1,
         "connected": bool(controller.connected),
         "components": components,
+        "route_decisions": route_decisions.snapshot() if route_decisions is not None else None,
     })
 
 

@@ -3,6 +3,10 @@
 Документ не меняется, пока пользователь не нажмёт «Добавить»: открытие и
 ввод ничего не пишут в конфиг. Правило встаёт сразу после служебных
 sniff/hijack-dns — выше стоковых, иначе его перехватит набор ниже по списку.
+
+Поэтому программа «через VPN» по умолчанию идёт «кроме российских сайтов»:
+иначе правило перекрывает стоковое «РФ напрямую», и VK, Яндекс, банки этой
+программы уходят в туннель, где с зарубежного адреса часто не открываются.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from PyQt6.QtWidgets import QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
+    CheckBox,
     FluentIcon as FIF,
     PlainTextEdit,
     PrimaryPushButton,
@@ -23,7 +28,7 @@ from qfluentwidgets import (
     StrongBodyLabel,
 )
 
-from ...singbox_config.simple_rule import BLOCK, ParsedRule, build_rule
+from ...singbox_config.simple_rule import BLOCK, ParsedRule, build_rule, routes_through_tunnel
 from ..detail_page import DetailPage
 
 #: (ключ, подпись) вариантов «Куда»; ключ — тег выхода или BLOCK.
@@ -79,6 +84,16 @@ class SimpleRulePage(DetailPage):
         )
         self.hint.setWordWrap(True)
         self.content_layout.addWidget(self.hint)
+        self.except_russian = CheckBox("Кроме российских сайтов", self.body)
+        self.except_russian.setChecked(True)
+        self.except_russian.setToolTip(
+            "Российские сайты этих программ пойдут дальше по списку правил — обычно напрямую"
+        )
+        self.except_russian.stateChanged.connect(lambda _state: self._refresh())
+        self.content_layout.addWidget(self.except_russian)
+        self.russian_note = CaptionLabel("", self.body)
+        self.russian_note.setWordWrap(True)
+        self.content_layout.addWidget(self.russian_note)
         self.preview = BodyLabel("", self.body)
         self.preview.setWordWrap(True)
         self.content_layout.addWidget(self.preview)
@@ -111,9 +126,20 @@ class SimpleRulePage(DetailPage):
     def texts(self) -> dict[str, str]:
         return {key: editor.toPlainText() for key, editor in self.editors.items()}
 
+    def programs_through_tunnel(self) -> bool:
+        """Программы отправляются в туннель — тут и нужен выбор про российские сайты."""
+        return routes_through_tunnel(self.target_key()) and bool(self.texts()["programs"].strip())
+
     def parsed(self) -> ParsedRule:
         texts = self.texts()
-        return build_rule(self.target_key(), texts["sites"], texts["ips"], texts["programs"], self._rule_sets)
+        return build_rule(
+            self.target_key(),
+            texts["sites"],
+            texts["ips"],
+            texts["programs"],
+            self._rule_sets,
+            except_russian=self.programs_through_tunnel() and self.except_russian.isChecked(),
+        )
 
     def is_dirty(self) -> bool:
         return any(text.strip() for text in self.texts().values())
@@ -138,7 +164,23 @@ class SimpleRulePage(DetailPage):
     def _schedule_refresh(self) -> None:
         self._refresh_timer.start()
 
+    def _refresh_russian_choice(self) -> None:
+        relevant = self.programs_through_tunnel()
+        self.except_russian.setVisible(relevant)
+        self.russian_note.setVisible(relevant)
+        if self.except_russian.isChecked():
+            self.russian_note.setText(
+                "Российские сайты (.ru, .рф, .su, наборы geosite-category-ru и geoip-ru) "
+                "не совпадут с правилом и пойдут дальше по списку — обычно напрямую."
+            )
+        else:
+            self.russian_note.setText(
+                "Все сайты этих программ, включая российские, пойдут через VPN. VK, Яндекс, "
+                "банки и госсервисы с зарубежного адреса часто не открываются."
+            )
+
     def _refresh(self) -> None:
+        self._refresh_russian_choice()
         result = self.parsed()
         filled = self.is_dirty()
         ready = result.rule is not None

@@ -21,6 +21,7 @@ from ..platform.windows.process_traffic_collector import collect_process_stats, 
 from ..platform.windows.subprocess_utils import decode_output, run_text
 from ..platform.windows.win_proc_monitor import get_proxy_connections, ProxyProcessInfo
 from .proxy_demand import clash_proxy_demand, local_proxy_demand
+from .route_decisions import RouteDecisionLog
 
 
 # Активный сервер на проводе не трогаем (требование незаметности, шлюз
@@ -117,6 +118,7 @@ class LiveMetricsWorker(QThread):
         transport_kind: str = "tcp",
         rtt_reader=_read_connection_rtt,
         link_confirmer=None,
+        route_decisions: RouteDecisionLog | None = None,
     ):
         super().__init__()
         self._xray_path = xray_path
@@ -153,6 +155,8 @@ class LiveMetricsWorker(QThread):
         self._demand_prev_bytes: dict[str, tuple[int, int]] = {}
         self._demand_prev_ts: float | None = None
         self._proxy_demand: dict[str, float | int] | None = None
+        # Сводка решений маршрута для диагностики (из того же ответа /connections).
+        self._route_decisions = route_decisions
 
     def stop(self) -> None:
         self._stopped = True
@@ -386,6 +390,11 @@ class LiveMetricsWorker(QThread):
         except Exception:
             self._proxy_demand = None
             return None, None
+        if self._route_decisions is not None:
+            try:
+                self._route_decisions.observe(data.get("connections") or ())
+            except Exception:
+                pass
         try:
             self._proxy_demand = clash_proxy_demand(
                 data.get("connections") or (),

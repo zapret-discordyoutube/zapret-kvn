@@ -144,6 +144,29 @@ class RoutingPageTests(unittest.TestCase):
         page.session.revert()
         self.assertFalse(page.is_dirty("singbox"))
 
+    def test_program_through_vpn_defaults_to_except_russian_sites(self) -> None:
+        page = _page()
+        rules = _section(page, "rules")
+        simple = rules.open_simple_rule()
+        simple.set_target("proxy")
+        simple.editors["programs"].setPlainText("chrome")
+        simple._refresh()
+        self.assertFalse(simple.except_russian.isHidden())
+        self.assertTrue(simple.except_russian.isChecked())
+        rule = simple.parsed().rule
+        self.assertEqual((rule["type"], rule["mode"]), ("logical", "and"))
+        self.assertTrue(rule["rules"][1]["invert"])
+        self.assertIn("кроме российских сайтов", simple.preview.text())
+
+        simple.except_russian.setChecked(False)
+        _pump()
+        self.assertNotIn("type", simple.parsed().rule)
+        self.assertIn("включая российские", simple.russian_note.text())
+
+        simple.set_target("direct")
+        self.assertTrue(simple.except_russian.isHidden())
+        self.assertNotIn("type", simple.parsed().rule)
+
     def test_simple_rule_writes_nothing_until_added_and_goes_on_top(self) -> None:
         from xray_fluent.ui.singbox.simple_rule_page import SimpleRulePage
 
