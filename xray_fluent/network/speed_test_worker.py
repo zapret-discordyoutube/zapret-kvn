@@ -32,6 +32,7 @@ from ..importer.link_parser import xray_core_tls_problem
 from .http_utils import build_opener
 from ..profiles.models import Node
 from ..engines.tls_fingerprint import apply_browser_fingerprint
+from . import probe_gate
 
 # Обычный браузерный User-Agent: хост тестового файла не должен видеть, что с
 # адреса прокси-сервера ходит именно это приложение.
@@ -434,6 +435,7 @@ class SpeedTestWorker(QThread):
         partial_on_error: bool = False,
         pause_range: tuple[float, float] | None = None,
         hysteria_path: str | None = None,
+        journal_kind: str | None = probe_gate.SWEEP,
     ):
         super().__init__()
         self._nodes = list(nodes)
@@ -458,6 +460,8 @@ class SpeedTestWorker(QThread):
         # Случайная пауза между серверами: подряд идущие объёмные потоки на
         # каждый адрес списка без передышки — самый заметный след теста.
         self._pause_range = pause_range
+        # Вид проверки для журнала шлюза; None — уже записал вызывающий.
+        self._journal_kind = journal_kind
         self._cancelled = False
         self._completed_nodes = 0
         self._current_proc: subprocess.Popen | None = None
@@ -597,6 +601,8 @@ class SpeedTestWorker(QThread):
         Возвращает кортеж (finished, speed_mbps, is_alive), где finished=False
         означает ручную отмену текущего измерения и отсутствие результата для ноды.
         """
+        if self._journal_kind:
+            probe_gate.GATE.record(self._journal_kind, str(node.server or ""))
         http_port = _pick_port(PROXY_HOST, self._http_port)
         try:
             launch = self._core_launch(node, http_port)

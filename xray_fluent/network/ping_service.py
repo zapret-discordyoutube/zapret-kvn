@@ -24,7 +24,9 @@
 * серверы с одним адресом и портом меряются одним соединением, результат
   получают все (в подписках один endpoint часто повторяется десятки раз);
 * порядок замеров случайный, а не порядок списка;
-* одновременных соединений немного, и каждое стартует со случайной задержкой;
+* соединение одно за раз, а между серверами одного прохода — пауза шлюза
+  проверок (``probe_gate.SWEEP_PAUSE_SEC``, 10–20 с со случайным разбросом):
+  на проводе это отдельные подключения, а не веер;
 * раунд можно отменить — оставшиеся в очереди серверы не трогаются.
 """
 
@@ -42,10 +44,11 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ..engines.singbox.config_builder import is_singbox_endpoint_node
 from ..profiles.geoip import endpoint_hosts
 from ..profiles.models import Node
+from . import probe_gate
 from .ping_worker import tcp_observation
 
 
-MAX_PARALLEL_PINGS = 8
+MAX_PARALLEL_PINGS = 1
 PING_TIMEOUT_SEC = 2.0
 IDLE_THREAD_EXIT_SEC = 20.0
 # Случайная задержка перед каждым соединением: размывает ровный «залп».
@@ -119,6 +122,8 @@ class PingService(QObject):
         max_parallel: int = MAX_PARALLEL_PINGS,
         idle_exit_sec: float = IDLE_THREAD_EXIT_SEC,
         start_jitter_sec: float = PING_START_JITTER_SEC,
+        pause: Callable[[], float] = probe_gate.sweep_pause,
+        gate: probe_gate.ProbeGate = probe_gate.GATE,
     ) -> None:
         super().__init__(parent)
         self._probe = probe
@@ -126,6 +131,8 @@ class PingService(QObject):
         self._max_parallel = max(1, int(max_parallel))
         self._idle_exit_sec = idle_exit_sec
         self._start_jitter_sec = max(0.0, float(start_jitter_sec))
+        self._pause = pause
+        self._gate = gate
 
         # Общее с потоками замеров — только под замком.
         self._lock = threading.Lock()
@@ -134,6 +141,8 @@ class PingService(QObject):
         self._threads = 0
         self._idle = 0
         self._closed = False
+        # Когда можно брать следующий сервер прохода (0 — сразу).
+        self._resume_at = 0.0
 
         # Состояние раунда — только в GUI-потоке.
         self._pending: set[str] = set()
@@ -198,6 +207,8 @@ class PingService(QObject):
         with self._lock:
             dropped = list(self._queue)
             self._queue.clear()
+            self._resume_at = 0.0
+            self._wakeup.notify_all()
         removed = 0
         for leader in dropped:
             for target in self._waiters.pop(leader.endpoint, ()):
@@ -245,7 +256,18 @@ class PingService(QObject):
                 if self._closed or not self._queue:
                     self._threads -= 1
                     return
+                # Следующий сервер прохода — только после паузы; отмена или
+                # выход будят поток раньше.
+                while not self._closed and self._queue:
+                    delay = self._resume_at - time.monotonic()
+                    if delay <= 0:
+                        break
+                    self._wakeup.wait(delay)
+                if self._closed or not self._queue:
+                    continue
+                sweeping = self._resume_at > 0 or len(self._queue) > 1
                 target = self._queue.popleft()
+            self._gate.record(probe_gate.SWEEP if sweeping else probe_gate.USER, target.server)
             if self._start_jitter_sec:
                 time.sleep(random.uniform(0.0, self._start_jitter_sec))
             try:
@@ -253,6 +275,7 @@ class PingService(QObject):
             except Exception:
                 ping_ms, peers = None, ()
             with self._lock:
+                self._resume_at = time.monotonic() + max(0.0, self._pause()) if self._queue else 0.0
                 if self._closed:
                     continue
             try:

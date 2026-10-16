@@ -33,6 +33,7 @@ from xray_fluent.application.smart_switch_service import (
     select_candidates,
 )
 from xray_fluent.diagnostics.proxy_demand import clash_proxy_demand, local_proxy_demand
+from xray_fluent.network import probe_gate
 from xray_fluent.profiles.models import AppSettings, Node
 
 MIB = 1024 * 1024
@@ -162,10 +163,15 @@ class SmartSwitchTestBase(unittest.TestCase):
 
         patcher_probe = patch.object(smart, "create_probe_worker", side_effect=_probe)
         patcher_cand = patch.object(smart, "create_candidate_worker", side_effect=_candidates)
+        # Свой шлюз проверок на тест: бюджет кандидатов не переходит между тестами.
+        self.gate = probe_gate.ProbeGate()
+        patcher_gate = patch.object(smart.probe_gate, "GATE", self.gate)
         patcher_probe.start()
         patcher_cand.start()
+        patcher_gate.start()
         self.addCleanup(patcher_probe.stop)
         self.addCleanup(patcher_cand.stop)
+        self.addCleanup(patcher_gate.stop)
 
     @property
     def state(self) -> SmartSwitchState:
@@ -384,18 +390,21 @@ class ProbeDecisionTests(SmartSwitchTestBase):
         self.assertEqual(self.state.phase, PHASE_PROBE_CANDIDATES)
         worker = self.candidate_workers[0]
         self.assertTrue(worker.started)
-        self.assertEqual(len(worker.nodes), 3)
+        # Один кандидат за эпизод: каждый — прямое рукопожатие с другим сервером.
+        self.assertEqual(len(worker.nodes), 1)
         self.assertNotIn("n0", [node.id for node in worker.nodes])
+        self.assertEqual([(r.kind, r.target) for r in self.gate.journal()],
+                         [(probe_gate.CANDIDATE, worker.nodes[0].server)])
         self.assertEqual(worker.result.slots, [self.controller._on_smart_candidate_result])
         self.assertEqual(worker.completed.slots, [self.controller._on_smart_candidates_done])
 
-        self.run_candidates(now + 20, {"n1": 0.05, "n2": 1.5, "n3": None})
+        self.run_candidates(now + 20, {"n1": 1.5})
 
-        self.assertEqual(self.controller.selected, [("n2", SelectionSource.SMART_SWITCH)])
+        self.assertEqual(self.controller.selected, [("n1", SelectionSource.SMART_SWITCH)])
         self.assertEqual(self.state.phase, PHASE_IDLE)
         level, message = self.controller.status.calls[-1]
         self.assertEqual(level, "warning")
-        self.assertEqual(message, "Сервер node-0 медленный (30 KB/s) — переключено на node-2 (1536 KB/s)")
+        self.assertEqual(message, "Сервер node-0 медленный (30 KB/s) — переключено на node-1 (1536 KB/s)")
         self.assertTrue(smart.is_slow_marked(self.state, "n0", now + 21))
         self.assertTrue(any(line.startswith("[auto-switch] решение: переключение") for line in self.controller.logs))
 
@@ -508,6 +517,17 @@ class HysteresisTests(SmartSwitchTestBase):
         self.feed(1000.0 + 3600.0 + 60.0, 25)
         self.assertEqual(len(self.probes), 4)
 
+    def test_candidate_budget_per_hour_stops_further_candidates(self) -> None:
+        # Шлюз: не больше CANDIDATE_PROBES_PER_HOUR автоматических проверок
+        # других серверов в час, даже если кулдауны самой замены уже прошли.
+        for _ in range(probe_gate.CANDIDATE_PROBES_PER_HOUR):
+            self.assertTrue(self.gate.try_candidate("other.example"))
+        now = self.suspect()
+        on_current_probe_measured(self.controller, self.probes[0], 30 * 1024.0, now=now)
+        self.assertEqual(self.candidate_workers, [])
+        self.assertEqual(self.state.phase, PHASE_IDLE)
+        self.assertTrue(any("лимит проверок других серверов" in line for line in self.controller.logs))
+
     def test_smart_switch_stamps_shared_cooldown_but_not_cycle(self) -> None:
         switched_at = self.switch_once(1000.0, to="n1")
         self.assertEqual(self.controller._auto_switch_last_switch, switched_at)
@@ -528,8 +548,10 @@ class CandidateSelectionTests(unittest.TestCase):
 
     def test_ranking_and_filters(self) -> None:
         state = SmartSwitchState()
-        picked = select_candidates(self.nodes(), "cur", state, 0.0)
+        picked = select_candidates(self.nodes(), "cur", state, 0.0, limit=3)
         self.assertEqual([n.id for n in picked], ["fast", "mid", "pinged"])
+        # По умолчанию — один кандидат, лучший.
+        self.assertEqual([n.id for n in select_candidates(self.nodes(), "cur", state, 0.0)], ["fast"])
 
     def test_slow_marked_nodes_are_skipped(self) -> None:
         state = SmartSwitchState()
@@ -541,7 +563,7 @@ class CandidateSelectionTests(unittest.TestCase):
         state = SmartSwitchState()
         picked = select_candidates(self.nodes(), "cur", state, 0.0, available_ids={"cur", "unknown"})
         self.assertEqual([n.id for n in picked], ["unknown"])
-        picked = select_candidates(self.nodes(), "cur", state, 0.0, available_ids={"cur"})
+        picked = select_candidates(self.nodes(), "cur", state, 0.0, available_ids={"cur"}, limit=3)
         self.assertEqual([n.id for n in picked], ["fast", "mid", "pinged"])
 
     def test_decide(self) -> None:

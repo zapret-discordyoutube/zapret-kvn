@@ -95,7 +95,6 @@ SPEED_TEST_WARMUP_SEC = 1.0
 SPEED_TEST_WINDOW_SEC = 2.0         # минимум после разгона
 SPEED_TEST_SETTLE_MAX_SEC = 8.0     # потолок от первого байта
 SPEED_TEST_MAX_BYTES = 96 * 1024 * 1024
-SPEED_TEST_PAUSE_RANGE_SEC = (0.4, 1.6)  # случайная пауза между серверами
 SPEED_TEST_TEMP_HTTP_PORT = 19101
 # Временное ядро теста скорости запускается из отдельной ссылки/копии xray.exe
 # с собственным именем: план sing-box TUN уводит ровно этот путь в direct

@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 import random
 from typing import TYPE_CHECKING
 
+from ..network import probe_gate
 from ..network.connectivity_test import ConnectivityTestWorker
 from ..constants import (
     DEFAULT_HTTP_PORT,
     SPEED_TEST_MAX_BYTES,
-    SPEED_TEST_PAUSE_RANGE_SEC,
     SPEED_TEST_RETRIES,
     SPEED_TEST_SETTLE_MAX_SEC,
     SPEED_TEST_WARMUP_SEC,
@@ -84,7 +84,9 @@ def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None
         window=SPEED_TEST_WINDOW_SEC,
         settle_max=SPEED_TEST_SETTLE_MAX_SEC,
         partial_on_error=True,
-        pause_range=SPEED_TEST_PAUSE_RANGE_SEC,
+        # Шлюз проверок: по одному серверу с паузой 10–20 с — отдельные
+        # подключения на проводе, а не пачка объёмных потоков подряд.
+        pause_range=probe_gate.SWEEP_PAUSE_SEC,
     )
     controller._speed_worker.result.connect(controller._on_speed_result)
     # Пропуски копятся и показываются одной строкой в конце: по сообщению на

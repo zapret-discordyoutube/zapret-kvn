@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
 
 from ..constants import SPEED_TEST_DEFAULT_URL, XRAY_PATH_DEFAULT
+from ..network import probe_gate
 from .auto_switch_service import _transition_in_progress
 from .selection_source import SelectionSource
 
@@ -65,7 +66,9 @@ SMART_SWITCH_POST_SWITCH_HOLD_SEC = 10 * 60.0
 # Покинутый медленный сервер не кандидат столько времени.
 SMART_SWITCH_SLOW_MARK_SEC = 30 * 60.0
 SMART_SWITCH_MAX_PER_HOUR = 3
-SMART_SWITCH_MAX_CANDIDATES = 3
+# Один кандидат за эпизод: каждый кандидат — прямое рукопожатие с другим
+# сервером списка, их число шлюз проверок держит минимальным.
+SMART_SWITCH_MAX_CANDIDATES = 1
 # Кандидат должен быть быстрее текущего сервера хотя бы во столько раз.
 SMART_SWITCH_BETTER_FACTOR = 2.0
 # Контрольный замер: не больше 3 МБ и не дольше 6 с (и текущий, и кандидаты).
@@ -436,6 +439,12 @@ def on_current_probe_measured(
         controller._log("[auto-switch] кандидатов для замера нет — остаёмся на текущем сервере")
         _finish(state, now, cooldown=True)
         return
+    if not probe_gate.GATE.try_candidate(str(candidates[0].server or "")):
+        controller._log(
+            "[auto-switch] лимит проверок других серверов за час исчерпан — остаёмся на текущем"
+        )
+        _finish(state, now, cooldown=True)
+        return
     controller._log(
         "[auto-switch] кандидаты: " + ", ".join(candidate.name for candidate in candidates)
     )
@@ -607,4 +616,5 @@ def create_candidate_worker(controller: AppController, nodes: list[Node]):
         max_bytes=SMART_SWITCH_PROBE_MAX_BYTES,
         url=SMART_SWITCH_PROBE_URL,
         http_port=SMART_SWITCH_TEMP_HTTP_PORT,
+        journal_kind=None,  # записан шлюзом в try_candidate
     )

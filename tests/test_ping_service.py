@@ -8,7 +8,8 @@ import unittest
 
 from PyQt6.QtCore import QCoreApplication, QEventLoop, QThread, QTimer
 
-from xray_fluent.network.ping_service import PingOutcome, PingService, PingTarget
+from xray_fluent.network import probe_gate
+from xray_fluent.network.ping_service import MAX_PARALLEL_PINGS, PingOutcome, PingService, PingTarget
 from xray_fluent.profiles.models import Node
 
 _APP = QCoreApplication.instance() or QCoreApplication([])
@@ -53,7 +54,7 @@ class _GatedProbe:
 class PingServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.probe = _GatedProbe()
-        self.service = PingService(probe=self.probe, max_parallel=4, idle_exit_sec=0.2)
+        self.service = PingService(probe=self.probe, max_parallel=4, idle_exit_sec=0.2, pause=lambda: 0.0)
         self.outcomes: list[PingOutcome] = []
         self.progress: list[tuple[int, int, bool]] = []
         self.service.measured.connect(self.outcomes.append)
@@ -157,7 +158,7 @@ class PingServiceTests(unittest.TestCase):
         self.assertEqual(self.progress, [])
 
     def test_measurement_order_is_shuffled(self) -> None:
-        service = PingService(probe=self.probe, max_parallel=1, start_jitter_sec=0.0)
+        service = PingService(probe=self.probe, max_parallel=1, start_jitter_sec=0.0, pause=lambda: 0.0)
         self.probe.release.set()
         nodes = [_node(i) for i in range(40)]
         service.request(nodes)
@@ -183,6 +184,49 @@ class PingServiceTests(unittest.TestCase):
         service.request([_node(1)])
         self.assertTrue(_spin_until(lambda: bool(outcomes)))
         self.assertIsNone(outcomes[0].ping_ms)
+        service.close()
+
+    def test_sweep_is_one_server_at_a_time_with_a_pause(self) -> None:
+        # Незаметность: проход «все» — по одному серверу с паузой шлюза, без веера.
+        gate = probe_gate.ProbeGate()
+        pauses: list[float] = []
+
+        def pause() -> float:
+            pauses.append(0.05)
+            return 0.05
+
+        stamps: list[float] = []
+
+        def probe(_target, _timeout):
+            stamps.append(time.monotonic())
+            return 10, ()
+
+        service = PingService(probe=probe, start_jitter_sec=0.0, pause=pause, gate=gate)
+        self.assertEqual(MAX_PARALLEL_PINGS, 1)
+        service.request([_node(i) for i in range(4)])
+        self.assertTrue(_spin_until(lambda: not service.busy))
+        service.close()
+        self.assertEqual(len(stamps), 4)
+        self.assertEqual(len(pauses), 3)  # между серверами, не после последнего
+        gaps = [later - earlier for earlier, later in zip(stamps, stamps[1:])]
+        self.assertTrue(all(gap >= 0.045 for gap in gaps), gaps)
+        self.assertEqual([record.kind for record in gate.journal()], [probe_gate.SWEEP] * 4)
+
+    def test_cancel_wakes_a_pausing_sweep(self) -> None:
+        calls: list[str] = []
+
+        def probe(target, _timeout):
+            calls.append(target.node_id)
+            return 10, ()
+
+        service = PingService(probe=probe, start_jitter_sec=0.0, pause=lambda: 30.0, gate=probe_gate.ProbeGate())
+        service.request([_node(i) for i in range(3)])
+        self.assertTrue(_spin_until(lambda: len(calls) == 1))
+        self.assertEqual(service.cancel(), 2)
+        self.assertTrue(_spin_until(lambda: not service.busy))
+        # Новый одиночный запрос после отмены не ждёт паузы прошлого прохода.
+        service.request([_node(9)])
+        self.assertTrue(_spin_until(lambda: len(calls) == 2, timeout_ms=2000))
         service.close()
 
     def test_target_snapshot_detects_moved_server(self) -> None:
