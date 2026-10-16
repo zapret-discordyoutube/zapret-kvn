@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..constants import PROXY_HOST, XRAY_TUN_DEFAULT_INTERFACE_NAME
 from ..engines.xray import get_windows_default_route_context
+from ..importer.link_parser import xray_core_tls_problem
 from .connection_service import find_free_api_port
 from .outbound_pool_service import ensure_xray_pool_control_plane
 from .port_allocator import apply_proxy_port_auto_selection
@@ -254,7 +255,7 @@ def build_runtime_xray_config(controller: AppController, node: Node | None = Non
             has_proxy_outbound = True
             if node is None:
                 raise ValueError("В конфиге есть outbound tag `proxy`. Выберите сервер для запуска xray.")
-            problem = controller._prepare_node_for_runtime(node)
+            problem = controller._prepare_node_for_runtime(node) or xray_core_tls_problem(node)
             if problem:
                 raise ValueError(problem)
             # Единый источник пула (П1/П3): кэшированный пул контроллера.

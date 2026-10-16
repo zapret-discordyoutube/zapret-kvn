@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from .config_builder import unenforced_tls_pin_warning
 from .runtime_planner import SingboxRuntimePlan
 from ..hysteria.runtime_contract import SECURITY_FAILURES, HysteriaFailureCode, HysteriaRuntimeState
 from ...application.async_steps import TransitionSteps, run_steps_blocking
@@ -98,6 +99,7 @@ def start_proxy_steps(
     controller._set_connection_status("starting", f"Запуск прокси: {session_label}{suffix}...", level="info")
     _notify_proxy_port_change(controller, plan)
     controller._log(f"[proxy] sing-box planner outcome: {plan.outcome} from {plan.source_path}")
+    _log_unenforced_tls_pin(controller, node)
 
     controller._xray_api_port = 0
     if not (yield from controller._start_singbox_runtime_plan_steps(plan)):
@@ -123,6 +125,12 @@ def start_proxy_steps(
         return None
 
     return SingboxStartResult(plan=plan, session_label=session_label)
+
+
+def _log_unenforced_tls_pin(controller: AppController, node: Node | None) -> None:
+    warning = unenforced_tls_pin_warning(node)
+    if warning:
+        controller._log(warning)
 
 
 def start_tun(
@@ -154,6 +162,7 @@ def start_tun_steps(
     start_message = f"Запуск VPN: {session_label}{_runtime_suffix(plan)}..."
     controller._set_connection_status("starting", start_message, level="info")
     controller._log(f"[tun] sing-box planner outcome: {plan.outcome} from {plan.source_path}")
+    _log_unenforced_tls_pin(controller, node)
     if plan.used_selected_node and node is not None:
         if plan.is_hybrid:
             controller._log(

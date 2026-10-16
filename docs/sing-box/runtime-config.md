@@ -509,6 +509,23 @@ The current conversion layer maps:
 - `server_name`
 - `alpn`
 - `allowInsecure` -> `tls.insecure`
+- `pinnedPeerCertSha256` -> `tls.insecure` (see below)
+
+Share links carry Xray's `pcs=<sha256 hex>` (`pinnedPeerCertSha256`; colons and
+a comma-separated list are accepted) and `vcn=<names>` (`verifyPeerCertByName`).
+The importer stores them in `tlsSettings` and drops `allowInsecure` whenever a
+pin is present, because Xray-core 26.x rejects `allowInsecure` and itself skips
+CA verification in favour of the pin. A malformed pin rejects the link. VLESS is
+always run by Xray, which enforces the pin. For Trojan/VMess, sing-box cannot
+pin a whole-certificate SHA-256 (`certificate_public_key_sha256` is an SPKI hash,
+a different value), so the converter sets `tls.insecure` and the app logs a
+`[warning]` that the pin is not enforced. A VLESS link with `allowInsecure=1`
+and no pin imports without `allowInsecure`: Xray has nothing to replace it with,
+so the server certificate is verified as usual (the Android client does the
+same). Only a saved VLESS node without its original link that still carries
+`allowInsecure` is refused with a Russian error. Trojan/VMess with
+`allowInsecure=1` and no pin still run in sing-box with `insecure`, but are
+skipped by the speed test (it uses a temporary Xray).
 
 ### Transport support mapped today
 

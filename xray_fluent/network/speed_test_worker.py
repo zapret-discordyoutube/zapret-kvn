@@ -28,6 +28,7 @@ from ..constants import (
 )
 from ..engines.hysteria.config_adapter import build_uri_client_config
 from ..engines.hysteria.runtime_contract import classify_hysteria_uri
+from ..importer.link_parser import xray_core_tls_problem
 from .http_utils import build_opener
 from ..profiles.models import Node
 
@@ -365,6 +366,10 @@ def should_skip_speed_test(node: Node) -> tuple[bool, str]:
     """
     outbound = node.outbound if isinstance(node.outbound, dict) else {}
     if not (outbound.get("type") and not outbound.get("protocol")):
+        # Временный xray не принимает allowInsecure без пина сертификата.
+        tls_problem = xray_core_tls_problem(node)
+        if tls_problem:
+            return True, f"Тест скорости для {node.name} пропущен: Xray 26.x не поддерживает allowInsecure без pcs."
         return False, ""
     protocol = str(outbound.get("type") or node.scheme or "native").upper()
     if is_hysteria_speed_node(node):

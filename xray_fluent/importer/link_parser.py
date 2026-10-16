@@ -163,6 +163,75 @@ def _to_bool(value: str) -> bool:
     return str(value).lower() in {"1", "true", "yes", "on"}
 
 
+_PIN_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _normalize_cert_pins(raw: str) -> str:
+    """Список SHA-256 отпечатков из ссылки (`pcs`) в строку, которую ждёт Xray.
+
+    Двоеточия (формат OpenSSL) и пробелы допустимы, значения через запятую.
+    Битый отпечаток нельзя молча выкинуть: без пина проверка сертификата
+    ослабла бы, поэтому ссылка отвергается.
+    """
+
+    pins: list[str] = []
+    for item in str(raw or "").split(","):
+        value = item.strip().replace(":", "").replace(" ", "").lower()
+        if not value:
+            continue
+        if not _PIN_SHA256_RE.fullmatch(value):
+            raise LinkParseError(
+                "Параметр pcs (pinnedPeerCertSha256) должен содержать SHA-256 отпечаток "
+                "сертификата: 64 шестнадцатеричных символа (двоеточия допустимы), "
+                "несколько значений через запятую."
+            )
+        if value not in pins:
+            pins.append(value)
+    return ",".join(pins)
+
+
+def _normalize_cert_names(raw: str) -> str:
+    names = [item.strip() for item in str(raw or "").split(",")]
+    return ",".join(item for item in names if item)
+
+
+def xray_tls_has_pin(tls_settings: Any) -> bool:
+    return isinstance(tls_settings, dict) and bool(str(tls_settings.get("pinnedPeerCertSha256") or "").strip())
+
+
+def xray_tls_allow_insecure(tls_settings: Any) -> bool:
+    if not isinstance(tls_settings, dict):
+        return False
+    value = tls_settings.get("allowInsecure")
+    if isinstance(value, str):
+        return _to_bool(value)
+    return bool(value)
+
+
+def xray_core_tls_problem(node: Node) -> str | None:
+    """Русское сообщение, если xray.exe откажется стартовать с этим outbound.
+
+    Xray-core 26.x удалил `allowInsecure`: при `tlsSettings.allowInsecure=true`
+    без `pinnedPeerCertSha256` ядро падает с загадочной ошибкой о миграции.
+    """
+
+    outbound = node.outbound if isinstance(node.outbound, dict) else {}
+    stream = outbound.get("streamSettings")
+    if not isinstance(stream, dict):
+        return None
+    tls_settings = stream.get("tlsSettings")
+    if not xray_tls_allow_insecure(tls_settings) or xray_tls_has_pin(tls_settings):
+        return None
+    node_name = str(node.name or node.server or "безымянный сервер").strip()
+    return (
+        f"Сервер {node_name} не может быть запущен ядром Xray: ссылка требует "
+        "allowInsecure=1 (отключить проверку сертификата), а Xray 26.x убрал эту "
+        "возможность. Попросите у провайдера ссылку с отпечатком сертификата "
+        "(параметр pcs=<sha256>) либо уберите allowInsecure=1, если сертификат у сервера "
+        "обычный."
+    )
+
+
 def _url_auth(parsed) -> str:
     username = unquote(parsed.username or "")
     if parsed.password is None:
@@ -288,7 +357,13 @@ def _native_node(link: str, scheme: str, outbound: dict[str, Any], server: str, 
 _KNOWN_SECURITY_MODES = frozenset({"none", "tls", "reality"})
 
 
-def _build_stream_settings(params: dict[str, str], default_network: str = "tcp", default_security: str = "none") -> dict[str, Any]:
+def _build_stream_settings(
+    params: dict[str, str],
+    default_network: str = "tcp",
+    default_security: str = "none",
+    *,
+    xray_only: bool = False,
+) -> dict[str, Any]:
     network = (_get_param(params, "type", "net", default=default_network or "tcp") or "tcp").lower()
     security = (_get_param(params, "security", "tls", default=default_security or "none") or "none").lower()
     if security == "none" and _get_param(params, "tls") == "tls":
@@ -354,9 +429,26 @@ def _build_stream_settings(params: dict[str, str], default_network: str = "tcp",
         fp = _get_param(params, "fp", "fingerprint")
         if fp:
             tls_settings["fingerprint"] = fp
-        allow_insecure = _get_param(params, "allowInsecure", "allow_insecure")
-        if allow_insecure:
-            tls_settings["allowInsecure"] = _to_bool(allow_insecure)
+        # Xray 26.x убрал allowInsecure: вместо него отпечаток сертификата
+        # `pcs` -> pinnedPeerCertSha256 и имена `vcn` -> verifyPeerCertByName.
+        # Если пин есть, Xray сам не проверяет цепочку CA, а сверяет пин, поэтому
+        # allowInsecure при пине не выдаётся (с ним ядро отказывается стартовать).
+        pins = _normalize_cert_pins(
+            _get_param(params, "pcs", "pinnedPeerCertSha256", "pinned_peer_cert_sha256")
+        )
+        if pins:
+            tls_settings["pinnedPeerCertSha256"] = pins
+        cert_names = _normalize_cert_names(
+            _get_param(params, "vcn", "verifyPeerCertByName", "verify_peer_cert_by_name")
+        )
+        if cert_names:
+            tls_settings["verifyPeerCertByName"] = cert_names
+        # VLESS исполняет только Xray, а без пина ему нечем заменить allowInsecure:
+        # сертификат проверяется обычным образом, как в Android-клиенте, вместо
+        # отказа запускать сервер. Trojan/VMess идут в sing-box, где insecure есть.
+        allow_insecure = _get_param(params, "allowInsecure", "allow_insecure", "insecure")
+        if not pins and not xray_only and _to_bool(allow_insecure):
+            tls_settings["allowInsecure"] = True
         stream["tlsSettings"] = tls_settings
     elif security == "reality":
         reality_settings: dict[str, Any] = {}
@@ -411,7 +503,12 @@ def _parse_vless(link: str) -> Node:
                 }
             ]
         },
-        "streamSettings": _build_stream_settings(params, default_network="tcp", default_security=params.get("security", "none")),
+        "streamSettings": _build_stream_settings(
+            params,
+            default_network="tcp",
+            default_security=params.get("security", "none"),
+            xray_only=True,
+        ),
     }
 
     name = _clean_name(parsed.fragment, f"vless-{server}:{port}")
@@ -525,6 +622,13 @@ def validate_node_outbound(node: Node) -> str | None:
     if not isinstance(stream_settings, dict):
         return None
 
+    # VLESS всегда исполняет Xray (в том числе как sidecar sing-box), а он не
+    # принимает allowInsecure без пина. Trojan/VMess в sing-box с insecure работают.
+    if protocol == "vless":
+        tls_problem = xray_core_tls_problem(node)
+        if tls_problem:
+            return tls_problem
+
     security = str(stream_settings.get("security") or "").strip().lower()
     if security != "reality":
         return None
@@ -570,6 +674,9 @@ def _parse_vmess(link: str) -> Node:
         "alpn": str(payload.get("alpn") or ""),
         "fp": str(payload.get("fp") or ""),
         "serviceName": str(payload.get("serviceName") or ""),
+        "allowInsecure": str(payload.get("allowInsecure") if payload.get("allowInsecure") is not None else payload.get("insecure") or ""),
+        "pcs": str(payload.get("pcs") or payload.get("pinnedPeerCertSha256") or ""),
+        "vcn": str(payload.get("vcn") or payload.get("verifyPeerCertByName") or ""),
     }
 
     outbound = {

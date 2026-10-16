@@ -24,6 +24,25 @@ def is_singbox_endpoint_node(node) -> bool:
     return node is not None and is_singbox_endpoint_outbound(node.outbound)
 
 
+def unenforced_tls_pin_warning(node) -> str:
+    """Предупреждение, если сервер с pcs уходит в sing-box, где пин не проверяется."""
+    outbound = node.outbound if node is not None and isinstance(node.outbound, dict) else {}
+    if outbound.get("type") and not outbound.get("protocol"):
+        return ""
+    if protocol_core(node) is not ProtocolCore.SINGBOX:
+        return ""
+    stream = outbound.get("streamSettings")
+    tls_settings = stream.get("tlsSettings") if isinstance(stream, dict) else None
+    if not isinstance(tls_settings, dict) or not str(tls_settings.get("pinnedPeerCertSha256") or "").strip():
+        return ""
+    name = str(getattr(node, "name", "") or getattr(node, "server", "") or "сервер").strip()
+    return (
+        f"[warning] {name}: ссылка закрепляет сертификат (pcs), но sing-box не умеет сверять "
+        "SHA-256 всего сертификата, поэтому сертификат сервера не проверяется (tls.insecure). "
+        "Проверка отпечатка работает только в ядре Xray (VLESS)."
+    )
+
+
 def build_singbox_outbound(node, *, tag: str = "proxy") -> dict[str, Any]:
     """Convert a stored node outbound into a native sing-box outbound."""
     source = deepcopy(node.outbound or {})
@@ -124,7 +143,12 @@ def _apply_tls(sb: dict[str, Any], stream: dict[str, Any]) -> None:
         fingerprint = str(tls_settings.get("fingerprint") or "")
         if fingerprint:
             tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
-        if tls_settings.get("allowInsecure", False):
+        # sing-box не умеет закреплять SHA-256 всего сертификата (его
+        # certificate_public_key_sha256 это хэш SPKI, другое значение), поэтому
+        # пин Xray здесь не проверяется. Без insecure самоподписанный сертификат
+        # не пройдёт, а ссылка с pcs рассчитана ровно на него; об этом
+        # предупреждает unenforced_tls_pin_warning().
+        if tls_settings.get("allowInsecure", False) or str(tls_settings.get("pinnedPeerCertSha256") or "").strip():
             tls["insecure"] = True
 
     sb["tls"] = tls
