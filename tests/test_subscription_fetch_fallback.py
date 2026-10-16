@@ -138,3 +138,74 @@ class CleartextSubscriptionTest(unittest.TestCase):
         handler = sh._SafeRedirectHandler(direct=True)
         with self.assertRaises(SubscriptionFetchError):
             handler.redirect_request(None, None, 302, "Found", {}, "http://sub.example/plain")
+
+
+class BrowserStackSubscriptionTest(unittest.TestCase):
+    """Прямая попытка — стеком Chromium (рукопожатие как у Chrome), с семантикой urllib."""
+
+    @staticmethod
+    def _model(etag: str = ""):
+        from xray_fluent.profiles.models import Subscription
+
+        return Subscription(url="https://sub.example/a", etag=etag)
+
+    def _fetch(self, response=None, error=None, *, sub=None):
+        from xray_fluent.network import browser_fetch
+
+        calls = []
+
+        class _Service:
+            def available(self):
+                return True
+
+            def fetch(self, url, *, headers, timeout, max_bytes):
+                calls.append((url, dict(headers)))
+                if error is not None:
+                    raise error
+                return response
+
+        with patch.object(browser_fetch, "SERVICE", _Service()), patch.object(sh, "build_opener") as legacy:
+            result = sh._fetch_once(sub or self._model(), url="https://sub.example/a", via_proxy=False,
+                                    proxy_port=None, timeout=5, max_bytes=1024)
+        legacy.return_value.open.assert_not_called()
+        return result, calls
+
+    def test_body_and_headers_come_from_the_browser_stack(self) -> None:
+        from xray_fluent.network.browser_fetch import BrowserResponse
+
+        result, calls = self._fetch(BrowserResponse(status=200, headers=(("ETag", "v1"),), body=b"vless://x"))
+        self.assertEqual((result.data, result.headers["etag"], result.via_proxy), (b"vless://x", "v1", False))
+        self.assertEqual(calls[0][0], "https://sub.example/a")
+        self.assertIn("User-Agent", calls[0][1])  # профиль клиента подписки сохраняется
+
+    def test_server_refusal_is_terminal(self) -> None:
+        from xray_fluent.network.browser_fetch import BrowserResponse
+
+        with self.assertRaises(SubscriptionServerResponseError):
+            self._fetch(BrowserResponse(status=404))
+
+    def test_no_response_is_a_transport_failure(self) -> None:
+        from xray_fluent.network.browser_fetch import BrowserFetchError
+
+        with self.assertRaises(urllib.error.URLError):
+            self._fetch(error=BrowserFetchError("net::ERR_CONNECTION_RESET"))
+
+    def test_oversized_body_is_refused(self) -> None:
+        from xray_fluent.network.browser_fetch import BrowserResponse
+
+        with self.assertRaises(SubscriptionServerResponseError):
+            self._fetch(BrowserResponse(status=200, body=b"x" * 2048, truncated=True))
+
+    def test_redirect_to_cleartext_is_refused(self) -> None:
+        from xray_fluent.network.browser_fetch import BrowserResponse
+
+        with self.assertRaises(SubscriptionFetchError) as caught:
+            self._fetch(BrowserResponse(status=302, redirect_refused="http://sub.example/plain"))
+        self.assertIn("http://", str(caught.exception))
+
+    def test_not_modified_needs_a_conditional_request(self) -> None:
+        from xray_fluent.network.browser_fetch import BrowserResponse
+
+        result, calls = self._fetch(BrowserResponse(status=304), sub=self._model(etag="v1"))
+        self.assertTrue(result.not_modified)
+        self.assertEqual(calls[0][1]["If-None-Match"], "v1")

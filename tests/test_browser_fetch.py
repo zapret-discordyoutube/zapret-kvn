@@ -18,7 +18,9 @@ FAKE = Path(__file__).resolve().parent / "fixtures" / "fake_browser_fetch.py"
 
 
 def _service() -> BrowserFetchService:
-    return BrowserFetchService(executable=lambda: FAKE, launcher=lambda exe: [sys.executable, "-I", str(exe)])
+    return BrowserFetchService(
+        executable=lambda: FAKE, launcher=lambda exe: [sys.executable, "-I", str(exe)], enabled=True,
+    )
 
 
 class BrowserFetchServiceTests(unittest.TestCase):
@@ -66,8 +68,9 @@ class BrowserFetchServiceTests(unittest.TestCase):
             self.service.fetch("https://nolib.example/", timeout=5)
 
     def test_missing_core_is_unavailable(self) -> None:
-        service = BrowserFetchService(executable=lambda: Path("/nonexistent/sing-box.exe"))
+        service = BrowserFetchService(executable=lambda: Path("/nonexistent/sing-box.exe"), enabled=True)
         self.assertFalse(service.available())
+        self.assertFalse(BrowserFetchService(executable=lambda: FAKE).available())  # не включена
         with self.assertRaises(BrowserFetchUnavailable):
             service.fetch("https://example.com/", timeout=1)
 

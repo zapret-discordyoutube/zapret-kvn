@@ -386,6 +386,12 @@ def main() -> int:
     # Запомненные адреса VPN-серверов: запас на случай, когда защищённый DNS
     # недоступен, а системный резолвер отвечает «домена нет».
     configure_cache(DATA_DIR / "bootstrap-lkg.json")
+    from xray_fluent.network import browser_fetch
+
+    # Прямые запросы (DoH сервера, подписка) — сетевым стеком Chromium из
+    # нашего ядра: на проводе это Chrome, а не TLS Python. Процесс ядра
+    # поднимается при первом запросе.
+    browser_fetch.SERVICE.enable()
     from xray_fluent.ui.fluent_fixes import install_translations
 
     install_translations(app)

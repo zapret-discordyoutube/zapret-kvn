@@ -64,6 +64,8 @@ class BrowserFetchService:
         self,
         executable: Callable[[], Path] = lambda: Path(SINGBOX_PATH_DEFAULT),
         launcher: Callable[[Path], list[str]] | None = None,
+        *,
+        enabled: bool = False,
     ) -> None:
         # Своё ядро из поставки, а не путь из настроек: патч browser-fetch есть
         # только в нём.
@@ -73,8 +75,16 @@ class BrowserFetchService:
         self._process: _Process | None = None
         self._ids = itertools.count(1)
         self._closed = False
+        # Выключена, пока приложение не включит её при старте (main.py): тесты
+        # и утилиты не запускают ядро и не ходят в сеть сами.
+        self._enabled = enabled
+
+    def enable(self) -> None:
+        self._enabled = True
 
     def available(self) -> bool:
+        if not self._enabled:
+            return False
         try:
             return self._executable().is_file()
         except OSError:

@@ -28,8 +28,10 @@ class BrowserFetchPatchTests(unittest.TestCase):
             "cmd/sing-box/cmd_tools_browser_fetch.go",
             "common/browserfetch/browserfetch.go",
             "common/browserfetch/browserfetch_stub.go",
+            "common/browserfetch/socket_control_unix.go",
             "common/browserfetch/types.go",
             "common/browserfetch/zapret_browserfetch_test.go",
+            "common/browserfetch/zapret_socket_control_test.go",
             "experimental/libbox/browser_fetch.go",
         ])
         self.assertEqual(len(re.findall(r"^new file mode", text, re.MULTILINE)), len(touched))

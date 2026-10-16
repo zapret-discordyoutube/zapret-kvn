@@ -17,6 +17,7 @@ from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 
 from ..constants import APP_VERSION, PROXY_HOST, SUBSCRIPTION_PARSER_REVISION
 from .happ_crypt import HappCryptError, decrypt_happ_link, is_happ_crypt_link
+from ..network import browser_fetch
 from ..network.http_utils import build_opener
 from ..profiles.models import Subscription
 
@@ -552,6 +553,16 @@ def _fetch_once(
         headers["If-None-Match"] = subscription.etag
     if not force_refresh and subscription.last_modified:
         headers["If-Modified-Since"] = subscription.last_modified
+    if not via_proxy and browser_fetch.SERVICE.available():
+        # Напрямую провайдер видит рукопожатие: стеком Chromium оно как у
+        # Chrome. Через туннель его не видно — там прежний urllib.
+        try:
+            return _fetch_direct_in_browser(
+                url, headers, timeout=timeout, max_bytes=max_bytes,
+                force_refresh=force_refresh, expires_at=expires_at,
+            )
+        except browser_fetch.BrowserFetchUnavailable:
+            pass
     request = urllib.request.Request(url, headers=headers)
     try:
         response = opener.open(request, timeout=timeout)
@@ -595,6 +606,48 @@ def _fetch_once(
             status=int(getattr(response, "status", 200) or 200),
             via_proxy=via_proxy,
         )
+
+
+def _fetch_direct_in_browser(
+    url: str,
+    headers: dict[str, str],
+    *,
+    timeout: float,
+    max_bytes: int,
+    force_refresh: bool,
+    expires_at: float | None,
+) -> SubscriptionFetchResult:
+    """Прямая попытка стеком Chromium — с той же семантикой ответов, что у urllib."""
+
+    if expires_at is not None:
+        timeout = max(0.5, min(timeout, expires_at - time.monotonic()))
+    try:
+        response = browser_fetch.SERVICE.fetch(
+            url, headers=tuple(headers.items()), timeout=timeout, max_bytes=max_bytes + 1,
+        )
+    except browser_fetch.BrowserFetchUnavailable:
+        raise
+    except browser_fetch.BrowserFetchError as exc:
+        # Ответа сервера нет — как у urllib: дальше решает маршрут через прокси.
+        raise urllib.error.URLError(str(exc)) from exc
+    response_headers = {name.lower(): value for name, value in response.headers}
+    if response.redirect_refused:
+        if cleartext_over_internet(response.redirect_refused):
+            raise SubscriptionFetchError(CLEARTEXT_DIRECT_ERROR)
+        raise SubscriptionFetchError("Перенаправление подписки использует небезопасную схему")
+    if response.status == 304:
+        if force_refresh or not (headers.get("If-None-Match") or headers.get("If-Modified-Since")):
+            raise SubscriptionServerResponseError(
+                "Сервер вернул 304 без условного запроса; полное тело подписки не получено"
+            )
+        return SubscriptionFetchResult(headers=response_headers, status=304, not_modified=True)
+    if response.status >= 400 or response.status < 200:
+        raise SubscriptionServerResponseError(describe_http_failure(response.status, response_headers))
+    if _HWID_REFUSAL_HEADERS.intersection(response_headers):
+        raise SubscriptionServerResponseError(describe_http_failure(response.status, response_headers))
+    if response.truncated or len(response.body) > max_bytes:
+        raise SubscriptionServerResponseError(f"Ответ подписки превышает {max_bytes // (1024 * 1024)} МиБ")
+    return SubscriptionFetchResult(data=response.body, headers=response_headers, status=response.status)
 
 
 def _read_body(response, limit: int, expires_at: float | None) -> bytes:

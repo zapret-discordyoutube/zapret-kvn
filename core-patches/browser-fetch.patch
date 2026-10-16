@@ -78,10 +78,10 @@ index 0000000..081720f
 +}
 diff --git a/common/browserfetch/browserfetch.go b/common/browserfetch/browserfetch.go
 new file mode 100644
-index 0000000..50bcc7c
+index 0000000..073e15a
 --- /dev/null
 +++ b/common/browserfetch/browserfetch.go
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,151 @@
 +//go:build with_naive_outbound
 +
 +// Package browserfetch — HTTPS-клиент, неотличимый от Chrome на проводе.
@@ -110,34 +110,47 @@ index 0000000..50bcc7c
 +)
 +
 +var (
-+	engineOnce sync.Once
-+	engine     cronet.Engine
-+	agent      string
-+	engineErr  error
++	engineMu      sync.Mutex
++	engineStarted bool
++	engine        cronet.Engine
++	agent         string
++	engineErr     error
++	// Свой dialer сокетов (Android: защита от своего VPN), до запуска движка.
++	pendingDialer cronet.Dialer
 +)
 +
 +func sharedEngine() (cronet.Engine, string, error) {
-+	engineOnce.Do(func() {
-+		// Без libcronet (нет рядом с ядром) загрузчик паникует — это не сбой
-+		// сети, а «браузерного стека нет»: вызывающий выберет запасной путь.
-+		defer func() {
-+			if recovered := recover(); recovered != nil {
-+				engineErr = &UnavailableError{Cause: fmt.Sprint(recovered)}
-+			}
-+		}()
-+		engine = cronet.NewEngine()
-+		agent = ChromeUserAgent(engine.Version())
-+		params := cronet.NewEngineParams()
-+		params.SetEnableHTTP2(true)
-+		// Chrome ходит по QUIC только к узлам, объявившим h3 (Alt-Svc); у
-+		// одиночных запросов без кеша Alt-Svc это всегда TCP — как здесь.
-+		params.SetEnableQuic(false)
-+		params.SetEnableBrotli(true)
-+		params.SetUserAgent(agent)
-+		engine.StartWithParams(params)
-+		params.Destroy()
-+	})
++	engineMu.Lock()
++	defer engineMu.Unlock()
++	if !engineStarted {
++		engineStarted = true
++		startEngine()
++	}
 +	return engine, agent, engineErr
++}
++
++func startEngine() {
++	// Без libcronet (нет рядом с ядром) загрузчик паникует — это не сбой
++	// сети, а «браузерного стека нет»: вызывающий выберет запасной путь.
++	defer func() {
++		if recovered := recover(); recovered != nil {
++			engineErr = &UnavailableError{Cause: fmt.Sprint(recovered)}
++		}
++	}()
++	engine = cronet.NewEngine()
++	agent = ChromeUserAgent(engine.Version())
++	if pendingDialer != nil {
++		engine.SetDialer(pendingDialer)
++	}
++	params := cronet.NewEngineParams()
++	params.SetEnableHTTP2(true)
++	// Chrome ходит по QUIC только к узлам, объявившим h3 (Alt-Svc); у
++	// одиночных запросов без кеша Alt-Svc это всегда TCP — как здесь.
++	params.SetEnableQuic(false)
++	params.SetEnableBrotli(true)
++	params.SetUserAgent(agent)
++	engine.StartWithParams(params)
++	params.Destroy()
 +}
 +
 +// UserAgent — User-Agent, с которым уходят запросы (по версии движка).
@@ -241,6 +254,92 @@ index 0000000..26e5d80
 +}
 +
 +func UserAgent() string { return "" }
+diff --git a/common/browserfetch/socket_control_unix.go b/common/browserfetch/socket_control_unix.go
+new file mode 100644
+index 0000000..da008fc
+--- /dev/null
++++ b/common/browserfetch/socket_control_unix.go
+@@ -0,0 +1,80 @@
++//go:build with_naive_outbound && unix
++
++package browserfetch
++
++import (
++	"context"
++	"net"
++	"strconv"
++	"syscall"
++	"time"
++
++	cronet "github.com/sagernet/cronet-go"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// SocketControl вызывается для каждого TCP-сокета движка до connect — на
++// Android здесь сокет защищают от своего же VPN (VpnService.protect) или
++// привязывают к физической сети. Без него сокеты Cronet ушли бы в туннель.
++type SocketControl func(fd uintptr) error
++
++const dialTimeout = 15 * time.Second
++
++// SetSocketControl задаёт обработчик сокетов. Действует только до первого
++// запроса (движок Chromium принимает dialer лишь до запуска).
++func SetSocketControl(control SocketControl) error {
++	engineMu.Lock()
++	defer engineMu.Unlock()
++	if engineStarted {
++		return E.New("browserfetch: engine already started")
++	}
++	pendingDialer = nil
++	if control != nil {
++		pendingDialer = socketDialer(control)
++	}
++	return nil
++}
++
++func socketDialer(control SocketControl) cronet.Dialer {
++	dialer := net.Dialer{
++		Timeout: dialTimeout,
++		Control: func(_, _ string, raw syscall.RawConn) error {
++			var controlErr error
++			if err := raw.Control(func(fd uintptr) { controlErr = control(fd) }); err != nil {
++				return err
++			}
++			return controlErr
++		},
++	}
++	return func(address string, port uint16) int {
++		conn, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(address, strconv.Itoa(int(port))))
++		if err != nil {
++			return netErrorCode(err)
++		}
++		defer conn.Close()
++		file, err := conn.(*net.TCPConn).File()
++		if err != nil {
++			return -104 // ERR_CONNECTION_FAILED
++		}
++		defer file.Close()
++		// Своя копия дескриптора: файл и соединение закроются, сокет останется движку.
++		fd, err := syscall.Dup(int(file.Fd()))
++		if err != nil {
++			return -104
++		}
++		return fd
++	}
++}
++
++func netErrorCode(err error) int {
++	switch {
++	case E.IsTimeout(err):
++		return -118 // ERR_CONNECTION_TIMED_OUT
++	case E.IsMulti(err, syscall.ECONNREFUSED):
++		return -102 // ERR_CONNECTION_REFUSED
++	case E.IsMulti(err, syscall.ENETUNREACH, syscall.EHOSTUNREACH):
++		return -109 // ERR_ADDRESS_UNREACHABLE
++	default:
++		return -104 // ERR_CONNECTION_FAILED
++	}
++}
 diff --git a/common/browserfetch/types.go b/common/browserfetch/types.go
 new file mode 100644
 index 0000000..699cbec
@@ -492,6 +591,77 @@ index 0000000..2b5a975
 +	_ = json.Unmarshal([]byte(marshal(envelope{Error: err.Error(), Unavailable: true})), &reply)
 +	if reply["unavailable"] != true {
 +		t.Fatalf("reply = %v", reply)
++	}
++}
+diff --git a/common/browserfetch/zapret_socket_control_test.go b/common/browserfetch/zapret_socket_control_test.go
+new file mode 100644
+index 0000000..06849c8
+--- /dev/null
++++ b/common/browserfetch/zapret_socket_control_test.go
+@@ -0,0 +1,65 @@
++//go:build with_naive_outbound && unix
++
++package browserfetch
++
++import (
++	"context"
++	"net"
++	"os"
++	"os/exec"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++// Движок — один на процесс, а dialer принимается только до запуска: проверка
++// идёт в отдельном процессе тестового бинарника.
++func TestZapretSocketControlSeesEveryEngineSocket(t *testing.T) {
++	if os.Getenv("ZAPRET_BROWSERFETCH_CHILD") == "1" {
++		runSocketControlChild(t)
++		return
++	}
++	if _, _, unavailable := sharedEngine(); unavailable != nil {
++		t.Skip("no libcronet next to the test binary: ", unavailable)
++	}
++	child := exec.Command(os.Args[0], "-test.run=^TestZapretSocketControlSeesEveryEngineSocket$", "-test.count=1")
++	child.Env = append(os.Environ(), "ZAPRET_BROWSERFETCH_CHILD=1")
++	if output, err := child.CombinedOutput(); err != nil {
++		t.Fatalf("child: %v\n%s", err, output)
++	}
++}
++
++func runSocketControlChild(t *testing.T) {
++	var controlled atomic.Int32
++	if err := SetSocketControl(func(fd uintptr) error {
++		controlled.Add(1)
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	accepted := make(chan struct{}, 1)
++	go func() {
++		conn, acceptErr := listener.Accept()
++		if acceptErr == nil {
++			accepted <- struct{}{}
++			conn.Close()
++		}
++	}()
++	_, _ = Fetch(context.Background(), Request{URL: "https://" + listener.Addr().String() + "/", TimeoutMillis: 4000})
++	select {
++	case <-accepted:
++	case <-time.After(6 * time.Second):
++		t.Fatal("engine never connected through the custom dialer")
++	}
++	if controlled.Load() == 0 {
++		t.Fatal("socket control was not called")
++	}
++	if SetSocketControl(nil) == nil {
++		t.Fatal("dialer must be refused once the engine runs")
 +	}
 +}
 diff --git a/experimental/libbox/browser_fetch.go b/experimental/libbox/browser_fetch.go
