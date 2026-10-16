@@ -1,8 +1,9 @@
 """Dead-link detection in the auto-switch service.
 
 Auto-switch leaves a server only when it is dead: the metrics worker's
-TCP-ping verdict (link_alive) switches away from a node whose pings keep
-failing while no payload traffic flows. A slow but working server is never
+link verdict (link_alive) — requests unanswered, then one confirmation
+through the tunnel — switches away while no payload traffic flows; nothing
+is sent to the server without that signal. A slow but working server is never
 switched, and UDP/QUIC protocols explicitly avoid the TCP verdict.
 """
 
@@ -279,34 +280,114 @@ class MetricsWorkerPingTargetTests(unittest.TestCase):
         worker = worker_class("xray.exe", 0, ping_host="old.example.com", ping_port=443)
         worker._last_ping_ms = 42
         worker._last_ping_ts = 1234.5
+        worker._link_verdict = False
         worker.set_ping_target("new.example.com", 8443)
         self.assertEqual(worker._ping_host, "new.example.com")
         self.assertEqual(worker._ping_port, 8443)
-        self.assertIsNone(worker._last_ping_ms)     # stale verdict cleared
-        self.assertEqual(worker._last_ping_ts, 0.0)  # next tick probes now
+        self.assertIsNone(worker._last_ping_ms)     # stale value cleared
+        self.assertIsNone(worker._link_verdict)     # verdict of the old server dropped
+        self.assertEqual(worker._last_ping_ts, 0.0)  # next tick reads now
         self.assertTrue(worker.pings_active_node())
 
-    def test_background_ping_cadence_follows_link_state(self) -> None:
-        # Пустое TCP-соединение раз в 3 с всю сессию — маяк на линии: часто
-        # пингуем только когда вердикт о канале действительно нужен.
-        import sys
-
+    def _watching(self, **kwargs):
         worker_class = self._worker_class()
         module = sys.modules[worker_class.__module__]
-        worker = worker_class("xray.exe", 0, ping_host="a.example.com", ping_port=443)
-        self.assertEqual(worker._ping_interval(0.0, 0.0), 3.0)  # ещё ни одного замера
+        reads: list[tuple] = []
+        confirms: list[int] = []
+        verdict = kwargs.pop("verdict", False)
 
-        worker._last_ping_ts, worker._last_ping_ms, worker._ping_jitter = 100.0, 40, 1.0
-        self.assertEqual(worker._ping_interval(50_000.0, 1_000.0), module.PING_INTERVAL_TRAFFIC_SEC)
-        self.assertEqual(worker._ping_interval(0.0, 0.0), module.PING_INTERVAL_IDLE_SEC)
-        # Запросы уходят, ответа нет — проверяем часто.
-        self.assertEqual(worker._ping_interval(0.0, 4_000.0), 3.0)
+        def reader(addresses, port):
+            reads.append((addresses, port))
+            return 42
 
-        worker._last_ping_ms = None  # прошлый пинг не прошёл
-        self.assertEqual(worker._ping_interval(50_000.0, 0.0), 3.0)
-        # Подтверждение мёртвого канала укладывается в окно авто-переключения.
+        def confirmer():
+            confirms.append(1)
+            return verdict
+
+        worker = worker_class(
+            "xray.exe", 0, ping_host="203.0.113.10", ping_port=443,
+            rtt_reader=reader, link_confirmer=confirmer,
+        )
+        return module, worker, reads, confirms
+
+    @staticmethod
+    def _settle(worker) -> None:
+        import time
+
+        deadline = time.monotonic() + 2.0
+        while worker._confirming and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    def test_latency_is_read_passively_from_the_core_connection(self) -> None:
+        # Незаметность: задержка — RTT уже открытого соединения ядра, ни одного
+        # своего соединения к серверу.
+        module, worker, reads, confirms = self._watching()
+        worker._watch_link(100.0, 0.0, 0.0)
+        worker._watch_link(100.5, 0.0, 0.0)  # чаще RTT_READ_INTERVAL_SEC не читаем
+        worker._watch_link(100.0 + module.RTT_READ_INTERVAL_SEC, 0.0, 0.0)
+        self.assertEqual(reads, [(("203.0.113.10",), 443)] * 2)
+        self.assertEqual(worker._last_ping_ms, 42)
+        self.assertEqual(confirms, [])
+        self.assertIsNone(worker._link_verdict)
+
+    def test_last_rtt_is_kept_while_the_core_has_no_connection(self) -> None:
+        module, worker, _reads, _confirms = self._watching()
+        values = iter([42, None, None])
+        worker._rtt_reader = lambda _a, _p: next(values)
+        worker._watch_link(100.0, 0.0, 0.0)
+        worker._watch_link(100.0 + module.RTT_READ_INTERVAL_SEC, 0.0, 0.0)
+        self.assertEqual(worker._last_ping_ms, 42)
+        worker._watch_link(100.0 + module.RTT_KEEP_SEC + 5, 0.0, 0.0)
+        self.assertIsNone(worker._last_ping_ms)
+
+    def test_idle_link_is_never_probed(self) -> None:
+        module, worker, _reads, confirms = self._watching()
+        for second in range(600):
+            worker._watch_link(100.0 + second, 0.0, 0.0)
+        self.assertEqual(confirms, [])
+        self.assertIsNone(worker._link_verdict)
+
+    def test_unanswered_requests_trigger_one_confirmation(self) -> None:
         from xray_fluent.application.auto_switch_service import AUTO_SWITCH_DEAD_LINK_SEC
-        self.assertGreaterEqual(AUTO_SWITCH_DEAD_LINK_SEC / worker._ping_interval(0.0, 0.0), 4)
+
+        module, worker, _reads, confirms = self._watching(verdict=False)
+        up, down = module.PING_UNANSWERED_UP_BPS * 2, 0.0
+        now = 100.0
+        while now < 100.0 + module.LINK_SUSPECT_SEC + 1:
+            worker._watch_link(now, down, up)
+            now += 1.0
+        self._settle(worker)
+        self.assertEqual(confirms, [1])
+        self.assertIs(worker._link_verdict, False)
+        # Пока подозрение держится, повтор — не чаще кулдауна.
+        for _ in range(int(module.LINK_CONFIRM_COOLDOWN_SEC) - 2):
+            worker._watch_link(now, down, up)
+            now += 1.0
+        self._settle(worker)
+        self.assertEqual(confirms, [1])
+        # Подозрение + подтверждение укладываются в разумное окно до переключения.
+        self.assertLessEqual(
+            module.LINK_SUSPECT_SEC + module.LINK_CONFIRM_TIMEOUT_SEC + AUTO_SWITCH_DEAD_LINK_SEC, 35.0
+        )
+
+    def test_answered_traffic_clears_the_verdict(self) -> None:
+        module, worker, _reads, confirms = self._watching()
+        worker._link_verdict = False
+        worker._watch_link(100.0, module.PING_TRAFFIC_BPS * 4, 1000.0)
+        self.assertIs(worker._link_verdict, True)
+        self.assertEqual(confirms, [])
+
+    def test_confirmation_is_journaled_as_current_server_check(self) -> None:
+        from xray_fluent.network import probe_gate
+
+        module, worker, _reads, _confirms = self._watching()
+        gate = probe_gate.ProbeGate()
+        with patch.object(probe_gate, "GATE", gate):
+            up = module.PING_UNANSWERED_UP_BPS * 2
+            for second in range(int(module.LINK_SUSPECT_SEC) + 2):
+                worker._watch_link(100.0 + second, 0.0, up)
+            self._settle(worker)
+        self.assertEqual([(r.kind, r.target) for r in gate.journal()], [(probe_gate.CURRENT, "203.0.113.10")])
 
     def test_udp_transport_does_not_start_tcp_probe(self) -> None:
         worker_class = self._worker_class()

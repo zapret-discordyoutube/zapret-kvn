@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import subprocess
+import threading
 import time
 from typing import Any
 from urllib.request import Request
@@ -16,25 +16,86 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT, XRAY_PATH_DEFAULT
 from ..profiles.path_utils import resolve_configured_path
-from ..network.ping_worker import tcp_ping
+from ..network import probe_gate
 from ..platform.windows.process_traffic_collector import collect_process_stats, ProcessTrafficSnapshot
 from ..platform.windows.subprocess_utils import decode_output, run_text
 from ..platform.windows.win_proc_monitor import get_proxy_connections, ProxyProcessInfo
 from .proxy_demand import clash_proxy_demand, local_proxy_demand
 
 
-# Фоновый TCP-пинг активного сервера — пустое соединение без данных.  Раз в 3 с
-# всю сессию это ровный маяк на линии, поэтому частота зависит от того, нужен
-# ли вердикт прямо сейчас:
-# * трафик идёт — канал и так доказанно жив, пинг только освежает цифру;
-# * тишина — редкая проверка;
-# * прошлый пинг не прошёл или запросы уходят без ответа — частая проверка:
-#   авто-переключению нужны подряд идущие отказы, чтобы признать канал мёртвым.
-PING_INTERVAL_TRAFFIC_SEC = 60.0
-PING_INTERVAL_IDLE_SEC = 10.0
+# Активный сервер на проводе не трогаем (требование незаметности, шлюз
+# проверок).  Раньше здесь было пустое TCP-соединение раз в 10–60 с всю
+# сессию — ровный маяк к VPN-серверу.  Теперь:
+# * задержка — RTT уже открытых соединений ядра, его меряет сам стек Windows
+#   (``platform/windows/tcp_rtt.py``), на провод не уходит ничего;
+# * «канал мёртв» — только по сигналу: запросы уходят, ответа нет
+#   ``LINK_SUSPECT_SEC`` подряд; тогда один HTTPS-запрос через локальный
+#   прокси ядра (внутри туннеля) подтверждает или снимает подозрение.
+RTT_READ_INTERVAL_SEC = 2.0
+# Соединений ядра с сервером сейчас нет (простой) — показываем последнее
+# известное значение не дольше этого.
+RTT_KEEP_SEC = 300.0
 PING_TRAFFIC_BPS = 2048.0
 PING_UNANSWERED_UP_BPS = 512.0
-PING_JITTER = (0.7, 1.3)
+LINK_IDLE_DOWN_BPS = 1024.0
+LINK_SUSPECT_SEC = 10.0
+LINK_CONFIRM_TIMEOUT_SEC = 6.0
+LINK_CONFIRM_COOLDOWN_SEC = 30.0
+LINK_CONFIRM_URL = "https://www.gstatic.com/generate_204"
+
+
+def _read_connection_rtt(addresses: tuple[str, ...], port: int) -> int | None:
+    try:
+        from ..platform.windows.tcp_rtt import connection_rtt_ms
+    except (ImportError, OSError, AttributeError):
+        return None
+    return connection_rtt_ms(addresses, port)
+
+
+def _server_addresses(host: str) -> tuple[str, ...]:
+    """Адреса сервера без сети: литерал или запомненный доверенный ответ."""
+
+    import ipaddress
+
+    from ..network.bootstrap_dns import cached_addresses
+
+    host = str(host or "").strip().strip("[]")
+    if not host:
+        return ()
+    try:
+        return (str(ipaddress.ip_address(host)),)
+    except ValueError:
+        return tuple(cached_addresses(host))
+
+
+def confirm_link_via_proxy(http_port: int, timeout: float = LINK_CONFIRM_TIMEOUT_SEC) -> bool | None:
+    """Один запрос через локальный HTTP-прокси ядра: True — жив, False — нет ответа.
+
+    None — до самого прокси не достучались (ядро перезапускается): это не
+    вердикт о сервере.
+    """
+
+    import urllib.error
+    from urllib.request import ProxyHandler
+
+    from ..network.http_utils import build_opener
+    from ..network.speed_test_worker import SPEED_TEST_USER_AGENT
+
+    proxy = f"http://127.0.0.1:{int(http_port)}"
+    opener = build_opener(ProxyHandler({"http": proxy, "https": proxy}))
+    request = Request(LINK_CONFIRM_URL, headers={"User-Agent": SPEED_TEST_USER_AGENT})
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            response.read(16)
+        return True
+    except urllib.error.HTTPError:
+        return True  # ответ пришёл — канал жив
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, ConnectionRefusedError):
+            return None
+        return False
+    except OSError:
+        return False
 
 
 class LiveMetricsWorker(QThread):
@@ -54,6 +115,8 @@ class LiveMetricsWorker(QThread):
         http_port: int = DEFAULT_HTTP_PORT,
         xray_inbound_tags: list[str] | None = None,
         transport_kind: str = "tcp",
+        rtt_reader=_read_connection_rtt,
+        link_confirmer=None,
     ):
         super().__init__()
         self._xray_path = xray_path
@@ -65,7 +128,15 @@ class LiveMetricsWorker(QThread):
         self._stopped = False
         self._last_ping_ms: int | None = None
         self._last_ping_ts = 0.0
-        self._ping_jitter = 1.0
+        self._rtt_reader = rtt_reader
+        self._link_confirmer = link_confirmer or (lambda: confirm_link_via_proxy(self._http_port))
+        self._ping_addresses: tuple[str, ...] | None = None
+        self._rtt_at = 0.0
+        # Вердикт о канале: None — неизвестно, True — жив, False — подтверждено мёртв.
+        self._link_verdict: bool | None = None
+        self._unanswered_since = 0.0
+        self._confirming = False
+        self._confirmed_at = 0.0
         self._mode = mode
         self._clash_api_port = clash_api_port
         self._socks_port = socks_port
@@ -87,7 +158,7 @@ class LiveMetricsWorker(QThread):
         self._stopped = True
 
     def pings_active_node(self) -> bool:
-        """True when the worker actually probes the active node over TCP.
+        """True when the worker watches the active node's TCP link (passively).
 
         UDP/QUIC protocols such as Hysteria 2 and TUIC must not use a TCP
         connect as their health verdict: the port can have different TCP and
@@ -99,23 +170,12 @@ class LiveMetricsWorker(QThread):
             and self._ping_port > 0
         )
 
-    def _ping_interval(self, down_bps: float | None, up_bps: float | None) -> float:
-        """Сколько ждать до следующего пинга при текущем состоянии канала."""
-        if self._last_ping_ts <= 0.0 or self._last_ping_ms is None:
-            return self._ping_interval_sec
-        down = down_bps or 0.0
-        if down >= PING_TRAFFIC_BPS:
-            return PING_INTERVAL_TRAFFIC_SEC * self._ping_jitter
-        if (up_bps or 0.0) >= PING_UNANSWERED_UP_BPS:
-            return self._ping_interval_sec
-        return PING_INTERVAL_IDLE_SEC * self._ping_jitter
-
     def set_ping_target(self, host: str, port: int, transport_kind: str | None = None) -> None:
-        """Re-point the TCP ping after a hot-switch (the worker survives it).
+        """Re-point the link watch after a hot-switch (the worker survives it).
 
-        Plain attribute writes are GIL-atomic; the worst case is one extra
-        ping against the old host. Clearing the timestamp makes the loop
-        probe the new target on its next tick instead of after the interval.
+        Plain attribute writes are GIL-atomic. Clearing the timestamp makes
+        the loop read the new target's RTT on its next tick; the old verdict
+        belongs to the old server and is dropped.
         """
         self._ping_host = host
         self._ping_port = int(port)
@@ -123,6 +183,58 @@ class LiveMetricsWorker(QThread):
             self._transport_kind = str(transport_kind or "tcp").strip().lower() or "tcp"
         self._last_ping_ms = None
         self._last_ping_ts = 0.0
+        self._ping_addresses = None
+        self._rtt_at = 0.0
+        self._link_verdict = None
+        self._unanswered_since = 0.0
+
+    def _watch_link(self, now: float, down_bps: float | None, up_bps: float | None) -> None:
+        """Задержка — из RTT ядра, вердикт о канале — только по сигналу."""
+
+        if now - self._last_ping_ts >= RTT_READ_INTERVAL_SEC or self._last_ping_ts <= 0.0:
+            if self._ping_addresses is None:
+                self._ping_addresses = _server_addresses(self._ping_host)
+            try:
+                rtt = self._rtt_reader(self._ping_addresses, self._ping_port)
+            except Exception:
+                rtt = None
+            if rtt is not None:
+                self._last_ping_ms = rtt
+                self._rtt_at = now
+            elif now - self._rtt_at > RTT_KEEP_SEC:
+                self._last_ping_ms = None
+            self._last_ping_ts = now
+        down = down_bps or 0.0
+        up = up_bps or 0.0
+        if down >= PING_TRAFFIC_BPS:
+            self._link_verdict = True  # ответы идут — канал доказанно жив
+        if not (up >= PING_UNANSWERED_UP_BPS and down < LINK_IDLE_DOWN_BPS):
+            self._unanswered_since = 0.0
+            return
+        if self._unanswered_since <= 0.0:
+            self._unanswered_since = now
+            return
+        if (
+            now - self._unanswered_since < LINK_SUSPECT_SEC
+            or self._confirming
+            or (self._confirmed_at and now - self._confirmed_at < LINK_CONFIRM_COOLDOWN_SEC)
+        ):
+            return
+        self._confirming = True
+        self._confirmed_at = now
+        host = self._ping_host
+        probe_gate.GATE.record(probe_gate.CURRENT, host)
+
+        def confirm() -> None:
+            try:
+                verdict = self._link_confirmer()
+            except Exception:
+                verdict = None
+            if self._ping_host == host:
+                self._link_verdict = verdict
+            self._confirming = False
+
+        threading.Thread(target=confirm, name="link-confirm", daemon=True).start()
 
     def run(self) -> None:
         prev_uplink: int | None = None
@@ -163,13 +275,8 @@ class LiveMetricsWorker(QThread):
                 prev_downlink = downlink_total
                 prev_ts = now
 
-            if self.pings_active_node() and (
-                self._last_ping_ts <= 0.0
-                or (now - self._last_ping_ts) >= self._ping_interval(down_bps, up_bps)
-            ):
-                self._last_ping_ms = tcp_ping(self._ping_host, self._ping_port, timeout=1.6)
-                self._last_ping_ts = now
-                self._ping_jitter = random.uniform(*PING_JITTER)
+            if self.pings_active_node():
+                self._watch_link(now, down_bps, up_bps)
 
             process_stats = None
             if self._mode != "singbox":
@@ -190,12 +297,13 @@ class LiveMetricsWorker(QThread):
                     "up_bps": up_bps,
                     "traffic_valid": traffic_valid,
                     "latency_ms": self._last_ping_ms,
-                    "probe_kind": "tcp_connect" if self.pings_active_node() else "none",
+                    "probe_kind": "tcp_rtt" if self.pings_active_node() else "none",
                     "probe_valid": (
                         self._last_ping_ms is not None
                         if self.pings_active_node()
                         else None
                     ),
+                    "link_alive": self._link_verdict if self.pings_active_node() else None,
                     "process_stats": process_stats,
                     "proxy_demand": self._proxy_demand,
                 }

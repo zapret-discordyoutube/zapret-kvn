@@ -29,8 +29,10 @@ ALLOWED: dict[str, set[str]] = {
     "application/controller.py": {"socket"},
     "application/port_allocator.py": {"socket"},
     "engines/singbox/runtime_planner.py": {"socket"},
-    # API ядра на 127.0.0.1 (clash/selector), готовность локальных портов.
-    "diagnostics/live_metrics_worker.py": {"urlopen"},
+    # API ядра на 127.0.0.1 (clash/selector), готовность локальных портов;
+    # подтверждение обрыва — один запрос через локальный прокси ядра (внутри
+    # туннеля) и только по сигналу «запросы без ответа».
+    "diagnostics/live_metrics_worker.py": {"urlopen", "build_opener"},
     "platform/windows/process_traffic_collector.py": {"urlopen"},
     "engines/singbox/selector_api.py": {"build_opener"},
     "engines/sidecar/readiness.py": {"create_connection"},
@@ -53,8 +55,7 @@ ALLOWED: dict[str, set[str]] = {
     # Смена сети: UDP connect без отправки пакетов (выбор интерфейса).
     "network/network_monitor.py": {"socket"},
     # Проверки серверов — правила шлюза: пинг по кнопке по одному с паузой,
-    # маяк текущего сервера (заменить пассивным сигналом, шаг 4), скорость
-    # по кнопке с паузой и кандидат умной замены в бюджете шлюза.
+    # скорость по кнопке с паузой и кандидат умной замены в бюджете шлюза.
     "network/ping_worker.py": {"create_connection"},
     "network/speed_test_worker.py": {"build_opener", "create_connection", "socket"},
     "network/connectivity_test.py": {"build_opener"},

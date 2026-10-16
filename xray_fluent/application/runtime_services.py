@@ -256,12 +256,14 @@ def on_live_metrics(controller: AppController, payload: dict[str, object]) -> No
     # may still render the fallback zero, but auto-switch receives the validity
     # bit and will not treat a failed stats/API read as degradation.
     down_bps = float(raw_down_bps) if raw_down_bps is not None else 0.0
-    # link_alive: вердикт TCP-пинга активной ноды; None — пинг не настроен,
-    # тогда детектор мёртвого сервера не участвует в решении.
+    # link_alive: вердикт о канале активной ноды — False только после
+    # подтверждения по сигналу (запросы без ответа + проверка через туннель);
+    # None — неизвестно, тогда детектор мёртвого сервера не участвует.
     link_alive: bool | None = None
     worker = controller._metrics_worker
     if worker is not None and worker.pings_active_node():
-        link_alive = payload.get("latency_ms") is not None
+        verdict = payload.get("link_alive")
+        link_alive = verdict if isinstance(verdict, bool) else None
     controller._check_auto_switch(down_bps, link_alive, traffic_valid=traffic_valid)
     # «Умная проверка» низкой скорости: подозрение только при реальном спросе
     # (проксируемые соединения качают), решение — после контрольного замера.
