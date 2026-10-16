@@ -271,10 +271,10 @@ index 0000000..0d27b77
 +func configurePlatform(cronet.Engine, cronet.EngineParams) error { return nil }
 diff --git a/common/browserfetch/engine_unix.go b/common/browserfetch/engine_unix.go
 new file mode 100644
-index 0000000..e543f02
+index 0000000..3adc9e9
 --- /dev/null
 +++ b/common/browserfetch/engine_unix.go
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,260 @@
 +//go:build with_naive_outbound && unix
 +
 +package browserfetch
@@ -461,8 +461,8 @@ index 0000000..e543f02
 +	}
 +}
 +
-+// answer — ответ на один DNS-запрос резолвером Go (на Android с cgo это
-+// системный getaddrinfo; сокеты движка при этом идут через SocketControl).
++// answer — ответ на один DNS-запрос: резолвером вызывающего (SetResolver,
++// на Android — доверенный DoH), без него — резолвером Go (системный DNS).
 +func answer(query []byte) []byte {
 +	var request mDNS.Msg
 +	if request.Unpack(query) != nil {
@@ -472,17 +472,15 @@ index 0000000..e543f02
 +	response.SetReply(&request)
 +	response.RecursionAvailable = true
 +	for _, question := range request.Question {
-+		network := map[uint16]string{mDNS.TypeA: "ip4", mDNS.TypeAAAA: "ip6"}[question.Qtype]
-+		if network == "" {
++		if question.Qtype != mDNS.TypeA && question.Qtype != mDNS.TypeAAAA {
 +			continue // HTTPS/SVCB и прочее — пустой ответ без ошибки
 +		}
 +		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 +		// Имя в запросе полное, с точкой; /etc/hosts резолвер Go сверяет без неё.
-+		addresses, err := net.DefaultResolver.LookupNetIP(ctx, network, strings.TrimSuffix(question.Name, "."))
++		addresses, err := lookup(ctx, strings.TrimSuffix(question.Name, "."), question.Qtype)
 +		cancel()
 +		if err != nil {
-+			var dnsErr *net.DNSError
-+			if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
++			if isNotFound(err) {
 +				response.Rcode = mDNS.RcodeNameError
 +			} else if len(response.Answer) == 0 {
 +				response.Rcode = mDNS.RcodeServerFailure
@@ -506,6 +504,25 @@ index 0000000..e543f02
 +	return packed
 +}
 +
++func lookup(ctx context.Context, host string, qtype uint16) ([]netip.Addr, error) {
++	if resolve := currentResolver(); resolve != nil {
++		return resolve(ctx, host)
++	}
++	network := "ip4"
++	if qtype == mDNS.TypeAAAA {
++		network = "ip6"
++	}
++	return net.DefaultResolver.LookupNetIP(ctx, network, host)
++}
++
++func isNotFound(err error) bool {
++	if errors.Is(err, ErrNameNotFound) {
++		return true
++	}
++	var dnsErr *net.DNSError
++	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
++}
++
 +func netErrorCode(err error) int {
 +	switch {
 +	case E.IsTimeout(err):
@@ -520,15 +537,20 @@ index 0000000..e543f02
 +}
 diff --git a/common/browserfetch/socket_control_unix.go b/common/browserfetch/socket_control_unix.go
 new file mode 100644
-index 0000000..76a85e2
+index 0000000..9278b13
 --- /dev/null
 +++ b/common/browserfetch/socket_control_unix.go
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,62 @@
 +//go:build with_naive_outbound && unix
 +
 +package browserfetch
 +
-+import "sync/atomic"
++import (
++	"context"
++	"errors"
++	"net/netip"
++	"sync/atomic"
++)
 +
 +// SocketControl вызывается для каждого сокета движка до connect — на Android
 +// здесь сокет защищают от своего же VPN (VpnService.protect) или привязывают
@@ -551,6 +573,33 @@ index 0000000..76a85e2
 +func currentSocketControl() SocketControl {
 +	if control := socketControl.Load(); control != nil {
 +		return *control
++	}
++	return nil
++}
++
++// Resolver — свой резолвер имён для движка (на Android — доверенный DoH, чтобы
++// имя хоста подписки не уходило открытым DNS). Адреса обоих семейств; «имени
++// нет» — ErrNameNotFound (или *net.DNSError с IsNotFound).
++type Resolver func(ctx context.Context, host string) ([]netip.Addr, error)
++
++// ErrNameNotFound — резолвер подтвердил, что имени нет (ответ NXDOMAIN).
++var ErrNameNotFound = errors.New("browserfetch: name not found")
++
++var resolver atomic.Pointer[Resolver]
++
++// SetResolver задаёт резолвер имён; nil — резолвер Go (системный DNS).
++// Читается на каждом запросе, менять можно в любой момент.
++func SetResolver(resolve Resolver) {
++	if resolve == nil {
++		resolver.Store(nil)
++		return
++	}
++	resolver.Store(&resolve)
++}
++
++func currentResolver() Resolver {
++	if resolve := resolver.Load(); resolve != nil {
++		return *resolve
 +	}
 +	return nil
 +}
@@ -809,10 +858,10 @@ index 0000000..2b5a975
 +}
 diff --git a/common/browserfetch/zapret_socket_control_test.go b/common/browserfetch/zapret_socket_control_test.go
 new file mode 100644
-index 0000000..7d7c20a
+index 0000000..dd8c073
 --- /dev/null
 +++ b/common/browserfetch/zapret_socket_control_test.go
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,127 @@
 +//go:build with_naive_outbound && unix
 +
 +package browserfetch
@@ -820,6 +869,7 @@ index 0000000..7d7c20a
 +import (
 +	"context"
 +	"net"
++	"net/netip"
 +
 +	mDNS "github.com/miekg/dns"
 +	"os"
@@ -901,6 +951,42 @@ index 0000000..7d7c20a
 +	}
 +	if !isFakeDNS("127.0.0.1", 53) || isFakeDNS("127.0.0.1", 5353) || isFakeDNS("8.8.8.8", 53) {
 +		t.Fatal("only 127.0.0.1:53 is intercepted")
++	}
++}
++
++func TestZapretCustomResolverAnswersInsteadOfSystemDNS(t *testing.T) {
++	defer SetResolver(nil)
++	var asked []string
++	SetResolver(func(_ context.Context, host string) ([]netip.Addr, error) {
++		asked = append(asked, host)
++		if host == "gone.example" {
++			return nil, ErrNameNotFound
++		}
++		return []netip.Addr{netip.MustParseAddr("203.0.113.5"), netip.MustParseAddr("2001:db8::5")}, nil
++	})
++	ask := func(name string, qtype uint16) *mDNS.Msg {
++		request := new(mDNS.Msg)
++		request.SetQuestion(name, qtype)
++		packed, _ := request.Pack()
++		var reply mDNS.Msg
++		if err := reply.Unpack(answer(packed)); err != nil {
++			t.Fatal(err)
++		}
++		return &reply
++	}
++	a := ask("sub.example.", mDNS.TypeA)
++	if len(a.Answer) != 1 || a.Answer[0].(*mDNS.A).A.String() != "203.0.113.5" {
++		t.Fatalf("A: %v", a)
++	}
++	aaaa := ask("sub.example.", mDNS.TypeAAAA)
++	if len(aaaa.Answer) != 1 || aaaa.Answer[0].(*mDNS.AAAA).AAAA.String() != "2001:db8::5" {
++		t.Fatalf("AAAA: %v", aaaa)
++	}
++	if gone := ask("gone.example.", mDNS.TypeA); gone.Rcode != mDNS.RcodeNameError {
++		t.Fatalf("NXDOMAIN expected: %v", gone)
++	}
++	if len(asked) != 3 || asked[0] != "sub.example" {
++		t.Fatalf("asked = %v", asked)
 +	}
 +}
 diff --git a/experimental/libbox/browser_fetch.go b/experimental/libbox/browser_fetch.go
