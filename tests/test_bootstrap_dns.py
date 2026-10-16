@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import struct
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from xray_fluent.engines.singbox.runtime_planner import (
     parse_singbox_document,
@@ -315,19 +317,64 @@ class DiagnosticsTests(unittest.TestCase):
     def test_system_denial_is_told_apart_from_unreachable_dns(self) -> None:
         import socket
 
-        def denies(*_args, **_kwargs):
+        self.assertTrue(bootstrap_dns._denies_name(socket.gaierror(socket.EAI_NONAME, "Name or service not known")))
+        self.assertTrue(bootstrap_dns._denies_name(socket.gaierror(11001, "getaddrinfo failed")))
+        self.assertFalse(bootstrap_dns._denies_name(socket.gaierror(socket.EAI_AGAIN, "Temporary failure")))
+        self.assertFalse(bootstrap_dns._denies_name(OSError("unreachable")))
+        self.assertFalse(bootstrap_dns._denies_name(None))
+
+    def test_refresh_never_asks_the_system_resolver_for_a_server_name(self) -> None:
+        # Открытый запрос имени сервера при каждом подключении выдаёт провайдеру,
+        # куда идёт пользователь; фоновое обновление спрашивает только DoH.
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        previous = bootstrap_dns._cache
+        bootstrap_dns.configure_cache(Path(directory.name) / "bootstrap-dns.json")
+        self.addCleanup(setattr, bootstrap_dns, "_cache", previous)
+        self.addCleanup(bootstrap_dns._session_snapshot.clear)
+        started: list[threading.Thread] = []
+        real_start = threading.Thread.start
+
+        def capture(thread: threading.Thread) -> None:
+            started.append(thread)
+            real_start(thread)
+
+        with (
+            patch.object(bootstrap_dns, "resolve_doh", return_value={"203.0.113.9"}),
+            patch.object(bootstrap_dns.socket, "getaddrinfo") as system,
+            patch.object(threading.Thread, "start", capture),
+        ):
+            self.assertTrue(bootstrap_dns.refresh_async("fresh-refresh.example.com"))
+            for thread in started:
+                thread.join(5)
+        system.assert_not_called()
+
+    def test_tampering_is_inferred_only_from_a_needed_fallback(self) -> None:
+        import socket
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        previous = bootstrap_dns._cache
+        bootstrap_dns.configure_cache(Path(directory.name) / "bootstrap-dns.json")
+        self.addCleanup(setattr, bootstrap_dns, "_cache", previous)
+        self.addCleanup(bootstrap_dns._session_snapshot.clear)
+        bootstrap_dns._cache.remember("vpn.example.com", {"203.0.113.4"})
+        seen: list[str] = []
+        bootstrap_dns.set_tampering_listener(seen.append)
+        self.addCleanup(bootstrap_dns.set_tampering_listener, None)
+
+        def doh_down(_name: str) -> set[str]:
+            raise OSError("doh blocked")
+
+        def denies(_name: str) -> set[str]:
             raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
 
-        def windows_denies(*_args, **_kwargs):
-            raise socket.gaierror(11001, "getaddrinfo failed")
-
-        def unreachable(*_args, **_kwargs):
-            raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
-
-        self.assertTrue(bootstrap_dns.system_denies_name("vpn.example.com", denies))
-        self.assertTrue(bootstrap_dns.system_denies_name("vpn.example.com", windows_denies))
-        self.assertFalse(bootstrap_dns.system_denies_name("vpn.example.com", unreachable))
-        self.assertFalse(bootstrap_dns.system_denies_name("vpn.example.com", lambda *_a, **_k: [("ok",)]))
+        result = bootstrap_dns.resolve_bootstrap("vpn.example.com", doh=doh_down, system=denies)
+        self.assertEqual(result.source, "cache")
+        self.assertEqual(seen, ["vpn.example.com"])
 
     def test_tampering_is_reported_once_per_session(self) -> None:
         seen: list[str] = []

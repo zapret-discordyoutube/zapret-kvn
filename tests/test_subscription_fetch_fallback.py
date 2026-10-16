@@ -97,3 +97,44 @@ class SubscriptionFetchFallbackTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleartextSubscriptionTest(unittest.TestCase):
+    """http:// напрямую показал бы провайдеру весь список серверов."""
+
+    def _http(self, url: str = "http://sub.example/a") -> SimpleNamespace:
+        subscription = _subscription()
+        subscription.url = url
+        return subscription
+
+    def test_cleartext_goes_only_through_the_tunnel(self) -> None:
+        attempts: list[bool] = []
+        proxied = SubscriptionFetchResult(data=b"ok", status=200, via_proxy=True)
+
+        def fake(_sub, *, via_proxy, **_kw):
+            attempts.append(via_proxy)
+            return proxied
+
+        with patch.object(sh, "_fetch_once", side_effect=fake):
+            result = fetch_subscription(self._http(), mode="auto", proxy_port=1080)
+        self.assertEqual(attempts, [True])
+        self.assertIs(result, proxied)
+
+    def test_cleartext_without_tunnel_is_refused_without_network(self) -> None:
+        with patch.object(sh, "_fetch_once") as fetch:
+            for mode in ("auto", "direct"):
+                with self.assertRaises(SubscriptionFetchError) as ctx:
+                    fetch_subscription(self._http(), mode=mode, proxy_port=None)
+                self.assertIn("http://", str(ctx.exception))
+        fetch.assert_not_called()
+
+    def test_local_network_http_stays_direct(self) -> None:
+        for url in ("http://127.0.0.1:8080/s", "http://192.168.1.5/s", "http://localhost/s"):
+            self.assertFalse(sh.cleartext_over_internet(url), url)
+        self.assertTrue(sh.cleartext_over_internet("http://8.8.8.8/s"))
+        self.assertFalse(sh.cleartext_over_internet("https://sub.example/s"))
+
+    def test_direct_redirect_to_cleartext_is_refused(self) -> None:
+        handler = sh._SafeRedirectHandler(direct=True)
+        with self.assertRaises(SubscriptionFetchError):
+            handler.redirect_request(None, None, 302, "Found", {}, "http://sub.example/plain")

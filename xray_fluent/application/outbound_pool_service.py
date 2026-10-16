@@ -13,6 +13,7 @@ import hashlib
 from typing import Iterable
 
 from ..profiles.models import Node
+from ..engines.tls_fingerprint import apply_browser_fingerprint
 from .protocol_core import ProtocolCore, protocol_core
 
 
@@ -53,7 +54,7 @@ class XrayOutboundPool:
     def outbounds(self) -> list[dict]:
         result: list[dict] = []
         for node in self.nodes:
-            outbound = deepcopy(node.outbound)
+            outbound = apply_browser_fingerprint(deepcopy(node.outbound))
             outbound["tag"] = self.tags[node.id]
             result.append(outbound)
         return result

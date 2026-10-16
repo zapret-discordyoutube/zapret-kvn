@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from xray_fluent.application.protocol_core import ProtocolCore, protocol_core
+from xray_fluent.engines.tls_fingerprint import BROWSER_TLS_FINGERPRINT, tls_over_quic
 
 _SUPPORTED_NATIVE_PROTOCOLS = {"vmess", "trojan", "shadowsocks", "socks", "http"}
 
@@ -122,11 +123,13 @@ def _apply_tls(sb: dict[str, Any], stream: dict[str, Any]) -> None:
         return
 
     tls: dict[str, Any] = {"enabled": True}
+    # Без fp в ссылке — рукопожатие Chrome, а не ClientHello библиотеки Go.
+    default_fingerprint = "" if tls_over_quic(stream) else BROWSER_TLS_FINGERPRINT
 
     if security == "reality":
         reality_settings = dict(stream.get("realitySettings") or {})
         tls["server_name"] = str(reality_settings.get("serverName") or "")
-        fingerprint = str(reality_settings.get("fingerprint") or "")
+        fingerprint = str(reality_settings.get("fingerprint") or "") or default_fingerprint
         if fingerprint:
             tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
         public_key = str(reality_settings.get("publicKey") or "")
@@ -140,7 +143,7 @@ def _apply_tls(sb: dict[str, Any], stream: dict[str, Any]) -> None:
         alpn = tls_settings.get("alpn")
         if alpn:
             tls["alpn"] = list(alpn)
-        fingerprint = str(tls_settings.get("fingerprint") or "")
+        fingerprint = str(tls_settings.get("fingerprint") or "") or default_fingerprint
         if fingerprint:
             tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
         # sing-box не умеет закреплять SHA-256 всего сертификата (его

@@ -33,7 +33,6 @@ Safety rules kept from the previous implementation:
 from __future__ import annotations
 
 import ipaddress
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -47,7 +46,6 @@ from ..engines.zapret.endpoint import (
     ServerEndpoint,
     endpoint_for_node,
     resolve_endpoint,
-    resolve_host,
 )
 from ..network.bootstrap_dns import cached_addresses
 from ..engines.zapret.manager import ZapretPlan
@@ -61,9 +59,8 @@ if TYPE_CHECKING:
     from ..profiles.models import Node
     from .controller import AppController
 
-#: Background lookups of pool servers: one thread, never the transition pool.
+#: Pool address registration (cache only): one thread, never the transition pool.
 _POOL_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xray_fluent_pool_dns")
-_POOL_THROTTLE_SEC = 0.05
 
 
 def _known_addresses(endpoints: tuple[ServerEndpoint, ...]) -> tuple[ResolvedEndpoint, ...]:
@@ -512,9 +509,12 @@ class ServerBypass(QObject):
     # ── log redaction of pool servers ────────────────────────────────────
 
     def learn_pool_addresses(self, *, submit=None) -> bool:
-        """Resolve the pool's server names in the background (redaction only).
+        """Mask the pool servers' known IPs in logs — without any network.
 
-        Nothing waits for it and winws2 is never touched; failures are ignored.
+        Only addresses already in the trusted bootstrap cache are registered.
+        Resolving every pool name on connect would show the provider (and the
+        DoH resolvers) the whole server list at once; a hot switch target is
+        resolved afresh — and registered — right before it is used.
         Returns whether a job was queued.
         """
 
@@ -536,10 +536,11 @@ class ServerBypass(QObject):
         def job() -> None:
             for host in hosts:
                 try:
-                    resolve_host(host)
-                except (OSError, UnicodeError):
+                    ipaddress.ip_address(host)
+                    continue
+                except ValueError:
                     pass
-                time.sleep(_POOL_THROTTLE_SEC)
+                register_server_aliases(host, cached_addresses(host))
 
         (submit or _POOL_EXECUTOR.submit)(job)
         return True

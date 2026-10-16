@@ -334,6 +334,10 @@ def resolve_bootstrap(
             _cache.remember(host, addresses)
         return BootstrapResolution(frozenset(addresses), "doh")
 
+    # Открытый запрос провайдеру — только здесь, когда доверенный путь не дал
+    # ответа, и только для сервера, к которому подключаемся сейчас (его IP
+    # провайдер и так увидит в рукопожатии). Имена остальных серверов сюда не
+    # попадают: их адреса берутся из кеша, без сети.
     system_error: Exception | None = None
     try:
         addresses = system(host)
@@ -346,6 +350,11 @@ def resolve_bootstrap(
 
     cached = _cache.lookup(host) if _cache is not None else []
     if cached:
+        if _denies_name(system_error):
+            # Имя известно по прошлому доверенному ответу, а провайдер говорит,
+            # что его нет: ответ подменён. Вывод из запроса, который всё равно
+            # понадобился, — отдельной проверки имени сервера нет.
+            _report_tampering(host)
         return BootstrapResolution(frozenset(cached), "cache")
     raise system_error or BootstrapDnsError(f"имя сервера не разрешено: {trusted_error}")
 
@@ -362,17 +371,11 @@ def set_tampering_listener(listener: Callable[[str], None] | None) -> None:
     _tampering_reported = False
 
 
-def system_denies_name(host: str, lookup: Callable[..., object] = socket.getaddrinfo) -> bool:
-    """Системный резолвер отвечает «имени нет» (а не просто недоступен)."""
+def _denies_name(error: BaseException | None) -> bool:
+    """Системный резолвер ответил «имени нет» (а не просто недоступен)."""
 
-    try:
-        lookup(host, None, type=socket.SOCK_DGRAM)
-    except socket.gaierror as exc:
-        # EAI_NONAME на POSIX, WSAHOST_NOT_FOUND (11001) на Windows.
-        return exc.errno in (socket.EAI_NONAME, 11001)
-    except OSError:
-        return False
-    return False
+    # EAI_NONAME на POSIX, WSAHOST_NOT_FOUND (11001) на Windows.
+    return isinstance(error, socket.gaierror) and error.errno in (socket.EAI_NONAME, 11001)
 
 
 def _report_tampering(host: str) -> None:
@@ -410,8 +413,8 @@ def refresh_async(host: str) -> bool:
         cache = _cache
         if cache is not None and addresses:
             cache.remember(host, addresses)
-        if addresses and system_denies_name(host):
-            _report_tampering(host)
+        # Системному резолверу имя сервера здесь не показываем: открытый
+        # запрос при каждом подключении сам выдаёт провайдеру, куда мы идём.
 
     threading.Thread(target=run, name="bootstrap-dns-refresh", daemon=True).start()
     return True

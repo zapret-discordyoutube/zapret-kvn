@@ -14,6 +14,7 @@ from .port_allocator import apply_proxy_port_auto_selection
 from .runtime_introspection import extract_xray_runtime_ports
 from .runtime_security import strip_xray_proxy_inbounds
 from .session_state import XrayRuntimeConfig
+from ..engines.tls_fingerprint import apply_browser_fingerprint
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -265,7 +266,7 @@ def build_runtime_xray_config(controller: AppController, node: Node | None = Non
                 ensure_xray_pool_control_plane(payload, pool)
                 outbound_pool_tags = dict(pool.tags)
             else:
-                proxy_outbound = deepcopy(node.outbound)
+                proxy_outbound = apply_browser_fingerprint(deepcopy(node.outbound))
                 proxy_outbound["tag"] = "proxy"
                 outbounds[index] = proxy_outbound
             used_selected_node = True

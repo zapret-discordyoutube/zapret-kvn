@@ -31,6 +31,7 @@ from ..engines.hysteria.runtime_contract import classify_hysteria_uri
 from ..importer.link_parser import xray_core_tls_problem
 from .http_utils import build_opener
 from ..profiles.models import Node
+from ..engines.tls_fingerprint import apply_browser_fingerprint
 
 # Обычный браузерный User-Agent: хост тестового файла не должен видеть, что с
 # адреса прокси-сервера ходит именно это приложение.
@@ -326,7 +327,7 @@ def build_speed_test_config(node: Node, http_port: int) -> dict:
     доли секунды вместо 9–16 с на холодном диске.
     """
 
-    outbound = json.loads(json.dumps(node.outbound))
+    outbound = apply_browser_fingerprint(json.loads(json.dumps(node.outbound)))
     outbound["tag"] = "proxy"
     return {
         "log": {"loglevel": "none"},

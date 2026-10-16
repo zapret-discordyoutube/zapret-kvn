@@ -272,7 +272,7 @@ class GateTests(unittest.TestCase):
         controller._request_transition.assert_not_called()
         self.resolver.assert_called_once()
 
-    def test_pool_addresses_are_learned_once_in_the_background(self) -> None:
+    def test_pool_addresses_are_learned_once_from_cache_only(self) -> None:
         controller = _controller(_vless())
         controller.xray_outbound_pool.return_value.nodes = [_vless("one.example"), _vless("two.example")]
         bypass = self._bypass(controller)
@@ -280,12 +280,16 @@ class GateTests(unittest.TestCase):
         self.assertTrue(bypass.learn_pool_addresses(submit=jobs.append))
         self.assertFalse(bypass.learn_pool_addresses(submit=jobs.append))
         with (
-            patch("xray_fluent.application.server_bypass.resolve_host") as resolve,
-            patch("xray_fluent.application.server_bypass.time.sleep"),
+            patch("xray_fluent.application.server_bypass.cached_addresses") as cached,
+            patch("xray_fluent.application.server_bypass.register_server_aliases") as aliases,
+            patch("xray_fluent.engines.zapret.endpoint.resolve_bootstrap") as network,
         ):
-            resolve.side_effect = [OSError("offline"), {"203.0.113.2"}]
+            cached.side_effect = [[], ["203.0.113.2"]]
             jobs[0]()
-        self.assertEqual([c.args[0] for c in resolve.call_args_list], ["one.example", "two.example"])
+        # Только кеш: имена остальных серверов в сеть (DNS/DoH) не уходят.
+        network.assert_not_called()
+        self.assertEqual([c.args[0] for c in cached.call_args_list], ["one.example", "two.example"])
+        self.assertEqual(aliases.call_args_list[-1].args, ("two.example", ["203.0.113.2"]))
         self.assertEqual(controller.zapret.launches, [])
 
     def test_required_rule_resolves_then_waits_for_its_process(self) -> None:

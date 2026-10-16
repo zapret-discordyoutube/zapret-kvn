@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import locale
@@ -83,10 +84,39 @@ class SubscriptionFetchResult:
     elapsed: float = 0.0
 
 
+CLEARTEXT_DIRECT_ERROR = (
+    "Подписка по http:// идёт открытым текстом: напрямую провайдер увидел бы весь список "
+    "серверов. Такая подписка обновляется только через подключённый VPN — подключитесь "
+    "или попросите у провайдера ссылку https://"
+)
+
+
+def cleartext_over_internet(url: str) -> bool:
+    """http:// к адресу в интернете: тело подписки увидит любой на пути."""
+
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() != "http":
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (address.is_private or address.is_loopback or address.is_link_local)
+
+
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, *, direct: bool = False) -> None:
+        super().__init__()
+        self._direct = direct
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urlsplit(newurl).scheme.lower() not in {"http", "https"}:
             raise SubscriptionFetchError("Перенаправление подписки использует небезопасную схему")
+        if self._direct and cleartext_over_internet(newurl):
+            raise SubscriptionFetchError(CLEARTEXT_DIRECT_ERROR)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -392,12 +422,17 @@ def fetch_subscription(
     url = validate_subscription_url(subscription.url)
     if mode not in {"auto", "direct", "proxy"}:
         raise SubscriptionFetchError(f"Неизвестный режим загрузки: {mode}")
+    # Открытый http:// напрямую показал бы провайдеру весь список серверов —
+    # только через туннель.
+    cleartext = cleartext_over_internet(url)
     attempts: list[tuple[bool, int | None]] = []
-    if mode in {"auto", "direct"}:
+    if mode in {"auto", "direct"} and not cleartext:
         attempts.append((False, None))
     if mode in {"auto", "proxy"} and proxy_port and proxy_port > 0:
         attempts.append((True, int(proxy_port)))
-    if mode == "proxy" and not attempts:
+    if not attempts:
+        if cleartext:
+            raise SubscriptionFetchError(CLEARTEXT_DIRECT_ERROR)
         raise SubscriptionFetchError("Активный HTTP-прокси недоступен")
 
     unconditional = bool(force_refresh) or (
@@ -511,7 +546,7 @@ def _fetch_once(
         if via_proxy and proxy_port
         else urllib.request.ProxyHandler({})
     )
-    opener = build_opener(proxy_handler, _SafeRedirectHandler())
+    opener = build_opener(proxy_handler, _SafeRedirectHandler(direct=not via_proxy))
     headers = subscription_request_headers(subscription)
     if not force_refresh and subscription.etag:
         headers["If-None-Match"] = subscription.etag
