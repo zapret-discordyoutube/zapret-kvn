@@ -96,10 +96,10 @@
     },
     {
       "id": "runetfreedom-routing-data",
-      "version": "d1389a5dd4f095771df886a4d1703635ff549bee",
-      "archive": "russia-v2ray-rules-dat-d1389a5dd4f095771df886a4d1703635ff549bee.zip",
-      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/d1389a5dd4f095771df886a4d1703635ff549bee.zip",
-      "sha256": "53fae373d3b68edecf4d76ac59b0c673abd50f3504c51a0ea76942b603db42f8",
+      "version": "1535a8398e2ecb00f8e056be56b602a0c5c2d7cd",
+      "archive": "russia-v2ray-rules-dat-1535a8398e2ecb00f8e056be56b602a0c5c2d7cd.zip",
+      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/1535a8398e2ecb00f8e056be56b602a0c5c2d7cd.zip",
+      "sha256": "abf03f2e53d1199116471ee4c284826484d8d6d778cf92198275aa549e09cdde",
       "files": [
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
         { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
