@@ -28,6 +28,8 @@ class BrowserFetchPatchTests(unittest.TestCase):
             "cmd/sing-box/cmd_tools_browser_fetch.go",
             "common/browserfetch/browserfetch.go",
             "common/browserfetch/browserfetch_stub.go",
+            "common/browserfetch/engine_other.go",
+            "common/browserfetch/engine_unix.go",
             "common/browserfetch/socket_control_unix.go",
             "common/browserfetch/types.go",
             "common/browserfetch/zapret_browserfetch_test.go",
@@ -43,6 +45,10 @@ class BrowserFetchPatchTests(unittest.TestCase):
         self.assertIn("SetEnableHTTP2(true)", text)
         self.assertIn("only https is allowed", text)
         self.assertIn("ChromeUserAgent(engine.Version())", text)
+        # Android: без JavaVM системный DNS Chromium роняет процесс — свой DNS.
+        self.assertIn("SetDNSServerOverride", text)
+        # Окна HTTP/2 не трогаем: свои значения (как у naive) поменяли бы отпечаток.
+        self.assertNotIn("SetHTTP2Options", text)
 
     def test_builder_applies_tests_and_records_the_patch(self) -> None:
         text = BUILDER.read_text(encoding="utf-8")

@@ -78,10 +78,10 @@ index 0000000..081720f
 +}
 diff --git a/common/browserfetch/browserfetch.go b/common/browserfetch/browserfetch.go
 new file mode 100644
-index 0000000..073e15a
+index 0000000..9fa9a29
 --- /dev/null
 +++ b/common/browserfetch/browserfetch.go
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,152 @@
 +//go:build with_naive_outbound
 +
 +// Package browserfetch — HTTPS-клиент, неотличимый от Chrome на проводе.
@@ -115,8 +115,6 @@ index 0000000..073e15a
 +	engine        cronet.Engine
 +	agent         string
 +	engineErr     error
-+	// Свой dialer сокетов (Android: защита от своего VPN), до запуска движка.
-+	pendingDialer cronet.Dialer
 +)
 +
 +func sharedEngine() (cronet.Engine, string, error) {
@@ -139,18 +137,21 @@ index 0000000..073e15a
 +	}()
 +	engine = cronet.NewEngine()
 +	agent = ChromeUserAgent(engine.Version())
-+	if pendingDialer != nil {
-+		engine.SetDialer(pendingDialer)
-+	}
 +	params := cronet.NewEngineParams()
++	defer params.Destroy()
++	if err := configurePlatform(engine, params); err != nil {
++		engineErr = &UnavailableError{Cause: "configure engine: " + err.Error()}
++		return
++	}
 +	params.SetEnableHTTP2(true)
 +	// Chrome ходит по QUIC только к узлам, объявившим h3 (Alt-Svc); у
 +	// одиночных запросов без кеша Alt-Svc это всегда TCP — как здесь.
 +	params.SetEnableQuic(false)
 +	params.SetEnableBrotli(true)
 +	params.SetUserAgent(agent)
-+	engine.StartWithParams(params)
-+	params.Destroy()
++	if result := engine.StartWithParams(params); result != cronet.ResultSuccess {
++		engineErr = &UnavailableError{Cause: fmt.Sprint("start engine: ", int(result))}
++	}
 +}
 +
 +// UserAgent — User-Agent, с которым уходят запросы (по версии движка).
@@ -254,78 +255,255 @@ index 0000000..26e5d80
 +}
 +
 +func UserAgent() string { return "" }
-diff --git a/common/browserfetch/socket_control_unix.go b/common/browserfetch/socket_control_unix.go
+diff --git a/common/browserfetch/engine_other.go b/common/browserfetch/engine_other.go
 new file mode 100644
-index 0000000..da008fc
+index 0000000..0d27b77
 --- /dev/null
-+++ b/common/browserfetch/socket_control_unix.go
-@@ -0,0 +1,80 @@
++++ b/common/browserfetch/engine_other.go
+@@ -0,0 +1,8 @@
++//go:build with_naive_outbound && !unix
++
++package browserfetch
++
++import cronet "github.com/sagernet/cronet-go"
++
++// Windows: системный резолвер и сокеты Chromium работают без JNI — движок как есть.
++func configurePlatform(cronet.Engine, cronet.EngineParams) error { return nil }
+diff --git a/common/browserfetch/engine_unix.go b/common/browserfetch/engine_unix.go
+new file mode 100644
+index 0000000..e543f02
+--- /dev/null
++++ b/common/browserfetch/engine_unix.go
+@@ -0,0 +1,243 @@
 +//go:build with_naive_outbound && unix
 +
 +package browserfetch
 +
 +import (
 +	"context"
++	"encoding/binary"
++	"errors"
++	"io"
 +	"net"
++	"net/netip"
++	"os"
 +	"strconv"
++	"strings"
 +	"syscall"
 +	"time"
 +
 +	cronet "github.com/sagernet/cronet-go"
 +	E "github.com/sagernet/sing/common/exceptions"
++
++	mDNS "github.com/miekg/dns"
 +)
 +
-+// SocketControl вызывается для каждого TCP-сокета движка до connect — на
-+// Android здесь сокет защищают от своего же VPN (VpnService.protect) или
-+// привязывают к физической сети. Без него сокеты Cronet ушли бы в туннель.
-+type SocketControl func(fd uintptr) error
++// Внутри libbox у Chromium нет JavaVM: его системный резолвер и слежение за
++// сетью на Android идут через JNI и роняют процесс на первом же запросе. Как
++// и naive-выход того же ядра, движок получает свои TCP/UDP-dialer'ы и
++// поддельный DNS-сервер: Chromium спрашивает 127.0.0.1:53, а отвечает
++// резолвер Go. Отпечаток TLS/HTTP2 от этого не меняется.
++var fakeDNS = netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 53)
 +
 +const dialTimeout = 15 * time.Second
 +
-+// SetSocketControl задаёт обработчик сокетов. Действует только до первого
-+// запроса (движок Chromium принимает dialer лишь до запуска).
-+func SetSocketControl(control SocketControl) error {
-+	engineMu.Lock()
-+	defer engineMu.Unlock()
-+	if engineStarted {
-+		return E.New("browserfetch: engine already started")
++func configurePlatform(engine cronet.Engine, params cronet.EngineParams) error {
++	engine.SetDialer(dialTCP)
++	engine.SetUDPDialer(dialUDP)
++	if err := params.SetAsyncDNS(true); err != nil {
++		return err
 +	}
-+	pendingDialer = nil
-+	if control != nil {
-+		pendingDialer = socketDialer(control)
-+	}
-+	return nil
++	return params.SetDNSServerOverride([]string{fakeDNS.String()})
 +}
 +
-+func socketDialer(control SocketControl) cronet.Dialer {
-+	dialer := net.Dialer{
-+		Timeout: dialTimeout,
-+		Control: func(_, _ string, raw syscall.RawConn) error {
++func isFakeDNS(address string, port uint16) bool {
++	addr, err := netip.ParseAddr(address)
++	return err == nil && addr.Unmap() == fakeDNS.Addr() && port == fakeDNS.Port()
++}
++
++func netDialer() net.Dialer {
++	control := currentSocketControl()
++	dialer := net.Dialer{Timeout: dialTimeout}
++	if control != nil {
++		dialer.Control = func(_, _ string, raw syscall.RawConn) error {
 +			var controlErr error
 +			if err := raw.Control(func(fd uintptr) { controlErr = control(fd) }); err != nil {
 +				return err
 +			}
 +			return controlErr
-+		},
-+	}
-+	return func(address string, port uint16) int {
-+		conn, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(address, strconv.Itoa(int(port))))
-+		if err != nil {
-+			return netErrorCode(err)
 +		}
-+		defer conn.Close()
-+		file, err := conn.(*net.TCPConn).File()
++	}
++	return dialer
++}
++
++func dialTCP(address string, port uint16) int {
++	if isFakeDNS(address, port) {
++		fd, conn, err := socketPair(syscall.SOCK_STREAM)
 +		if err != nil {
 +			return -104 // ERR_CONNECTION_FAILED
 +		}
-+		defer file.Close()
-+		// Своя копия дескриптора: файл и соединение закроются, сокет останется движку.
-+		fd, err := syscall.Dup(int(file.Fd()))
-+		if err != nil {
-+			return -104
-+		}
++		go serveDNSStream(conn.(net.Conn))
 +		return fd
 +	}
++	dialer := netDialer()
++	conn, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(address, strconv.Itoa(int(port))))
++	if err != nil {
++		return netErrorCode(err)
++	}
++	defer conn.Close()
++	fd, err := dupFD(conn.(syscall.Conn))
++	if err != nil {
++		return -104
++	}
++	return fd
++}
++
++func dialUDP(address string, port uint16) (int, string, uint16, func()) {
++	if isFakeDNS(address, port) {
++		fd, conn, err := socketPair(syscall.SOCK_DGRAM)
++		if err != nil {
++			return -104, "", 0, nil
++		}
++		packet := conn.(net.PacketConn)
++		go servePackets(packet)
++		return fd, "", 0, func() { packet.Close() }
++	}
++	dialer := netDialer()
++	conn, err := dialer.DialContext(context.Background(), "udp", net.JoinHostPort(address, strconv.Itoa(int(port))))
++	if err != nil {
++		return netErrorCode(err), "", 0, nil
++	}
++	defer conn.Close()
++	fd, err := dupFD(conn.(syscall.Conn))
++	if err != nil {
++		return -104, "", 0, nil
++	}
++	local, _ := netip.ParseAddrPort(conn.LocalAddr().String())
++	return fd, local.Addr().Unmap().String(), local.Port(), nil
++}
++
++// dupFD — своя копия дескриптора для движка: соединение Go закроется, сокет останется.
++func dupFD(conn syscall.Conn) (int, error) {
++	raw, err := conn.SyscallConn()
++	if err != nil {
++		return -1, err
++	}
++	fd := -1
++	var dupErr error
++	if err = raw.Control(func(value uintptr) {
++		fd, dupErr = syscall.Dup(int(value))
++		if dupErr == nil {
++			syscall.CloseOnExec(fd)
++		}
++	}); err != nil {
++		return -1, err
++	}
++	return fd, dupErr
++}
++
++// socketPair: один конец — движку, второй — нашему DNS-серверу.
++func socketPair(kind int) (int, any, error) {
++	fds, err := syscall.Socketpair(syscall.AF_UNIX, kind, 0)
++	if err != nil {
++		return -1, nil, err
++	}
++	syscall.CloseOnExec(fds[0])
++	file := os.NewFile(uintptr(fds[1]), "browserfetch-dns")
++	defer file.Close()
++	var conn any
++	if kind == syscall.SOCK_DGRAM {
++		conn, err = net.FilePacketConn(file)
++	} else {
++		conn, err = net.FileConn(file)
++	}
++	if err != nil {
++		syscall.Close(fds[0])
++		return -1, nil, err
++	}
++	return fds[0], conn, nil
++}
++
++func serveDNSStream(conn net.Conn) {
++	defer conn.Close()
++	for {
++		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
++		var length uint16
++		if binary.Read(conn, binary.BigEndian, &length) != nil || length == 0 {
++			return
++		}
++		query := make([]byte, int(length))
++		if _, err := io.ReadFull(conn, query); err != nil {
++			return
++		}
++		reply := answer(query)
++		if reply == nil {
++			continue
++		}
++		framed := binary.BigEndian.AppendUint16(nil, uint16(len(reply)))
++		if _, err := conn.Write(append(framed, reply...)); err != nil {
++			return
++		}
++	}
++}
++
++func servePackets(conn net.PacketConn) {
++	defer conn.Close()
++	buffer := make([]byte, 65535)
++	for {
++		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
++		n, peer, err := conn.ReadFrom(buffer)
++		if err != nil {
++			return
++		}
++		if reply := answer(buffer[:n]); reply != nil {
++			_, _ = conn.WriteTo(reply, peer)
++		}
++	}
++}
++
++// answer — ответ на один DNS-запрос резолвером Go (на Android с cgo это
++// системный getaddrinfo; сокеты движка при этом идут через SocketControl).
++func answer(query []byte) []byte {
++	var request mDNS.Msg
++	if request.Unpack(query) != nil {
++		return nil
++	}
++	response := new(mDNS.Msg)
++	response.SetReply(&request)
++	response.RecursionAvailable = true
++	for _, question := range request.Question {
++		network := map[uint16]string{mDNS.TypeA: "ip4", mDNS.TypeAAAA: "ip6"}[question.Qtype]
++		if network == "" {
++			continue // HTTPS/SVCB и прочее — пустой ответ без ошибки
++		}
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		// Имя в запросе полное, с точкой; /etc/hosts резолвер Go сверяет без неё.
++		addresses, err := net.DefaultResolver.LookupNetIP(ctx, network, strings.TrimSuffix(question.Name, "."))
++		cancel()
++		if err != nil {
++			var dnsErr *net.DNSError
++			if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
++				response.Rcode = mDNS.RcodeNameError
++			} else if len(response.Answer) == 0 {
++				response.Rcode = mDNS.RcodeServerFailure
++			}
++			continue
++		}
++		header := mDNS.RR_Header{Name: question.Name, Rrtype: question.Qtype, Class: mDNS.ClassINET, Ttl: 60}
++		for _, address := range addresses {
++			address = address.Unmap()
++			if question.Qtype == mDNS.TypeA && address.Is4() {
++				response.Answer = append(response.Answer, &mDNS.A{Hdr: header, A: address.AsSlice()})
++			} else if question.Qtype == mDNS.TypeAAAA && address.Is6() {
++				response.Answer = append(response.Answer, &mDNS.AAAA{Hdr: header, AAAA: address.AsSlice()})
++			}
++		}
++	}
++	packed, err := response.Pack()
++	if err != nil {
++		return nil
++	}
++	return packed
 +}
 +
 +func netErrorCode(err error) int {
@@ -339,6 +517,42 @@ index 0000000..da008fc
 +	default:
 +		return -104 // ERR_CONNECTION_FAILED
 +	}
++}
+diff --git a/common/browserfetch/socket_control_unix.go b/common/browserfetch/socket_control_unix.go
+new file mode 100644
+index 0000000..76a85e2
+--- /dev/null
++++ b/common/browserfetch/socket_control_unix.go
+@@ -0,0 +1,30 @@
++//go:build with_naive_outbound && unix
++
++package browserfetch
++
++import "sync/atomic"
++
++// SocketControl вызывается для каждого сокета движка до connect — на Android
++// здесь сокет защищают от своего же VPN (VpnService.protect) или привязывают
++// к физической сети. Без него при поднятом VPN сокеты Cronet ушли бы в туннель.
++type SocketControl func(fd uintptr) error
++
++var socketControl atomic.Pointer[SocketControl]
++
++// SetSocketControl задаёт обработчик сокетов; nil — системные сокеты как есть.
++// Читается на каждом новом сокете, поэтому менять его можно в любой момент.
++func SetSocketControl(control SocketControl) error {
++	if control == nil {
++		socketControl.Store(nil)
++		return nil
++	}
++	socketControl.Store(&control)
++	return nil
++}
++
++func currentSocketControl() SocketControl {
++	if control := socketControl.Load(); control != nil {
++		return *control
++	}
++	return nil
 +}
 diff --git a/common/browserfetch/types.go b/common/browserfetch/types.go
 new file mode 100644
@@ -595,10 +809,10 @@ index 0000000..2b5a975
 +}
 diff --git a/common/browserfetch/zapret_socket_control_test.go b/common/browserfetch/zapret_socket_control_test.go
 new file mode 100644
-index 0000000..06849c8
+index 0000000..7d7c20a
 --- /dev/null
 +++ b/common/browserfetch/zapret_socket_control_test.go
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,90 @@
 +//go:build with_naive_outbound && unix
 +
 +package browserfetch
@@ -606,6 +820,8 @@ index 0000000..06849c8
 +import (
 +	"context"
 +	"net"
++
++	mDNS "github.com/miekg/dns"
 +	"os"
 +	"os/exec"
 +	"sync/atomic"
@@ -660,8 +876,31 @@ index 0000000..06849c8
 +	if controlled.Load() == 0 {
 +		t.Fatal("socket control was not called")
 +	}
-+	if SetSocketControl(nil) == nil {
-+		t.Fatal("dialer must be refused once the engine runs")
++}
++
++func TestZapretFakeDNSAnswersWithTheGoResolver(t *testing.T) {
++	query := func(name string, qtype uint16) *mDNS.Msg {
++		request := new(mDNS.Msg)
++		request.SetQuestion(name, qtype)
++		packed, _ := request.Pack()
++		var reply mDNS.Msg
++		if err := reply.Unpack(answer(packed)); err != nil {
++			t.Fatal(err)
++		}
++		return &reply
++	}
++	local := query("localhost.", mDNS.TypeA)
++	if local.Rcode != mDNS.RcodeSuccess || len(local.Answer) == 0 {
++		t.Fatalf("localhost A: %v", local)
++	}
++	if missing := query("zapret-browserfetch-test.invalid.", mDNS.TypeA); missing.Rcode != mDNS.RcodeNameError {
++		t.Fatalf("invalid name must be NXDOMAIN: %v", missing)
++	}
++	if other := query("localhost.", mDNS.TypeHTTPS); other.Rcode != mDNS.RcodeSuccess || len(other.Answer) != 0 {
++		t.Fatalf("HTTPS record must be an empty success: %v", other)
++	}
++	if !isFakeDNS("127.0.0.1", 53) || isFakeDNS("127.0.0.1", 5353) || isFakeDNS("8.8.8.8", 53) {
++		t.Fatal("only 127.0.0.1:53 is intercepted")
 +	}
 +}
 diff --git a/experimental/libbox/browser_fetch.go b/experimental/libbox/browser_fetch.go
