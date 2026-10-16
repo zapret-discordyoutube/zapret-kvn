@@ -1062,7 +1062,14 @@ class AppController(QObject):
         preferred_relay_port = 0
         preferred_protect_port = 0
         preferred_protect_password = ""
+        allowed_proxy_ports: set[int] = set()
         session = self._active_session
+        if session is not None and session.active_core == "singbox":
+            # Порты своей же сессии заняты ею самой: переподключение их сохраняет.
+            if session.socks_port > 0:
+                allowed_proxy_ports.add(int(session.socks_port))
+            if session.http_port > 0:
+                allowed_proxy_ports.add(int(session.http_port))
         if session is not None and session.active_core == "singbox" and not replacement:
             if session.hybrid:
                 preferred_relay_port = session.sidecar_relay_port
@@ -1074,6 +1081,7 @@ class AppController(QObject):
         return plan_singbox_runtime(
             document,
             node,
+            allowed_proxy_ports=allowed_proxy_ports,
             preferred_relay_port=preferred_relay_port,
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,

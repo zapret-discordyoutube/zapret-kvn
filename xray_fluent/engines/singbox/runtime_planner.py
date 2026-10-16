@@ -50,6 +50,9 @@ _APP_SINGBOX_HYBRID_RELAY_OUTBOUND_TAGS = (
     "__app_hybrid_relay_b",
 )
 _PUBLIC_PROXY_LISTEN = "0.0.0.0"
+#: Локальный прокси режима TUN: только для программ этого компьютера.
+#: Раздачу прокси в сеть включают режимом «Прокси»; в TUN её никто не просил.
+_LOOPBACK_PROXY_LISTEN = "127.0.0.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +242,7 @@ def plan_singbox_runtime(
     document: ParsedSingboxDocument,
     node: Node | None,
     *,
+    allowed_proxy_ports: set[int] | None = None,
     preferred_relay_port: int = 0,
     preferred_protect_port: int = 0,
     preferred_protect_password: str = "",
@@ -246,6 +250,14 @@ def plan_singbox_runtime(
 ) -> SingboxRuntimePlan:
     runtime_config = deepcopy(document.payload)
     strip_singbox_proxy_inbounds(runtime_config)
+    # Тот же локальный SOCKS/HTTP, что в режиме «Прокси», но на loopback:
+    # прокси, вписанный в Telegram (кнопка «Добавить в Telegram») или другую
+    # программу, не обрывает её связь при переходе в TUN (16.10.2026).
+    selection = _ensure_singbox_proxy_runtime_contract(
+        runtime_config,
+        allowed_proxy_ports=allowed_proxy_ports,
+        listen=_LOOPBACK_PROXY_LISTEN,
+    )
     clash_api_port = _ensure_singbox_metrics_contract(runtime_config)
     _ensure_singbox_tun_runtime_contract(runtime_config)
 
@@ -256,6 +268,10 @@ def plan_singbox_runtime(
         preferred_relay_port=preferred_relay_port,
         preferred_protect_port=preferred_protect_port,
         preferred_protect_password=preferred_protect_password,
+        requested_socks_port=selection.requested_socks_port,
+        requested_http_port=selection.requested_http_port,
+        socks_port=selection.socks_port,
+        http_port=selection.http_port,
         clash_api_port=clash_api_port,
         pool_nodes=pool_nodes,
     )
@@ -1132,6 +1148,7 @@ def _ensure_singbox_proxy_runtime_contract(
     payload: dict[str, Any],
     *,
     allowed_proxy_ports: set[int] | None,
+    listen: str = _PUBLIC_PROXY_LISTEN,
 ) -> _ProxyPortSelection:
     inbounds = _ensure_list(payload, "inbounds")
     excluded_ports: set[int] = set()
@@ -1154,7 +1171,7 @@ def _ensure_singbox_proxy_runtime_contract(
             return True
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind((_PUBLIC_PROXY_LISTEN, port))
+                sock.bind((listen, port))
             return True
         except OSError:
             return False
@@ -1181,13 +1198,13 @@ def _ensure_singbox_proxy_runtime_contract(
             {
                 "type": "mixed",
                 "tag": "socks-in",
-                "listen": _PUBLIC_PROXY_LISTEN,
+                "listen": listen,
                 "listen_port": selection.socks_port,
             },
             {
                 "type": "http",
                 "tag": "http-in",
-                "listen": _PUBLIC_PROXY_LISTEN,
+                "listen": listen,
                 "listen_port": selection.http_port,
             },
         ]

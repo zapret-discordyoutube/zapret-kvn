@@ -327,6 +327,27 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
         self.assertIsNone(controller._pending_transport_node_id)
         controller._commit_pending_transport_selection.assert_not_called()
 
+    def test_tun_runtime_keeps_loopback_proxy_next_to_tun(self) -> None:
+        """Прокси, вписанный в Telegram, не обрывается при переходе в TUN (16.10.2026)."""
+
+        document = parse_singbox_document(TEMPLATE_PATH, TEMPLATE_PATH.read_text(encoding="utf-8"))
+        for link in (
+            "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls&type=tcp&sni=example.com#v",
+        ):
+            with self.subTest(link=link.split(":", 1)[0]):
+                plan = plan_singbox_runtime(document, parse_single(link), allowed_proxy_ports={1390, 1391})
+                self.assertEqual((plan.socks_port, plan.http_port), (1390, 1391))
+                inbounds = [
+                    (item.get("type"), item.get("listen"), item.get("listen_port"))
+                    for item in plan.singbox_config["inbounds"]
+                ]
+                self.assertIn(("mixed", "127.0.0.1", 1390), inbounds)
+                self.assertIn(("http", "127.0.0.1", 1391), inbounds)
+                self.assertEqual(1, sum(1 for kind, _listen, _port in inbounds if kind == "tun"))
+                # В TUN раздачи прокси в сеть нет: ни одного входа на 0.0.0.0.
+                self.assertNotIn("0.0.0.0", {listen for _kind, listen, _port in inbounds})
+
     def test_default_proxy_runtime_replaces_tun_with_public_proxy_inbounds(self) -> None:
         plan = self._build_plan(
             "hy2://secret@example.com:443/?sni=cdn.example.com&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

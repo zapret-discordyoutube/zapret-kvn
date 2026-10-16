@@ -847,7 +847,8 @@ class MainWindow(FluentWindow):
             self._config_saved_unapplied = False  # новая сессия читает сохранённый конфиг
         self.dashboard_page.set_active_tun_mode(self.controller.active_tun_mode())
         self.dashboard_page.set_connection(connected)
-        if connected and not self.controller.state.settings.tun_mode:
+        # Локальный прокси есть в обоих режимах; в TUN — только на 127.0.0.1.
+        if connected:
             socks_port, http_port = self.controller.get_effective_proxy_ports()
             self.dashboard_page.set_proxy_ports(socks_port, http_port)
         else:

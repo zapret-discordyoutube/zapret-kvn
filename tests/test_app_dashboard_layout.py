@@ -118,9 +118,12 @@ class DashboardWordWrapTest(unittest.TestCase):
         )
         self.assertIn("Порт 1392 принимает и HTTP", page.connection_ports_label.toolTip())
 
+        # TUN держит тот же прокси на loopback: адрес остаётся на панели
+        # (вписанный в Telegram прокси не обрывается при смене режима).
         page.set_tun_mode(True)
         page._do_refresh_dashboard()
-        self.assertTrue(page.connection_ports_label.isHidden())
+        self.assertFalse(page.connection_ports_label.isHidden())
+        self.assertIn("только программам этого компьютера", page.connection_ports_label.toolTip())
         page.deleteLater()
         QApplication.processEvents()
 
@@ -140,7 +143,8 @@ class DashboardWordWrapTest(unittest.TestCase):
 
         page.set_tun_mode(True)
         page._do_refresh_dashboard()
-        self.assertTrue(page.proxy_address_row.isHidden())
+        self.assertFalse(page.proxy_address_row.isHidden())
+        self.assertTrue(page.telegram_proxy_btn.isHidden())
         page.deleteLater()
         QApplication.processEvents()
 
@@ -249,10 +253,13 @@ class DashboardEffectivePortsWiringTest(unittest.TestCase):
         dashboard.set_connection.assert_called_once_with(True)
         dashboard.set_proxy_ports.assert_called_once_with(1392, 1393)
 
-    def test_tun_connection_never_advertises_proxy_ports(self) -> None:
+    def test_tun_connection_advertises_its_loopback_proxy_ports(self) -> None:
+        """С 16.10.2026 TUN держит локальный прокси на 127.0.0.1: панель его называет."""
+
         dashboard = Mock()
         controller = Mock()
         controller.state.settings.tun_mode = True
+        controller.get_effective_proxy_ports.return_value = (1390, 1391)
         window = SimpleNamespace(
             dashboard_page=dashboard,
             controller=controller,
@@ -265,8 +272,7 @@ class DashboardEffectivePortsWiringTest(unittest.TestCase):
 
         MainWindow._on_connection_changed(window, True)
 
-        dashboard.set_proxy_ports.assert_called_once_with(0, 0)
-        controller.get_effective_proxy_ports.assert_not_called()
+        dashboard.set_proxy_ports.assert_called_once_with(1390, 1391)
 
 
 class DashboardActiveModeWiringTest(unittest.TestCase):

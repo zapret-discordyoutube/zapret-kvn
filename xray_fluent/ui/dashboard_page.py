@@ -892,6 +892,8 @@ class DashboardPage(StackedSection):
         self.connection_ports_label.setToolTip(self._proxy_ports_tooltip())
         self.connection_ports_label.setVisible(bool(ports_text))
         self.proxy_address_row.setVisible(bool(ports_text))
+        # В TUN Telegram идёт через сервер сам; кнопка нужна режиму «Прокси».
+        self.telegram_proxy_btn.setVisible(bool(ports_text) and not self._settings.tun_mode)
 
     def _color_state_title(self, *_args) -> None:
         """Заголовок состояния в цвет сферы: зелёный — есть защита, красный — ошибка."""
@@ -1112,12 +1114,7 @@ class DashboardPage(StackedSection):
         return f"{action} {'работает' if self._connected else 'остановлен'}"
 
     def _proxy_ports_text(self) -> str:
-        if (
-            not self._connected
-            or self._settings.tun_mode
-            or self._proxy_socks_port <= 0
-            or self._proxy_http_port <= 0
-        ):
+        if not self._connected or self._proxy_socks_port <= 0 or self._proxy_http_port <= 0:
             return ""
         # Каждый протокол — со своим портом; то, что SOCKS-порт sing-box
         # (mixed) понимает и HTTP, — подробность для подсказки, не для строки.
@@ -1149,6 +1146,8 @@ class DashboardPage(StackedSection):
         )
         if self._is_singbox_proxy_mode():
             tip += f"\nПорт {self._proxy_socks_port} принимает и HTTP (режим mixed)"
+        if self._settings.tun_mode:
+            tip += "\nВ режиме VPN (TUN) прокси доступен только программам этого компьютера"
         return tip
 
     def _system_proxy_note(self) -> str:
