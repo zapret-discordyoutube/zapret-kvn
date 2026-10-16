@@ -2,9 +2,11 @@
 
 Системный резолвер на российских сетях отвечает NXDOMAIN на заблокированные
 имена, а открытый DNS к публичным резолверам перехватывается. Имя сервера
-поэтому сначала спрашивается по DoH у нескольких резолверов по литеральному
-IP: в TLS-приветствии нет имени сервера (SNI для IP не отправляется), а
-сертификат проверяется по IP из SAN. Ответ запоминается: когда защищённый
+поэтому сначала спрашивается по DoH по литеральному IP резолвера: в
+TLS-приветствии нет имени сервера (SNI для IP не отправляется), а сертификат
+проверяется по IP из SAN. Запрос идёт сетевым стеком Chromium из нашего ядра
+(``browser_fetch``) — на проводе это Chrome, а не TLS Python, — и к одному
+резолверу за раз, как у браузера. Ответ запоминается: когда защищённый
 путь недоступен, а системный резолвер лжёт или молчит, остаётся последний
 адрес, полученный доверенным путём.
 
@@ -23,11 +25,12 @@ import socket
 import struct
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+from . import browser_fetch
 from .http_utils import _make_ssl_context
 
 # Адреса резолверов из `direct-doh` шаблона sing-box. У всех сертификат содержит
@@ -36,6 +39,8 @@ from .http_utils import _make_ssl_context
 # HTTP/1.1; его место занимает второй адрес Cloudflare.
 DOH_SERVERS: tuple[str, ...] = ("8.8.8.8", "1.1.1.1", "94.140.14.14", "8.8.4.4", "1.0.0.1")
 DOH_PATH = "/dns-query"
+# Через столько секунд молчания резолвера подключается следующий.
+DOH_HEDGE_SEC = 0.8
 
 # Столько же хранит Android-клиент: дольше недели адрес сервера чаще устаревает,
 # чем помогает.
@@ -112,8 +117,61 @@ def _usable(address: str) -> bool:
     return not (ip.is_unspecified or ip.is_multicast or ip.is_loopback)
 
 
+def _answers(server: str, host: str, replies: Iterable[tuple[int, bytes]]) -> set[str]:
+    found: set[str] = set()
+    for status, body in replies:
+        if status != 200:
+            raise BootstrapDnsError(f"DoH {server}: HTTP {status}")
+        rcode, addresses = parse_response(body)
+        if rcode == _RCODE_NXDOMAIN:
+            if not found:
+                raise BootstrapNameNotFound(host)
+            break
+        if rcode != 0:
+            raise BootstrapDnsError(f"DoH {server}: rcode {rcode}")
+        found.update(address for address in addresses if _usable(address))
+    return found
+
+
+def _browser_replies(server: str, host: str, timeout: float):
+    """A, затем AAAA — через сетевой стек Chromium: одно h2-соединение, как у Chrome."""
+
+    for qtype in (_TYPE_A, _TYPE_AAAA):
+        response = browser_fetch.SERVICE.fetch(
+            f"https://{server}{DOH_PATH}",
+            method="POST",
+            headers=(("accept", "application/dns-message"), ("content-type", "application/dns-message")),
+            body=build_query(host, qtype),
+            timeout=timeout,
+            max_bytes=65535,
+        )
+        yield response.status, response.body
+
+
+_legacy_logged = False
+
+
 def _doh_lookup(server: str, host: str, timeout: float) -> set[str]:
-    """A и AAAA одним TLS-соединением к одному резолверу."""
+    """A и AAAA к одному резолверу: браузерным стеком, без него — ssl Python."""
+
+    if browser_fetch.SERVICE.available():
+        try:
+            return _answers(server, host, _browser_replies(server, host, timeout))
+        except browser_fetch.BrowserFetchUnavailable:
+            pass  # ядро без браузерного стека — запасной путь ниже
+        except browser_fetch.BrowserFetchError as exc:
+            raise BootstrapDnsError(f"DoH {server}: {exc}") from exc
+    global _legacy_logged
+    if not _legacy_logged:
+        _legacy_logged = True
+        import logging
+
+        logging.getLogger(__name__).warning("DoH без браузерного стека: TLS Python (отпечаток не Chrome)")
+    return _legacy_doh_lookup(server, host, timeout)
+
+
+def _legacy_doh_lookup(server: str, host: str, timeout: float) -> set[str]:
+    """A и AAAA одним TLS-соединением к одному резолверу (ssl Python)."""
 
     connection = http.client.HTTPSConnection(server, 443, timeout=timeout, context=_make_ssl_context())
     try:
@@ -150,17 +208,39 @@ def resolve_doh(
     timeout: float = 3.0,
     servers: Iterable[str] = DOH_SERVERS,
     lookup: Callable[[str, str, float], set[str]] = _doh_lookup,
+    hedge: float = DOH_HEDGE_SEC,
 ) -> set[str]:
-    """Первый непустой ответ любого из резолверов; все опрашиваются сразу."""
+    """Первый непустой ответ; резолверы — по одному, как у браузера.
+
+    Следующий подключается, только если предыдущий ответил ошибкой или молчит
+    ``hedge`` секунд: пять одновременных TLS-соединений к публичным DoH при
+    каждом подключении сами были узнаваемым узором.
+    """
 
     targets = tuple(servers)
-    executor = ThreadPoolExecutor(max_workers=max(1, len(targets)), thread_name_prefix="bootstrap-doh")
+    if not targets:
+        raise BootstrapDnsError("нет доверенных резолверов")
+    executor = ThreadPoolExecutor(max_workers=len(targets), thread_name_prefix="bootstrap-doh")
+    deadline = time.monotonic() + timeout + 1.0
     try:
-        futures = [executor.submit(lookup, server, host, timeout) for server in targets]
+        queue = list(targets)
+        running: set = set()
         missing = 0
         last_error: Exception | None = None
-        try:
-            for future in as_completed(futures, timeout=timeout + 1.0):
+        while queue or running:
+            if queue and not running:
+                running.add(executor.submit(lookup, queue.pop(0), host, timeout))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, _ = wait(running, timeout=min(remaining, hedge) if queue else remaining, return_when=FIRST_COMPLETED)
+            if not done:
+                if queue:
+                    # Молчит — подключаем следующего, первый ещё может ответить.
+                    running.add(executor.submit(lookup, queue.pop(0), host, timeout))
+                continue
+            for future in done:
+                running.discard(future)
                 try:
                     addresses = future.result()
                 except BootstrapNameNotFound as exc:
@@ -172,8 +252,6 @@ def resolve_doh(
                     continue
                 if addresses:
                     return addresses
-        except TimeoutError as exc:
-            last_error = last_error or exc
         if missing and missing == len(targets):
             raise BootstrapNameNotFound(host)
         raise BootstrapDnsError(f"нет ответа доверенных резолверов: {last_error}")

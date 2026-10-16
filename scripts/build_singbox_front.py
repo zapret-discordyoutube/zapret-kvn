@@ -16,6 +16,9 @@ from prepare_sing_udp_patch import extract_module, prepare, sha256
 
 
 PROCESS_LOOKUP_PATCH = "singbox-process-lookup-cache.patch"
+# Прямые HTTPS-запросы приложения сетевым стеком Chromium (`tools browser-fetch`):
+# только новые файлы, общий патч с Android (там — 0007 в series).
+BROWSER_FETCH_PATCH = "browser-fetch.patch"
 # Signs that upstream already stopped scanning the whole connection table per
 # lookup (sing dev 4ca3bebe: keyed TCP owner lookup; any table cache/single-flight).
 UPSTREAM_OWNER_LOOKUP_MARKERS = ("FindSocketOwner", "nsiGetTCPConnection", "singleflight")
@@ -115,6 +118,9 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     process_patch = manifest.parent / PROCESS_LOOKUP_PATCH
     apply_process_lookup_patch(source, process_patch)
     shutil.copyfile(manifest.parent / 'singbox_process_lookup_test.go', source / 'common/process/zapret_pid_table_cache_test.go')
+    browser_patch = manifest.parent / BROWSER_FETCH_PATCH
+    subprocess.run(['git', 'apply', '--check', str(browser_patch)], cwd=source, check=True)
+    subprocess.run(['git', 'apply', str(browser_patch)], cwd=source, check=True)
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
     # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
@@ -126,11 +132,14 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     subprocess.run([go, "mod", "edit", f"-replace=github.com/sagernet/sing={replacement}"], cwd=source, check=True)
     subprocess.run([go, 'test', '-mod=readonly', './dns/transport/fallback', '-run', '^TestZapret', '-count=1'], cwd=source, check=True)
     subprocess.run([go, 'test', '-mod=readonly', './common/process', '-run', '^TestZapret', '-count=1'], cwd=source, check=True)
-    for tags in ("", "with_low_memory"):
-        subprocess.run([go, "test", "-mod=readonly", "-tags", tags,
+    tags = (source / "release/DEFAULT_BUILD_TAGS").read_text().strip() + ",with_purego"
+    # Без libcronet рядом тест ClientHello пропускается, остальные идут всегда.
+    subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, './common/browserfetch', '-run', '^TestZapret', '-count=1'],
+                   cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
+    for tags_variant in ("", "with_low_memory"):
+        subprocess.run([go, "test", "-mod=readonly", "-tags", tags_variant,
                         "github.com/sagernet/sing/common/network", "-run", "^TestZapret", "-count=1"],
                        cwd=source, check=True)
-    tags = (source / "release/DEFAULT_BUILD_TAGS").read_text().strip() + ",with_purego"
     flags = (source / "release/LDFLAGS").read_text().strip()
     flags += f' -X github.com/sagernet/sing-box/constant.Version={pin["version"].removeprefix("v")} -s -w -buildid='
     # Воспроизводимая сборка: без путей, без VCS-меток, без build ID, без cgo.
@@ -139,14 +148,26 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                     "-ldflags", flags, "-o", str(output.resolve()), "./cmd/sing-box"],
                    cwd=source, check=True, env=reproducible_env)
     assert_no_build_paths(output, stage, work)
+    assert_browser_fetch_command(output)
     provenance = {**pin, "go": subprocess.check_output([go, "env", "GOVERSION"], text=True).strip(),
                   "goos": os.environ.get("GOOS", ""), "goarch": os.environ.get("GOARCH", ""),
                   "build_tags": tags, "binary_sha256": sha256(output),
                   "udp_patch": json.loads((dependency.parent / "provenance.json").read_text()),
                   "dns_warning_patch_sha256": sha256(dns_patch),
-                  "process_lookup_patch_sha256": sha256(process_patch)}
+                  "process_lookup_patch_sha256": sha256(process_patch),
+                  "browser_fetch_patch_sha256": sha256(browser_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
+
+
+def assert_browser_fetch_command(binary: Path) -> None:
+    """В собранном ядре есть `tools browser-fetch` (проверка без сети и без libcronet)."""
+    if os.name != "nt":
+        return  # сборка релиза идёт на win10; чужой exe здесь не запустить
+    reply = subprocess.run([str(binary), "tools", "browser-fetch"], input='{"url":"http://example.com/"}',
+                           capture_output=True, text=True, timeout=60)
+    if "only https" not in reply.stdout:
+        raise RuntimeError(f"sing-box без browser-fetch: {reply.stdout.strip()[:200]} {reply.stderr.strip()[:200]}")
 
 
 if __name__ == "__main__":

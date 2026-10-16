@@ -1,0 +1,521 @@
+diff --git a/cmd/sing-box/cmd_tools_browser_fetch.go b/cmd/sing-box/cmd_tools_browser_fetch.go
+new file mode 100644
+index 0000000..081720f
+--- /dev/null
++++ b/cmd/sing-box/cmd_tools_browser_fetch.go
+@@ -0,0 +1,72 @@
++package main
++
++import (
++	"bufio"
++	"encoding/json"
++	"io"
++	"os"
++	"sync"
++
++	"github.com/sagernet/sing-box/common/browserfetch"
++	"github.com/sagernet/sing-box/log"
++
++	"github.com/spf13/cobra"
++)
++
++var commandBrowserFetchFlagServe bool
++
++// Zapret KVN (Windows): прямые HTTPS-запросы приложения с рукопожатием и
++// HTTP/2 Chrome. Один запрос: JSON на stdin, ответ JSON на stdout. С --serve —
++// долгоживущий процесс с прогретым движком: запросы и ответы — по одной
++// JSON-строке, поле "id" связывает ответ с запросом. Конфиг не нужен.
++var commandBrowserFetch = &cobra.Command{
++	Use:   "browser-fetch",
++	Short: "Fetch HTTPS URLs with the Chromium network stack (JSON on stdin/stdout)",
++	Args:  cobra.NoArgs,
++	Run: func(cmd *cobra.Command, args []string) {
++		if commandBrowserFetchFlagServe {
++			serveBrowserFetch(os.Stdin, os.Stdout)
++			return
++		}
++		request, err := io.ReadAll(io.LimitReader(os.Stdin, 16<<20))
++		if err != nil {
++			log.Fatal(err)
++		}
++		_, err = os.Stdout.WriteString(browserfetch.FetchJSON(globalCtx, string(request)) + "\n")
++		if err != nil {
++			log.Fatal(err)
++		}
++	},
++}
++
++func init() {
++	commandBrowserFetch.Flags().BoolVar(&commandBrowserFetchFlagServe, "serve", false, "serve newline-delimited JSON requests until stdin closes")
++	commandTools.AddCommand(commandBrowserFetch)
++}
++
++func serveBrowserFetch(input io.Reader, output io.Writer) {
++	scanner := bufio.NewScanner(input)
++	scanner.Buffer(make([]byte, 64<<10), 16<<20)
++	var writeLock sync.Mutex
++	var pending sync.WaitGroup
++	for scanner.Scan() {
++		line := append([]byte(nil), scanner.Bytes()...)
++		pending.Add(1)
++		go func() {
++			defer pending.Done()
++			var head struct {
++				ID json.RawMessage `json:"id"`
++			}
++			_ = json.Unmarshal(line, &head)
++			reply := browserfetch.FetchJSON(globalCtx, string(line))
++			if len(head.ID) > 0 {
++				// {"id":…, …ответ…}
++				reply = `{"id":` + string(head.ID) + "," + reply[1:]
++			}
++			writeLock.Lock()
++			_, _ = io.WriteString(output, reply+"\n")
++			writeLock.Unlock()
++		}()
++	}
++	pending.Wait()
++}
+diff --git a/common/browserfetch/browserfetch.go b/common/browserfetch/browserfetch.go
+new file mode 100644
+index 0000000..50bcc7c
+--- /dev/null
++++ b/common/browserfetch/browserfetch.go
+@@ -0,0 +1,138 @@
++//go:build with_naive_outbound
++
++// Package browserfetch — HTTPS-клиент, неотличимый от Chrome на проводе.
++//
++// Запрос идёт через сетевой стек самого Chromium (Cronet, тот же, что у
++// naive-выхода): ClientHello, HTTP/2 SETTINGS и WINDOW_UPDATE, порядок
++// псевдозаголовков, сжатие — ровно как у Chrome этой версии. User-Agent
++// берётся из версии движка, чтобы заголовок и рукопожатие не расходились.
++// Zapret KVN ходит так напрямую (DoH, подписка, обновления), чтобы
++// оборудование провайдера не отличало приложение от браузера.
++package browserfetch
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"strings"
++	"sync"
++	"time"
++
++	cronet "github.com/sagernet/cronet-go"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++var (
++	engineOnce sync.Once
++	engine     cronet.Engine
++	agent      string
++	engineErr  error
++)
++
++func sharedEngine() (cronet.Engine, string, error) {
++	engineOnce.Do(func() {
++		// Без libcronet (нет рядом с ядром) загрузчик паникует — это не сбой
++		// сети, а «браузерного стека нет»: вызывающий выберет запасной путь.
++		defer func() {
++			if recovered := recover(); recovered != nil {
++				engineErr = &UnavailableError{Cause: fmt.Sprint(recovered)}
++			}
++		}()
++		engine = cronet.NewEngine()
++		agent = ChromeUserAgent(engine.Version())
++		params := cronet.NewEngineParams()
++		params.SetEnableHTTP2(true)
++		// Chrome ходит по QUIC только к узлам, объявившим h3 (Alt-Svc); у
++		// одиночных запросов без кеша Alt-Svc это всегда TCP — как здесь.
++		params.SetEnableQuic(false)
++		params.SetEnableBrotli(true)
++		params.SetUserAgent(agent)
++		engine.StartWithParams(params)
++		params.Destroy()
++	})
++	return engine, agent, engineErr
++}
++
++// UserAgent — User-Agent, с которым уходят запросы (по версии движка).
++func UserAgent() string {
++	_, value, _ := sharedEngine()
++	return value
++}
++
++// Fetch выполняет один запрос. Тело ответа ограничено MaxBytes (по умолчанию 8 МиБ).
++func Fetch(ctx context.Context, request Request) (*Response, error) {
++	target, err := url.Parse(request.URL)
++	if err != nil {
++		return nil, E.Cause(err, "parse url")
++	}
++	if target.Scheme != "https" && !(request.AllowCleartext && target.Scheme == "http") {
++		return nil, E.New("browserfetch: only https is allowed: ", target.Scheme)
++	}
++	method := strings.ToUpper(strings.TrimSpace(request.Method))
++	if method == "" {
++		method = http.MethodGet
++	}
++	if request.TimeoutMillis > 0 {
++		var cancel context.CancelFunc
++		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.TimeoutMillis)*time.Millisecond)
++		defer cancel()
++	}
++	var body io.Reader
++	if len(request.Body) > 0 {
++		body = bytes.NewReader(request.Body)
++	}
++	httpRequest, err := http.NewRequestWithContext(ctx, method, target.String(), body)
++	if err != nil {
++		return nil, err
++	}
++	// User-Agent по умолчанию — Chrome той же версии, что движок; свой UA
++	// вызывающего (профиль клиента подписки) имеет приоритет.
++	for _, header := range request.Headers {
++		httpRequest.Header.Add(header[0], header[1])
++	}
++	shared, _, err := sharedEngine()
++	if err != nil {
++		return nil, err
++	}
++	transport := &cronet.RoundTripper{
++		Engine: shared,
++		CheckRedirect: func(location string) bool {
++			next, parseErr := url.Parse(location)
++			if parseErr != nil {
++				return false
++			}
++			return next.Scheme == "https" || (request.AllowCleartext && next.Scheme == "http")
++		},
++	}
++	response, err := transport.RoundTrip(httpRequest)
++	if err != nil {
++		return nil, err
++	}
++	defer response.Body.Close()
++	limit := request.MaxBytes
++	if limit <= 0 {
++		limit = DefaultMaxBytes
++	}
++	data, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
++	if err != nil {
++		return nil, E.Cause(err, "read body")
++	}
++	result := &Response{Status: response.StatusCode}
++	if int64(len(data)) > limit {
++		data = data[:limit]
++		result.Truncated = true
++	}
++	result.Body = data
++	for name, values := range response.Header {
++		for _, value := range values {
++			result.Headers = append(result.Headers, [2]string{name, value})
++		}
++	}
++	if location := response.Header.Get("Location"); location != "" && response.StatusCode >= 300 && response.StatusCode < 400 {
++		result.RedirectRefused = location
++	}
++	return result, nil
++}
+diff --git a/common/browserfetch/browserfetch_stub.go b/common/browserfetch/browserfetch_stub.go
+new file mode 100644
+index 0000000..26e5d80
+--- /dev/null
++++ b/common/browserfetch/browserfetch_stub.go
+@@ -0,0 +1,15 @@
++//go:build !with_naive_outbound
++
++package browserfetch
++
++import (
++	"context"
++)
++
++// Без сетевого стека Chromium подделывать браузер нечем: лучше честная
++// ошибка, чем запрос с отпечатком Go под видом Chrome.
++func Fetch(context.Context, Request) (*Response, error) {
++	return nil, &UnavailableError{Cause: "built without with_naive_outbound"}
++}
++
++func UserAgent() string { return "" }
+diff --git a/common/browserfetch/types.go b/common/browserfetch/types.go
+new file mode 100644
+index 0000000..699cbec
+--- /dev/null
++++ b/common/browserfetch/types.go
+@@ -0,0 +1,93 @@
++package browserfetch
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"regexp"
++	"runtime"
++)
++
++// DefaultMaxBytes — предел тела ответа, если вызывающий не задал свой.
++const DefaultMaxBytes int64 = 8 << 20
++
++// Request — один запрос. Заголовки — пары по порядку; без User-Agent уходит
++// UA Chrome той же версии, что движок.
++// В JSON тело передаётся base64 (так кодирует []byte encoding/json).
++type Request struct {
++	Method         string      `json:"method,omitempty"`
++	URL            string      `json:"url"`
++	Headers        [][2]string `json:"headers,omitempty"`
++	Body           []byte      `json:"body,omitempty"`
++	TimeoutMillis  int         `json:"timeout_ms,omitempty"`
++	MaxBytes       int64       `json:"max_bytes,omitempty"`
++	AllowCleartext bool        `json:"allow_cleartext,omitempty"`
++}
++
++// Response — ответ. RedirectRefused — куда сервер перенаправлял, если
++// переход отклонён (например, с https на http).
++type Response struct {
++	Status          int         `json:"status"`
++	Headers         [][2]string `json:"headers,omitempty"`
++	Body            []byte      `json:"body,omitempty"`
++	Truncated       bool        `json:"truncated,omitempty"`
++	RedirectRefused string      `json:"redirect_refused,omitempty"`
++}
++
++type envelope struct {
++	*Response
++	Error       string `json:"error,omitempty"`
++	Unavailable bool   `json:"unavailable,omitempty"`
++	UserAgent   string `json:"user_agent,omitempty"`
++}
++
++// UnavailableError — сетевого стека Chromium нет (библиотека не загрузилась
++// или ядро собрано без него). Это не ответ сервера и не сбой сети.
++type UnavailableError struct{ Cause string }
++
++func (e *UnavailableError) Error() string { return "browserfetch unavailable: " + e.Cause }
++
++var chromeMajor = regexp.MustCompile(`^(\d+)\.`)
++
++// ChromeUserAgent — User-Agent Chrome той же основной версии, что и движок
++// ("150.0.7871.63" → Chrome/150.0.0.0), в урезанном виде, как его шлёт сам
++// Chrome начиная со 107-й версии.
++func ChromeUserAgent(engineVersion string) string {
++	major := "150"
++	if match := chromeMajor.FindStringSubmatch(engineVersion); match != nil {
++		major = match[1]
++	}
++	switch runtime.GOOS {
++	case "android":
++		return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + major + ".0.0.0 Mobile Safari/537.36"
++	case "windows":
++		return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + major + ".0.0.0 Safari/537.36"
++	case "darwin":
++		return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + major + ".0.0.0 Safari/537.36"
++	default:
++		return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + major + ".0.0.0 Safari/537.36"
++	}
++}
++
++// FetchJSON — запрос и ответ одной JSON-строкой: так его зовут и CLI
++// (Windows), и gomobile (Android), где нет составных типов.
++func FetchJSON(ctx context.Context, requestJSON string) string {
++	var request Request
++	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
++		return marshal(envelope{Error: "bad request: " + err.Error()})
++	}
++	response, err := Fetch(ctx, request)
++	if err != nil {
++		var unavailable *UnavailableError
++		return marshal(envelope{Error: err.Error(), Unavailable: errors.As(err, &unavailable)})
++	}
++	return marshal(envelope{Response: response, UserAgent: UserAgent()})
++}
++
++func marshal(value envelope) string {
++	data, err := json.Marshal(value)
++	if err != nil {
++		return `{"error":"marshal"}`
++	}
++	return string(data)
++}
+diff --git a/common/browserfetch/zapret_browserfetch_test.go b/common/browserfetch/zapret_browserfetch_test.go
+new file mode 100644
+index 0000000..2b5a975
+--- /dev/null
++++ b/common/browserfetch/zapret_browserfetch_test.go
+@@ -0,0 +1,148 @@
++//go:build with_naive_outbound
++
++package browserfetch
++
++import (
++	"context"
++	"encoding/binary"
++	"encoding/json"
++	"io"
++	"net"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestZapretChromeUserAgentFollowsEngineVersion(t *testing.T) {
++	agent := ChromeUserAgent("150.0.7871.63")
++	if !strings.Contains(agent, "Chrome/150.0.0.0") || strings.Contains(agent, "Cronet") {
++		t.Fatalf("user agent %q", agent)
++	}
++	if !strings.Contains(ChromeUserAgent("garbage"), "Chrome/") {
++		t.Fatal("fallback user agent must still look like Chrome")
++	}
++}
++
++func TestZapretCleartextIsRefusedWithoutNetwork(t *testing.T) {
++	_, err := Fetch(context.Background(), Request{URL: "http://example.com/"})
++	if err == nil || !strings.Contains(err.Error(), "only https") {
++		t.Fatalf("err = %v", err)
++	}
++	var reply map[string]any
++	if json.Unmarshal([]byte(FetchJSON(context.Background(), `{"url":"http://example.com/"}`)), &reply) != nil || reply["error"] == nil {
++		t.Fatalf("FetchJSON must report the refusal: %v", reply)
++	}
++}
++
++type clientHello struct {
++	ciphers    []uint16
++	extensions []uint16
++	alpn       []string
++}
++
++func parseClientHello(record []byte) (*clientHello, bool) {
++	// record header(5) + handshake header(4) + version(2) + random(32)
++	if len(record) < 5+4+2+32+1 || record[0] != 0x16 || record[5] != 0x01 {
++		return nil, false
++	}
++	p := record[5+4+2+32:]
++	sessionLen := int(p[0])
++	p = p[1+sessionLen:]
++	cipherLen := int(binary.BigEndian.Uint16(p))
++	hello := &clientHello{}
++	for i := 0; i < cipherLen; i += 2 {
++		hello.ciphers = append(hello.ciphers, binary.BigEndian.Uint16(p[2+i:]))
++	}
++	p = p[2+cipherLen:]
++	p = p[1+int(p[0]):] // compression methods
++	extTotal := int(binary.BigEndian.Uint16(p))
++	p = p[2 : 2+extTotal]
++	for len(p) >= 4 {
++		kind := binary.BigEndian.Uint16(p)
++		size := int(binary.BigEndian.Uint16(p[2:]))
++		data := p[4 : 4+size]
++		hello.extensions = append(hello.extensions, kind)
++		if kind == 0x0010 && len(data) > 2 {
++			for list := data[2:]; len(list) > 0; {
++				n := int(list[0])
++				hello.alpn = append(hello.alpn, string(list[1:1+n]))
++				list = list[1+n:]
++			}
++		}
++		p = p[4+size:]
++	}
++	return hello, true
++}
++
++func isGrease(value uint16) bool { return value&0x0f0f == 0x0a0a && value>>8 == value&0xff }
++
++func TestZapretClientHelloLooksLikeChrome(t *testing.T) {
++	if _, _, unavailable := sharedEngine(); unavailable != nil {
++		t.Skip("no libcronet next to the test binary: ", unavailable)
++	}
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	got := make(chan []byte, 1)
++	go func() {
++		conn, acceptErr := listener.Accept()
++		if acceptErr != nil {
++			got <- nil
++			return
++		}
++		defer conn.Close()
++		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
++		header := make([]byte, 5)
++		if _, readErr := io.ReadFull(conn, header); readErr != nil {
++			got <- nil
++			return
++		}
++		body := make([]byte, int(binary.BigEndian.Uint16(header[3:])))
++		if _, readErr := io.ReadFull(conn, body); readErr != nil {
++			got <- nil
++			return
++		}
++		got <- append(header, body...)
++	}()
++	go func() {
++		// Сертификата нет — запрос не удастся; нужен только ClientHello.
++		_, _ = Fetch(context.Background(), Request{URL: "https://" + listener.Addr().String() + "/", TimeoutMillis: 4000})
++	}()
++	var record []byte
++	select {
++	case record = <-got:
++	case <-time.After(8 * time.Second):
++		t.Fatal("no ClientHello")
++	}
++	hello, ok := parseClientHello(record)
++	if !ok {
++		t.Fatalf("not a ClientHello: % x", record[:min(len(record), 16)])
++	}
++	if len(hello.ciphers) == 0 || !isGrease(hello.ciphers[0]) {
++		t.Fatalf("no GREASE cipher first (Chrome always sends one): %04x", hello.ciphers)
++	}
++	has := map[uint16]bool{}
++	for _, ext := range hello.extensions {
++		has[ext] = true
++	}
++	// compress_certificate (brotli) и ECH GREASE: у Chrome есть, у Go crypto/tls — нет.
++	for _, ext := range []uint16{0x001b, 0xfe0d} {
++		if !has[ext] {
++			t.Fatalf("extension %04x missing: %04x", ext, hello.extensions)
++		}
++	}
++	if len(hello.alpn) == 0 || hello.alpn[0] != "h2" {
++		t.Fatalf("alpn = %v", hello.alpn)
++	}
++}
++
++func TestZapretMissingLibraryIsUnavailableNotAFailure(t *testing.T) {
++	err := &UnavailableError{Cause: "no libcronet"}
++	var reply map[string]any
++	_ = json.Unmarshal([]byte(marshal(envelope{Error: err.Error(), Unavailable: true})), &reply)
++	if reply["unavailable"] != true {
++		t.Fatalf("reply = %v", reply)
++	}
++}
+diff --git a/experimental/libbox/browser_fetch.go b/experimental/libbox/browser_fetch.go
+new file mode 100644
+index 0000000..5e106d6
+--- /dev/null
++++ b/experimental/libbox/browser_fetch.go
+@@ -0,0 +1,19 @@
++package libbox
++
++import (
++	"context"
++
++	"github.com/sagernet/sing-box/common/browserfetch"
++)
++
++// BrowserFetch — Zapret KVN (Android): один HTTPS-запрос через сетевой стек
++// Chromium, неотличимый от Chrome на проводе. Запрос и ответ — JSON-строки
++// (browserfetch.Request / ответ с полями status, headers, body или error).
++func BrowserFetch(requestJSON string) string {
++	return browserfetch.FetchJSON(context.Background(), requestJSON)
++}
++
++// BrowserUserAgent — User-Agent, с которым уходят такие запросы.
++func BrowserUserAgent() string {
++	return browserfetch.UserAgent()
++}

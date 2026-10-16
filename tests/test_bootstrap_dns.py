@@ -71,6 +71,54 @@ class ResolveDohTests(unittest.TestCase):
             {"203.0.113.7"},
         )
 
+    def test_resolvers_are_asked_one_at_a_time(self) -> None:
+        # Не веер: следующий резолвер — только после ошибки или молчания первого.
+        asked: list[str] = []
+
+        def lookup(server: str, host: str, timeout: float) -> set[str]:
+            asked.append(server)
+            return {"203.0.113.7"}
+
+        self.assertEqual(resolve_doh("vpn.example.com", servers=("a", "b", "c"), lookup=lookup), {"203.0.113.7"})
+        self.assertEqual(asked, ["a"])
+
+    def test_silent_resolver_is_hedged_by_the_next(self) -> None:
+        import threading
+
+        release = threading.Event()
+        self.addCleanup(release.set)
+        asked: list[str] = []
+
+        def lookup(server: str, host: str, timeout: float) -> set[str]:
+            asked.append(server)
+            if server == "slow":
+                release.wait(5)
+                return set()
+            return {"203.0.113.8"}
+
+        result = resolve_doh("vpn.example.com", servers=("slow", "fast", "never"), lookup=lookup, hedge=0.05)
+        self.assertEqual(result, {"203.0.113.8"})
+        self.assertEqual(asked, ["slow", "fast"])
+
+    def test_browser_stack_is_used_for_doh_when_available(self) -> None:
+        from xray_fluent.network import browser_fetch
+
+        query_answer = {}
+
+        class _Service:
+            def available(self) -> bool:
+                return True
+
+            def fetch(self, url, *, method, headers, body, timeout, max_bytes):
+                query_answer.setdefault("urls", []).append((url, method, dict(headers)["content-type"]))
+                return browser_fetch.BrowserResponse(status=200, body=_answer(body, [(1, bytes([203, 0, 113, 9]))] if body[-3] == 1 else []))
+
+        with patch.object(browser_fetch, "SERVICE", _Service()), patch.object(bootstrap_dns.http.client, "HTTPSConnection") as legacy:
+            addresses = bootstrap_dns._doh_lookup("8.8.8.8", "vpn.example.com", 2.0)
+        legacy.assert_not_called()
+        self.assertEqual(addresses, {"203.0.113.9"})
+        self.assertEqual(query_answer["urls"], [("https://8.8.8.8/dns-query", "POST", "application/dns-message")] * 2)
+
     def test_name_missing_only_when_every_resolver_agrees(self) -> None:
         def missing(server: str, host: str, timeout: float) -> set[str]:
             raise BootstrapNameNotFound(host)
