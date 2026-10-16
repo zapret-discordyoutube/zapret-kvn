@@ -49,6 +49,9 @@ class BrowserFetchPatchTests(unittest.TestCase):
         self.assertIn("SetDNSServerOverride", text)
         # Окна HTTP/2 не трогаем: свои значения (как у naive) поменяли бы отпечаток.
         self.assertNotIn("SetHTTP2Options", text)
+        # Путь загрузки тела в cronet-go падает SIGSEGV — тела отклоняются.
+        self.assertIn("request bodies are not supported", text)
+        self.assertNotIn("NewUploadDataProvider", text)
 
     def test_builder_applies_tests_and_records_the_patch(self) -> None:
         text = BUILDER.read_text(encoding="utf-8")

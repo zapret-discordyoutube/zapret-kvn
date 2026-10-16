@@ -17,6 +17,7 @@ sing-box.
 
 from __future__ import annotations
 
+import base64
 import http.client
 import ipaddress
 import json
@@ -134,14 +135,17 @@ def _answers(server: str, host: str, replies: Iterable[tuple[int, bytes]]) -> se
 
 
 def _browser_replies(server: str, host: str, timeout: float):
-    """A, затем AAAA — через сетевой стек Chromium: одно h2-соединение, как у Chrome."""
+    """A, затем AAAA — через сетевой стек Chromium: одно h2-соединение, как у Chrome.
+
+    GET с ``?dns=`` (RFC 8484), как Chrome для шаблона ``dns.google{?dns}``;
+    POST к тому же и не годится: путь загрузки тела в cronet-go падает.
+    """
 
     for qtype in (_TYPE_A, _TYPE_AAAA):
+        encoded = base64.urlsafe_b64encode(build_query(host, qtype)).rstrip(b"=").decode("ascii")
         response = browser_fetch.SERVICE.fetch(
-            f"https://{server}{DOH_PATH}",
-            method="POST",
-            headers=(("accept", "application/dns-message"), ("content-type", "application/dns-message")),
-            body=build_query(host, qtype),
+            f"https://{server}{DOH_PATH}?dns={encoded}",
+            headers=(("accept", "application/dns-message"),),
             timeout=timeout,
             max_bytes=65535,
         )

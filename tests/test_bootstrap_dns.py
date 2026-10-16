@@ -109,15 +109,20 @@ class ResolveDohTests(unittest.TestCase):
             def available(self) -> bool:
                 return True
 
-            def fetch(self, url, *, method, headers, body, timeout, max_bytes):
-                query_answer.setdefault("urls", []).append((url, method, dict(headers)["content-type"]))
-                return browser_fetch.BrowserResponse(status=200, body=_answer(body, [(1, bytes([203, 0, 113, 9]))] if body[-3] == 1 else []))
+            def fetch(self, url, *, headers, timeout, max_bytes):
+                import base64 as b64
+
+                path, _, encoded = url.partition("?dns=")
+                query = b64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+                query_answer.setdefault("urls", []).append((path, dict(headers)["accept"]))
+                return browser_fetch.BrowserResponse(status=200, body=_answer(query, [(1, bytes([203, 0, 113, 9]))] if query[-3] == 1 else []))
 
         with patch.object(browser_fetch, "SERVICE", _Service()), patch.object(bootstrap_dns.http.client, "HTTPSConnection") as legacy:
             addresses = bootstrap_dns._doh_lookup("8.8.8.8", "vpn.example.com", 2.0)
         legacy.assert_not_called()
         self.assertEqual(addresses, {"203.0.113.9"})
-        self.assertEqual(query_answer["urls"], [("https://8.8.8.8/dns-query", "POST", "application/dns-message")] * 2)
+        # GET с ?dns= (RFC 8484), как Chrome: тело через Cronet не отправляем.
+        self.assertEqual(query_answer["urls"], [("https://8.8.8.8/dns-query", "application/dns-message")] * 2)
 
     def test_name_missing_only_when_every_resolver_agrees(self) -> None:
         def missing(server: str, host: str, timeout: float) -> set[str]:

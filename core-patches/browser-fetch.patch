@@ -78,10 +78,10 @@ index 0000000..081720f
 +}
 diff --git a/common/browserfetch/browserfetch.go b/common/browserfetch/browserfetch.go
 new file mode 100644
-index 0000000..9fa9a29
+index 0000000..2561a72
 --- /dev/null
 +++ b/common/browserfetch/browserfetch.go
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,170 @@
 +//go:build with_naive_outbound
 +
 +// Package browserfetch — HTTPS-клиент, неотличимый от Chrome на проводе.
@@ -95,7 +95,6 @@ index 0000000..9fa9a29
 +package browserfetch
 +
 +import (
-+	"bytes"
 +	"context"
 +	"fmt"
 +	"io"
@@ -113,8 +112,14 @@ index 0000000..9fa9a29
 +	engineMu      sync.Mutex
 +	engineStarted bool
 +	engine        cronet.Engine
-+	agent         string
-+	engineErr     error
++	// Один исполнитель на всё время жизни движка. RoundTripper без своего
++	// Executor создаёт его на каждый запрос и вешает финализатор, который
++	// уничтожает исполнитель при сборке мусора, — а Chromium ещё досылает в
++	// него request.Destroy() после того, как тело ответа прочитано. Отсюда
++	// SIGSEGV по адресу 0 в случайный момент (Android, стресс-тест на Linux).
++	executor  cronet.Executor
++	agent     string
++	engineErr error
 +)
 +
 +func sharedEngine() (cronet.Engine, string, error) {
@@ -151,7 +156,14 @@ index 0000000..9fa9a29
 +	params.SetUserAgent(agent)
 +	if result := engine.StartWithParams(params); result != cronet.ResultSuccess {
 +		engineErr = &UnavailableError{Cause: fmt.Sprint("start engine: ", int(result))}
++		return
 +	}
++	executor = cronet.NewExecutor(func(_ cronet.Executor, command cronet.Runnable) {
++		go func() {
++			command.Run()
++			command.Destroy()
++		}()
++	})
 +}
 +
 +// UserAgent — User-Agent, с которым уходят запросы (по версии движка).
@@ -173,16 +185,19 @@ index 0000000..9fa9a29
 +	if method == "" {
 +		method = http.MethodGet
 +	}
++	// Тело запроса cronet-go отдаёт движку через UploadDataProvider, и этот
++	// путь падает SIGSEGV по адресу 0 (стресс-тест: каждый прогон из сотен POST;
++	// GET — ни одного сбоя на тысячах). Тела не принимаем: DoH — GET с ?dns=,
++	// как у самого Chrome для шаблона dns.google{?dns}.
++	if len(request.Body) > 0 {
++		return nil, E.New("browserfetch: request bodies are not supported (use GET, e.g. DoH ?dns=)")
++	}
 +	if request.TimeoutMillis > 0 {
 +		var cancel context.CancelFunc
 +		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.TimeoutMillis)*time.Millisecond)
 +		defer cancel()
 +	}
-+	var body io.Reader
-+	if len(request.Body) > 0 {
-+		body = bytes.NewReader(request.Body)
-+	}
-+	httpRequest, err := http.NewRequestWithContext(ctx, method, target.String(), body)
++	httpRequest, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
 +	if err != nil {
 +		return nil, err
 +	}
@@ -195,8 +210,11 @@ index 0000000..9fa9a29
 +	if err != nil {
 +		return nil, err
 +	}
++	// С заданными Engine и Executor у RoundTripper нет финализатора: ни движок,
++	// ни исполнитель он не уничтожит.
 +	transport := &cronet.RoundTripper{
-+		Engine: shared,
++		Engine:   shared,
++		Executor: executor,
 +		CheckRedirect: func(location string) bool {
 +			next, parseErr := url.Parse(location)
 +			if parseErr != nil {
@@ -605,10 +623,10 @@ index 0000000..9278b13
 +}
 diff --git a/common/browserfetch/types.go b/common/browserfetch/types.go
 new file mode 100644
-index 0000000..699cbec
+index 0000000..2b3f95b
 --- /dev/null
 +++ b/common/browserfetch/types.go
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,94 @@
 +package browserfetch
 +
 +import (
@@ -623,8 +641,9 @@ index 0000000..699cbec
 +const DefaultMaxBytes int64 = 8 << 20
 +
 +// Request — один запрос. Заголовки — пары по порядку; без User-Agent уходит
-+// UA Chrome той же версии, что движок.
-+// В JSON тело передаётся base64 (так кодирует []byte encoding/json).
++// UA Chrome той же версии, что движок. Body не поддерживается (Fetch его
++// отклоняет: путь загрузки тела в cronet-go падает) — поле оставлено, чтобы
++// старый вызывающий получил понятную ошибку, а не тихо потерянное тело.
 +type Request struct {
 +	Method         string      `json:"method,omitempty"`
 +	URL            string      `json:"url"`
@@ -704,10 +723,10 @@ index 0000000..699cbec
 +}
 diff --git a/common/browserfetch/zapret_browserfetch_test.go b/common/browserfetch/zapret_browserfetch_test.go
 new file mode 100644
-index 0000000..2b5a975
+index 0000000..cff4155
 --- /dev/null
 +++ b/common/browserfetch/zapret_browserfetch_test.go
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,155 @@
 +//go:build with_naive_outbound
 +
 +package browserfetch
@@ -730,6 +749,13 @@ index 0000000..2b5a975
 +	}
 +	if !strings.Contains(ChromeUserAgent("garbage"), "Chrome/") {
 +		t.Fatal("fallback user agent must still look like Chrome")
++	}
++}
++
++func TestZapretRequestBodyIsRefusedWithoutNetwork(t *testing.T) {
++	_, err := Fetch(context.Background(), Request{Method: "POST", URL: "https://8.8.8.8/dns-query", Body: []byte{0}})
++	if err == nil || !strings.Contains(err.Error(), "bodies are not supported") {
++		t.Fatalf("err = %v", err)
 +	}
 +}
 +

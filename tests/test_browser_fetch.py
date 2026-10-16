@@ -30,15 +30,15 @@ class BrowserFetchServiceTests(unittest.TestCase):
 
     def test_request_round_trip_keeps_method_headers_and_body(self) -> None:
         response = self.service.fetch(
-            "https://8.8.8.8/dns-query", method="POST",
-            headers=(("accept", "application/dns-message"),), body=b"\x00\x01", timeout=5,
+            "https://8.8.8.8/dns-query?dns=AAE", method="GET",
+            headers=(("accept", "application/dns-message"),), timeout=5,
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(response.header("content-type"), "application/json")
         echo = json.loads(response.body)
-        self.assertEqual(echo["method"], "POST")
+        self.assertEqual(echo["method"], "GET")
         self.assertEqual(echo["headers"], [["accept", "application/dns-message"]])
-        self.assertEqual(echo["body"], "AAE=")
+        self.assertEqual(echo["body"], "")  # тела браузерный стек не принимает
 
     def test_parallel_requests_share_one_process(self) -> None:
         results: list[int] = []

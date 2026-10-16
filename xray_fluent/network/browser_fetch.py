@@ -96,14 +96,11 @@ class BrowserFetchService:
         *,
         method: str = "GET",
         headers: Iterable[tuple[str, str]] = (),
-        body: bytes = b"",
         timeout: float = 10.0,
         max_bytes: int = 0,
     ) -> BrowserResponse:
         request = {"url": url, "method": method, "headers": [[k, v] for k, v in headers],
                    "timeout_ms": max(1, int(timeout * 1000))}
-        if body:
-            request["body"] = base64.b64encode(body).decode("ascii")
         if max_bytes:
             request["max_bytes"] = int(max_bytes)
         future = self._submit(request)
