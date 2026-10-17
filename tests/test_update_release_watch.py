@@ -411,3 +411,66 @@ class RevokedVersionTests(unittest.TestCase):
         self.assertTrue(signal.is_urgent("0.8.26"))
         self.assertTrue(signal.is_granted("0.8.26"))
         self.assertFalse(signal.is_urgent("0.8.27"))
+
+
+class AskServerTransportTests(unittest.TestCase):
+    """Отключено — напрямую стеком Chromium; подключено — urllib внутри туннеля."""
+
+    def _service(self, *, status=200, body=b'{"version": "0.9.0"}'):
+        from xray_fluent.network import browser_fetch
+
+        calls = []
+
+        class _Service:
+            def available(self):
+                return True
+
+            def fetch(self, url, *, headers, timeout, max_bytes):
+                calls.append((url, dict(headers)))
+                return browser_fetch.BrowserResponse(status=status, body=body)
+
+        return _Service(), calls
+
+    def test_disconnected_poll_goes_through_the_browser_stack(self) -> None:
+        from unittest.mock import patch
+        from xray_fluent.network import browser_fetch
+        from xray_fluent.updates import release_watch
+
+        service, calls = self._service()
+        with patch.object(browser_fetch, "SERVICE", service), patch.object(release_watch, "urlopen") as legacy:
+            answer = release_watch._ask_server(release_watch.WAIT_URL + "?known=0.8.38&run=0", 5)
+        legacy.assert_not_called()
+        self.assertEqual(answer, {"version": "0.9.0"})
+        self.assertEqual(calls[0][1]["accept"], "application/json")
+
+    def test_connected_poll_stays_inside_the_tunnel(self) -> None:
+        import io
+        from unittest.mock import patch
+        from xray_fluent.network import browser_fetch
+        from xray_fluent.updates import release_watch
+
+        service, calls = self._service()
+
+        class _Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with patch.object(browser_fetch, "SERVICE", service), \
+                patch.object(release_watch, "urlopen", return_value=_Response(b'{"version": "0.9.1"}')) as legacy:
+            answer = release_watch._ask_server(release_watch.WAIT_URL + "?known=0.8.38&run=1", 5)
+        self.assertEqual(calls, [])
+        legacy.assert_called_once()
+        self.assertEqual(answer, {"version": "0.9.1"})
+
+    def test_server_error_is_a_failure_not_an_answer(self) -> None:
+        from unittest.mock import patch
+        from xray_fluent.network import browser_fetch
+        from xray_fluent.updates import release_watch
+
+        service, _calls = self._service(status=502, body=b"")
+        with patch.object(browser_fetch, "SERVICE", service):
+            with self.assertRaises(OSError):
+                release_watch._ask_server(release_watch.WAIT_URL + "?run=0", 5)

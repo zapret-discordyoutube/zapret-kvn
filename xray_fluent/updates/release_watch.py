@@ -34,11 +34,12 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request
 
 from zapret_update import screen
 
+from ..network import browser_fetch
 from ..network.http_utils import urlopen
 from .app_updater import USER_AGENT, _is_newer_version, _parse_semver
 
@@ -94,9 +95,37 @@ def fullscreen_app_active() -> bool:
 
 
 def _ask_server(url: str, timeout: float) -> dict:
+    """Один вопрос серверу.
+
+    Подключение выключено (``run=0``) — запрос идёт напрямую, и провайдер видит
+    рукопожатие: тогда сетевым стеком Chromium, чтобы ровный опрос нашего
+    сервера не выдавал приложение отпечатком TLS Python. Подключено — как
+    раньше, urllib через системный прокси или TUN, то есть внутри туннеля:
+    прямой путь там был бы заметнее, а не тише.
+    """
+
+    connected = parse_qs(urlsplit(url).query).get("run", ["1"])[0] != "0"
+    if not connected and browser_fetch.SERVICE.available():
+        try:
+            reply = browser_fetch.SERVICE.fetch(
+                url,
+                headers=(("accept", "application/json"), ("user-agent", USER_AGENT)),
+                timeout=timeout,
+                max_bytes=64 * 1024,
+            )
+        except browser_fetch.BrowserFetchUnavailable:
+            pass
+        else:
+            if reply.status != 200:
+                raise OSError(f"сервер ответил HTTP {reply.status}")
+            return _payload(reply.body)
     request = Request(url, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
     with urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read(64 * 1024).decode("utf-8"))
+        return _payload(response.read(64 * 1024))
+
+
+def _payload(body: bytes) -> dict:
+    payload = json.loads(body.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("сервер ответил не тем, чего ждал слушатель")
     return payload
