@@ -58,6 +58,7 @@ from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
+from .window_presence import WindowPresence, is_native_restore_command
 from .window_reveal import cloak_until_painted, is_system_show_event
 from .theme import apply_theme, stop_system_theme_listener, sync_system_theme_listener
 from .tour import TOUR_STEPS, TourOverlay, TourStep, active_tour
@@ -111,6 +112,8 @@ def _runtime_identity_log_line() -> str:
 class MainWindow(FluentWindow):
     def __init__(self, defer_init: bool = False):
         super().__init__()
+        # Присутствие окна: память подтягивается заранее, когда окно возвращают из долгого фона.
+        self._window_presence = WindowPresence(self)
         self._quitting = False
         self._tray_notified = False
         self._state_loaded = False
@@ -653,6 +656,13 @@ class MainWindow(FluentWindow):
             from .window_geometry import MINIMUM_SIZE
             area = self.screen().availableGeometry()
             self.setMinimumSize(min(MINIMUM_SIZE.width(), area.width()), min(MINIMUM_SIZE.height(), area.height()))
+
+    def nativeEvent(self, event_type, message):  # noqa: N802 (Qt override)
+        # Окно из панели задач разворачивает Windows: команда приходит раньше, чем Qt
+        # покажет и нарисует окно, — самое время подтянуть память из фона.
+        if is_native_restore_command(message):
+            self._window_presence.return_intent()
+        return super().nativeEvent(event_type, message)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -2297,10 +2307,16 @@ class MainWindow(FluentWindow):
         self.settings_page.set_encryption_active(False)
 
     def _toggle_window_visible(self) -> None:
-        if self.isVisible():
+        # У свёрнутого окна isVisible() тоже True: клик по значку в трее прятал его,
+        # а не возвращал. Прячем только окно, которое человек видит.
+        if self.isVisible() and not self.isMinimized():
             self.hide()
         else:
-            self.show()
+            self._window_presence.return_intent()
+            if self.isMinimized():
+                self.showNormal()
+            else:
+                self.show()
             self.activateWindow()
             self.raise_()
 
