@@ -28,6 +28,7 @@ class BrowserFetchPatchTests(unittest.TestCase):
             "cmd/sing-box/cmd_tools_browser_fetch.go",
             "common/browserfetch/browserfetch.go",
             "common/browserfetch/browserfetch_stub.go",
+            "common/browserfetch/dns_answer.go",
             "common/browserfetch/engine_other.go",
             "common/browserfetch/engine_unix.go",
             "common/browserfetch/socket_control_unix.go",
@@ -52,6 +53,10 @@ class BrowserFetchPatchTests(unittest.TestCase):
         # Путь загрузки тела в cronet-go падает SIGSEGV — тела отклоняются.
         self.assertIn("request bodies are not supported", text)
         self.assertNotIn("NewUploadDataProvider", text)
+        # Имена — своим DoH тем же движком: на Windows локальный DNS-сервер,
+        # подкоманда ставит TrustedDoH (иначе хост подписки — системным DNS).
+        self.assertIn("SetResolver(browserfetch.TrustedDoH)", text)
+        self.assertIn("listenLocalDNS", text)
 
     def test_builder_applies_tests_and_records_the_patch(self) -> None:
         text = BUILDER.read_text(encoding="utf-8")

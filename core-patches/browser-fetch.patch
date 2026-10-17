@@ -1,9 +1,9 @@
 diff --git a/cmd/sing-box/cmd_tools_browser_fetch.go b/cmd/sing-box/cmd_tools_browser_fetch.go
 new file mode 100644
-index 0000000..081720f
+index 0000000..47cae1a
 --- /dev/null
 +++ b/cmd/sing-box/cmd_tools_browser_fetch.go
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,74 @@
 +package main
 +
 +import (
@@ -30,6 +30,8 @@ index 0000000..081720f
 +	Short: "Fetch HTTPS URLs with the Chromium network stack (JSON on stdin/stdout)",
 +	Args:  cobra.NoArgs,
 +	Run: func(cmd *cobra.Command, args []string) {
++		// Имена — доверенным DoH тем же движком, не системным DNS.
++		browserfetch.SetResolver(browserfetch.TrustedDoH)
 +		if commandBrowserFetchFlagServe {
 +			serveBrowserFetch(os.Stdin, os.Stdout)
 +			return
@@ -254,16 +256,18 @@ index 0000000..2561a72
 +}
 diff --git a/common/browserfetch/browserfetch_stub.go b/common/browserfetch/browserfetch_stub.go
 new file mode 100644
-index 0000000..26e5d80
+index 0000000..6b1df2d
 --- /dev/null
 +++ b/common/browserfetch/browserfetch_stub.go
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,29 @@
 +//go:build !with_naive_outbound
 +
 +package browserfetch
 +
 +import (
 +	"context"
++	"errors"
++	"net/netip"
 +)
 +
 +// Без сетевого стека Chromium подделывать браузер нечем: лучше честная
@@ -273,47 +277,385 @@ index 0000000..26e5d80
 +}
 +
 +func UserAgent() string { return "" }
++
++// Resolver, SetResolver, TrustedDoH — как в сборке с Chromium; без него
++// запросов нет, резолверу отвечать некому.
++type Resolver func(ctx context.Context, host string) ([]netip.Addr, error)
++
++var ErrNameNotFound = errors.New("browserfetch: name not found")
++
++func SetResolver(Resolver) {}
++
++func TrustedDoH(context.Context, string) ([]netip.Addr, error) {
++	return nil, &UnavailableError{Cause: "built without with_naive_outbound"}
++}
+diff --git a/common/browserfetch/dns_answer.go b/common/browserfetch/dns_answer.go
+new file mode 100644
+index 0000000..2807c98
+--- /dev/null
++++ b/common/browserfetch/dns_answer.go
+@@ -0,0 +1,267 @@
++//go:build with_naive_outbound
++
++package browserfetch
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/binary"
++	"errors"
++	"io"
++	"net"
++	"net/netip"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	E "github.com/sagernet/sing/common/exceptions"
++
++	mDNS "github.com/miekg/dns"
++)
++
++// Свой DNS для Chromium. Движок спрашивает наш сервер (на unix — 127.0.0.1:53
++// через свой dialer, на Windows — локальный порт), а ответ даёт резолвер
++// вызывающего (SetResolver) или резолвер Go. Так имя хоста (подписки) не уходит
++// открытым системным DNS, когда есть доверенный DoH.
++
++// Resolver — свой резолвер имён для движка (на Android — доверенный DoH, чтобы
++// имя хоста подписки не уходило открытым DNS). Адреса обоих семейств; «имени
++// нет» — ErrNameNotFound (или *net.DNSError с IsNotFound).
++type Resolver func(ctx context.Context, host string) ([]netip.Addr, error)
++
++// ErrNameNotFound — резолвер подтвердил, что имени нет (ответ NXDOMAIN).
++var ErrNameNotFound = errors.New("browserfetch: name not found")
++
++var resolver atomic.Pointer[Resolver]
++
++// SetResolver задаёт резолвер имён; nil — резолвер Go (системный DNS).
++// Читается на каждом запросе, менять можно в любой момент.
++func SetResolver(resolve Resolver) {
++	if resolve == nil {
++		resolver.Store(nil)
++		return
++	}
++	resolver.Store(&resolve)
++}
++
++func currentResolver() Resolver {
++	if resolve := resolver.Load(); resolve != nil {
++		return *resolve
++	}
++	return nil
++}
++
++func serveDNSStream(conn net.Conn) {
++	defer conn.Close()
++	for {
++		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
++		var length uint16
++		if binary.Read(conn, binary.BigEndian, &length) != nil || length == 0 {
++			return
++		}
++		query := make([]byte, int(length))
++		if _, err := io.ReadFull(conn, query); err != nil {
++			return
++		}
++		reply := answer(query)
++		if reply == nil {
++			continue
++		}
++		framed := binary.BigEndian.AppendUint16(nil, uint16(len(reply)))
++		if _, err := conn.Write(append(framed, reply...)); err != nil {
++			return
++		}
++	}
++}
++
++func servePackets(conn net.PacketConn) {
++	defer conn.Close()
++	buffer := make([]byte, 65535)
++	for {
++		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
++		n, peer, err := conn.ReadFrom(buffer)
++		if err != nil {
++			return
++		}
++		if reply := answer(buffer[:n]); reply != nil {
++			_, _ = conn.WriteTo(reply, peer)
++		}
++	}
++}
++
++// answer — ответ на один DNS-запрос: резолвером вызывающего (SetResolver,
++// на Android — доверенный DoH), без него — резолвером Go (системный DNS).
++func answer(query []byte) []byte {
++	var request mDNS.Msg
++	if request.Unpack(query) != nil {
++		return nil
++	}
++	response := new(mDNS.Msg)
++	response.SetReply(&request)
++	response.RecursionAvailable = true
++	for _, question := range request.Question {
++		if question.Qtype != mDNS.TypeA && question.Qtype != mDNS.TypeAAAA {
++			continue // HTTPS/SVCB и прочее — пустой ответ без ошибки
++		}
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		// Имя в запросе полное, с точкой; /etc/hosts резолвер Go сверяет без неё.
++		addresses, err := lookup(ctx, strings.TrimSuffix(question.Name, "."), question.Qtype)
++		cancel()
++		if err != nil {
++			if isNotFound(err) {
++				response.Rcode = mDNS.RcodeNameError
++			} else if len(response.Answer) == 0 {
++				response.Rcode = mDNS.RcodeServerFailure
++			}
++			continue
++		}
++		header := mDNS.RR_Header{Name: question.Name, Rrtype: question.Qtype, Class: mDNS.ClassINET, Ttl: 60}
++		for _, address := range addresses {
++			address = address.Unmap()
++			if question.Qtype == mDNS.TypeA && address.Is4() {
++				response.Answer = append(response.Answer, &mDNS.A{Hdr: header, A: address.AsSlice()})
++			} else if question.Qtype == mDNS.TypeAAAA && address.Is6() {
++				response.Answer = append(response.Answer, &mDNS.AAAA{Hdr: header, AAAA: address.AsSlice()})
++			}
++		}
++	}
++	packed, err := response.Pack()
++	if err != nil {
++		return nil
++	}
++	return packed
++}
++
++func lookup(ctx context.Context, host string, qtype uint16) ([]netip.Addr, error) {
++	if resolve := currentResolver(); resolve != nil {
++		return resolve(ctx, host)
++	}
++	network := "ip4"
++	if qtype == mDNS.TypeAAAA {
++		network = "ip6"
++	}
++	return net.DefaultResolver.LookupNetIP(ctx, network, host)
++}
++
++func isNotFound(err error) bool {
++	if errors.Is(err, ErrNameNotFound) {
++		return true
++	}
++	var dnsErr *net.DNSError
++	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
++}
++
++// TrustedDoHServers — доверенные резолверы по IP (без SNI, сертификат с IP в SAN).
++var TrustedDoHServers = []string{"8.8.8.8", "1.1.1.1", "8.8.4.4", "1.0.0.1"}
++
++const dohTimeout = 3 * time.Second
++
++type cachedAddrs struct {
++	addrs   []netip.Addr
++	missing bool
++	until   time.Time
++}
++
++var (
++	dohCacheMu sync.Mutex
++	dohCache   = map[string]cachedAddrs{}
++)
++
++// TrustedDoH — резолвер через DoH тем же движком Chromium: GET ?dns= к
++// резолверу по IP, как Chrome для шаблона dns.google{?dns}. IP-литерал движок
++// сам не резолвит, поэтому рекурсии нет. Резолверы — по одному за раз.
++func TrustedDoH(ctx context.Context, host string) ([]netip.Addr, error) {
++	key := strings.ToLower(strings.TrimSuffix(host, "."))
++	dohCacheMu.Lock()
++	if hit, ok := dohCache[key]; ok && time.Now().Before(hit.until) {
++		dohCacheMu.Unlock()
++		if hit.missing {
++			return nil, ErrNameNotFound
++		}
++		return hit.addrs, nil
++	}
++	dohCacheMu.Unlock()
++	var lastErr error
++	for _, server := range TrustedDoHServers {
++		var addrs []netip.Addr
++		missing := 0
++		var queryErr error
++		for _, qtype := range []uint16{mDNS.TypeA, mDNS.TypeAAAA} {
++			found, err := dohQuery(ctx, server, key, qtype)
++			switch {
++			case errors.Is(err, ErrNameNotFound):
++				missing++
++			case err != nil:
++				queryErr = err
++			default:
++				addrs = append(addrs, found...)
++			}
++		}
++		if len(addrs) > 0 || missing == 2 || (missing > 0 && queryErr == nil) {
++			entry := cachedAddrs{addrs: addrs, missing: len(addrs) == 0, until: time.Now().Add(60 * time.Second)}
++			dohCacheMu.Lock()
++			dohCache[key] = entry
++			dohCacheMu.Unlock()
++			if entry.missing {
++				return nil, ErrNameNotFound
++			}
++			return addrs, nil
++		}
++		lastErr = queryErr
++		if ctx.Err() != nil {
++			break
++		}
++	}
++	return nil, E.Cause(lastErr, "trusted DoH")
++}
++
++func dohQuery(ctx context.Context, server, host string, qtype uint16) ([]netip.Addr, error) {
++	request := new(mDNS.Msg)
++	request.SetQuestion(mDNS.Fqdn(host), qtype)
++	request.Id = 0 // RFC 8484: так ответ кешируется, так делает и Chrome
++	packed, err := request.Pack()
++	if err != nil {
++		return nil, err
++	}
++	timeout := dohTimeout
++	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < timeout {
++		timeout = time.Until(deadline)
++	}
++	response, err := Fetch(ctx, Request{
++		URL:           "https://" + server + "/dns-query?dns=" + base64.RawURLEncoding.EncodeToString(packed),
++		Headers:       [][2]string{{"accept", "application/dns-message"}},
++		TimeoutMillis: int(timeout / time.Millisecond),
++		MaxBytes:      65535,
++	})
++	if err != nil {
++		return nil, err
++	}
++	if response.Status != 200 {
++		return nil, E.New("DoH ", server, ": HTTP ", response.Status)
++	}
++	var reply mDNS.Msg
++	if err = reply.Unpack(response.Body); err != nil {
++		return nil, err
++	}
++	if reply.Rcode == mDNS.RcodeNameError {
++		return nil, ErrNameNotFound
++	}
++	if reply.Rcode != mDNS.RcodeSuccess {
++		return nil, E.New("DoH ", server, ": rcode ", reply.Rcode)
++	}
++	var addrs []netip.Addr
++	for _, record := range reply.Answer {
++		switch value := record.(type) {
++		case *mDNS.A:
++			if addr, ok := netip.AddrFromSlice(value.A.To4()); ok {
++				addrs = append(addrs, addr)
++			}
++		case *mDNS.AAAA:
++			if addr, ok := netip.AddrFromSlice(value.AAAA.To16()); ok {
++				addrs = append(addrs, addr)
++			}
++		}
++	}
++	return addrs, nil
++}
 diff --git a/common/browserfetch/engine_other.go b/common/browserfetch/engine_other.go
 new file mode 100644
-index 0000000..0d27b77
+index 0000000..75966e6
 --- /dev/null
 +++ b/common/browserfetch/engine_other.go
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,67 @@
 +//go:build with_naive_outbound && !unix
 +
 +package browserfetch
 +
-+import cronet "github.com/sagernet/cronet-go"
++import (
++	"net"
++	"strconv"
 +
-+// Windows: системный резолвер и сокеты Chromium работают без JNI — движок как есть.
-+func configurePlatform(cronet.Engine, cronet.EngineParams) error { return nil }
++	cronet "github.com/sagernet/cronet-go"
++)
++
++// Windows: сокеты Chromium работают без JNI, свой dialer не нужен. Свой DNS —
++// нужен: иначе имена (хост подписки) уходят системным резолвером открытым
++// текстом. Движок спрашивает наш сервер на локальном порту (UDP и TCP).
++func configurePlatform(_ cronet.Engine, params cronet.EngineParams) error {
++	packets, listener, err := listenLocalDNS()
++	if err != nil {
++		return err
++	}
++	go func() {
++		buffer := make([]byte, 65535)
++		for {
++			n, peer, readErr := packets.ReadFrom(buffer)
++			if readErr != nil {
++				return
++			}
++			query := append([]byte(nil), buffer[:n]...)
++			go func() {
++				if reply := answer(query); reply != nil {
++					_, _ = packets.WriteTo(reply, peer)
++				}
++			}()
++		}
++	}()
++	go func() {
++		for {
++			conn, acceptErr := listener.Accept()
++			if acceptErr != nil {
++				return
++			}
++			go serveDNSStream(conn)
++		}
++	}()
++	if err = params.SetAsyncDNS(true); err != nil {
++		return err
++	}
++	return params.SetDNSServerOverride([]string{packets.LocalAddr().String()})
++}
++
++// listenLocalDNS — UDP и TCP на одном свободном порту 127.0.0.1.
++func listenLocalDNS() (net.PacketConn, net.Listener, error) {
++	var lastErr error
++	for attempt := 0; attempt < 16; attempt++ {
++		packets, err := net.ListenPacket("udp4", "127.0.0.1:0")
++		if err != nil {
++			return nil, nil, err
++		}
++		port := packets.LocalAddr().(*net.UDPAddr).Port
++		listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
++		if err == nil {
++			return packets, listener, nil
++		}
++		packets.Close()
++		lastErr = err
++	}
++	return nil, nil, lastErr
++}
 diff --git a/common/browserfetch/engine_unix.go b/common/browserfetch/engine_unix.go
 new file mode 100644
-index 0000000..3adc9e9
+index 0000000..8ef9da4
 --- /dev/null
 +++ b/common/browserfetch/engine_unix.go
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,154 @@
 +//go:build with_naive_outbound && unix
 +
 +package browserfetch
 +
 +import (
 +	"context"
-+	"encoding/binary"
-+	"errors"
-+	"io"
 +	"net"
 +	"net/netip"
 +	"os"
 +	"strconv"
-+	"strings"
 +	"syscall"
 +	"time"
 +
 +	cronet "github.com/sagernet/cronet-go"
 +	E "github.com/sagernet/sing/common/exceptions"
-+
-+	mDNS "github.com/miekg/dns"
 +)
 +
 +// Внутри libbox у Chromium нет JavaVM: его системный резолвер и слежение за
@@ -441,106 +783,6 @@ index 0000000..3adc9e9
 +	return fds[0], conn, nil
 +}
 +
-+func serveDNSStream(conn net.Conn) {
-+	defer conn.Close()
-+	for {
-+		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-+		var length uint16
-+		if binary.Read(conn, binary.BigEndian, &length) != nil || length == 0 {
-+			return
-+		}
-+		query := make([]byte, int(length))
-+		if _, err := io.ReadFull(conn, query); err != nil {
-+			return
-+		}
-+		reply := answer(query)
-+		if reply == nil {
-+			continue
-+		}
-+		framed := binary.BigEndian.AppendUint16(nil, uint16(len(reply)))
-+		if _, err := conn.Write(append(framed, reply...)); err != nil {
-+			return
-+		}
-+	}
-+}
-+
-+func servePackets(conn net.PacketConn) {
-+	defer conn.Close()
-+	buffer := make([]byte, 65535)
-+	for {
-+		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-+		n, peer, err := conn.ReadFrom(buffer)
-+		if err != nil {
-+			return
-+		}
-+		if reply := answer(buffer[:n]); reply != nil {
-+			_, _ = conn.WriteTo(reply, peer)
-+		}
-+	}
-+}
-+
-+// answer — ответ на один DNS-запрос: резолвером вызывающего (SetResolver,
-+// на Android — доверенный DoH), без него — резолвером Go (системный DNS).
-+func answer(query []byte) []byte {
-+	var request mDNS.Msg
-+	if request.Unpack(query) != nil {
-+		return nil
-+	}
-+	response := new(mDNS.Msg)
-+	response.SetReply(&request)
-+	response.RecursionAvailable = true
-+	for _, question := range request.Question {
-+		if question.Qtype != mDNS.TypeA && question.Qtype != mDNS.TypeAAAA {
-+			continue // HTTPS/SVCB и прочее — пустой ответ без ошибки
-+		}
-+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-+		// Имя в запросе полное, с точкой; /etc/hosts резолвер Go сверяет без неё.
-+		addresses, err := lookup(ctx, strings.TrimSuffix(question.Name, "."), question.Qtype)
-+		cancel()
-+		if err != nil {
-+			if isNotFound(err) {
-+				response.Rcode = mDNS.RcodeNameError
-+			} else if len(response.Answer) == 0 {
-+				response.Rcode = mDNS.RcodeServerFailure
-+			}
-+			continue
-+		}
-+		header := mDNS.RR_Header{Name: question.Name, Rrtype: question.Qtype, Class: mDNS.ClassINET, Ttl: 60}
-+		for _, address := range addresses {
-+			address = address.Unmap()
-+			if question.Qtype == mDNS.TypeA && address.Is4() {
-+				response.Answer = append(response.Answer, &mDNS.A{Hdr: header, A: address.AsSlice()})
-+			} else if question.Qtype == mDNS.TypeAAAA && address.Is6() {
-+				response.Answer = append(response.Answer, &mDNS.AAAA{Hdr: header, AAAA: address.AsSlice()})
-+			}
-+		}
-+	}
-+	packed, err := response.Pack()
-+	if err != nil {
-+		return nil
-+	}
-+	return packed
-+}
-+
-+func lookup(ctx context.Context, host string, qtype uint16) ([]netip.Addr, error) {
-+	if resolve := currentResolver(); resolve != nil {
-+		return resolve(ctx, host)
-+	}
-+	network := "ip4"
-+	if qtype == mDNS.TypeAAAA {
-+		network = "ip6"
-+	}
-+	return net.DefaultResolver.LookupNetIP(ctx, network, host)
-+}
-+
-+func isNotFound(err error) bool {
-+	if errors.Is(err, ErrNameNotFound) {
-+		return true
-+	}
-+	var dnsErr *net.DNSError
-+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
-+}
-+
 +func netErrorCode(err error) int {
 +	switch {
 +	case E.IsTimeout(err):
@@ -555,20 +797,15 @@ index 0000000..3adc9e9
 +}
 diff --git a/common/browserfetch/socket_control_unix.go b/common/browserfetch/socket_control_unix.go
 new file mode 100644
-index 0000000..9278b13
+index 0000000..76a85e2
 --- /dev/null
 +++ b/common/browserfetch/socket_control_unix.go
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,30 @@
 +//go:build with_naive_outbound && unix
 +
 +package browserfetch
 +
-+import (
-+	"context"
-+	"errors"
-+	"net/netip"
-+	"sync/atomic"
-+)
++import "sync/atomic"
 +
 +// SocketControl вызывается для каждого сокета движка до connect — на Android
 +// здесь сокет защищают от своего же VPN (VpnService.protect) или привязывают
@@ -591,33 +828,6 @@ index 0000000..9278b13
 +func currentSocketControl() SocketControl {
 +	if control := socketControl.Load(); control != nil {
 +		return *control
-+	}
-+	return nil
-+}
-+
-+// Resolver — свой резолвер имён для движка (на Android — доверенный DoH, чтобы
-+// имя хоста подписки не уходило открытым DNS). Адреса обоих семейств; «имени
-+// нет» — ErrNameNotFound (или *net.DNSError с IsNotFound).
-+type Resolver func(ctx context.Context, host string) ([]netip.Addr, error)
-+
-+// ErrNameNotFound — резолвер подтвердил, что имени нет (ответ NXDOMAIN).
-+var ErrNameNotFound = errors.New("browserfetch: name not found")
-+
-+var resolver atomic.Pointer[Resolver]
-+
-+// SetResolver задаёт резолвер имён; nil — резолвер Go (системный DNS).
-+// Читается на каждом запросе, менять можно в любой момент.
-+func SetResolver(resolve Resolver) {
-+	if resolve == nil {
-+		resolver.Store(nil)
-+		return
-+	}
-+	resolver.Store(&resolve)
-+}
-+
-+func currentResolver() Resolver {
-+	if resolve := resolver.Load(); resolve != nil {
-+		return *resolve
 +	}
 +	return nil
 +}
