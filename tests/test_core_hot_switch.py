@@ -600,6 +600,7 @@ class HybridRuntimeStartupTests(unittest.TestCase):
         controller.xray.is_running = True
         controller.singbox.start.return_value = True
         controller._apply_core_outbound_tag.return_value = True
+        controller._rejected_xray_tags.return_value = []
 
         self.assertTrue(drive(AppController._start_singbox_runtime_plan_steps(controller, plan)))
 

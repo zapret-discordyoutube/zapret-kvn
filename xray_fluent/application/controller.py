@@ -86,7 +86,13 @@ from .smart_switch_service import (
     on_candidates_done as on_smart_candidates_done_operation,
     on_current_probe_measured as on_smart_probe_measured_operation,
 )
-from ..diagnostics.runtime_errors import RuntimeErrorJournal, core_failure, is_core_error_line
+from ..diagnostics.runtime_errors import (
+    RepeatedNoticeFilter,
+    RuntimeErrorJournal,
+    core_failure,
+    is_core_error_line,
+    is_deprecation_notice,
+)
 from ..engines.hysteria.runtime_contract import (
     AUTOMATIC_SWITCH_FAILURES,
     SECURITY_FAILURES,
@@ -500,7 +506,14 @@ class AppController(QObject):
         # П3 (AC9/AC10): кэш пула outbound'ов по идентичности списка нод.
         self._xray_outbound_pool_cache: XrayOutboundPool | None = None
         self._xray_outbound_pool_cache_key: tuple | None = None
+        # Серверы, которые запущенное ядро Xray отвергло при разборе конфига
+        # (node_id -> (id(node.outbound), причина)). Пока outbound не заменён,
+        # узел не возвращается в пул: один такой outbound не должен снова
+        # останавливать запуск для всех.
+        self._xray_pool_quarantine: dict[str, tuple[int, str]] = {}
+        self._xray_pool_quarantine_version = 0
         self._core_log_contexts: dict[str, RuntimeLogContext] = {}
+        self._core_notices = RepeatedNoticeFilter()
         self._active_singbox_plan: SingboxRuntimePlan | None = None
         self._session_generation = 0
         self._front_process_generation = 0
@@ -1085,7 +1098,7 @@ class AppController(QObject):
             preferred_relay_port=preferred_relay_port,
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
-            pool_nodes=self.state.nodes,
+            pool_nodes=self._pool_candidate_nodes(node),
         )
 
     def _refresh_server_bootstrap(self, node: Node | None) -> None:
@@ -1128,7 +1141,7 @@ class AppController(QObject):
             preferred_relay_port=preferred_relay_port,
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
-            pool_nodes=self.state.nodes,
+            pool_nodes=self._pool_candidate_nodes(node),
         )
 
     def _singbox_plan_facts(self, node: Node | None, *, tun: bool) -> SingboxPlanFacts | None:
@@ -1144,10 +1157,12 @@ class AppController(QObject):
         """
         state = self._get_singbox_document_state()
         nodes = self.state.nodes
+        self._xray_pool_quarantine_reasons()
         key = (
             str(state.source_path),
             state.text_hash,
             bool(tun),
+            self._xray_pool_quarantine_version,
             node.id if node is not None else None,
             id(node.outbound) if node is not None else 0,
             id(nodes),
@@ -1378,9 +1393,20 @@ class AppController(QObject):
                 f"protect=127.0.0.1:{plan.xray_sidecar.protect_port}"
             )
             if not (yield from self.xray.start_steps(self.state.settings.xray_path, plan.xray_sidecar.config)):
+                # Что ядро отвергло, не возвращается в следующий запуск: он должен сойтись.
+                self._quarantine_pruned_xray_outbounds(plan, self._rejected_xray_tags(), notify=False)
                 self._protect_ss_port = 0
                 self._protect_ss_password = ""
                 return False
+            pruned_tags = self._rejected_xray_tags()
+            if pruned_tags:
+                rejected_selected = self._quarantine_pruned_xray_outbounds(plan, pruned_tags)
+                if rejected_selected:
+                    yield from self.xray.stop_steps()
+                    self._protect_ss_port = 0
+                    self._protect_ss_password = ""
+                    self.xray.error.emit(rejected_selected)
+                    return False
             self._xray_api_port = plan.xray_sidecar.api_port
             if plan.selected_outbound_tag and not (yield from self._apply_core_outbound_tag_steps(
                 "xray", plan.selected_outbound_tag
@@ -3166,14 +3192,100 @@ class AppController(QObject):
         """
 
         nodes = self.state.nodes
+        quarantine = self._xray_pool_quarantine_reasons()
         key = (
             id(nodes),
+            self._xray_pool_quarantine_version,
             tuple((id(node), id(node.outbound), node.sort_order) for node in nodes),
         )
         if self._xray_outbound_pool_cache is None or self._xray_outbound_pool_cache_key != key:
-            self._xray_outbound_pool_cache = build_xray_outbound_pool(nodes)
+            self._xray_outbound_pool_cache = build_xray_outbound_pool(nodes, quarantine=quarantine)
             self._xray_outbound_pool_cache_key = key
         return self._xray_outbound_pool_cache
+
+    def _xray_pool_quarantine_reasons(self) -> dict[str, str]:
+        """node_id -> причина для узлов, которые ядро отвергло и чей outbound не менялся."""
+
+        if not self._xray_pool_quarantine:
+            return {}
+        current = {node.id: id(node.outbound) for node in self.state.nodes}
+        stale = [
+            node_id
+            for node_id, (outbound_id, _reason) in self._xray_pool_quarantine.items()
+            if current.get(node_id) != outbound_id
+        ]
+        for node_id in stale:
+            del self._xray_pool_quarantine[node_id]
+        if stale:
+            self._xray_pool_quarantine_version += 1
+        return {node_id: reason for node_id, (_outbound_id, reason) in self._xray_pool_quarantine.items()}
+
+    def _rejected_xray_tags(self) -> list[str]:
+        """Теги, на которых ядро остановило разбор конфига при последнем запуске."""
+
+        tags = getattr(self.xray, "rejected_outbound_tags", None)
+        return list(tags) if isinstance(tags, (list, tuple)) else []
+
+    def _pool_candidate_nodes(self, selected: Node | None) -> list[Node]:
+        """Узлы для сборки пула: без отвергнутых ядром, кроме выбранного.
+
+        Выбранный остаётся, чтобы запуск назвал причину отказа, а не молча
+        подменил сервер.
+        """
+
+        reasons = self._xray_pool_quarantine_reasons()
+        if not reasons:
+            return self.state.nodes
+        keep = selected.id if selected is not None else ""
+        return [node for node in self.state.nodes if node.id not in reasons or node.id == keep]
+
+    def _quarantine_pruned_xray_outbounds(
+        self,
+        plan: SingboxRuntimePlan,
+        pruned_tags: list[str],
+        *,
+        notify: bool = True,
+    ) -> str:
+        """Занести отвергнутые ядром узлы в карантин и убрать их из плана.
+
+        Возвращает текст ошибки, если отвергнут выбранный сервер, иначе пустую строку.
+        ``notify=False`` — запуск всё равно провалился и пользователь получит
+        ошибку ядра: отдельное предупреждение о пуле было бы шумом.
+        """
+
+        sidecar = plan.xray_sidecar
+        tags = sidecar.outbound_pool_tags if sidecar is not None and sidecar.outbound_pool_tags else {}
+        by_tag = {tag: node_id for node_id, tag in tags.items()}
+        nodes_by_id = {node.id: node for node in self.state.nodes}
+        names: list[str] = []
+        selected_rejected = ""
+        for tag in pruned_tags:
+            node_id = by_tag.get(tag)
+            node = nodes_by_id.get(node_id or "")
+            if node is None:
+                continue
+            reason = "ядро Xray не смогло собрать этот сервер"
+            self._xray_pool_quarantine[node.id] = (id(node.outbound), reason)
+            names.append(node.name or node.id)
+            tags.pop(node.id, None)
+            if plan.selector_tags is not None:
+                plan.selector_tags.pop(node.id, None)
+            if tag == plan.selected_outbound_tag:
+                selected_rejected = node.name or node.id
+        if names:
+            self._xray_pool_quarantine_version += 1
+            self._invalidate_xray_outbound_pool_cache()
+            self._invalidate_plan_facts_cache()
+            shown = ", ".join(names[:5]) + (f" и ещё {len(names) - 5}" if len(names) > 5 else "")
+            self._log(f"[xray-pool] ядро Xray не приняло серверы, они убраны из пула: {shown}")
+            if notify and not selected_rejected:
+                self.status.emit("warning", f"Xray не принял серверов: {len(names)}. Они убраны из пула.")
+        if selected_rejected:
+            return (
+                f"Xray не принял выбранный сервер «{selected_rejected}»: его настройки не подходят "
+                "текущему ядру. Выберите другой сервер или обновите подписку."
+            )
+        return ""
 
     def _invalidate_xray_outbound_pool_cache(self) -> None:
         self._xray_outbound_pool_cache = None
@@ -3901,7 +4013,12 @@ class AppController(QObject):
         )
         # Optional endpoint health and per-destination refusals by an
         # authenticated server are evidence, not a transport failure episode.
-        if is_core_error_line(line) and not health_log:
+        if is_deprecation_notice(line):
+            # Не сбой: ядро работает. Один раз на текст, остальное считаем.
+            if not self._core_notices.first_time(engine, line):
+                return
+            line += " (повторяется для каждого сервера пула, дальше скрыто)"
+        elif is_core_error_line(line) and not health_log:
             self._record_core_failure(engine, "runtime", line)
         context = self._core_log_contexts.get(engine)
         if context is None:
@@ -3996,6 +4113,8 @@ class AppController(QObject):
         self._on_core_error("sing-box", message)
 
     def _on_core_stopped(self, core: str, exit_code: int) -> None:
+        for summary in self._core_notices.drain_summary(core):
+            self._log(summary)
         self._log(f"[{core}] process stopped with code {exit_code}")
 
     def _on_core_state_changed(self, _running: bool) -> None:

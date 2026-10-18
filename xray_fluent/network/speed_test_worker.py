@@ -32,6 +32,7 @@ from ..importer.link_parser import xray_core_tls_problem
 from .http_utils import build_opener
 from ..profiles.models import Node
 from ..engines.tls_fingerprint import apply_browser_fingerprint
+from ..engines.xray_outbound_compat import normalize_xray_outbound
 from . import probe_gate
 
 # Обычный браузерный User-Agent: хост тестового файла не должен видеть, что с
@@ -328,7 +329,7 @@ def build_speed_test_config(node: Node, http_port: int) -> dict:
     доли секунды вместо 9–16 с на холодном диске.
     """
 
-    outbound = apply_browser_fingerprint(json.loads(json.dumps(node.outbound)))
+    outbound = apply_browser_fingerprint(normalize_xray_outbound(json.loads(json.dumps(node.outbound))))
     outbound["tag"] = "proxy"
     return {
         "log": {"loglevel": "none"},

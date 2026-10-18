@@ -31,6 +31,7 @@ from ...application.outbound_pool_service import (
     build_xray_outbound_pool,
     ensure_xray_pool_control_plane,
     singbox_outbound_tag,
+    xray_pool_exclusion,
 )
 from ..hysteria.runtime_contract import classify_hysteria_uri
 from ...application.protocol_core import ProtocolCore, protocol_core
@@ -803,6 +804,9 @@ def _build_xray_sidecar_config(
         raise ValueError("Выбранный сервер не содержит protocol для xray sidecar.")
     pool = build_xray_outbound_pool(pool_nodes or [node])
     if not pool.contains(node.id):
+        reason = pool.excluded.get(node.id) or xray_pool_exclusion(node)
+        if reason:
+            raise ValueError(f"Выбранный сервер не подходит для текущего Xray: {reason}.")
         raise ValueError("Выбранный сервер нельзя добавить в Xray sidecar pool.")
     proxy_outbounds = pool.outbounds()
     for proxy_outbound in proxy_outbounds:

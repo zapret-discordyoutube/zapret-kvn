@@ -414,9 +414,14 @@ def _build_stream_settings(
             "header": {"type": _get_param(params, "headerType", "header_type") or "none"},
         }
     elif network == "kcp":
-        stream["kcpSettings"] = {
-            "header": {"type": _get_param(params, "headerType", "header_type") or "none"},
-        }
+        # Xray 26.x отвергает любой ключ header в kcpSettings, даже {"type": "none"}:
+        # пишем его только для маскировки, которую ядро всё равно не соберёт, —
+        # тогда узел будет назван несовместимым, а не уронит запуск всего пула.
+        kcp_settings: dict[str, Any] = {}
+        header_type = _get_param(params, "headerType", "header_type") or "none"
+        if header_type.strip().lower() not in ("", "none"):
+            kcp_settings["header"] = {"type": header_type}
+        stream["kcpSettings"] = kcp_settings
 
     if security == "tls":
         tls_settings: dict[str, Any] = {}

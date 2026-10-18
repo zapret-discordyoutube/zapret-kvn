@@ -20,6 +20,7 @@ from ...application.outbound_pool_service import (
 )
 from ...profiles.models import AppSettings, Node, RoutingSettings
 from ..tls_fingerprint import apply_browser_fingerprint
+from ..xray_outbound_compat import normalize_xray_outbound
 
 
 _VPN_DETECTION_DOMAINS = (
@@ -107,7 +108,7 @@ def _resolve_xray_process_name(rule: dict[str, str]) -> str:
 
 
 def _build_proxy_outbounds(node: Node) -> list[dict[str, Any]]:
-    primary = apply_browser_fingerprint(deepcopy(node.outbound))
+    primary = apply_browser_fingerprint(normalize_xray_outbound(deepcopy(node.outbound)))
     primary["tag"] = "proxy"
     return [primary]
 

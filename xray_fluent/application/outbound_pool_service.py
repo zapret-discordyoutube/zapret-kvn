@@ -10,10 +10,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from ..profiles.models import Node
 from ..engines.tls_fingerprint import apply_browser_fingerprint
+from ..engines.xray_outbound_compat import normalize_xray_outbound, xray_outbound_incompatibility
 from .protocol_core import ProtocolCore, protocol_core
 
 
@@ -44,6 +45,9 @@ def is_xray_pool_node(node: Node) -> bool:
 class XrayOutboundPool:
     nodes: list[Node] = field(default_factory=list)
     tags: dict[str, str] = field(default_factory=dict)
+    #: узлы Xray-ядра, которых нет в пуле, и почему: ядро их не соберёт, а один
+    #: такой outbound останавливал запуск всего пула.
+    excluded: dict[str, str] = field(default_factory=dict)
 
     def contains(self, node_id: str | None) -> bool:
         return str(node_id or "") in self.tags
@@ -54,7 +58,7 @@ class XrayOutboundPool:
     def outbounds(self) -> list[dict]:
         result: list[dict] = []
         for node in self.nodes:
-            outbound = apply_browser_fingerprint(deepcopy(node.outbound))
+            outbound = apply_browser_fingerprint(normalize_xray_outbound(deepcopy(node.outbound)))
             outbound["tag"] = self.tags[node.id]
             result.append(outbound)
         return result
@@ -63,12 +67,38 @@ class XrayOutboundPool:
         return [[self.tags[node.id], node.outbound] for node in self.nodes]
 
 
-def build_xray_outbound_pool(nodes: Iterable[Node]) -> XrayOutboundPool:
-    eligible = [node for node in nodes if is_xray_pool_node(node)]
+def xray_pool_exclusion(node: Node, quarantine: Mapping[str, str] | None = None) -> str:
+    """Причина, по которой Xray-узел не берётся в пул (пусто — берётся).
+
+    ``quarantine`` — узлы, которые запущенное ядро уже отвергло (самовосстановление
+    запуска): они не возвращаются в пул, пока контроллер не снимет карантин.
+    """
+
+    if quarantine and node.id in quarantine:
+        return quarantine[node.id] or "ядро Xray отвергло этот сервер"
+    return xray_outbound_incompatibility(node.outbound)
+
+
+def build_xray_outbound_pool(
+    nodes: Iterable[Node],
+    *,
+    quarantine: Mapping[str, str] | None = None,
+) -> XrayOutboundPool:
+    eligible: list[Node] = []
+    excluded: dict[str, str] = {}
+    for node in nodes:
+        if not is_xray_pool_node(node):
+            continue
+        reason = xray_pool_exclusion(node, quarantine)
+        if reason:
+            excluded[node.id] = reason
+        else:
+            eligible.append(node)
     eligible.sort(key=lambda item: (item.sort_order, item.id))
     return XrayOutboundPool(
         nodes=eligible,
         tags={node.id: xray_outbound_tag(node.id) for node in eligible},
+        excluded=excluded,
     )
 
 

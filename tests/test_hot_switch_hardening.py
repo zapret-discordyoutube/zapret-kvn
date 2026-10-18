@@ -111,6 +111,7 @@ class SessionCaptureController:
     _capture_active_session = AppController._capture_active_session
     _derive_outbound_pool_tags = AppController._derive_outbound_pool_tags
     xray_outbound_pool = AppController.xray_outbound_pool
+    _xray_pool_quarantine_reasons = AppController._xray_pool_quarantine_reasons
     _invalidate_xray_outbound_pool_cache = AppController._invalidate_xray_outbound_pool_cache
     _hot_switch_precheck = AppController._hot_switch_precheck
 
@@ -125,6 +126,8 @@ class SessionCaptureController:
         self._blocked_transition_signature = "sentinel"
         self._xray_outbound_pool_cache = None
         self._xray_outbound_pool_cache_key = None
+        self._xray_pool_quarantine = {}
+        self._xray_pool_quarantine_version = 0
         self.connected = True
         self.logs: list[str] = []
         self.bypass = SimpleNamespace(ready_for=lambda node: True)

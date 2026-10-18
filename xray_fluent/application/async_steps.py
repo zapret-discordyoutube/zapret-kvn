@@ -342,11 +342,16 @@ class TransitionProfile:
 
     #: Шаги короче этого порога не печатаются поимённо, только суммой.
     LIST_THRESHOLD_MS = 15.0
+    #: Кусок кода генератора на GUI-потоке (между двумя yield) дольше этого порога
+    #: попадает в журнал с местом в коде: gui=… в сводке сам не говорит, где потрачено.
+    SLOW_SLICE_MS = 100.0
+    MAX_SLOW_SLICES = 5
 
     def __init__(self) -> None:
         self.started = time.perf_counter()
         self.finished: float | None = None
         self.gui_ms = 0.0
+        self.slow_slices: list[tuple[str, float]] = []
         self.steps: list[tuple[str, float]] = []
         self._step_started = 0.0
         self._step_label = ""
@@ -360,8 +365,11 @@ class TransitionProfile:
             self.steps.append((self._step_label, (time.perf_counter() - self._step_started) * 1000.0))
             self._step_label = ""
 
-    def add_gui(self, began: float) -> None:
-        self.gui_ms += (time.perf_counter() - began) * 1000.0
+    def add_gui(self, began: float, where: str = "") -> None:
+        elapsed_ms = (time.perf_counter() - began) * 1000.0
+        self.gui_ms += elapsed_ms
+        if where and elapsed_ms >= self.SLOW_SLICE_MS:
+            self.slow_slices.append((where, elapsed_ms))
 
     def close(self) -> None:
         self.end_step()
@@ -380,7 +388,11 @@ class TransitionProfile:
         if rest:
             parts.append(f"прочие {len(rest)} шагов={sum(rest):.0f}")
         text = f"total={self.total_ms:.0f}ms gui={self.gui_ms:.0f}ms steps={len(self.steps)}"
-        return text + (" | " + ", ".join(parts) if parts else "")
+        text += (" | " + ", ".join(parts) if parts else "")
+        if self.slow_slices:
+            worst = sorted(self.slow_slices, key=lambda item: item[1], reverse=True)[: self.MAX_SLOW_SLICES]
+            text += " | медленно в GUI: " + ", ".join(f"{where}={ms:.0f}" for where, ms in worst)
+        return text
 
 
 class TransitionRunner(QObject):
@@ -449,6 +461,7 @@ class TransitionRunner(QObject):
         if not self._is_current():
             self._cancel_run()
             return
+        slice_from = _step_origin(self._gen)
         gui_began = time.perf_counter()
         try:
             if error is not None:
@@ -458,14 +471,14 @@ class TransitionRunner(QObject):
         except StopIteration as stop:
             # Synchronous steps can pump Qt events internally, including Stop
             # or a newer selection, without yielding back to this runner.
-            self.profile.add_gui(gui_began)
+            self.profile.add_gui(gui_began, f"{slice_from}→конец")
             self._finish(result=stop.value, cancelled=not self._is_current())
             return
         except BaseException as exc:  # noqa: BLE001 — transition errors surface via .error
-            self.profile.add_gui(gui_began)
+            self.profile.add_gui(gui_began, f"{slice_from}→ошибка")
             self._finish(error=exc)
             return
-        self.profile.add_gui(gui_began)
+        self.profile.add_gui(gui_began, f"{slice_from}→{_step_origin(self._gen)}")
         if not isinstance(step, TransitionStep):
             bad = TypeError(f"Transition generator must yield TransitionStep, got {type(step)!r}")
             try:

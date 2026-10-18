@@ -21,9 +21,11 @@ from ...application.async_steps import (
     wait_process_finished,
     wait_process_started,
 )
+from ...application.outbound_pool_service import XRAY_OUTBOUND_PREFIX
 from ...application.port_allocator import is_tcp_port_bindable
 from ...constants import PROXY_HOST, RUNTIME_DIR, XRAY_CONFIG_FILE, XRAY_PATH_DEFAULT
 from ...diagnostics.export import capture_runtime_config
+from ..xray_outbound_compat import failed_outbound_tag
 from ...profiles.path_utils import resolve_configured_path
 from ...network.proxy_readiness import LISTENER_POLL_MS, ports_listening, probe_listener_role
 from ...platform.windows.subprocess_utils import (
@@ -33,6 +35,12 @@ from ...platform.windows.subprocess_utils import (
     run_text,
     run_text_pumped,
 )
+
+
+#: Сколько раз за один запуск можно убрать из пула outbound, который ядро не
+#: смогло собрать, и стартовать снова. Каждая попытка — доли секунды: ядро
+#: падает на разборе конфига, до открытия портов.
+MAX_POOL_PRUNE_RETRIES = 6
 
 
 class XrayManager(QObject):
@@ -61,6 +69,14 @@ class XrayManager(QObject):
         self._last_exit_expected = False
         self._exe_path: Path | None = None
         self.diagnostic_config: dict[str, Any] | None = None
+        #: теги outbound'ов, которые ядро отвергло и которые последний запуск
+        #: убрал из конфига (самовосстановление); контроллер сверяет с ними пул.
+        self.pruned_outbound_tags: list[str] = []
+        #: все теги, на которых ядро остановило разбор конфига в последнем запуске:
+        #: убранные из конфига и тот, на котором кончились попытки.
+        self.rejected_outbound_tags: list[str] = []
+        self._hold_startup_failure = False
+        self._held_startup_failure: str | None = None
 
     @property
     def is_running(self) -> bool:
@@ -123,45 +139,92 @@ class XrayManager(QObject):
             self.error.emit(port_error)
             return False
 
-        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-        XRAY_CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
-        self.diagnostic_config = capture_runtime_config(exe, config)
+        self.pruned_outbound_tags = []
+        self.rejected_outbound_tags = []
+        self._hold_startup_failure = True
+        self._held_startup_failure = None
+        try:
+            attempt = 0
+            while True:
+                RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+                XRAY_CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
+                self.diagnostic_config = capture_runtime_config(exe, config)
 
-        self._starting = True
-        self._startup_failure_reported = False
-        self._runtime_error_reported = False
-        self._last_output_lines.clear()
-        self._process.setWorkingDirectory(str(exe.parent))
-        self._process.setProgram(str(exe))
-        self._process.setArguments(["run", "-c", str(XRAY_CONFIG_FILE)])
-        spawn_began = time.monotonic()
-        self._process.start()
+                self._starting = True
+                self._startup_failure_reported = False
+                self._runtime_error_reported = False
+                self._last_output_lines.clear()
+                self._process.setWorkingDirectory(str(exe.parent))
+                self._process.setProgram(str(exe))
+                self._process.setArguments(["run", "-c", str(XRAY_CONFIG_FILE)])
+                spawn_began = time.monotonic()
+                self._process.start()
 
-        started = yield wait_process_started(self._process, 2000)
-        if not started:
+                started = yield wait_process_started(self._process, 2000)
+                if not started:
+                    self._starting = False
+                    self._report_startup_failure(f"Не удалось запустить Xray: {self._process.errorString()}")
+                    return self._startup_failed()
+                spawn_elapsed = time.monotonic() - spawn_began
+
+                ready_began = time.monotonic()
+                ready = yield from self._wait_until_ready_steps(
+                    required_ports,
+                    credentials=self._extract_socks_credentials(config),
+                )
+                if ready:
+                    break
+                self._starting = False
+                # Вывод ядра мог ещё не дойти из канала процесса: дочитываем до разбора.
+                self._on_ready_read()
+                tag = failed_outbound_tag(self._last_output_lines, prefix=XRAY_OUTBOUND_PREFIX)
+                if tag:
+                    self.rejected_outbound_tags.append(tag)
+                if not tag or attempt >= MAX_POOL_PRUNE_RETRIES or not self._prune_outbound(config, tag):
+                    return self._startup_failed()
+                attempt += 1
+                self.pruned_outbound_tags.append(tag)
+                self._held_startup_failure = None
+                self.log_received.emit(
+                    f"[xray] ядро не приняло outbound {tag}: запускаем без него (попытка {attempt + 1})"
+                )
+                yield sleep_ms(50)
+            ready_elapsed = time.monotonic() - ready_began
+
+            self._hold_startup_failure = False
+            self._held_startup_failure = None
             self._starting = False
-            self._report_startup_failure(f"Не удалось запустить Xray: {self._process.errorString()}")
-            return False
-        spawn_elapsed = time.monotonic() - spawn_began
+            self._mark_running()
+            self.log_received.emit(
+                "[xray-perf] start: "
+                f"ensure_ports={ports_elapsed:.2f}s spawn={spawn_elapsed:.2f}s "
+                f"wait_ready={ready_elapsed:.2f}s total={time.monotonic() - start_began:.2f}s"
+                + (f" pruned={len(self.pruned_outbound_tags)}" if self.pruned_outbound_tags else "")
+            )
+            return True
+        finally:
+            # Отмена перехода закрывает генератор здесь: флаг не должен пережить запуск.
+            self._hold_startup_failure = False
 
-        ready_began = time.monotonic()
-        ready = yield from self._wait_until_ready_steps(
-            required_ports,
-            credentials=self._extract_socks_credentials(config),
-        )
-        if not ready:
-            self._starting = False
+    @staticmethod
+    def _prune_outbound(config: dict[str, Any], tag: str) -> bool:
+        outbounds = config.get("outbounds")
+        if not isinstance(outbounds, list):
             return False
-        ready_elapsed = time.monotonic() - ready_began
-
-        self._starting = False
-        self._mark_running()
-        self.log_received.emit(
-            "[xray-perf] start: "
-            f"ensure_ports={ports_elapsed:.2f}s spawn={spawn_elapsed:.2f}s "
-            f"wait_ready={ready_elapsed:.2f}s total={time.monotonic() - start_began:.2f}s"
-        )
+        kept = [item for item in outbounds if not (isinstance(item, dict) and item.get("tag") == tag)]
+        if len(kept) == len(outbounds):
+            return False
+        config["outbounds"] = kept
         return True
+
+    def _startup_failed(self) -> bool:
+        """Запуск окончательно не удался: показать причину, которую держали на попытках."""
+
+        self._hold_startup_failure = False
+        held, self._held_startup_failure = self._held_startup_failure, None
+        if held:
+            self.error.emit(held)
+        return False
 
     def stop(self, expected: bool = True) -> bool:
         # Холодный совместимый путь (disconnect, shutdown, sing-box flows):
@@ -517,6 +580,11 @@ class XrayManager(QObject):
         if self._startup_failure_reported:
             return
         self._startup_failure_reported = True
+        if self._hold_startup_failure:
+            # Запуск ещё может удаться со следующей попытки: ошибку покажет
+            # _startup_failed(), если она окажется последней.
+            self._held_startup_failure = message
+            return
         self.error.emit(message)
 
     def _best_output_detail(self) -> str:

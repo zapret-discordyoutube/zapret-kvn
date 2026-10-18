@@ -117,3 +117,44 @@ class RuntimeErrorJournal:
 
 def is_core_error_line(message: str) -> bool:
     return bool(re.search(r"\b(?:error|fatal|panic|warn(?:ing)?|rejected)\b", message, re.IGNORECASE))
+
+
+# Xray на каждый outbound пула печатает «The feature … is deprecated» (WebSocket,
+# gRPC): при сотне узлов это сотни одинаковых строк за запуск. Это не сбой —
+# ядро работает, — поэтому они не идут в журнал ошибок, а в логе остаётся одна
+# строка на текст плюс счётчик повторов.
+_DEPRECATION_NOTICE_RE = re.compile(r"\[Warning\]\s+\S+:\s+The feature\b.+\bis deprecated\b", re.IGNORECASE)
+
+
+_LEADING_TIMESTAMP = re.compile(r"^\d{4}/\d{2}/\d{2} [\d:.]+ ")
+
+
+def is_deprecation_notice(message: str) -> bool:
+    return bool(_DEPRECATION_NOTICE_RE.search(message))
+
+
+class RepeatedNoticeFilter:
+    """Пропускает первое появление текста, повторы только считает."""
+
+    def __init__(self) -> None:
+        self._counts: dict[tuple[str, str], int] = {}
+        self._samples: dict[tuple[str, str], str] = {}
+
+    def first_time(self, engine: str, line: str) -> bool:
+        key = (engine, _VOLATILE_DIGITS.sub("#", line))
+        count = self._counts.get(key, 0) + 1
+        self._counts[key] = count
+        if count == 1:
+            self._samples[key] = line
+        return count == 1
+
+    def drain_summary(self, engine: str) -> list[str]:
+        """Строки «скрыто N повторов» для движка; счётчики сбрасываются."""
+
+        lines: list[str] = []
+        for key in [key for key in self._counts if key[0] == engine]:
+            hidden = self._counts.pop(key) - 1
+            sample = self._samples.pop(key, "")
+            if hidden > 0:
+                lines.append(f"[{engine}] скрыто повторов: {hidden} — {_LEADING_TIMESTAMP.sub('', sample)[:160]}")
+        return lines
