@@ -58,7 +58,7 @@ from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
-from .window_presence import WindowPresence, is_native_restore_command
+from .window_presence import WindowPresence, is_native_minimize_command, is_native_restore_command
 from .window_reveal import cloak_until_painted, is_system_show_event
 from .theme import apply_theme, stop_system_theme_listener, sync_system_theme_listener
 from .tour import TOUR_STEPS, TourOverlay, TourStep, active_tour
@@ -662,6 +662,10 @@ class MainWindow(FluentWindow):
         # покажет и нарисует окно, — самое время подтянуть память из фона.
         if is_native_restore_command(message):
             self._window_presence.return_intent()
+        elif is_native_minimize_command(message):
+            # Windows сжимает память свёрнутого окна сразу после этой команды:
+            # защита ставится до того, а не после.
+            self._window_presence.away_intent()
         return super().nativeEvent(event_type, message)
 
     def changeEvent(self, event):
@@ -669,6 +673,8 @@ class MainWindow(FluentWindow):
         # Окно за другими окнами экскурсию не начинает — ждёт, пока его выведут вперёд.
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
             self._schedule_tour_autostart()
+        if event.type() == QEvent.Type.WindowStateChange and not self.isMinimized():
+            QTimer.singleShot(0, self._flush_deferred_dashboard_metrics)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -685,6 +691,8 @@ class MainWindow(FluentWindow):
             ))
         # Запуск в трей окно не показывает — экскурсия ждёт первого появления.
         self._schedule_tour_autostart()
+        # Метрики, пришедшие, пока окно было скрыто, дашборд получает одним разом.
+        QTimer.singleShot(0, self._flush_deferred_dashboard_metrics)
         if not getattr(self, "_screen_signals_connected", False) and self.windowHandle():
             self._screen_signals_connected = True
             self.windowHandle().screenChanged.connect(self._on_window_screen_changed)
@@ -932,9 +940,19 @@ class MainWindow(FluentWindow):
             self.dashboard_page.set_process_stats(process_stats)
 
     def _is_dashboard_active(self) -> bool:
-        return self.stackedWidget.currentWidget() is self.dashboard_page
+        # Дашборд обновляется только когда его видно: открытая страница скрытого
+        # окна копила бы изменения раскладки, которые Qt разбирает при показе.
+        return (
+            self.stackedWidget.currentWidget() is self.dashboard_page
+            and self.isVisible()
+            and not self.isMinimized()
+        )
 
     def _on_current_interface_changed(self, _index: int) -> None:
+        self._flush_deferred_dashboard_metrics()
+
+    def _flush_deferred_dashboard_metrics(self) -> None:
+        """Доставляет дашборду то, что пришло, пока он был не виден (страница, свёрнутое окно, трей)."""
         if not self._is_dashboard_active():
             return
         if self._deferred_dashboard_metrics is not None:
@@ -2310,6 +2328,7 @@ class MainWindow(FluentWindow):
         # У свёрнутого окна isVisible() тоже True: клик по значку в трее прятал его,
         # а не возвращал. Прячем только окно, которое человек видит.
         if self.isVisible() and not self.isMinimized():
+            self._window_presence.away_intent()
             self.hide()
         else:
             self._window_presence.return_intent()
@@ -2397,6 +2416,7 @@ class MainWindow(FluentWindow):
         if self._state_loaded:
             self.controller.save()
         e.ignore()
+        self._window_presence.away_intent()
         self.hide()
         if self.tray is not None and not self._tray_notified:
             self.tray.showMessage(APP_NAME, "Приложение свёрнуто в системный трей", QSystemTrayIcon.MessageIcon.Information, 2000)

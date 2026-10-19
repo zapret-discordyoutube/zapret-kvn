@@ -28,7 +28,7 @@ if _existing is not None and not isinstance(_existing, QApplication):
 app = _existing or QApplication([])
 
 from xray_fluent.platform.windows import working_set
-from xray_fluent.platform.windows.working_set import PrefetchResult, WorkingSetSnapshot
+from xray_fluent.platform.windows.working_set import PrefetchResult, WorkingSetHold, WorkingSetSnapshot
 from xray_fluent.ui import window_presence
 from xray_fluent.ui.window_presence import WindowPresence, is_native_restore_command
 
@@ -211,7 +211,204 @@ class WorkingSetTests(unittest.TestCase):
         for module in (working_set, window_presence):
             source = inspect.getsource(module)
             self.assertNotIn("EmptyWorkingSet(", source)
-            self.assertNotIn("SetProcessWorkingSetSize", source)
+            # «Минус единицы» в SetProcessWorkingSetSizeEx — это выгрузка памяти.
+            self.assertNotIn("(-1", source)
+            self.assertNotIn("c_size_t(-1)", source)
+        # Работает с минимумом рабочего набора только модуль working_set, не само окно.
+        self.assertNotIn("SetProcessWorkingSetSize", inspect.getsource(window_presence))
+        self.assertNotIn("import psutil", inspect.getsource(window_presence))
+
+    def test_weak_pc_with_under_a_gigabyte_free_is_still_protected(self) -> None:
+        mb = 1 << 20
+        self.assertIsNotNone(working_set.hold_size_for(80 * mb, 700 * mb))
+        size = 80 * mb + working_set.HOLD_MARGIN_BYTES
+        self.assertIsNone(working_set.hold_size_for(80 * mb, size + working_set.HOLD_SPARE_BYTES - 1))
+        self.assertIsNone(working_set.hold_size_for(None, None))
+        self.assertIsNone(working_set.hold_size_for(working_set.HOLD_MIN_BYTES - 1, None))
+
+    def test_hold_and_counters_do_nothing_outside_windows(self) -> None:
+        with patch.object(working_set.sys, "platform", "linux"):
+            self.assertIsNone(working_set.hold_working_set(100 << 20))
+            self.assertFalse(working_set.release_working_set_hold())
+            self.assertIsNone(working_set.current_working_set_bytes())
+            self.assertIsNone(working_set.available_physical_bytes())
+            self.assertIsNone(working_set.process_page_faults())
+
+
+class EarlyAwayIntentTests(unittest.TestCase):
+    """Windows сжимает набор свёрнутого окна сразу: защита ставится до этого, а не после."""
+
+    def _window(self) -> QWidget:
+        window = QWidget()
+        self.addCleanup(window.deleteLater)
+        window.show()
+        app.processEvents()
+        return window
+
+    def _make(self, window, *, snapshots=None):
+        events: list[str] = []
+        queue = list(snapshots or [SNAPSHOT])
+        presence = WindowPresence(
+            window,
+            settle_ms=60_000,
+            report_ms=60_000,
+            min_away_for_prefetch_s=20.0,
+            take_snapshot=lambda: events.append("snapshot") or (queue.pop(0) if len(queue) > 1 else queue[0]),
+            prefetch=lambda snap: events.append("prefetch") or PrefetchResult(len(snap.ranges), snap.total_bytes, 1.0, True),
+            hold=lambda: events.append("hold") or WorkingSetHold(bytes=80 << 20, ok=True, error=0),
+            release_hold=lambda: events.append("release"),
+            start_worker=lambda fn: fn(),
+            clock=_Clock(),
+        )
+        events.clear()
+        return presence, events
+
+    def test_intent_holds_and_remembers_pages_before_the_window_leaves(self) -> None:
+        window = self._window()
+        presence, events = self._make(window)
+
+        presence.away_intent()
+
+        self.assertEqual(events, ["hold", "snapshot"])
+        # Состояние «в фоне» сам сигнал не ставит: сворачивание могло не состояться.
+        self.assertFalse(presence.away)
+
+    def test_the_late_qt_event_does_not_repeat_the_snapshot_but_keeps_the_hold(self) -> None:
+        window = self._window()
+        presence, events = self._make(window)
+        presence.away_intent()
+        events.clear()
+
+        window.hide()
+        app.processEvents()
+
+        self.assertTrue(presence.away)
+        self.assertEqual(events, ["hold"])
+
+    def test_window_that_stayed_on_screen_gets_its_protection_removed(self) -> None:
+        window = self._window()
+        presence, events = self._make(window)
+        presence.away_intent()
+        events.clear()
+
+        presence._on_intent_timeout()
+
+        self.assertEqual(events, ["release"])
+
+    def test_window_that_left_is_not_released_by_the_intent_timer(self) -> None:
+        window = self._window()
+        presence, events = self._make(window)
+        presence.away_intent()
+        window.hide()
+        app.processEvents()
+        events.clear()
+
+        presence._on_intent_timeout()
+
+        self.assertEqual(events, [])
+
+    def test_return_releases_the_hold_even_after_a_short_absence(self) -> None:
+        window = self._window()
+        presence, events = self._make(window)
+        window.hide()
+        app.processEvents()
+        events.clear()
+
+        presence.return_intent()
+
+        self.assertEqual(events, ["release"])
+
+    def test_poorer_snapshot_taken_after_the_trim_does_not_replace_the_full_one(self) -> None:
+        full = WorkingSetSnapshot(ranges=((0x1000, 0x9000),), total_bytes=0x9000, taken_ms=1.0)
+        trimmed = WorkingSetSnapshot(ranges=((0x1000, 0x1000),), total_bytes=0x1000, taken_ms=1.0)
+        window = self._window()
+        presence, _events = self._make(window, snapshots=[full, trimmed])
+
+        presence.away_intent()
+        window.hide()
+        app.processEvents()
+        presence._on_settle_timeout()
+
+        self.assertIs(presence._snapshot, full)
+
+    def test_hold_size_follows_the_hot_size_not_the_trimmed_one(self) -> None:
+        window = self._window()
+        presence = WindowPresence(window, start_worker=lambda fn: fn())
+        presence._hot_bytes = 150 << 20
+
+        with (
+            patch.object(window_presence, "current_working_set_bytes", return_value=10 << 20),
+            patch.object(window_presence, "available_physical_bytes", return_value=4096 << 20),
+            patch.object(window_presence, "hold_working_set") as hold,
+        ):
+            presence._hold_hot_set()
+
+        self.assertGreaterEqual(hold.call_args.args[0], 150 << 20)
+
+    def test_minimize_command_is_recognised_and_main_window_tells_presence_first(self) -> None:
+        def message(command: int):
+            return SimpleNamespace(message=window_presence.WM_SYSCOMMAND, wParam=command)
+
+        with (
+            patch.object(window_presence.sys, "platform", "win32"),
+            patch("ctypes.wintypes.MSG") as msg_type,
+        ):
+            msg_type.from_address.side_effect = lambda address: message(address)
+            self.assertTrue(window_presence.is_native_minimize_command(window_presence.SC_MINIMIZE))
+            self.assertFalse(window_presence.is_native_minimize_command(window_presence.SC_RESTORE))
+
+        source = MAIN_WINDOW.read_text(encoding="utf-8")
+        body = re.search(r"def nativeEvent\(.*?\n(?=    def )", source, re.S).group(0)
+        self.assertIn("is_native_minimize_command", body)
+        self.assertIn("_window_presence.away_intent()", body)
+        for name in ("_toggle_window_visible", "closeEvent"):
+            method = re.search(rf"def {name}\(.*?(?=\n    def |\Z)", source, re.S).group(0)
+            self.assertLess(method.index("away_intent()"), method.index("self.hide()"), name)
+
+
+class DashboardVisibilityTests(unittest.TestCase):
+    """Скрытое окно не обновляет дашборд: изменения раскладки копились бы до показа."""
+
+    def _window(self, *, on_dashboard=True, visible=True, minimized=False):
+        from xray_fluent.ui.main_window import MainWindow
+
+        dashboard = object()
+        window = SimpleNamespace(
+            dashboard_page=dashboard,
+            stackedWidget=SimpleNamespace(currentWidget=lambda: dashboard if on_dashboard else object()),
+            isVisible=lambda: visible,
+            isMinimized=lambda: minimized,
+        )
+        window._is_dashboard_active = lambda: MainWindow._is_dashboard_active(window)
+        return MainWindow, window
+
+    def test_dashboard_is_active_only_when_the_window_is_on_screen(self) -> None:
+        cls, window = self._window()
+        self.assertTrue(cls._is_dashboard_active(window))
+        for kwargs in ({"visible": False}, {"minimized": True}, {"on_dashboard": False}):
+            _cls, window = self._window(**kwargs)
+            self.assertFalse(cls._is_dashboard_active(window), kwargs)
+
+    def test_metrics_wait_while_hidden_and_arrive_after_the_window_returns(self) -> None:
+        from unittest.mock import Mock
+
+        cls, window = self._window(visible=False)
+        window._deferred_dashboard_metrics = None
+        window._deferred_process_stats = None
+        window._has_deferred_process_stats = False
+        window.dashboard_page = Mock()
+        window.stackedWidget = SimpleNamespace(currentWidget=lambda: window.dashboard_page)
+        window._is_dashboard_active = lambda: cls._is_dashboard_active(window)
+
+        cls._on_live_metrics_updated(window, {"down_bps": 5.0, "up_bps": 2.0, "latency_ms": 40, "process_stats": [1]})
+        window.dashboard_page.set_live_metrics.assert_not_called()
+
+        window.isVisible = lambda: True
+        cls._flush_deferred_dashboard_metrics(window)
+
+        window.dashboard_page.set_live_metrics.assert_called_once_with(5.0, 2.0, 40)
+        window.dashboard_page.set_process_stats.assert_called_once_with([1])
+        self.assertIsNone(window._deferred_dashboard_metrics)
 
 
 if __name__ == "__main__":
