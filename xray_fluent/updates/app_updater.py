@@ -15,6 +15,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -38,6 +39,7 @@ from .delta_zip import DeltaUnavailable, HttpRangeSource, SignedFile, prepare_de
 from .installer.plan import APP_EXE_NAME, WORK_DIR_PREFIX
 from .installer.runner import STAGE_ROOT_NAME
 from .signed_release import signed_asset_urls, verified_manifest
+from zapret_update import mirrors as git_mirrors
 from zapret_update.manifest import ManifestError
 
 FORGEJO_RELEASE_API = (
@@ -51,6 +53,13 @@ FORGEJO_RELEASE_DOWNLOAD_PREFIXES = (
     "/zapretdiscordyoutube/zapret-kvn/releases/download/",
 )
 FORGEJO_HOST = "git.zapret.moe"
+# Основное имя режут по TLS; тот же Forgejo открывается под зеркалами git2, git3, …
+# (список имён отдаёт сам сервер). Проверка обновления идёт под первым открытым
+# именем, а ссылки на файлы выпуска остаются теми, под которым ответил сервер.
+_MIRROR_LIST_TIMEOUT = 3
+_MAX_MIRROR_LIST_BYTES = 64 * 1024
+# Дольше этого перебор имён не идёт.
+_MIRROR_ROUND_BUDGET_S = 25.0
 USER_AGENT = f"ZapretKVN/{APP_VERSION}"
 _UPDATE_CHECK_TIMEOUT = 8
 _MAX_RELEASE_METADATA_BYTES = 1024 * 1024
@@ -211,7 +220,7 @@ def _is_trusted_release_url(url: str) -> bool:
         return False
     return (
         parsed.scheme.lower() == "https"
-        and (parsed.hostname or "").lower() == FORGEJO_HOST
+        and git_mirrors.is_git_host((parsed.hostname or "").lower())
         and parsed.username is None
         and parsed.password is None
         and port in {None, 443}
@@ -228,7 +237,7 @@ def _is_trusted_release_api_url(url: str) -> bool:
         return False
     return (
         parsed.scheme.lower() == "https"
-        and (parsed.hostname or "").lower() == FORGEJO_HOST
+        and git_mirrors.is_git_host((parsed.hostname or "").lower())
         and parsed.username is None
         and parsed.password is None
         and port in {None, 443}
@@ -241,6 +250,19 @@ class _ReleaseClient:
 
     def __init__(self, proxy_url: str | None = None):
         self._proxy_url = proxy_url
+        self._mirrors = git_mirrors.MirrorList(self._fetch_mirror_list)
+
+    def _fetch_mirror_list(self, url: str) -> bytes | None:
+        """Список имён сервера: одна короткая попытка на каждом маршруте."""
+        response = fetch_bytes(
+            Request(url, headers={"Accept": "application/json", "User-Agent": USER_AGENT}),
+            timeout=_MIRROR_LIST_TIMEOUT,
+            max_bytes=_MAX_MIRROR_LIST_BYTES,
+            proxy_url=self._proxy_url,
+            attempts_per_route=1,
+            prefer_proxy=bool(self._proxy_url),
+        )
+        return response.data
 
     def _fetch(self, request: Request, *, max_bytes: int):
         return fetch_bytes(
@@ -258,17 +280,39 @@ class _ReleaseClient:
         )
 
     def fetch_release(self) -> dict:
-        request = Request(
-            FORGEJO_RELEASE_API,
-            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
-        )
-        response = self._fetch(request, max_bytes=_MAX_RELEASE_METADATA_BYTES)
+        response = self._fetch_release_response()
         if not _is_trusted_release_api_url(response.final_url):
             raise ValueError("Сервер обновлений перенаправил запрос на недоверенный адрес")
         payload = json.loads(response.data.decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("Сервер обновлений вернул некорректный ответ")
         return payload
+
+    def _fetch_release_response(self):
+        """Ответ о последнем выпуске под первым открытым именем сервера.
+
+        Следующее имя пробуется только когда не удался ни один маршрут (сеть,
+        TLS): ответ сервера вроде 404 одинаков под любым именем.
+        """
+        started = time.monotonic()
+        last_error: BaseException | None = None
+        for host in self._mirrors.hosts():
+            request = Request(
+                git_mirrors.with_host(FORGEJO_RELEASE_API, host),
+                headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            )
+            try:
+                response = self._fetch(request, max_bytes=_MAX_RELEASE_METADATA_BYTES)
+            except HttpFetchError as exc:
+                last_error = exc
+                if time.monotonic() - started >= _MIRROR_ROUND_BUDGET_S:
+                    break
+                continue
+            self._mirrors.remember(host)
+            return response
+        # Ни одно имя не ответило: список имён мог устареть.
+        self._mirrors.forget()
+        raise last_error if last_error is not None else ValueError("Нет ни одного имени сервера обновлений")
 
     def fetch_signed(self, url: str, max_bytes: int) -> bytes:
         if not _is_trusted_release_url(url):
@@ -689,7 +733,11 @@ class UpdateDownloader(QThread):
         except (update_plan.PlanError, OSError) as exc:
             _log.info("[update] Хранилище выпуска не подходит: %s", exc)
             return None
-        url_for = lambda name: store.forgejo_url(f"https://{FORGEJO_HOST}", "zapretkvn", "zapret-kvn", name)  # noqa: E731
+        # Имя сервера — то, под которым ответила проверка обновления (основное режут по TLS).
+        store_host = git_mirrors.host_of(self._update.download_url)
+        if not git_mirrors.is_git_host(store_host):
+            store_host = FORGEJO_HOST
+        url_for = lambda name: store.forgejo_url(f"https://{store_host}", "zapretkvn", "zapret-kvn", name)  # noqa: E731
         sources = [fetch.Source("Forgejo", url_for)]
         if self._proxy_url:
             sources.append(fetch.Source("Forgejo через прокси", url_for, proxy=self._proxy_url))

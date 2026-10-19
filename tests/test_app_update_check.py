@@ -11,6 +11,7 @@ import hashlib
 from xray_fluent.updates import app_updater, signed_release
 from xray_fluent.network.http_utils import HttpFetchError, HttpResponseData
 from zapret_update import manifest as update_manifest
+from zapret_update import mirrors as git_mirrors
 from zapret_update.ed25519 import public_key_from_seed, sign_ed25519
 
 SEED = hashlib.sha256(b"kvn test key").digest()
@@ -53,6 +54,12 @@ def _signed_release(digest, *, seed=SEED, listed_digest=None, with_list=True, li
 
 
 class AppUpdateCheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Список имён сервера в этих тестах не нужен: обмен идёт под основным именем.
+        patcher = patch.object(git_mirrors.MirrorList, "hosts", return_value=["git.zapret.moe"])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_release_client_uses_active_proxy_and_bounded_retry_policy(self) -> None:
         payload = json.dumps({"tag_name": "v0.4.86", "assets": []}).encode()
         with patch.object(
@@ -258,3 +265,77 @@ class UpdateDownloaderTests(unittest.TestCase):
         self.assertIsNone(downloader.prepared)
         self.assertFalse(downloader.failure_permanent)
         self.assertEqual(len(self.errors), 1)
+
+
+class ReleaseClientMirrorNamesTests(unittest.TestCase):
+    """Основное имя режут по TLS: проверка обновления идёт под первым открытым именем сервера."""
+
+    HOSTS = ["git2.zapret.moe", "git3.zapret.moe", "git.zapret.moe"]
+
+    def _client(self):
+        client = app_updater._ReleaseClient()
+        client._mirrors._hosts = list(self.HOSTS)
+        client._mirrors._expires_at = float("inf")
+        return client
+
+    @staticmethod
+    def _api(host: str) -> str:
+        return git_mirrors.with_host(app_updater.FORGEJO_RELEASE_API, host)
+
+    def test_next_name_is_tried_only_after_every_route_failed(self) -> None:
+        client = self._client()
+        payload = json.dumps({"tag_name": "v1.0.0", "assets": []}).encode()
+        calls: list[str] = []
+
+        def fake(request, **_kwargs):
+            calls.append(request.full_url)
+            if "git2." in request.full_url:
+                raise HttpFetchError(())
+            return _response(payload, request.full_url)
+
+        with patch.object(app_updater, "fetch_bytes", side_effect=fake):
+            release = client.fetch_release()
+
+        self.assertEqual(release["tag_name"], "v1.0.0")
+        self.assertEqual(calls, [self._api("git2.zapret.moe"), self._api("git3.zapret.moe")])
+        self.assertEqual(client._mirrors.hosts()[0], "git3.zapret.moe")
+
+    def test_server_answer_like_404_is_not_retried_under_other_names(self) -> None:
+        client = self._client()
+        error = urllib.error.HTTPError(self._api("git2.zapret.moe"), 404, "нет", {}, None)
+
+        with patch.object(app_updater, "fetch_bytes", side_effect=error) as fetch:
+            with self.assertRaises(urllib.error.HTTPError):
+                client.fetch_release()
+
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_when_no_name_answers_the_network_error_is_raised(self) -> None:
+        client = self._client()
+
+        with patch.object(app_updater, "fetch_bytes", side_effect=HttpFetchError(())) as fetch:
+            with self.assertRaises(HttpFetchError):
+                client.fetch_release()
+
+        self.assertEqual(fetch.call_count, 3)
+
+    def test_answer_from_a_mirror_is_trusted_but_a_foreign_redirect_is_not(self) -> None:
+        client = self._client()
+        payload = json.dumps({"tag_name": "v1.0.0", "assets": []}).encode()
+
+        with patch.object(app_updater, "fetch_bytes", return_value=_response(payload, self._api("git2.zapret.moe"))):
+            self.assertEqual(client.fetch_release()["tag_name"], "v1.0.0")
+
+        with patch.object(app_updater, "fetch_bytes", return_value=_response(payload, "https://evil.example/x")):
+            with self.assertRaises(ValueError):
+                client.fetch_release()
+
+    def test_release_file_links_on_any_project_git_name_are_trusted(self) -> None:
+        path = "/zapretkvn/zapret-kvn/releases/download/v1/a.zip"
+        for host in ("git.zapret.moe", "git2.zapret.moe", "git9.zapret.moe"):
+            self.assertTrue(app_updater._is_trusted_release_url(f"https://{host}{path}"), host)
+        for host in ("evil.example", "git2.zapret.moe.evil.example", "wiki.zapret.moe"):
+            self.assertFalse(app_updater._is_trusted_release_url(f"https://{host}{path}"), host)
+        self.assertFalse(app_updater._is_trusted_release_url(f"http://git2.zapret.moe{path}"))
+        self.assertFalse(app_updater._is_trusted_release_url(f"https://git2.zapret.moe:8443{path}"))
+
