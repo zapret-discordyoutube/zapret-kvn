@@ -58,6 +58,7 @@ from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
 from .about_page import AboutPage
 from .history_page import HistoryPage
+from .page_warmup import HiddenPageWarmup
 from .window_presence import WindowPresence, is_native_minimize_command, is_native_restore_command
 from .window_reveal import cloak_until_painted, is_system_show_event
 from .theme import apply_theme, stop_system_theme_listener, sync_system_theme_listener
@@ -192,6 +193,18 @@ class MainWindow(FluentWindow):
         self.updates_page = DeferredPage(UpdatesPage, "updates", self)
         self.history_page = DeferredPage(HistoryPage, "history", self)
         self.about_page = DeferredPage(AboutPage, "about", self)
+        # Запуск в трей: страницы, которые человек нажмёт первыми, строятся заранее, пока
+        # окно скрыто и он отошёл, а не под щелчком при первом открытии окна.
+        self._page_warmup = HiddenPageWarmup(
+            self,
+            lambda: (
+                self.nodes_page,
+                self.subscriptions_page,
+                self.settings_page,
+                self.updates_page,
+                self.logs_page,
+            ),
+        )
 
         self._create_navigation()
         self._create_tray()

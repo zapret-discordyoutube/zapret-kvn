@@ -75,6 +75,13 @@ RETURN_REPORT_MS = 3 * 1000
 SAMPLE_AFTER_SHOW_MS = 4 * 1000
 # Сколько ждать, что окно, собравшееся уйти, действительно ушло.
 INTENT_CONFIRM_MS = 2 * 1000
+# Пока окно скрыто, раз в столько проверяется, не выросла ли память программы
+# настолько, что удержание пора увеличить: запуск в трей берёт хватку на пятой
+# секунде, когда программа ещё не закончила стартовые работы, и всё, что выросло
+# потом, Windows вправе отобрать.
+AWAY_REFRESH_MS = 60 * 1000
+# На сколько должно вырасти, чтобы хватку пересчитывать.
+HOLD_GROWTH_BYTES = 16 * 1024 * 1024
 
 _WATCHED_EVENTS = (QEvent.Type.Hide, QEvent.Type.Show, QEvent.Type.WindowStateChange)
 
@@ -178,6 +185,10 @@ class WindowPresence(QObject):
         self._intent_timer.setInterval(INTENT_CONFIRM_MS)
         self._intent_timer.timeout.connect(self._on_intent_timeout)
 
+        self._away_refresh_timer = QTimer(self)
+        self._away_refresh_timer.setInterval(AWAY_REFRESH_MS)
+        self._away_refresh_timer.timeout.connect(self._on_away_refresh)
+
         self._report_timer = QTimer(self)
         self._report_timer.setSingleShot(True)
         self._report_timer.setInterval(self._report_ms)
@@ -278,12 +289,29 @@ class WindowPresence(QObject):
         self._sample_timer.stop()
         self._intent_timer.stop()
         self._settle_timer.start()
+        self._away_refresh_timer.start()
         self._start_worker(self._hold_if_away)
 
     def _on_settle_timeout(self) -> None:
         if self._away:
             self._start_worker(self._hold_if_away)
             self._start_worker(self._store_snapshot)
+
+    def _on_away_refresh(self) -> None:
+        if self._away:
+            self._start_worker(self._refresh_hold_if_grown)
+
+    def _refresh_hold_if_grown(self) -> None:
+        """Память выросла после того, как хватка была взята: берёт её заново, побольше."""
+        try:
+            current = int(current_working_set_bytes() or 0)
+        except Exception:
+            return
+        held = self._held
+        if held is not None and held.ok and current < held.bytes + HOLD_GROWTH_BYTES:
+            return
+        self._hold_if_away()
+        self._store_snapshot()
 
     def _hold_if_away(self) -> None:
         with self._hold_lock:
@@ -323,6 +351,7 @@ class WindowPresence(QObject):
     def _enter_shown(self) -> None:
         self._away = False
         self._settle_timer.stop()
+        self._away_refresh_timer.stop()
         self._sample_timer.start()
         since, self._away_since = self._away_since, None
         away_s = 0.0 if since is None else max(0.0, self._clock() - since)
@@ -372,7 +401,9 @@ class WindowPresence(QObject):
 
 
 __all__ = [
+    "AWAY_REFRESH_MS",
     "AWAY_SETTLE_MS",
+    "HOLD_GROWTH_BYTES",
     "INTENT_CONFIRM_MS",
     "MIN_AWAY_FOR_PREFETCH_S",
     "RETURN_REPORT_MS",

@@ -121,6 +121,10 @@ class MirrorList:
     ``fetch(url)`` — короткий (одна попытка, несколько секунд) запрос без
     повторов, возвращает тело ответа или ``None``/бросает ошибку. Работает на
     маршруте вызывающего: прямом или через прокси.
+
+    ``report(строка)`` — необязательный журнал: откуда получен список имён и по
+    какой причине не вышло с каждым именем (без него по записи «Forgejo
+    недоступен» не понять, чем именно закрыты зеркала на этом компьютере).
     """
 
     def __init__(
@@ -128,9 +132,11 @@ class MirrorList:
         fetch: Callable[[str], bytes | None],
         *,
         clock: Callable[[], float] = time.monotonic,
+        report: Callable[[str], None] | None = None,
     ) -> None:
         self._fetch = fetch
         self._clock = clock
+        self._report = report
         self._hosts: list[str] | None = None
         self._expires_at = 0.0
         self._good: str | None = None
@@ -159,18 +165,36 @@ class MirrorList:
             hosts.insert(0, self._good)
         return hosts
 
+    def _say(self, message: str) -> None:
+        if self._report is None:
+            return
+        try:
+            self._report(message)
+        except Exception:
+            pass
+
     def _download_list(self) -> list[str]:
+        failures: list[str] = []
         for host in BOOTSTRAP_HOSTS:
             try:
                 body = self._fetch(f"https://{host}{MIRRORS_PATH}")
                 if not body:
+                    failures.append(f"{host}: пустой ответ")
                     continue
                 ordered = ordered_hosts(json.loads(body))
-            except Exception:
+            except Exception as exc:
+                failures.append(f"{host}: {type(exc).__name__}: {str(exc)[:120]}")
                 continue
             if ordered:
+                self._say(f"список имён сервера получен с {host}: {', '.join(ordered)}")
                 return ordered
+            failures.append(f"{host}: список без имён")
+        self._say("список имён сервера не получен, берётся запасной; " + "; ".join(failures))
         return []
+
+    def note_failure(self, host: str, exc: BaseException) -> None:
+        """Журнал: под этим именем сервер не ответил (причина — для разбора на компьютере пользователя)."""
+        self._say(f"{host}: {type(exc).__name__}: {str(exc)[:160]}")
 
 
 __all__ = [

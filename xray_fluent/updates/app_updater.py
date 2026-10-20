@@ -250,7 +250,10 @@ class _ReleaseClient:
 
     def __init__(self, proxy_url: str | None = None):
         self._proxy_url = proxy_url
-        self._mirrors = git_mirrors.MirrorList(self._fetch_mirror_list)
+        self._mirrors = git_mirrors.MirrorList(
+            self._fetch_mirror_list,
+            report=lambda message: _log.info("[update] Forgejo, имена сервера: %s", message),
+        )
 
     def _fetch_mirror_list(self, url: str) -> bytes | None:
         """Список имён сервера: одна короткая попытка на каждом маршруте."""
@@ -305,6 +308,7 @@ class _ReleaseClient:
                 response = self._fetch(request, max_bytes=_MAX_RELEASE_METADATA_BYTES)
             except HttpFetchError as exc:
                 last_error = exc
+                self._mirrors.note_failure(host, exc)
                 if time.monotonic() - started >= _MIRROR_ROUND_BUDGET_S:
                     break
                 continue

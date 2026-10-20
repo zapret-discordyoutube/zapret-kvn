@@ -366,6 +366,73 @@ class EarlyAwayIntentTests(unittest.TestCase):
             self.assertLess(method.index("away_intent()"), method.index("self.hide()"), name)
 
 
+class AwayHoldRefreshTests(unittest.TestCase):
+    """Запуск в трей: хватка берётся рано, потом память растёт — хватка растёт вместе с ней."""
+
+    def _make(self, window):
+        sizes: list[int] = []
+
+        def hold():
+            size = (len(sizes) + 1) * 100 << 20
+            sizes.append(size)
+            return WorkingSetHold(bytes=size, ok=True, error=0)
+
+        window.show()
+        app.processEvents()
+        presence = WindowPresence(
+            window,
+            settle_ms=60_000,
+            report_ms=60_000,
+            min_away_for_prefetch_s=20.0,
+            take_snapshot=lambda: SNAPSHOT,
+            prefetch=lambda snap: PrefetchResult(len(snap.ranges), snap.total_bytes, 1.0, True),
+            hold=hold,
+            release_hold=lambda: None,
+            start_worker=lambda fn: fn(),
+            clock=_Clock(),
+        )
+        sizes.clear()
+        window.hide()
+        app.processEvents()
+        return presence, sizes
+
+    def _window(self) -> QWidget:
+        window = QWidget()
+        self.addCleanup(window.deleteLater)
+        return window
+
+    def test_hold_is_raised_when_the_program_grew_while_hidden(self) -> None:
+        presence, sizes = self._make(self._window())
+        self.assertEqual(sizes, [100 << 20])
+
+        with patch.object(window_presence, "current_working_set_bytes", return_value=150 << 20):
+            presence._refresh_hold_if_grown()
+
+        self.assertEqual(sizes, [100 << 20, 200 << 20])
+
+    def test_hold_is_not_touched_when_nothing_grew(self) -> None:
+        presence, sizes = self._make(self._window())
+
+        with patch.object(window_presence, "current_working_set_bytes", return_value=105 << 20):
+            presence._refresh_hold_if_grown()
+
+        self.assertEqual(sizes, [100 << 20])
+
+    def test_refresh_runs_only_while_the_window_is_away(self) -> None:
+        window = self._window()
+        presence, sizes = self._make(window)
+        self.assertTrue(presence._away_refresh_timer.isActive())
+
+        window.show()
+        app.processEvents()
+        self.assertFalse(presence._away_refresh_timer.isActive())
+
+        sizes.clear()
+        with patch.object(window_presence, "current_working_set_bytes", return_value=900 << 20):
+            presence._on_away_refresh()
+        self.assertEqual(sizes, [])
+
+
 class DashboardVisibilityTests(unittest.TestCase):
     """Скрытое окно не обновляет дашборд: изменения раскладки копились бы до показа."""
 
