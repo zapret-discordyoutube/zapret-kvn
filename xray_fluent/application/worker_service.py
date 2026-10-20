@@ -87,8 +87,10 @@ def speed_test_nodes(controller: AppController, node_ids: set[str] | None = None
         # Шлюз проверок: по одному серверу с паузой 10–20 с — отдельные
         # подключения на проводе, а не пачка объёмных потоков подряд.
         pause_range=probe_gate.SWEEP_PAUSE_SEC,
+        check_services=True,
     )
     controller._speed_worker.result.connect(controller._on_speed_result)
+    controller._speed_worker.services.connect(controller._on_services_result)
     # Пропуски копятся и показываются одной строкой в конце: по сообщению на
     # сервер давало десятки всплывающих плашек на списке native-нод.
     skipped = controller._speed_skipped
@@ -173,6 +175,18 @@ def on_speed_result(controller: AppController, node_id: str, speed_mbps: float |
         if len(node.speed_history) > 50:
             node.speed_history = node.speed_history[-50:]
     controller.speed_updated.emit(node_id, speed_mbps, is_alive)
+
+
+def on_services_result(controller: AppController, node_id: str, verdicts: dict) -> None:
+    """Что открывается через узел — в карточку узла; список узлов перерисуется как после замера скорости."""
+    if controller.sender() is not controller._speed_worker:
+        return
+    node = controller._get_node_by_id(node_id)
+    if node is None:
+        return
+    node.services = {str(key): dict(value) for key, value in verdicts.items() if isinstance(value, dict)}
+    node.services_checked_at = datetime.now(timezone.utc).isoformat()
+    controller.speed_updated.emit(node_id, node.speed_mbps, bool(node.is_alive))
 
 
 def on_speed_progress(controller: AppController, current: int, total: int) -> None:

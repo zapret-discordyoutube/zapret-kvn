@@ -33,7 +33,7 @@ from .http_utils import build_opener
 from ..profiles.models import Node
 from ..engines.tls_fingerprint import apply_browser_fingerprint
 from ..engines.xray_outbound_compat import normalize_xray_outbound
-from . import probe_gate
+from . import probe_gate, service_check
 
 # Обычный браузерный User-Agent: хост тестового файла не должен видеть, что с
 # адреса прокси-сервера ходит именно это приложение.
@@ -417,6 +417,7 @@ class SpeedTestWorker(QThread):
     progress = pyqtSignal(int, int)          # current, total
     node_progress = pyqtSignal(str, int)     # node_id, percent 0..100
     skipped = pyqtSignal(str, str)           # node_id, короткое сообщение о пропуске
+    services = pyqtSignal(str, object)       # node_id, {ключ сервиса: вывод} — что открывается через узел
     completed = pyqtSignal()
 
     def __init__(
@@ -437,6 +438,7 @@ class SpeedTestWorker(QThread):
         pause_range: tuple[float, float] | None = None,
         hysteria_path: str | None = None,
         journal_kind: str | None = probe_gate.SWEEP,
+        check_services: bool = False,
     ):
         super().__init__()
         self._nodes = list(nodes)
@@ -463,6 +465,8 @@ class SpeedTestWorker(QThread):
         self._pause_range = pause_range
         # Вид проверки для журнала шлюза; None — уже записал вызывающий.
         self._journal_kind = journal_kind
+        # Ручной тест после скорости проверяет и известные сервисы через тот же временный прокси.
+        self._check_services = bool(check_services)
         self._cancelled = False
         self._completed_nodes = 0
         self._current_proc: subprocess.Popen | None = None
@@ -669,6 +673,7 @@ class SpeedTestWorker(QThread):
                 results.sort()
                 results = results[1:]
             speed = round(sum(results) / len(results), 2)
+            self._check_node_services(node, http_port)
             return True, speed, True
 
         except Exception:
@@ -685,6 +690,17 @@ class SpeedTestWorker(QThread):
                     proc.kill()
             if config_path is not None:
                 _unlink_quietly(config_path)
+
+    def _check_node_services(self, node: Node, http_port: int) -> None:
+        """Какие сервисы открываются через узел и как отвечают. Сбой проверки скорость не портит."""
+        if not self._check_services or self._cancelled:
+            return
+        try:
+            verdicts = service_check.check_all(PROXY_HOST, http_port, cancelled=lambda: self._cancelled)
+        except Exception:
+            return
+        if not self._cancelled:
+            self.services.emit(node.id, {key: verdict.as_dict() for key, verdict in verdicts.items()})
 
     def _measure_speed(
         self, url: str, node_id: str, http_port: int, attempt: int, attempts: int,

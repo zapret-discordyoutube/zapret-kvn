@@ -91,6 +91,9 @@ class Node:
     provider_name: str = ""
     country_override: str = ""
     is_favorite: bool = False
+    # Что открывается через узел: ключ сервиса → {code, text, ttfb_median_ms, ttfb_max_ms} (см. network.service_check).
+    services: dict[str, dict[str, Any]] = field(default_factory=dict)
+    services_checked_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +120,8 @@ class Node:
             "source_key": self.source_key,
             "source_fingerprint": self.source_fingerprint,
             "provider_name": self.provider_name,
+            "services": self.services,
+            "services_checked_at": self.services_checked_at,
         }
 
     @staticmethod
@@ -145,6 +150,8 @@ class Node:
             source_key=str(data.get("source_key") or ""),
             source_fingerprint=str(data.get("source_fingerprint") or ""),
             provider_name=str(data.get("provider_name") or data.get("name") or ""),
+            services={str(key): dict(value) for key, value in (data.get("services") or {}).items() if isinstance(value, dict)},
+            services_checked_at=str(data.get("services_checked_at") or ""),
         )
 
 

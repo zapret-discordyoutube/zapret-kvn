@@ -47,6 +47,7 @@ from .worker_service import (
     on_connectivity_result,
     on_ping_measured,
     on_ping_progress,
+    on_services_result,
     on_speed_complete,
     on_speed_node_progress,
     on_speed_progress,

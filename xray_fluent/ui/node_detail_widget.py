@@ -73,10 +73,15 @@ class NodeDetailWidget(DetailPage):
         self.endpoint_label = BodyLabel("", self.info_card)
         self.details_label = CaptionLabel("", self.info_card)
         self.status_label = CaptionLabel("", self.info_card)
+        # Какие сервисы открываются через узел (после теста скорости): значки и слова о проблемах.
+        self.services_label = CaptionLabel("", self.info_card)
+        self.services_label.setWordWrap(True)
+        self.services_label.setVisible(False)
         info_layout.addWidget(self.name_label)
         info_layout.addWidget(self.endpoint_label)
         info_layout.addWidget(self.details_label)
         info_layout.addWidget(self.status_label)
+        info_layout.addWidget(self.services_label)
         root.addWidget(self.info_card)
 
         # Two tables side by side: ping history + speed history
@@ -161,6 +166,9 @@ class NodeDetailWidget(DetailPage):
         if node.is_alive is not None:
             parts.append("Статус: OK" if node.is_alive else "Статус: Недоступен")
         self.status_label.setText("  |  ".join(parts) if parts else "Не тестировался")
+        services = self._services_text(node)
+        self.services_label.setText(services)
+        self.services_label.setVisible(bool(services))
 
         # Ping history table (newest first)
         history = list(reversed(node.ping_history))
@@ -177,6 +185,21 @@ class NodeDetailWidget(DetailPage):
             time_str = self._format_ts(ts)
             self.speed_table.setItem(row, 0, QTableWidgetItem(time_str))
             self.speed_table.setItem(row, 1, QTableWidgetItem("--" if spd is None else f"{spd:.1f} MB/s"))
+
+    def _services_text(self, node: Node) -> str:
+        """Строка значков по сервисам и под ней слова о том, что не в порядке. Пусто — сервисы не проверялись."""
+        if not node.services:
+            return ""
+        from ..network import service_check
+
+        lines = [f"Через этот узел: {service_check.summary_text(node.services)}"]
+        titles = {spec.key: spec.title for spec in service_check.SERVICES}
+        for key, verdict in node.services.items():
+            if verdict.get("code") not in (service_check.CODE_OK, service_check.CODE_UNKNOWN):
+                lines.append(f"{titles.get(key, key)}: {verdict.get('text') or ''}")
+        if node.services_checked_at:
+            lines.append(f"Проверено: {self._format_ts(node.services_checked_at)}")
+        return "\n".join(lines)
 
     def _ping(self) -> None:
         if self._node:

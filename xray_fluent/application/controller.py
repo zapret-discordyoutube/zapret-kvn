@@ -131,6 +131,7 @@ from .runtime import (
     on_live_metrics as on_live_metrics_operation,
     on_ping_measured as on_ping_measured_operation,
     on_ping_progress as on_ping_progress_operation,
+    on_services_result as on_services_result_operation,
     on_speed_complete as on_speed_complete_operation,
     on_speed_node_progress as on_speed_node_progress_operation,
     on_speed_progress as on_speed_progress_operation,
@@ -4128,6 +4129,9 @@ class AppController(QObject):
 
     def _on_speed_result(self, node_id: str, speed_mbps: float | None, is_alive: bool) -> None:
         on_speed_result_operation(self, node_id, speed_mbps, is_alive)
+
+    def _on_services_result(self, node_id: str, verdicts: object) -> None:
+        on_services_result_operation(self, node_id, verdicts if isinstance(verdicts, dict) else {})
 
     def _on_speed_progress(self, current: int, total: int) -> None:
         on_speed_progress_operation(self, current, total)
