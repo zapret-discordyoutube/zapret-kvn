@@ -8691,6 +8691,9 @@
       },
       "cwnd": {
        "type": "integer"
+      },
+      "disable_path_mtu_discovery": {
+       "type": "boolean"
       }
      },
      "required": [
@@ -13475,6 +13478,9 @@
       "use_http2": {
        "type": "boolean"
       },
+      "use_l4_proxy": {
+       "type": "boolean"
+      },
       "use_ipv6": {
        "type": "boolean"
       },
@@ -13501,6 +13507,9 @@
        "maximum": 65535
       },
       "reconnect_delay": {
+       "$ref": "#/$defs/Duration"
+      },
+      "handshake_timeout": {
        "$ref": "#/$defs/Duration"
       },
       "congestion_controller": {
@@ -15292,6 +15301,9 @@
         "type": "string"
        }
       },
+      "multiplex": {
+       "type": "string"
+      },
       "http_mask": {
        "$ref": "#/$defs/SudokuHTTPMask"
       }
@@ -15776,6 +15788,9 @@
       },
       "cwnd": {
        "type": "integer"
+      },
+      "disable_path_mtu_discovery": {
+       "type": "boolean"
       },
       "multiplex": {
        "$ref": "#/$defs/TrustTunnelMultiplexOptions"
@@ -20554,7 +20569,13 @@
     "rekey_timeout": {},
     "reject_after_time": {},
     "keepalive_timeout": {},
-    "max_handshake_attempts": {}
+    "max_handshake_attempts": {},
+    "random_trailers": {
+     "type": "boolean"
+    },
+    "disable_cookies": {
+     "type": "boolean"
+    }
    },
    "additionalProperties": false
   },

@@ -58,6 +58,9 @@ ALLOWED: dict[str, set[str]] = {
     # скорость по кнопке с паузой и кандидат умной замены в бюджете шлюза.
     "network/ping_worker.py": {"create_connection"},
     "network/speed_test_worker.py": {"build_opener", "create_connection", "socket"},
+    # Карточка сервисов в тесте скорости: HTTP CONNECT к известным сервисам через
+    # временный локальный прокси проверяемого узла — внутри туннеля, по кнопке.
+    "network/service_check.py": {"HTTPSConnection"},
     "network/connectivity_test.py": {"build_opener"},
 }
 
