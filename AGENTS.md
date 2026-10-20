@@ -24,6 +24,6 @@
 - Скриншоты Windows снимаются на машине `win10` (VM 100); личные данные и ссылки подписок на снимках закрашиваются.
 - Правка заметок — по навыку хранилища `/home/codex-pve/Privacy/.claude/skills/vault-note/SKILL.md`; публикация — коммит и `git push` хранилища (сайт пересобирается сам) и `"$HOME/.local/bin/obsidian" vault="Privacy" publish:add path=<файл>` для зеркала. Подробная процедура и проверка сайта — навык `vpnbot-maintain-user-guides` в `/home/codex-pve/vpnbot/vpnbot_codex/.claude/skills/`.
 
-## Оформление ответа
+## Response format
 
-Правила оформления ответа общие для всех проектов: раздел «Оформление ответа» в `/home/codex-pve/AGENTS.md`. Прочитай его и соблюдай в каждом сеансе; менять правила только там.
+The response format rules are common to all projects: the "Response format" section in `/home/codex-pve/AGENTS.md`. Read it and follow it in every session; change the rules only there.
