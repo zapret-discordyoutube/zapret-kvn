@@ -9,6 +9,13 @@
       "zip_sha256": "6753f348d1bc4a41f3db0a5bce7dc2d376914f4df6881c523751ff01f715ab66",
       "patch": "sing-udp-v9.patch",
       "patch_sha256": "e061e10f97928565e4b09f3bfe98c80eacc72fae00c8faa15b92fabe59046dd8"
+    },
+    "v0.9.7-extended-1.2.1": {
+      "commit": "fe045639087fe73d1412b99f09486bbef96433db",
+      "module_sum": "h1:CWLGvp/D3U39lV9rkNvlY8/Ru/0u5N5jZSEwi8zlcLE=",
+      "zip_sha256": "8c6e138b9388084c216bd61f9cd1c34f54216c068df2b8bd43683b205e05ee53",
+      "patch": "sing-udp-v9.patch",
+      "patch_sha256": "e061e10f97928565e4b09f3bfe98c80eacc72fae00c8faa15b92fabe59046dd8"
     }
   }
 }
