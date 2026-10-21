@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from urllib.request import Request
 
 from zapret_update import mirrors as git_mirrors
@@ -40,7 +39,6 @@ _NAMES = git_mirrors.MirrorList(
     _fetch_names,
     report=lambda message: _log.info("[update] Имена сервера: %s", message),
 )
-_LOCK = threading.Lock()
 
 
 def remember(host: str) -> None:
@@ -55,9 +53,7 @@ def resolve(url: str) -> str:
     """
     if not git_mirrors.is_rewritable(url):
         return str(url)
-    with _LOCK:
-        host = _NAMES.choose()
-    return git_mirrors.with_host(url, host)
+    return git_mirrors.with_host(url, _NAMES.choose())
 
 
 __all__ = ["remember", "resolve"]
