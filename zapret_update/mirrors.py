@@ -248,6 +248,24 @@ class MirrorList:
             hosts = self._hosts or list(bootstrap_hosts(self._family))
             return self._good or (hosts[0] if hosts else canonical_host(self._family))
 
+    def best(self) -> str:
+        """Имя для ссылки, которую откроет браузер: мгновенно, без сети и без ожидания гонки.
+
+        Своя сеть программы (запрос из Python) и браузер доходят до сайта по-разному:
+        фильтр провайдера может сбрасывать рукопожатие программы и пускать
+        браузер, поэтому проба из программы не говорит, что откроет браузер, и
+        кнопка не должна её ждать. Берётся имя, уже доказавшее себя (``remember``
+        или победитель гонки), иначе первое имя из списка сервера (лучшее первым,
+        закрытые из России последними), иначе запасной список.
+
+        Читает состояние без блокировки: гонка в другом потоке не задерживает.
+        """
+        good = self._good
+        if good is not None and self._clock() < self._good_until:
+            return good
+        hosts = self._hosts or bootstrap_hosts(self._family)
+        return hosts[0] if hosts else canonical_host(self._family)
+
     def note_failure(self, host: str, exc: BaseException) -> None:
         """Журнал: под этим именем сервер не ответил (причина — для разбора на компьютере пользователя)."""
         self._say(f"{host}: {type(exc).__name__}: {str(exc)[:160]}")
@@ -270,7 +288,9 @@ class MirrorList:
             self._failed_until = now + FALLBACK_TTL_S
             self._say("ни одно имя сервера не ответило, берётся запасной список; " + "; ".join(failures))
             return
-        self._good, self._good_until = winner, now + GOOD_TTL_S
+        # Имя, под которым уже был настоящий обмен (``remember``), весомее гонки.
+        if self._good is None or now >= self._good_until:
+            self._good, self._good_until = winner, now + GOOD_TTL_S
         self._failed_until = 0.0
         if ordered:
             self._hosts, self._expires_at = ordered, now + LIST_TTL_S
