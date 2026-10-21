@@ -35,6 +35,7 @@ from ..network.http_utils import (
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..constants import APP_VERSION, BASE_DIR
+from . import site_names
 from .delta_zip import DeltaUnavailable, HttpRangeSource, SignedFile, prepare_delta
 from .installer.plan import APP_EXE_NAME, WORK_DIR_PREFIX
 from .installer.runner import STAGE_ROOT_NAME
@@ -313,6 +314,7 @@ class _ReleaseClient:
                     break
                 continue
             self._mirrors.remember(host)
+            site_names.remember(host)
             return response
         # Ни одно имя не ответило: список имён мог устареть.
         self._mirrors.forget()

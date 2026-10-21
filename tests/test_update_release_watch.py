@@ -416,6 +416,15 @@ class RevokedVersionTests(unittest.TestCase):
 class AskServerTransportTests(unittest.TestCase):
     """Отключено — напрямую стеком Chromium; подключено — urllib внутри туннеля."""
 
+    def setUp(self) -> None:
+        # Имя сервера выбирается по сети; здесь проверяется только маршрут запроса.
+        from unittest.mock import patch
+        from xray_fluent.updates import site_names
+
+        patcher = patch.object(site_names, "resolve", side_effect=lambda url: url)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _service(self, *, status=200, body=b'{"version": "0.9.0"}'):
         from xray_fluent.network import browser_fetch
 
@@ -474,3 +483,49 @@ class AskServerTransportTests(unittest.TestCase):
         with patch.object(browser_fetch, "SERVICE", service):
             with self.assertRaises(OSError):
                 release_watch._ask_server(release_watch.WAIT_URL + "?run=0", 5)
+
+
+class AskServerNameTests(unittest.TestCase):
+    """Очередь обновлений спрашивается под открытым именем сервера, а не под режущимся основным."""
+
+    def test_poll_goes_to_the_open_name(self) -> None:
+        import io
+        from unittest.mock import patch
+        from xray_fluent.network import browser_fetch
+        from xray_fluent.updates import release_watch, site_names
+
+        asked: list[str] = []
+
+        class _Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(request, timeout):
+            asked.append(request.full_url)
+            return _Response(b'{"changed": false}')
+
+        with patch.object(browser_fetch.SERVICE, "available", return_value=False), \
+                patch.object(site_names._NAMES, "choose", return_value="git2.zapret.moe"), \
+                patch.object(release_watch, "urlopen", side_effect=fake_urlopen):
+            release_watch._ask_server(release_watch.WAIT_URL + "?known=0.8.38&run=1", 5)
+
+        self.assertEqual(asked, ["https://git2.zapret.moe/api/zapret/kvn/wait?known=0.8.38&run=1"])
+
+    def test_foreign_address_is_not_rewritten_and_asks_nothing(self) -> None:
+        from unittest.mock import patch
+        from xray_fluent.updates import site_names
+
+        with patch.object(site_names._NAMES, "choose", side_effect=AssertionError("сеть не нужна")):
+            for url in ("https://example.com/x", "http://git.zapret.moe/x", "https://git.zapret.moe:8443/x"):
+                self.assertEqual(site_names.resolve(url), url)
+
+    def test_release_client_shares_its_working_name_with_the_queue(self) -> None:
+        from xray_fluent.updates import site_names
+
+        site_names._NAMES.forget()
+        site_names.remember("git3.zapret.moe")
+        self.assertEqual(site_names.resolve("https://git.zapret.moe/a"), "https://git3.zapret.moe/a")
+        site_names._NAMES.forget()

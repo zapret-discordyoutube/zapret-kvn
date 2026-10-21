@@ -41,6 +41,7 @@ from zapret_update import screen
 
 from ..network import browser_fetch
 from ..network.http_utils import urlopen
+from . import site_names
 from .app_updater import USER_AGENT, _is_newer_version, _parse_semver
 
 _log = logging.getLogger(__name__)
@@ -104,6 +105,8 @@ def _ask_server(url: str, timeout: float) -> dict:
     прямой путь там был бы заметнее, а не тише.
     """
 
+    # Основное имя сервера режут по TLS: спрашиваем под открытым (git2, git3, …).
+    url = site_names.resolve(url)
     connected = parse_qs(urlsplit(url).query).get("run", ["1"])[0] != "0"
     if not connected and browser_fetch.SERVICE.available():
         try:
