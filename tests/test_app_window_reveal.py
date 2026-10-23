@@ -112,6 +112,29 @@ class FrameRevealTests(unittest.TestCase):
 
         self.assertEqual(self.calls, [True, False])
 
+    def test_window_is_painted_before_the_deadline_reveals_it(self) -> None:
+        # Запуск занял цикл событий дольше срока: окно рисуется принудительно,
+        # а не открывается ни разу не нарисованным.
+        self.window.repaint = lambda: self.order.append("repaint")
+        reveal = self._reveal(wait_max_ms=0)
+        reveal.start()
+
+        app.processEvents()
+
+        self.assertEqual(self.order, ["cloak", "repaint", "composed", "uncloak"])
+
+    def test_failed_repaint_still_reveals_window(self) -> None:
+        def broken() -> None:
+            raise RuntimeError("repaint failed")
+
+        self.window.repaint = broken
+        reveal = self._reveal(wait_max_ms=0)
+        reveal.start()
+
+        app.processEvents()
+
+        self.assertEqual(self.calls, [True, False])
+
     def test_refused_cloak_leaves_window_alone(self) -> None:
         self.accept = False
         reveal = self._reveal()

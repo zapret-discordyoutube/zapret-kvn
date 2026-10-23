@@ -85,7 +85,7 @@ class FrameReveal(QObject):
         self._deadline = QTimer(self)
         self._deadline.setSingleShot(True)
         self._deadline.setInterval(max(0, int(wait_max_ms)))
-        self._deadline.timeout.connect(self.reveal)
+        self._deadline.timeout.connect(self._deadline_reached)
 
     def start(self) -> bool:
         """Вызывается из showEvent: окно ещё не выведено на экран."""
@@ -114,6 +114,18 @@ class FrameReveal(QObject):
             # и после того, как Windows соберёт его для экрана.
             QTimer.singleShot(0, self.reveal)
         return False
+
+    def _deadline_reached(self) -> None:
+        # Срок идёт по тому же циклу событий, что и отрисовка: если запуск
+        # занял поток интерфейса дольше срока, таймер срабатывает раньше первой
+        # отрисовки, и окно открылось бы пустым и белым. Рисуем его сами, сразу,
+        # а уже потом открываем.
+        if self._cloaked:
+            try:
+                self._window.repaint()
+            except Exception:
+                pass
+        self.reveal()
 
     def reveal(self) -> None:
         if not self._cloaked:
