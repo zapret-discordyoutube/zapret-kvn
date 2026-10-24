@@ -50,10 +50,10 @@
     },
     {
       "id": "xray-core",
-      "version": "v26.3.27",
+      "version": "v26.10.21",
       "archive": "Xray-windows-64.zip",
-      "url": "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip",
-      "sha256": "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad",
+      "url": "https://github.com/XTLS/Xray-core/releases/download/v26.10.21/Xray-windows-64.zip",
+      "sha256": "fc58c39ee2f2717b4c54d28d374362389e5319b20ae44aea76ea45a5243ec827",
       "files": [
         { "match": "(^|/)xray\\.exe$", "target": "xray.exe" },
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
@@ -62,10 +62,10 @@
       ],
       "repository": "XTLS/Xray-core",
       "channel": "stable",
-      "release_tag": "v26.3.27",
+      "release_tag": "v26.10.21",
       "release_prerelease": false,
       "asset_name": "Xray-windows-64.zip",
-      "asset_size": 20913304
+      "asset_size": 15029603
     },
     {
       "id": "hysteria",
@@ -96,10 +96,10 @@
     },
     {
       "id": "runetfreedom-routing-data",
-      "version": "ba3d118d1d78ea1674eafba547aeaa3573dda2a4",
-      "archive": "russia-v2ray-rules-dat-ba3d118d1d78ea1674eafba547aeaa3573dda2a4.zip",
-      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/ba3d118d1d78ea1674eafba547aeaa3573dda2a4.zip",
-      "sha256": "1be7000fd4094fc93fa316c4d5e13d05fa6796536048021caf4a78969dfda92a",
+      "version": "40918e78104f2ca036a7d8160c0b7eaa08139e5a",
+      "archive": "russia-v2ray-rules-dat-40918e78104f2ca036a7d8160c0b7eaa08139e5a.zip",
+      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/40918e78104f2ca036a7d8160c0b7eaa08139e5a.zip",
+      "sha256": "9ac3a75aaa28f98f6c27e573a06e84dc09407c4547f67f5ab7e4a659b0cdee95",
       "files": [
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
         { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
@@ -111,7 +111,7 @@
       "repository": "runetfreedom/russia-v2ray-rules-dat",
       "channel": "release",
       "branch": "release",
-      "asset_size": 49847888
+      "asset_size": 49850489
     },
     {
       "id": "tun2socks",
