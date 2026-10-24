@@ -1,8 +1,8 @@
 # Zapret KVN (beta)
 
-Простой VPN-клиент для Windows с обходом блокировок от создателей [Zapret 2 GUI](https://git.zapret.moe/zapretdiscordyoutube/zapret). Работает из коробки.
+Простой VPN-клиент для Windows с обходом блокировок от создателей [Zapret 2 GUI](https://git2.zapret.moe/zapretdiscordyoutube/zapret). Работает из коробки.
 
-### [Получить ключи можно тут](https://t.me/zapretvpns_bot?start=kvnwin_readme_keys) | [Скачать](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases) | [Android](https://git.zapret.moe/zapretdiscordyoutube/ZapretKVN-android)
+### [Получить ключи можно тут](https://t.me/zapretvpns_bot?start=kvnwin_readme_keys) | [Скачать](https://git2.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases) | [Android](https://git2.zapret.moe/zapretdiscordyoutube/ZapretKVN-android)
 
 <img width="200" alt="Список серверов Zapret KVN" src="assets/zapret-kvn-server-list.png"><img width="200" alt="Подключение Zapret KVN" src="assets/zapret-kvn-connection.png"><img width="200" alt="Настройки Zapret KVN" src="assets/zapret-kvn-settings.png">
 
@@ -11,7 +11,7 @@
 > [!WARNING]
 > Первая бета-версия. Некоторый функционал может работать некорректно.
 > 
-> Сообщить о проблеме рекомендуем ТОЛЬКО сюда: [Issues](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/issues)
+> Сообщить о проблеме рекомендуем ТОЛЬКО сюда: [Issues](https://git2.zapret.moe/zapretdiscordyoutube/zapret-kvn/issues)
 
 
 ## Что это
@@ -151,7 +151,7 @@ outbound JSON остаются в нативном пути sing-box.
 
 ## Установка
 
-1. Скачайте установщик со страницы [Releases](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases)
+1. Скачайте установщик со страницы [Releases](https://git2.zapret.moe/zapretdiscordyoutube/zapret-kvn/releases)
 2. Запустите скачанный `.exe` — он распакует программу в выбранную папку
 3. Запустите `ZapretKVN.exe` из этой папки
 
@@ -202,7 +202,7 @@ dev/stable. Перед повторным использованием пров�
 ## Обратная связь
 
 - [Telegram-канал](https://t.me/vpndiscordyooutube) — новости и обновления
-- [Сообщить о проблеме](https://git.zapret.moe/zapretdiscordyoutube/zapret-kvn/issues)
+- [Сообщить о проблеме](https://git2.zapret.moe/zapretdiscordyoutube/zapret-kvn/issues)
 
 ## Лицензия
 
