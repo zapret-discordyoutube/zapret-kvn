@@ -19,6 +19,8 @@ from xray_fluent.application.smart_switch_service import (
     PHASE_IDLE,
     PHASE_PROBE_CANDIDATES,
     PHASE_PROBE_CURRENT,
+    SMART_SWITCH_DEMAND_MIN_WINDOW_BYTES,
+    SMART_SWITCH_FALSE_ALARM_BACKOFF_SEC,
     SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC,
     SMART_SWITCH_POST_SWITCH_HOLD_SEC,
     SMART_SWITCH_SLOW_MARK_SEC,
@@ -235,7 +237,24 @@ class SuspicionTests(SmartSwitchTestBase):
         self.assertEqual(self.probes[0].http_port, 10809)
         self.assertEqual(self.probes[0].measured.slots, [self.controller._on_smart_probe_measured])
         self.assertEqual(self.state.phase, PHASE_PROBE_CURRENT)
-        self.assertTrue(any(line.startswith("[auto-switch] подозрение") for line in self.controller.logs))
+        # Строка в журнал — одна, с исходом замера; подозрение запомнено для неё.
+        self.assertEqual(self.controller.logs, [])
+        self.assertIn("за 2", self.state.suspicion)
+        self.assertIn("(3 соедин.)", self.state.suspicion)
+
+    def test_open_keepalive_sockets_with_single_bytes_are_not_demand(self) -> None:
+        # 26.10.2026: 24 открытых соединения, по которым каждую секунду идут
+        # единичные байты, при «0 KB/s» будили замер 9–12 раз в час.
+        idle = {"active": 24, "growing": 3, "down_bps": 0.0}
+        self.feed(1000.0, 600, down_bps=300.0, demand=idle)
+        self.assertEqual(self.probes, [])
+
+    def test_slow_trickle_below_the_window_volume_is_not_demand(self) -> None:
+        # 5 КБ/с за 20 с — 100 КБ, меньше объёма окна: окно начинается заново.
+        trickle = {"active": 2, "growing": 1, "down_bps": 5 * 1024.0}
+        self.assertLess(5 * 1024 * 20, SMART_SWITCH_DEMAND_MIN_WINDOW_BYTES)
+        self.feed(1000.0, 300, down_bps=5 * 1024.0, demand=trickle)
+        self.assertEqual(self.probes, [])
 
     def test_short_growth_pause_keeps_demand(self) -> None:
         # Пауза роста 3 с (TCP подвисает на медленном сервере) не сбрасывает окно.
@@ -370,6 +389,41 @@ class GateTests(SmartSwitchTestBase):
 
 
 class ProbeDecisionTests(SmartSwitchTestBase):
+    def false_alarm(self, start: float) -> float:
+        before = len(self.probes)
+        now = self.feed(start, 21)
+        self.assertEqual(len(self.probes), before + 1, self.controller.logs)
+        on_current_probe_measured(self.controller, self.probes[-1], 3.0 * SMART_SWITCH_THRESHOLD_BPS, now=now)
+        return now
+
+    def test_one_check_writes_one_log_line(self) -> None:
+        self.false_alarm(1000.0)
+        self.assertEqual(len(self.controller.logs), 1, self.controller.logs)
+        line = self.controller.logs[0]
+        self.assertIn("node-0", line)
+        self.assertIn("ложная тревога", line)
+        self.assertIn("20 KB/s", line)
+
+    def test_repeated_false_alarms_back_off_5_15_30_minutes(self) -> None:
+        now = 1000.0
+        for pause in (*SMART_SWITCH_FALSE_ALARM_BACKOFF_SEC, SMART_SWITCH_FALSE_ALARM_BACKOFF_SEC[-1]):
+            at = self.false_alarm(now)
+            self.assertEqual(self.state.cooldown_until, at + pause)
+            self.assertIn(f"через {pause / 60:.0f} мин", self.controller.logs[-1])
+            # До конца паузы замера нет.
+            probes = len(self.probes)
+            self.feed(at + 1, int(pause) - 30)
+            self.assertEqual(len(self.probes), probes)
+            now = at + pause + 1
+
+    def test_confirmed_slow_probe_resets_the_backoff(self) -> None:
+        at = self.false_alarm(1000.0)
+        at = self.false_alarm(at + SMART_SWITCH_FALSE_ALARM_BACKOFF_SEC[0] + 1)
+        self.assertEqual(self.state.false_alarms, {"n0": 2})
+        now = self.feed(at + SMART_SWITCH_FALSE_ALARM_BACKOFF_SEC[1] + 1, 21)
+        on_current_probe_measured(self.controller, self.probes[-1], 30 * 1024.0, now=now)
+        self.assertEqual(self.state.false_alarms, {})
+
     def test_probe_above_threshold_is_false_alarm_with_cooldown(self) -> None:
         now = self.suspect()
         on_current_probe_measured(self.controller, self.probes[0], 3.0 * SMART_SWITCH_THRESHOLD_BPS, now=now)

@@ -6,15 +6,22 @@
 1. Пассивное подозрение само ничего не переключает.  Подозрение — это
    СПРОС при низкой скорости: не меньше ``SMART_SWITCH_SUSPICION_SEC`` подряд
    есть хотя бы одно проксируемое соединение, счётчики байт которого растут
-   (пауза роста не дольше ``SMART_SWITCH_DEMAND_GAP_SEC``), а загрузка через
-   туннель ниже ``SMART_SWITCH_THRESHOLD_BPS``.  Данные о соединениях считает
-   ``LiveMetricsWorker`` (``diagnostics/proxy_demand.py``).  Нет спроса — нет
-   подозрения.
+   (пауза роста не дольше ``SMART_SWITCH_DEMAND_GAP_SEC``), загрузка через
+   туннель ниже ``SMART_SWITCH_THRESHOLD_BPS``, а за окно приложения реально
+   скачали не меньше ``SMART_SWITCH_DEMAND_MIN_WINDOW_BYTES``.  Данные о
+   соединениях считает ``LiveMetricsWorker`` (``diagnostics/proxy_demand.py``).
+   Нет спроса — нет подозрения: два десятка открытых keep-alive соединений,
+   по которым идут единичные байты, — простой, а не медленный сервер
+   (26.10.2026: такое окно будило замер 9–12 раз в час, и каждый замер
+   показывал 2–5 МБ/с).
 2. Контрольный замер текущего сервера — короткая ограниченная загрузка через
    работающий локальный прокси (``ActiveProxySpeedProbeWorker``, вне GUI-потока).
-   Скорость не ниже порога — ложная тревога, пауза ``SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC``;
-   ни байта не пришло — результат неясен (не дошёл сам замер), та же пауза без
-   переключения: отказ по адресу назначения не повод менять сервер.
+   Скорость не ниже порога — ложная тревога; пауза растёт с каждой ложной
+   тревогой того же сервера (``SMART_SWITCH_FALSE_ALARM_BACKOFF_SEC``) и
+   сбрасывается подтверждённо медленным замером или переключением.  Ни байта
+   не пришло — результат неясен (не дошёл сам замер), первая пауза без
+   переключения: отказ по адресу назначения не повод менять сервер.  Каждая
+   проверка пишет в журнал одну строку исхода.
 3. Сервер подтверждённо медленный — до ``SMART_SWITCH_MAX_CANDIDATES`` кандидатов
    меряются штатным ``SpeedTestWorker`` (временный xray на своих портах, активное
    подключение не трогается).  Переключение — только если лучший кандидат не
@@ -59,8 +66,13 @@ SMART_SWITCH_SUSPICION_SEC = 20.0
 SMART_SWITCH_DEMAND_GAP_SEC = 5.0
 # Данные о соединениях старше этого срока считаются отсутствующими.
 SMART_SWITCH_DEMAND_MAX_AGE_SEC = 6.0
+# Спрос — это реальная загрузка: за окно подозрения приложения через туннель
+# скачали хотя бы столько (в среднем ≥ 12,8 КБ/с при скорости ниже порога).
+SMART_SWITCH_DEMAND_MIN_WINDOW_BYTES = 256 * 1024
 # Ложная тревога / кандидата лучше нет — столько не перепроверять.
 SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC = 5 * 60.0
+# Пауза после 1-й, 2-й, 3-й и следующих ложных тревог одного сервера подряд.
+SMART_SWITCH_FALSE_ALARM_BACKOFF_SEC = (5 * 60.0, 15 * 60.0, 30 * 60.0)
 # После умного переключения — столько без новых умных переключений.
 SMART_SWITCH_POST_SWITCH_HOLD_SEC = 10 * 60.0
 # Покинутый медленный сервер не кандидат столько времени.
@@ -109,6 +121,11 @@ class SmartSwitchState:
     demand_active: int = 0
     demand_down_bps: float = 0.0
     last_growth_at: float = 0.0
+    # Сколько приложения скачали через туннель с начала окна подозрения.
+    window_bytes: float = 0.0
+    last_observed_at: float = 0.0
+    # Что увидело подозрение — для одной строки исхода проверки.
+    suspicion: str = ""
     # Активная проверка.
     phase: str = PHASE_IDLE
     phase_started_at: float = 0.0
@@ -125,6 +142,8 @@ class SmartSwitchState:
     hold_until: float = 0.0
     slow_until: dict[str, float] = field(default_factory=dict)
     switch_times: list[float] = field(default_factory=list)
+    # Ложные тревоги подряд по серверу: длина следующей паузы.
+    false_alarms: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -165,13 +184,33 @@ def observe(
         state.demand_down_bps >= SMART_SWITCH_THRESHOLD_BPS
         or float(down_bps or 0.0) >= SMART_SWITCH_THRESHOLD_BPS
     )
+    previous, state.last_observed_at = state.last_observed_at, now
     if not traffic_valid or not has_demand or fast:
         state.low_since = 0.0
         return False
     if state.low_since == 0.0:
         state.low_since = now
+        state.window_bytes = 0.0
         return False
-    return now - state.low_since >= SMART_SWITCH_SUSPICION_SEC
+    state.window_bytes += state.demand_down_bps * max(0.0, now - previous)
+    if now - state.low_since < SMART_SWITCH_SUSPICION_SEC:
+        return False
+    if state.window_bytes < SMART_SWITCH_DEMAND_MIN_WINDOW_BYTES:
+        # Окно прошло, а качали единицы килобайт: это не загрузка, начать заново.
+        state.low_since = now
+        state.window_bytes = 0.0
+        return False
+    return True
+
+
+def false_alarm_pause(state: SmartSwitchState, node_id: str | None) -> float:
+    """Учесть ложную тревогу сервера и вернуть паузу до следующей проверки."""
+
+    key = str(node_id or "")
+    count = state.false_alarms.get(key, 0) + 1
+    state.false_alarms[key] = count
+    steps = SMART_SWITCH_FALSE_ALARM_BACKOFF_SEC
+    return steps[min(count, len(steps)) - 1]
 
 
 def switches_last_hour(state: SmartSwitchState, now: float) -> int:
@@ -341,17 +380,20 @@ def _start_current_probe(controller: AppController, state: SmartSwitchState, now
     if node is None:
         state.low_since = 0.0
         return
-    duration = now - state.low_since
+    duration = max(1.0, now - state.low_since)
     state.low_since = 0.0
-    controller._log(
-        f"[auto-switch] подозрение: {node.name} — {_kbps(state.demand_down_bps)} при "
-        f"активной загрузке ({state.demand_active} соедин.) {duration:.0f} с; контрольный замер"
+    state.suspicion = (
+        f"{_kbps(state.window_bytes / duration)} за {duration:.0f} с загрузки "
+        f"({state.demand_active} соедин.)"
     )
     session = getattr(controller, "_active_session", None)
     http_port = int(getattr(session, "http_port", 0) or 0) if session is not None else 0
     tun_mode = bool(getattr(session, "tun_mode", False)) if session is not None else False
     if http_port <= 0 and not tun_mode:
-        controller._log("[auto-switch] замер невозможен: нет локального HTTP-прокси — проверка отложена")
+        controller._log(
+            f"[auto-switch] {node.name}: {state.suspicion}; замер невозможен — нет локального "
+            "HTTP-прокси, проверка отложена"
+        )
         state.cooldown_until = now + SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC
         return
     # В TUN — обычным соединением, которое уводит сам TUN (как ConnectivityTestWorker):
@@ -414,20 +456,27 @@ def on_current_probe_measured(
         # адресу назначения никогда не повод уходить с сервера
         # (destination-scope): мёртвый сервер — забота детектора мёртвого линка.
         controller._log(
-            f"[auto-switch] замер {name} не удался (данные не пришли) — результат неясен, "
-            f"остаёмся; повтор не раньше чем через {SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC / 60:.0f} мин"
+            f"[auto-switch] {name}: {state.suspicion}; замер не удался (данные не пришли) — "
+            f"результат неясен, остаёмся; повтор не раньше чем через "
+            f"{SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC / 60:.0f} мин"
         )
         _finish(state, now, cooldown=True)
         return
     if bps >= SMART_SWITCH_THRESHOLD_BPS:
+        pause = false_alarm_pause(state, state.node_id)
         controller._log(
-            f"[auto-switch] замер {name}: {_kbps(bps)} ≥ порога {_kbps(SMART_SWITCH_THRESHOLD_BPS)} — "
-            f"ложная тревога, повтор не раньше чем через {SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC / 60:.0f} мин"
+            f"[auto-switch] {name}: {state.suspicion}; замер {_kbps(bps)} ≥ порога "
+            f"{_kbps(SMART_SWITCH_THRESHOLD_BPS)} — ложная тревога, повтор не раньше чем через "
+            f"{pause / 60:.0f} мин"
         )
-        _finish(state, now, cooldown=True)
+        _finish(state, now, cooldown=False)
+        state.cooldown_until = now + pause
         return
     state.current_bps = float(bps)
-    controller._log(f"[auto-switch] замер {name}: {_kbps(bps)} — сервер подтверждённо медленный")
+    state.false_alarms.pop(str(state.node_id or ""), None)
+    controller._log(
+        f"[auto-switch] {name}: {state.suspicion}; замер {_kbps(bps)} — сервер подтверждённо медленный"
+    )
     candidates = select_candidates(
         controller.state.nodes,
         state.node_id,
@@ -509,6 +558,7 @@ def on_candidates_done(controller: AppController, worker: Any, *, now: float | N
     state.slow_until[old_id] = now + SMART_SWITCH_SLOW_MARK_SEC
     state.hold_until = now + SMART_SWITCH_POST_SWITCH_HOLD_SEC
     state.switch_times.append(now)
+    state.false_alarms.clear()
     _finish(state, now, cooldown=False)
     # Общий анти-дребезг с детектором мёртвого сервера; счётчик цикла
     # «перебраны все серверы» относится только к отказам и не трогается.
