@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "releases": {
-    "windows": "0.8.45",
-    "android": "v0.5.20"
+    "windows": "0.8.46",
+    "android": "v0.5.21"
   },
-  "checked_at_utc": "2026-10-24T21:37:14.890310+00:00",
+  "checked_at_utc": "2026-10-26T10:46:56.826112+00:00",
   "amnezia": {
     "id": "amnezia",
     "repository": "amnezia-vpn/amneziawg-go",
@@ -34,7 +34,7 @@
   },
   "inputs": {
     "windows": {
-      "scripts/core-lock.windows-x64.json": "ddaf6998587c3244f1082a26fc0bd6e334d8d9a83864e7883b9034f8460c8097",
+      "scripts/core-lock.windows-x64.json": "46676be692295b23736a1ccb32a8ed0d13526f1f76299a03cb71ddacc70d9892",
       "runtime/amnezia/go.mod": "d855786545c947cee939fc3fda5fce83a5530f0341b109ccce9853447d6241f1",
       "runtime/amnezia/go.sum": "b6e8c738a3eec160d0cc58d10ea6dbbf17886b122ed140a379bd9a29eec8df82"
     },
