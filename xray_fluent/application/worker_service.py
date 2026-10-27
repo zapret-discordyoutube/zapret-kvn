@@ -144,7 +144,12 @@ def on_ping_measured(controller: AppController, outcome: PingOutcome) -> None:
 
         remember_country_addresses(controller, node, outcome.peers, refresh=False)
         controller._country_ping_pending = True
-    apply_ping_measurement(node, outcome.ping_ms)
+    apply_ping_measurement(node, outcome.ping_ms, measured=outcome.measured)
+    if not outcome.measured:
+        if outcome.reason:
+            controller._log(f"[ping] {node.name}: не измерен — {outcome.reason}")
+        controller.ping_updated.emit(node.id, node.ping_ms)
+        return
     ts = datetime.now(timezone.utc).isoformat()
     node.ping_history.append((ts, node.ping_ms))
     if len(node.ping_history) > 50:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 from .blobs import blob_arguments, lua_init_arguments, unresolved_blob_names
 from .endpoint import ResolvedEndpoint
@@ -79,6 +80,69 @@ def _sorted_ips(values) -> list[str]:
 def _merged_ports(endpoints) -> str:
     tokens = dict.fromkeys(port for endpoint in endpoints for port in endpoint.ports)
     return ",".join(sorted(tokens, key=lambda item: int(item.split("-", 1)[0])))
+
+
+_INCLUDE_LISTS = ("--hostlist=", "--ipset=")
+_EXCLUDE_LISTS = ("--hostlist-exclude=", "--ipset-exclude=")
+
+
+def _is_profile_separator(arg: str) -> bool:
+    return arg == "--new" or arg.startswith("--new=")
+
+
+def drop_missing_lists(
+    preset_args: list[str], exists: Callable[[str], bool],
+) -> tuple[list[str], list[str]]:
+    """Preset arguments without list files that are not on disk.
+
+    winws2 refuses to start on a single missing ``--hostlist``/``--ipset``
+    file, and with it the VPN-server rule that rides on the same process.
+    A missing exclusion list is simply dropped (nothing to exclude).  A
+    missing inclusion list is dropped too, but a profile left with no
+    inclusion list at all would start matching all traffic — such a profile
+    is dropped whole.  Returns the arguments and a note per dropped item.
+    """
+
+    first_profile = next(
+        (
+            index for index, arg in enumerate(preset_args)
+            if _is_profile_separator(arg) or arg.startswith(_PROFILE_PREFIXES)
+        ),
+        len(preset_args),
+    )
+    # Profiles with their leading separator (none before the first one).
+    profiles: list[tuple[str | None, list[str]]] = [(None, [])]
+    for arg in preset_args[first_profile:]:
+        if _is_profile_separator(arg):
+            profiles.append((arg, []))
+        else:
+            profiles[-1][1].append(arg)
+
+    def path(arg: str) -> str:
+        return arg.split("=", 1)[1]
+
+    result = list(preset_args[:first_profile])
+    notes: list[str] = []
+    kept_profiles = 0
+    for number, (separator, profile) in enumerate(profiles, start=1):
+        if separator is None and not profile:
+            continue
+        lists = [arg for arg in profile if arg.startswith(_INCLUDE_LISTS)]
+        if lists and not any(exists(path(arg)) for arg in lists):
+            name = next((path(arg) for arg in profile if arg.startswith("--name=")), f"№{number}")
+            notes.append(f"профиль {name} пропущен: нет {', '.join(path(arg) for arg in lists)}")
+            continue
+        kept: list[str] = []
+        for arg in profile:
+            if arg.startswith(_INCLUDE_LISTS + _EXCLUDE_LISTS) and not exists(path(arg)):
+                notes.append(f"нет файла {path(arg)}: {arg.split('=', 1)[0]} пропущен")
+                continue
+            kept.append(arg)
+        if kept_profiles:
+            result.append(separator or "--new")
+        result.extend(kept)
+        kept_profiles += 1
+    return result, notes
 
 
 def build_arguments(

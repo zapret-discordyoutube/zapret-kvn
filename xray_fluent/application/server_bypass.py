@@ -105,6 +105,10 @@ class ServerBypass(QObject):
         self._manual_generation = 0
         self._manual_busy = False
         self._learned_hosts: set[str] = set()
+        # Zapret for sites: the user started it (button or autostart).  Off,
+        # winws2 runs the VPN-server rule alone — a preset the user did not
+        # ask for must neither touch their traffic nor break the VPN start.
+        self._sites_on = False
 
         self._zapret.plan_applied.connect(self._on_plan_applied)
         self._zapret.plan_failed.connect(self._on_plan_failed)
@@ -117,6 +121,14 @@ class ServerBypass(QObject):
     @property
     def settings(self) -> ZapretTargetSettings:
         return self._controller.state.settings.zapret_target
+
+    @property
+    def sites_on(self) -> bool:
+        return self._sites_on
+
+    def _site_preset(self) -> str:
+        """Preset winws2 runs under the server rule; empty — Zapret is off for sites."""
+        return self._controller.state.settings.zapret_preset if self._sites_on else ""
 
     def required(self, node: Node | None) -> bool:
         """The server's kind has bypass on: the VPN must not start without it."""
@@ -189,7 +201,7 @@ class ServerBypass(QObject):
         except ValueError as exc:
             c._cancel_target_transition(f"Zapret: {exc}")
             return True
-        if self.settings.enabled(endpoint.kind) and not self._ensure_preset():
+        if self._sites_on and self.settings.enabled(endpoint.kind) and not self._ensure_preset():
             return True
 
         if c.connected and not self.ready_for(node):
@@ -241,7 +253,10 @@ class ServerBypass(QObject):
 
         plan = self._zapret.plan
         if plan is not None and plan.rule is not None:
-            self._zapret.apply(ZapretPlan(plan.preset))
+            if plan.preset:
+                self._zapret.apply(ZapretPlan(plan.preset))
+            else:
+                self._zapret.stop()  # it carried nothing but the rule
 
     def _resolve(self, generation: int, endpoint: ServerEndpoint) -> None:
         self._wait_generation = generation
@@ -305,7 +320,7 @@ class ServerBypass(QObject):
         return (
             plan is not None
             and self._zapret.is_applied(plan)
-            and plan.preset == self._controller.state.settings.zapret_preset
+            and plan.preset == self._site_preset()
             and plan.covers(resolved, strategy)
         )
 
@@ -392,12 +407,12 @@ class ServerBypass(QObject):
             self._drop_rule()
             self._resume(transition_request_delay_ms(c._transition_reason))
             return
-        if not self._ensure_preset():
+        if self._sites_on and not self._ensure_preset():
             return
         # The chosen preset is what runs: a restart on another one goes
         # through here, so a protected tunnel is stopped first.
         plan = ZapretPlan(
-            c.state.settings.zapret_preset,
+            self._site_preset(),
             ServerRule(resolved, strategy),
             self._pool_rules(known_pool),
         )
@@ -553,6 +568,7 @@ class ServerBypass(QObject):
         c = self._controller
         c.state.settings.zapret_preset = preset
         c.schedule_save()
+        self._sites_on = True
         self._manual_generation += 1
         node = c.selected_node
         if (c.connected or c._desired_connected) and self.required(node):
@@ -596,9 +612,21 @@ class ServerBypass(QObject):
         self._start_worker(generation, endpoint, on_resolved)
 
     def stop_manual(self) -> None:
-        """Stop winws2 and cancel a pending manual start (its DNS callback)."""
+        """Zapret off for sites; a pending manual start is cancelled.
 
+        A session whose server needs the rule keeps it: the coordinator
+        restarts winws2 with the rule alone (stopping winws2 under it would
+        stop the VPN, fail closed).
+        """
+
+        self._sites_on = False
         self._manual_generation += 1
+        c = self._controller
+        if (c.connected or c._desired_connected) and self.required(c.selected_node):
+            self._settle_manual_busy()
+            c._desired_connected = True
+            c._request_transition("Zapret for sites stopped")
+            return
         self._zapret.stop()
         self._settle_manual_busy()
 

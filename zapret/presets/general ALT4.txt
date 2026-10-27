@@ -137,7 +137,7 @@
 
 --filter-tcp=80,443
 --hostlist=lists/list-general.txt
---hostlist-exclude=lists/netrogat.txt
+--hostlist-exclude=lists/list-exclude.txt
 --payload=tls_client_hello
 --lua-desync=fake:blob=tls_google:repeats=6:tcp_seq=1000
 --payload=tls_client_hello,http_req

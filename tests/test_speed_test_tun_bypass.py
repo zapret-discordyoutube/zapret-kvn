@@ -18,6 +18,7 @@ from unittest.mock import patch
 from xray_fluent.constants import (
     HYSTERIA_PATH_DEFAULT,
     SPEED_TEST_HYSTERIA_PATH,
+    SPEED_TEST_SINGBOX_PATH,
     SPEED_TEST_XRAY_PATH,
     XRAY_PATH_DEFAULT,
 )
@@ -32,7 +33,11 @@ from xray_fluent.network.speed_test_worker import prepare_speed_test_xray
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "data" / "templates" / "sing-box" / "default.json"
 SPEED_RULE = {
-    "process_path": [str(SPEED_TEST_XRAY_PATH.resolve()), str(SPEED_TEST_HYSTERIA_PATH.resolve())],
+    "process_path": [
+        str(SPEED_TEST_XRAY_PATH.resolve()),
+        str(SPEED_TEST_HYSTERIA_PATH.resolve()),
+        str(SPEED_TEST_SINGBOX_PATH.resolve()),
+    ],
     "action": "route",
     "outbound": "direct",
 }

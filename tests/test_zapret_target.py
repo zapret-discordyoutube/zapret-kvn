@@ -244,6 +244,7 @@ class GateTests(unittest.TestCase):
     def test_missing_preset_file_falls_back_to_default(self) -> None:
         controller = _controller(_vless(), preset="Renamed away")
         bypass = self._bypass(controller)
+        bypass._sites_on = True
         with patch("xray_fluent.application.server_bypass.presets.default_preset", return_value="Default"):
             self.assertTrue(bypass.prepare(5))
         self.assertEqual(controller.state.settings.zapret_preset, "Default")
@@ -306,7 +307,8 @@ class GateTests(unittest.TestCase):
             bypass._on_resolved(5, endpoint_for_node(node), _resolved(node), None)
         remember.assert_called_once()
         plan, _revision = controller.zapret.launches[-1]
-        self.assertEqual(plan.preset, "Default")
+        # Zapret is off for sites: winws2 carries the server rule alone.
+        self.assertEqual(plan.preset, "")
         self.assertEqual(plan.rule.strategy.strategy_id, "alt9")
         self.assertTrue(bypass.waiting_for(5))
         controller._schedule_transition_drain.assert_not_called()
@@ -316,6 +318,34 @@ class GateTests(unittest.TestCase):
         self.assertFalse(bypass.waiting)
         self.assertTrue(bypass.ready_for(node))
         controller._schedule_transition_drain.assert_called_once()
+
+    def test_sites_off_never_needs_a_preset(self) -> None:
+        controller = _controller(_vless(), preset="")
+        bypass = self._bypass(controller)
+        with patch("xray_fluent.application.server_bypass.presets.default_preset", return_value=""):
+            self.assertTrue(bypass.prepare(23))
+        controller._cancel_target_transition.assert_not_called()
+        self.resolver.assert_called_once()
+
+    def test_sites_on_runs_the_preset_under_the_rule(self) -> None:
+        node = _vless()
+        controller = _controller(node)
+        bypass = self._bypass(controller)
+        bypass._sites_on = True
+        bypass.prepare(5)
+        bypass._on_resolved(5, endpoint_for_node(node), _resolved(node), None)
+        plan, _revision = controller.zapret.launches[-1]
+        self.assertEqual(plan.preset, "Default")
+
+    def test_stop_for_sites_under_a_protected_session_keeps_the_rule(self) -> None:
+        controller = _controller(_vless(), connected=True)
+        bypass = self._bypass(controller)
+        bypass.start_manual("Default")
+        controller._request_transition.reset_mock()
+        bypass.stop_manual()
+        self.assertFalse(bypass.sites_on)
+        controller._request_transition.assert_called_once_with("Zapret for sites stopped")
+        self.assertEqual(controller.zapret.launches, [])
 
     def test_udp_off_with_zapret_running_gets_a_pass_rule(self) -> None:
         node = parse_single(_HY2)
@@ -397,6 +427,7 @@ class GateTests(unittest.TestCase):
     def test_empty_preset_falls_back_to_default(self) -> None:
         controller = _controller(_vless(), preset="")
         bypass = self._bypass(controller)
+        bypass._sites_on = True
         with patch("xray_fluent.application.server_bypass.presets.default_preset", return_value="Default"):
             self.assertTrue(bypass.prepare(21))
         controller._cancel_target_transition.assert_not_called()
@@ -407,6 +438,7 @@ class GateTests(unittest.TestCase):
     def test_no_presets_at_all_cancel_with_a_message(self) -> None:
         controller = _controller(_vless(), preset="")
         bypass = self._bypass(controller)
+        bypass._sites_on = True
         with patch("xray_fluent.application.server_bypass.presets.default_preset", return_value=""):
             self.assertTrue(bypass.prepare(22))
         controller._cancel_target_transition.assert_called_once()
@@ -536,6 +568,7 @@ class PoolRuleTests(unittest.TestCase):
             "Default", self._rule(self.a, "203.0.113.1"), (self._rule(self.b, "203.0.113.2"),),
         ))
         bypass = ServerBypass(controller)
+        bypass._sites_on = True
         self.assertTrue(bypass.prepare(5))
         fresh = ResolvedEndpoint(endpoint_for_node(self.b), ("203.0.113.2",))
         bypass._on_resolved(5, endpoint_for_node(self.b), (fresh, ()), None)

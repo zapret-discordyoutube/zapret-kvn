@@ -146,6 +146,8 @@ def transition_signature(
             proxy_enabled=bool(settings.enable_system_proxy),
             proxy_bypass_lan=system_proxy_bypass_lan(controller, settings),
         )
+    elif settings.lan_proxy_enabled:
+        payload["lan_proxy"] = True
     return signature(payload)
 
 

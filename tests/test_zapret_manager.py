@@ -9,7 +9,7 @@ from unittest.mock import patch
 from PyQt6.QtCore import QCoreApplication
 
 from xray_fluent.engines.zapret.blobs import lua_init_arguments
-from xray_fluent.engines.zapret.command import SERVER_PROFILE_NAME, ServerRule, build_arguments
+from xray_fluent.engines.zapret.command import SERVER_PROFILE_NAME, ServerRule, build_arguments, drop_missing_lists
 from xray_fluent.network.bootstrap_dns import BootstrapResolution
 from xray_fluent.engines.zapret.endpoint import (
     ResolvedEndpoint,
@@ -131,6 +131,59 @@ class ServerRuleArgumentTests(unittest.TestCase):
                         self.assertTrue(
                             any(arg.startswith(f"--blob={dependency}:") for arg in updated), dependency,
                         )
+
+
+class MissingListTests(unittest.TestCase):
+    """A list file absent on disk must not stop winws2 (and the VPN-server rule)."""
+
+    def _drop(self, args: list[str], present: set[str]) -> tuple[list[str], list[str]]:
+        return drop_missing_lists(args, lambda name: name in present)
+
+    def test_missing_exclusion_is_dropped_and_the_profile_kept(self) -> None:
+        args = [
+            "--lua-init=@lua/zapret-lib.lua",
+            "--filter-tcp=443", "--hostlist=lists/a.txt", "--hostlist-exclude=lists/netrogat.txt",
+            "--lua-desync=fake",
+        ]
+        result, notes = self._drop(args, {"lists/a.txt"})
+        self.assertEqual(result, [
+            "--lua-init=@lua/zapret-lib.lua", "--filter-tcp=443", "--hostlist=lists/a.txt", "--lua-desync=fake",
+        ])
+        self.assertEqual(len(notes), 1)
+
+    def test_profile_without_any_existing_inclusion_list_is_dropped_whole(self) -> None:
+        args = [
+            "--filter-tcp=80", "--ipset=lists/ipset-base.txt", "--lua-desync=fake",
+            "--new", "--filter-tcp=443", "--hostlist=lists/a.txt", "--lua-desync=split",
+            "--new=last", "--filter-udp=443", "--lua-desync=quic",
+        ]
+        result, notes = self._drop(args, {"lists/a.txt"})
+        # Не «весь трафик»: профиль без своих списков не превращается в общий.
+        self.assertEqual(result, [
+            "--filter-tcp=443", "--hostlist=lists/a.txt", "--lua-desync=split",
+            "--new=last", "--filter-udp=443", "--lua-desync=quic",
+        ])
+        self.assertEqual(len(notes), 1)
+
+    def test_profile_keeps_its_other_inclusion_lists(self) -> None:
+        args = ["--filter-tcp=443", "--hostlist=lists/gone.txt", "--hostlist=lists/a.txt", "--lua-desync=fake"]
+        result, _notes = self._drop(args, {"lists/a.txt"})
+        self.assertEqual(result, ["--filter-tcp=443", "--hostlist=lists/a.txt", "--lua-desync=fake"])
+
+    def test_all_present_is_unchanged(self) -> None:
+        args = ["--wf-tcp-out=443", "--filter-tcp=443", "--hostlist=lists/a.txt", "--new", "--filter-udp=443"]
+        self.assertEqual(self._drop(args, {"lists/a.txt"}), (args, []))
+
+    def test_shipped_presets_reference_only_shipped_lists(self) -> None:
+        from xray_fluent.engines.zapret import presets
+
+        for name in presets.list_presets():
+            with self.subTest(preset=name):
+                args = presets.preset_arguments(name)
+                _result, notes = drop_missing_lists(
+                    args, lambda path: (presets.ZAPRET_DIR / path).is_file(),
+                )
+                self.assertEqual(notes, [])
 
 
 class ResolutionTests(unittest.TestCase):

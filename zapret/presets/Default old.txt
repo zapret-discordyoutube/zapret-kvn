@@ -217,7 +217,6 @@
 
 --filter-tcp=80,443
 --ipset=lists/ipset-all.txt
---ipset=lists/ipset-base.txt
 --ipset=lists/ipset-discord.txt
 --ipset=lists/ipset-amazon.txt
 --ipset=lists/ipset-roblox.txt

@@ -132,7 +132,7 @@
 
 --filter-tcp=80,443
 --hostlist=lists/list-general.txt
---hostlist-exclude=lists/netrogat.txt
+--hostlist-exclude=lists/list-exclude.txt
 --lua-desync=multisplit:pos=2:seqovl=652:seqovl_pattern=tls_google
 
 --new

@@ -1,4 +1,7 @@
-"""TCP-замер одного сервера. Очередь и потоки — в ``ping_service``."""
+"""Применение замера задержки к серверу; TCP-замер остался для зондов, где нужен голый connect.
+
+Сам замер сервера — через ядро, ``latency_probe``; очередь — ``ping_service``.
+"""
 
 from __future__ import annotations
 
@@ -36,13 +39,16 @@ def ping_node(node: Node, timeout: float = 2.0) -> int | None:
     return tcp_ping(node.server, node.port, timeout)
 
 
-def apply_ping_measurement(node: Node, ping_ms: int | None) -> None:
-    """Применяет результат TCP-пинга к ноде.
+def apply_ping_measurement(node: Node, ping_ms: int | None, *, measured: bool = True) -> None:
+    """Применяет результат замера задержки к ноде.
 
-    Endpoint-ноды (UDP-only) не измеряются по TCP: ping_ms остаётся None,
-    is_alive не сбрасывается в False.
+    ``measured=False`` — проверить было нечем (ядра нет, адрес не узнать без
+    открытого DNS): прежний вывод о сервере остаётся, «мёртвым» он не становится.
     """
+    if not measured:
+        return
     if is_singbox_endpoint_node(node):
+        # Endpoint-ноды (WireGuard/AWG) замер не проверяет: не «мёртвые».
         node.ping_ms = None
         return
     node.ping_ms = ping_ms

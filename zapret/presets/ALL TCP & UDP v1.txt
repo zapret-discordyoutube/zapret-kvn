@@ -53,7 +53,7 @@
 --new
 
 --filter-tcp=80,443-65535
---hostlist-exclude=lists/netrogat.txt
+--hostlist-exclude=lists/list-exclude.txt
 --out-range=-d10
 --lua-desync=send:repeats=2
 --lua-desync=syndata:blob=tls7

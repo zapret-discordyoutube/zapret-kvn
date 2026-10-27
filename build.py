@@ -368,7 +368,7 @@ def build_exe() -> None:
         _windows_path(ROOT / "main.py"),
         "--name", APP_NAME,
         "--noconfirm",
-        "--console",
+        "--windowed",
         "--onedir",
         "--uac-admin",
         "--manifest", _windows_path(MANIFEST),

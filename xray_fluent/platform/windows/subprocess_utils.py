@@ -44,8 +44,9 @@ def run_text(
         "timeout": timeout,
         "check": check,
     }
-    if creationflags is not None:
-        kwargs["creationflags"] = creationflags
+    # The app is a windowed program: a console child without CREATE_NO_WINDOW
+    # would pop up its own console window.
+    kwargs["creationflags"] = CREATE_NO_WINDOW if creationflags is None else creationflags
     return subprocess.run(command, **kwargs)
 
 

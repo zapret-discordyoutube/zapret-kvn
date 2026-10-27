@@ -249,8 +249,15 @@ class SettingsPage(ScrollablePage):
             parent=network_group,
         )
 
+        self.lan_proxy_card = SwitchSettingCard(
+            FIF.SHARE, "Прокси для устройств в локальной сети",
+            "PS5, телевизор и другие устройства без своего VPN выходят через этот ПК",
+            parent=network_group,
+        )
+
         network_group.addSettingCard(self.proxy_bypass_lan_card)
         network_group.addSettingCard(self.reconnect_card)
+        network_group.addSettingCard(self.lan_proxy_card)
         root.addWidget(network_group)
 
         # ============================================================
@@ -526,6 +533,8 @@ class SettingsPage(ScrollablePage):
         self.theme_card.combo.currentIndexChanged.connect(self._auto_save)
         self.accent_card.picker.colorChanged.connect(self._auto_save)
         self.proxy_bypass_lan_card.checkedChanged.connect(self._auto_save)
+        self.lan_proxy_card.checkedChanged.connect(self._auto_save)
+        self.lan_proxy_card.checkedChanged.connect(self._sync_lan_proxy_hint)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)
 
@@ -577,6 +586,8 @@ class SettingsPage(ScrollablePage):
         self._select_combo_data(self.theme_card.combo, settings.theme)
         self.accent_card.set_color(QColor(settings.accent_color or DEFAULT_ACCENT))
         self.proxy_bypass_lan_card.setChecked(settings.system_proxy_bypass_lan)
+        self.lan_proxy_card.setChecked(settings.lan_proxy_enabled)
+        self._sync_lan_proxy_hint()
         self.xray_path_card.edit.setText(
             normalize_configured_path(
                 settings.xray_path,
@@ -684,6 +695,7 @@ class SettingsPage(ScrollablePage):
         data.theme = str(self.theme_card.combo.currentData() or "system")
         data.accent_color = self.accent_card.current_hex()
         data.system_proxy_bypass_lan = self.proxy_bypass_lan_card.isChecked()
+        data.lan_proxy_enabled = self.lan_proxy_card.isChecked()
         data.xray_path = normalize_configured_path(
             self.xray_path_card.edit.text(),
             default_path=XRAY_PATH_DEFAULT,
@@ -730,6 +742,26 @@ class SettingsPage(ScrollablePage):
         "tag": ("Тег", "например: игры"),
         "subscription": ("Подписка", "название или идентификатор подписки"),
     }
+
+    def _sync_lan_proxy_hint(self, *_args) -> None:
+        """Включено — показать, что вписать на устройстве."""
+
+        from ..constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT
+        from ..platform.windows.lan_firewall import lan_addresses
+
+        if not self.lan_proxy_card.isChecked():
+            self.lan_proxy_card.setContent(
+                "PS5, телевизор и другие устройства без своего VPN выходят через этот ПК"
+            )
+            return
+        addresses = lan_addresses()
+        if not addresses:
+            self.lan_proxy_card.setContent("Включено. Адрес ПК появится, когда он подключится к домашней сети")
+            return
+        self.lan_proxy_card.setContent(
+            f"На устройстве: прокси {addresses[0]}, порт {DEFAULT_HTTP_PORT} (HTTP) "
+            f"или {DEFAULT_SOCKS_PORT} (SOCKS5). Пускает только устройства этой сети"
+        )
 
     def _sync_dependent_cards(self, *_args) -> None:
         """Показать только те настройки, которые сейчас на что-то влияют."""

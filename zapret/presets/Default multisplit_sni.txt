@@ -166,7 +166,7 @@
 --new
 
 --filter-tcp=443
---hostlist-exclude=lists/netrogat.txt
+--hostlist-exclude=lists/list-exclude.txt
 --hostlist=lists/other.txt
 --hostlist=lists/russia-blacklist.txt
 --out-range=-d10

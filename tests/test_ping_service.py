@@ -9,6 +9,7 @@ import unittest
 from PyQt6.QtCore import QCoreApplication, QEventLoop, QThread, QTimer
 
 from xray_fluent.network import probe_gate
+from xray_fluent.network.latency_probe import OK, ProbeResult
 from xray_fluent.network.ping_service import MAX_PARALLEL_PINGS, PingOutcome, PingService, PingTarget
 from xray_fluent.profiles.models import Node
 
@@ -48,7 +49,7 @@ class _GatedProbe:
         self.release.wait(5)
         with self.lock:
             self.active -= 1
-        return 10, ()
+        return ProbeResult(OK, 10)
 
 
 class PingServiceTests(unittest.TestCase):
@@ -174,7 +175,8 @@ class PingServiceTests(unittest.TestCase):
         alive = lambda: [t for t in threading.enumerate() if t.name == "ping"]  # noqa: E731
         self.assertTrue(_spin_until(lambda: not alive(), timeout_ms=3000))
 
-    def test_probe_error_is_reported_as_unreachable(self) -> None:
+    def test_probe_error_is_reported_as_not_measured(self) -> None:
+        # Сбой самого замера — не вывод «сервер мёртв».
         def broken(_target, _timeout):
             raise OSError("boom")
 
@@ -184,6 +186,7 @@ class PingServiceTests(unittest.TestCase):
         service.request([_node(1)])
         self.assertTrue(_spin_until(lambda: bool(outcomes)))
         self.assertIsNone(outcomes[0].ping_ms)
+        self.assertFalse(outcomes[0].measured)
         service.close()
 
     def test_sweep_is_one_server_at_a_time_with_a_pause(self) -> None:
@@ -199,7 +202,7 @@ class PingServiceTests(unittest.TestCase):
 
         def probe(_target, _timeout):
             stamps.append(time.monotonic())
-            return 10, ()
+            return ProbeResult(OK, 10)
 
         service = PingService(probe=probe, start_jitter_sec=0.0, pause=pause, gate=gate)
         self.assertEqual(MAX_PARALLEL_PINGS, 1)
@@ -217,7 +220,7 @@ class PingServiceTests(unittest.TestCase):
 
         def probe(target, _timeout):
             calls.append(target.node_id)
-            return 10, ()
+            return ProbeResult(OK, 10)
 
         service = PingService(probe=probe, start_jitter_sec=0.0, pause=lambda: 30.0, gate=probe_gate.ProbeGate())
         service.request([_node(i) for i in range(3)])
@@ -228,6 +231,14 @@ class PingServiceTests(unittest.TestCase):
         service.request([_node(9)])
         self.assertTrue(_spin_until(lambda: len(calls) == 2, timeout_ms=2000))
         service.close()
+
+    def test_same_address_but_other_settings_is_measured_apart(self) -> None:
+        # Один адрес и порт, разные транспорты: живость у них может различаться.
+        grpc = Node(id="a", name="a", server="h.example", port=443, outbound={"protocol": "vless", "x": "grpc"})
+        ws = Node(id="b", name="b", server="h.example", port=443, outbound={"protocol": "vless", "x": "ws"})
+        twin = Node(id="c", name="c", server="h.example", port=443, outbound={"protocol": "vless", "x": "ws"})
+        self.assertNotEqual(PingTarget.of(grpc).endpoint, PingTarget.of(ws).endpoint)
+        self.assertEqual(PingTarget.of(ws).endpoint, PingTarget.of(twin).endpoint)
 
     def test_target_snapshot_detects_moved_server(self) -> None:
         node = _node(1)

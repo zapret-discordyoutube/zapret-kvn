@@ -151,7 +151,7 @@
 
 --filter-tcp=80,443
 --hostlist=lists/list-general.txt
---hostlist-exclude=lists/netrogat.txt
+--hostlist-exclude=lists/list-exclude.txt
 --payload=tls_client_hello
 --lua-desync=fake:blob=tls_google:tls_mod=rnd,dupsid,sni=ya.ru:tcp_ts=-600000
 --lua-desync=hostfakesplit:host=ya.ru:tcp_ts=-600000

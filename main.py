@@ -224,20 +224,6 @@ def _ignore_console_interrupt() -> None:
         pass
 
 
-def _hide_console_if_needed() -> None:
-    if sys.platform != "win32" or not getattr(sys, "frozen", False):
-        return
-    try:
-        import ctypes
-
-        console = ctypes.windll.kernel32.GetConsoleWindow()
-        if console:
-            ctypes.windll.user32.ShowWindow(console, 0)
-            _bootstrap_logger.debug("Console window hidden")
-    except Exception:
-        _bootstrap_logger.exception("Failed to hide console window")
-
-
 def _recover_system_proxy_from_previous_run() -> None:
     """Restore a leaked app-managed system proxy from a previous crashed run."""
     if sys.platform != "win32":
@@ -354,7 +340,6 @@ def main() -> int:
     _setup_bootstrap_logging()
     _install_exception_hooks()
     _enforce_frozen()
-    _hide_console_if_needed()
 
     parser = argparse.ArgumentParser(description="zapret kvn")
     parser.add_argument("--tray", action="store_true", help="start in tray")

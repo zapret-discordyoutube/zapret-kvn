@@ -63,6 +63,9 @@ HYSTERIA_PATH_DEFAULT = BASE_DIR / "core" / "hysteria.exe"
 AMNEZIA_PATH_DEFAULT = BASE_DIR / "core" / "zapret-amnezia.exe"
 HYSTERIA_CONFIG_FILE = RUNTIME_DIR / "hysteria_config.json"
 
+# Только зарубежные цели: трафик через VPN идёт за рубеж, а сервер, чей адрес
+# числится в России (входной мост, CDN), иначе мерился бы к российскому сайту —
+# туда и обратно через границу, мимо того, что пользователь реально качает.
 SPEED_TEST_URLS_BY_COUNTRY: dict[str, str] = {
     "nl": "https://ams.download.datapacket.com/100mb.bin",
     "de": "https://fra.download.datapacket.com/100mb.bin",
@@ -80,7 +83,6 @@ SPEED_TEST_URLS_BY_COUNTRY: dict[str, str] = {
     "pl": "https://ber.download.datapacket.com/100mb.bin",
     "cz": "https://ber.download.datapacket.com/100mb.bin",
     "ie": "https://lon.download.datapacket.com/100mb.bin",
-    "ru": "https://speedtest.selectel.ru/100MB",
     "us": "https://ams.download.datapacket.com/100mb.bin",
 }
 SPEED_TEST_DEFAULT_URL = "https://fra.download.datapacket.com/100mb.bin"
@@ -102,6 +104,7 @@ SPEED_TEST_TEMP_HTTP_PORT = 19101
 # отличается от xray.exe гибридного сайдкара, поэтому правило его не задевает.
 SPEED_TEST_XRAY_PATH = RUNTIME_DIR / "speedtest" / "xray-speedtest.exe"
 SPEED_TEST_HYSTERIA_PATH = RUNTIME_DIR / "speedtest" / "hysteria-speedtest.exe"
+SPEED_TEST_SINGBOX_PATH = RUNTIME_DIR / "speedtest" / "sing-box-speedtest.exe"
 
 SS_PROTECT_PORT_START = 19200
 SS_PROTECT_PORT_END = 19300

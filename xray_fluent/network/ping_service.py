@@ -1,5 +1,8 @@
 """Пинг серверов: одна долгоживущая служба вместо QThread на каждый клик.
 
+Сам замер — настоящее подключение через ядро (``latency_probe``): тёплый
+запрос через сервер даёт его RTT, а не время пустого TCP-соединения.
+
 Раньше каждый запрос создавал свой ``PingWorker(QThread)``, а ссылку на него
 обнуляли в слоте его же сигнала ``completed``. Этот сигнал испускается ещё
 внутри ``run()``, поэтому при частых кликах Python удалял объект потока,
@@ -18,11 +21,12 @@
   когда не осталось ни одного замера в работе;
 * GUI-поток никогда ничего не ждёт.
 
-Заметность на линии.  TCP-замер — пустое соединение без данных, и веер таких
-соединений на весь список за секунду выдаёт сам список серверов.  Поэтому:
+Заметность на линии.  Веер подключений на весь список за секунду выдаёт сам
+список серверов.  Поэтому:
 
-* серверы с одним адресом и портом меряются одним соединением, результат
-  получают все (в подписках один endpoint часто повторяется десятки раз);
+* одинаковые серверы (тот же адрес, порт и настройки подключения) меряются
+  одним подключением, результат получают все (в подписках сервер часто
+  повторяется под разными именами);
 * порядок замеров случайный, а не порядок списка;
 * соединение одно за раз, а между серверами одного прохода — пауза шлюза
   проверок (``probe_gate.SWEEP_PAUSE_SEC``, 10–20 с со случайным разбросом):
@@ -33,7 +37,8 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import random
 import threading
 import time
@@ -41,14 +46,14 @@ from typing import Callable, Iterable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..engines.singbox.config_builder import is_singbox_endpoint_node
 from ..profiles.geoip import endpoint_hosts
 from ..profiles.models import Node
-from . import probe_gate
-from .ping_worker import tcp_observation
+from . import latency_probe, probe_gate
 
 
 MAX_PARALLEL_PINGS = 1
+# Не используется замером через ядро (у него свои сроки запуска и запроса);
+# оставлен как параметр подменяемых в тестах проб.
 PING_TIMEOUT_SEC = 2.0
 IDLE_THREAD_EXIT_SEC = 20.0
 # Случайная задержка перед каждым соединением: размывает ровный «залп».
@@ -63,7 +68,10 @@ class PingTarget:
     server: str
     port: int
     hosts: tuple[str, ...]
-    measurable: bool  # False у endpoint-нод (UDP-only): TCP их не мерит
+    # Настройки подключения: одинаковые серверы под разными именами — один замер.
+    settings: str = ""
+    # Копия сервера на момент запроса — её и меряет ядро.
+    node: Node | None = field(default=None, compare=False, hash=False, repr=False)
 
     @classmethod
     def of(cls, node: Node) -> "PingTarget":
@@ -72,13 +80,14 @@ class PingTarget:
             server=str(node.server or ""),
             port=int(node.port or 0),
             hosts=endpoint_hosts(node),
-            measurable=not is_singbox_endpoint_node(node),
+            settings=_settings_key(node),
+            node=Node.from_dict(node.to_dict()),
         )
 
     @property
-    def endpoint(self) -> tuple[str, int, bool]:
-        """Куда реально идёт соединение: одинаковый endpoint — один замер."""
-        return self.server.strip().lower(), self.port, self.measurable
+    def endpoint(self) -> tuple[str, int, str]:
+        """Куда и как реально идёт подключение: одинаковое — один замер."""
+        return self.server.strip().lower(), self.port, self.settings
 
     def matches(self, node: Node) -> bool:
         """Сервер не сменил адрес, пока шёл замер."""
@@ -89,24 +98,38 @@ class PingTarget:
         )
 
 
+def _settings_key(node: Node) -> str:
+    outbound = node.outbound if isinstance(node.outbound, dict) else {}
+    meaningful = {key: value for key, value in outbound.items() if key not in ("tag", "remarks")}
+    return json.dumps([node.link or "", meaningful], sort_keys=True, ensure_ascii=True, default=str)
+
+
 @dataclass(frozen=True)
 class PingOutcome:
     target: PingTarget
     ping_ms: int | None
-    peers: tuple[str, ...]  # адрес, с которым реально установлено соединение
+    peers: tuple[str, ...] = ()  # адрес, с которым реально установлено соединение
+    # False — проверить было нечем (нет ядра, адреса без открытого DNS…):
+    # такой сервер не «мёртвый», прежний вывод о нём остаётся.
+    measured: bool = True
+    reason: str = ""
 
 
-Probe = Callable[[PingTarget, float], tuple[int | None, tuple[str, ...]]]
+Probe = Callable[[PingTarget, float], "latency_probe.ProbeResult"]
 
 
-def probe_target(target: PingTarget, timeout: float) -> tuple[int | None, tuple[str, ...]]:
-    if not target.measurable:
-        return None, ()
-    return tcp_observation(target.server, target.port, timeout)
+def probe_target(target: PingTarget, timeout: float) -> latency_probe.ProbeResult:
+    if target.node is None:
+        return latency_probe.ProbeResult(latency_probe.UNMEASURED, reason="нет данных сервера")
+    return latency_probe.probe_node(target.node, cancelled=_closing.is_set)
+
+
+# Выход приложения: идущий замер бросает ожидание ядра.
+_closing = threading.Event()
 
 
 class PingService(QObject):
-    """Очередь TCP-замеров с дедупликацией; все сигналы — в GUI-потоке."""
+    """Очередь замеров с дедупликацией; все сигналы — в GUI-потоке."""
 
     measured = pyqtSignal(object)          # PingOutcome
     progress = pyqtSignal(int, int, bool)  # done, total, finished
@@ -147,7 +170,7 @@ class PingService(QObject):
         # Состояние раунда — только в GUI-потоке.
         self._pending: set[str] = set()
         # endpoint → все серверы, ждущие результата одного соединения.
-        self._waiters: dict[tuple[str, int, bool], list[PingTarget]] = {}
+        self._waiters: dict[tuple[str, int, str], list[PingTarget]] = {}
         self._done = 0
         self._total = 0
 
@@ -229,6 +252,9 @@ class PingService(QObject):
             self._closed = True
             self._queue.clear()
             self._wakeup.notify_all()
+        if self._probe is probe_target:
+            _closing.set()
+            latency_probe.terminate_all()
         self._pending.clear()
         self._waiters.clear()
         self._done = self._total = 0
@@ -239,7 +265,9 @@ class PingService(QObject):
                 continue
             self._pending.discard(target.node_id)
             self._done += 1
-            self.measured.emit(PingOutcome(target, outcome.ping_ms, outcome.peers))
+            self.measured.emit(
+                PingOutcome(target, outcome.ping_ms, outcome.peers, outcome.measured, outcome.reason)
+            )
             finished = not self._pending
             self.progress.emit(self._done, self._total, finished)
             if finished:
@@ -271,14 +299,19 @@ class PingService(QObject):
             if self._start_jitter_sec:
                 time.sleep(random.uniform(0.0, self._start_jitter_sec))
             try:
-                ping_ms, peers = self._probe(target, self._timeout)
-            except Exception:
-                ping_ms, peers = None, ()
+                result = self._probe(target, self._timeout)
+            except Exception as exc:
+                result = latency_probe.ProbeResult(latency_probe.UNMEASURED, reason=f"сбой замера: {exc}")
             with self._lock:
                 self._resume_at = time.monotonic() + max(0.0, self._pause()) if self._queue else 0.0
                 if self._closed:
                     continue
             try:
-                self._arrived.emit(PingOutcome(target, ping_ms, tuple(peers)))
+                self._arrived.emit(PingOutcome(
+                    target,
+                    result.ping_ms if result.state == latency_probe.OK else None,
+                    measured=result.measured,
+                    reason=result.reason,
+                ))
             except RuntimeError:
                 return  # объект службы уже разрушен (выход приложения)

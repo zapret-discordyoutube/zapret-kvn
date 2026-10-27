@@ -24,6 +24,7 @@ from ...constants import (
     SS_PROTECT_PORT_END,
     SS_PROTECT_PORT_START,
     SPEED_TEST_HYSTERIA_PATH,
+    SPEED_TEST_SINGBOX_PATH,
     SPEED_TEST_XRAY_PATH,
 )
 from ...application.outbound_pool_service import (
@@ -248,16 +249,19 @@ def plan_singbox_runtime(
     preferred_protect_port: int = 0,
     preferred_protect_password: str = "",
     pool_nodes: list[Node] | None = None,
+    share_lan: bool = False,
 ) -> SingboxRuntimePlan:
     runtime_config = deepcopy(document.payload)
     strip_singbox_proxy_inbounds(runtime_config)
     # Тот же локальный SOCKS/HTTP, что в режиме «Прокси», но на loopback:
     # прокси, вписанный в Telegram (кнопка «Добавить в Telegram») или другую
     # программу, не обрывает её связь при переходе в TUN (16.10.2026).
+    # «Прокси для устройств в локальной сети» открывает его и другим
+    # устройствам (PS5, ТВ), как в режиме «Прокси».
     selection = _ensure_singbox_proxy_runtime_contract(
         runtime_config,
         allowed_proxy_ports=allowed_proxy_ports,
-        listen=_LOOPBACK_PROXY_LISTEN,
+        listen=_PUBLIC_PROXY_LISTEN if share_lan else _LOOPBACK_PROXY_LISTEN,
     )
     clash_api_port = _ensure_singbox_metrics_contract(runtime_config)
     _ensure_singbox_tun_runtime_contract(runtime_config)
@@ -1092,7 +1096,8 @@ def _ensure_speed_test_process_direct_route(payload: dict[str, Any]) -> None:
 
     Тест скорости и «умная проверка» меряют КАНДИДАТА через временное ядро,
     запущенное из собственного пути: xray — ``SPEED_TEST_XRAY_PATH``,
-    официальный клиент Hysteria — ``SPEED_TEST_HYSTERIA_PATH``.  В TUN его
+    официальный клиент Hysteria — ``SPEED_TEST_HYSTERIA_PATH``, sing-box
+    замера задержки — ``SPEED_TEST_SINGBOX_PATH``.  В TUN его
     соединение с сервером-кандидатом иначе попадёт в туннель и пойдёт через
     текущий (возможно, медленный) сервер — замер покажет скорость текущего.
     Схема та же, что у сайдкара Hysteria (``process_path → direct``), но
@@ -1112,6 +1117,7 @@ def _ensure_speed_test_process_direct_route(payload: dict[str, Any]) -> None:
     executables = [
         str(SPEED_TEST_XRAY_PATH.resolve()),
         str(SPEED_TEST_HYSTERIA_PATH.resolve()),
+        str(SPEED_TEST_SINGBOX_PATH.resolve()),
     ]
     direct_rule = {"process_path": executables, "action": "route", "outbound": "direct"}
     for index, rule in enumerate(rules):

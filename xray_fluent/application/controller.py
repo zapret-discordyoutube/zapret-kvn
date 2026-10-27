@@ -265,6 +265,7 @@ from ..diagnostics.runtime_logging import (
 )
 from ..profiles.storage import PassphraseRequired, StateStorage
 from ..platform.windows import startup as windows_startup
+from ..platform.windows.lan_firewall import apply_lan_proxy_firewall
 from ..platform.windows.subprocess_utils import result_output_text, run_text
 from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistoryStorage
 from .server_bypass import ServerBypass
@@ -1100,6 +1101,7 @@ class AppController(QObject):
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
             pool_nodes=self._pool_candidate_nodes(node),
+            share_lan=bool(self.state.settings.lan_proxy_enabled),
         )
 
     def _refresh_server_bootstrap(self, node: Node | None) -> None:
@@ -2437,7 +2439,7 @@ class AppController(QObject):
         if self.connected or self._desired_connected:
             self._desired_connected = True
             self._request_transition("Zapret target strategy changed")
-        elif self.zapret.plan is not None:
+        elif self.zapret.plan is not None and self.bypass.sites_on:
             self.start_zapret(self.state.settings.zapret_preset or self.zapret.plan.preset)
 
     def _schedule_transition_drain(self, delay_ms: int) -> None:
@@ -3794,6 +3796,9 @@ class AppController(QObject):
             name="autostart-repair",
             daemon=True,
         ).start()
+        if self.state.settings.lan_proxy_enabled:
+            # Путь к ядрам мог смениться (перенос папки): правило — по программе.
+            apply_lan_proxy_firewall(True, self._log)
 
     def update_settings(self, settings: AppSettings) -> None:
         settings.proxy_engine = "singbox"
@@ -3805,6 +3810,7 @@ class AppController(QObject):
         old_tun_engine = old_settings.tun_engine
         old_rotation = self._rotation_settings_signature(old_settings)
         old_auto_switch_enabled = old_settings.auto_switch_enabled
+        old_lan_proxy = old_settings.lan_proxy_enabled
         self.state.settings = settings
         self.settings_changed.emit(self.state.settings)
         self.schedule_save()
@@ -3821,6 +3827,9 @@ class AppController(QObject):
             # Смена интервала/режима не трогает конфиг — достаточно перепланировать таймер.
             self._rotation_timer.stop()
             self._sync_rotation_timer()
+
+        if old_lan_proxy != settings.lan_proxy_enabled:
+            apply_lan_proxy_firewall(settings.lan_proxy_enabled, self._log)
 
         if old_launch != settings.launch_on_startup:
             try:

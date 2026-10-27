@@ -29,7 +29,7 @@ from xray_fluent.importer.link_parser import (
     parse_single,
     validate_node_outbound,
 )
-from xray_fluent.constants import SPEED_TEST_HYSTERIA_PATH, SPEED_TEST_XRAY_PATH
+from xray_fluent.constants import SPEED_TEST_HYSTERIA_PATH, SPEED_TEST_SINGBOX_PATH, SPEED_TEST_XRAY_PATH
 from xray_fluent.profiles.models import Node
 
 
@@ -598,6 +598,7 @@ class WireguardDnsPreservationTests(unittest.TestCase):
                     "process_path": [
                         str(SPEED_TEST_XRAY_PATH.resolve()),
                         str(SPEED_TEST_HYSTERIA_PATH.resolve()),
+                        str(SPEED_TEST_SINGBOX_PATH.resolve()),
                     ],
                     "action": "route",
                     "outbound": "direct",

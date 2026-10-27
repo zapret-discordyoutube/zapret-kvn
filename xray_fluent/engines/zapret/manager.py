@@ -26,7 +26,7 @@ from ...application.async_steps import (
 )
 from ...platform.windows.subprocess_utils import decode_output, kill_processes_by_path
 from . import presets
-from .command import ServerRule, build_arguments
+from .command import ServerRule, build_arguments, drop_missing_lists
 from .endpoint import ResolvedEndpoint, ServerEndpoint
 from .strategies import Strategy
 from .presets import ZAPRET_DIR
@@ -66,6 +66,9 @@ def _kill_orphaned_blocking() -> list[str]:
 @dataclass(frozen=True, slots=True)
 class ZapretPlan:
     """What winws2 should run: a preset and, maybe, the VPN-server rule.
+
+    An empty ``preset`` means Zapret is off for sites: winws2 carries only
+    the VPN-server rules.
 
     ``pool`` — rules for the other servers of the running pool.  With them
     in place a switch inside the pool keeps winws2 (and the tunnel) running.
@@ -250,10 +253,18 @@ class ZapretManager(QObject):
         if not WINWS2_EXE.exists():
             self._fail(f"winws2.exe не найден: {WINWS2_EXE}", "missing_executable")
             return False
-        if not presets.preset_path(plan.preset).is_file():
-            self._fail(f"Пресет не найден: {plan.preset}", "missing_preset")
-            return False
-        args = build_arguments(presets.preset_arguments(plan.preset), plan.rule, plan.pool)
+        preset_args: list[str] = []
+        if plan.preset:
+            if not presets.preset_path(plan.preset).is_file():
+                self._fail(f"Пресет не найден: {plan.preset}", "missing_preset")
+                return False
+            preset_args, notes = drop_missing_lists(
+                presets.preset_arguments(plan.preset),
+                lambda name: (ZAPRET_DIR / name).is_file(),
+            )
+            for note in notes:
+                self.log_line.emit(f"[zapret] Пресет {plan.preset}: {note}")
+        args = build_arguments(preset_args, plan.rule, plan.pool)
         if not args:
             self._fail(f"Пресет пустой: {plan.preset}", "empty_preset")
             return False
@@ -271,7 +282,9 @@ class ZapretManager(QObject):
         self._process_plan = plan
         self._process_args = args
         log.info("zapret start: %s [%s] (%d args)", WINWS2_EXE.name, plan.preset, len(args))
-        self.log_line.emit(f"[zapret] Запуск: {plan.preset} ({len(args)} аргументов)")
+        self.log_line.emit(
+            f"[zapret] Запуск: {plan.preset or 'только правило VPN-сервера'} ({len(args)} аргументов)"
+        )
         process.start()
         return True
 
