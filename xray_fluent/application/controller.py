@@ -489,6 +489,8 @@ class AppController(QObject):
         self._transition_reason = ""
         self._transition_generation = 0
         self._blocked_transition_signature = ""
+        # Подключение не удалось без сети — повторить, когда сеть появится.
+        self._retry_connect_on_network = False
         self._transition_runner: TransitionRunner | None = None
         # Подготовка выбранного сервера (DNS/Zapret) выполняется один раз на
         # поколение запроса; клик во время перехода откладывает её до конца.
@@ -2035,6 +2037,7 @@ class AppController(QObject):
         if hasattr(self, "_hysteria_automatic_switch_attempted"):
             self._hysteria_automatic_switch_attempted = False
         self._blocked_transition_signature = ""
+        self._retry_connect_on_network = False
         begin_auto_switch_warmup(self, node)
 
     def _derive_outbound_pool_tags(self, node: Node | None, *, core: str) -> dict[str, str] | None:
@@ -2513,10 +2516,14 @@ class AppController(QObject):
                 ok = bool(runner.result) and runner.error is None
                 if ok:
                     self._blocked_transition_signature = ""
+                    self._retry_connect_on_network = False
                 else:
                     self._blocked_transition_signature = self._transition_signature(
                         self._runtime_selected_node()
                     )
+                    # Подключение не удалось, пока сети ещё не было (старт Windows,
+                    # Wi-Fi не поднялся): появится адрес — одна повторная попытка.
+                    self._retry_connect_on_network = bool(self._desired_connected) and not self.connected
                     self._desired_connected = self.connected
             elif superseded and not runner.cancelled:
                 # Устаревший переход не блокирует сигнатуру и не трогает
@@ -3752,6 +3759,7 @@ class AppController(QObject):
         return self._traffic_history
 
     def toggle_connection(self) -> None:
+        self._retry_connect_on_network = False
         current_target = self._desired_connected if (self._transition_active or self._transition_pending) else self.connected
         self._desired_connected = not current_target
         # Ручное действие отменяет отложенный возврат после неудачной замены.
@@ -4225,6 +4233,20 @@ class AppController(QObject):
 
     def _on_network_changed(self, old: str, new: str) -> None:
         self._log(f"[network] changed: {old} -> {new}")
+        if (
+            getattr(self, "_retry_connect_on_network", False)
+            and new != "0.0.0.0"
+            and not self.connected
+            and not self._desired_connected
+            and not self._transition_active
+            and self.state.settings.reconnect_on_network_change
+        ):
+            # Прошлое подключение не удалось без сети: сеть появилась — пробуем снова.
+            self._retry_connect_on_network = False
+            self._log("[network] сеть появилась после неудачного подключения — повторная попытка")
+            self._desired_connected = True
+            self._request_transition("network returned")
+            return
         # TUN mode creates a virtual adapter which triggers network change —
         # reconnecting would kill the TUN and cause an infinite loop
         if self.state.settings.tun_mode:

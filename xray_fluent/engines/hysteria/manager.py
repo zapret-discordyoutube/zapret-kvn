@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,8 @@ from ...diagnostics.export import capture_runtime_config
 from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 from ..health_check import BackgroundHealthCheck
 from ..sidecar import wait_for_loopback_relay_steps
+from ...network.bootstrap_dns import resolve_bootstrap
+from .config_adapter import pin_server_address, server_host
 from .runtime_contract import (
     SECURITY_FAILURES,
     HysteriaFailureCode,
@@ -220,6 +223,36 @@ class HysteriaManager(QObject):
         finally:
             self._start_depth -= 1
 
+    def _trusted_server_address_steps(self, config: dict[str, Any]) -> TransitionSteps:
+        """Адрес сервера — из доверенного DoH приложения, а не от DNS провайдера.
+
+        Официальный клиент разрешает имя сервера системным резолвером; на сети,
+        где провайдер подменяет ответы, живой сервер получал «no such host» или
+        чужой адрес и таймаут рукопожатия (жалоба 0.8.47: пинг через ядро с
+        тем же DoH видел сервер живым).  Нет доверенного ответа — имя остаётся
+        как есть, клиент разрешит его сам, как раньше.
+        """
+
+        host = server_host(config)
+        if not host:
+            return config
+        try:
+            ipaddress.ip_address(host)
+            return config
+        except ValueError:
+            pass
+        try:
+            resolution = yield run_in_worker(lambda: resolve_bootstrap(host))
+        except (OSError, UnicodeError):
+            return config
+        if resolution.source == "system" or not resolution.addresses:
+            return config
+        address = sorted(
+            resolution.addresses, key=lambda value: (ipaddress.ip_address(value).version, value),
+        )[0]
+        self._emit_log(f"server address from trusted DNS ({resolution.source})", stage="resolve")
+        return pin_server_address(config, address)
+
     def _start_attempt_steps(
         self,
         config: dict[str, Any],
@@ -297,6 +330,9 @@ class HysteriaManager(QObject):
                 yield sleep_ms(500)
             if attempt_generation != self._compatibility_generation or not _still_wanted(should_continue):
                 return False
+        config = yield from self._trusted_server_address_steps(config)
+        if attempt_generation != self._compatibility_generation or not _still_wanted(should_continue):
+            return False
         self._cleanup_config()
         temporary = self._config_path.with_suffix(".json.tmp")
         try:

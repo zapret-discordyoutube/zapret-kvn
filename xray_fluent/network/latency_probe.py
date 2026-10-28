@@ -38,7 +38,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit, urlunsplit
 
 from ..application.protocol_core import ProtocolCore, protocol_core
 from ..constants import (
@@ -50,6 +49,7 @@ from ..constants import (
     SPEED_TEST_XRAY_PATH,
     XRAY_PATH_DEFAULT,
 )
+from ..engines.hysteria.config_adapter import pin_server_address
 from ..engines.singbox.config_builder import build_singbox_outbound, is_singbox_endpoint_node
 from ..profiles.models import Node
 from .bootstrap_dns import BootstrapNameNotFound, resolve_bootstrap
@@ -184,26 +184,10 @@ def _singbox_config(node: Node, port: int, host: str, addresses: list[str]) -> d
     return config
 
 
-def _replace_uri_host(uri: str, address: str) -> str:
-    """``hy2://auth@name:443,5000-6000/?…`` → тот же URI с адресом вместо имени."""
-
-    parts = urlsplit(uri)
-    userinfo, at, hostport = parts.netloc.rpartition("@")
-    if hostport.startswith("["):
-        rest = hostport[hostport.index("]") + 1:]
-    else:
-        name, colon, ports = hostport.partition(":")
-        rest = colon + ports
-    literal = f"[{address}]" if ":" in address else address
-    return urlunsplit((parts.scheme, f"{userinfo}{at}{literal}{rest}", parts.path, parts.query, parts.fragment))
-
-
 def _hysteria_config(node: Node, port: int, host: str, addresses: list[str]) -> dict:
     config = build_hysteria_speed_test_config(node, port)
     if host not in addresses:
-        # Имя остаётся в SNI, а соединение идёт на известный адрес.
-        config.setdefault("tls", {}).setdefault("sni", host)
-        config["server"] = _replace_uri_host(str(config["server"]), addresses[0])
+        config = pin_server_address(config, addresses[0])
     return config
 
 

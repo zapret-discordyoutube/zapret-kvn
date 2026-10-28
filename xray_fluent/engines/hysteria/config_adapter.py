@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Iterable
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on", "t"})
@@ -206,3 +207,41 @@ def _runtime_server_uri(
     userinfo = parsed.netloc.rsplit("@", 1)[0] + "@" if "@" in parsed.netloc else ""
     netloc = f"{userinfo}{host}:{','.join(ports)}"
     return parsed._replace(netloc=netloc).geturl()
+
+
+def replace_server_host(uri: str, address: str) -> str:
+    """``hy2://auth@name:443,5000-6000/?…`` → тот же URI с адресом вместо имени."""
+
+    parts = urlsplit(uri)
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    if hostport.startswith("["):
+        rest = hostport[hostport.index("]") + 1:]
+    else:
+        _name, colon, ports = hostport.partition(":")
+        rest = colon + ports
+    literal = f"[{address}]" if ":" in address else address
+    return urlunsplit((parts.scheme, f"{userinfo}{at}{literal}{rest}", parts.path, parts.query, parts.fragment))
+
+
+def server_host(config: dict[str, Any]) -> str:
+    """Имя сервера из ``server`` конфига официального клиента."""
+
+    return str(urlsplit(str(config.get("server") or "")).hostname or "")
+
+
+def pin_server_address(config: dict[str, Any], address: str) -> dict[str, Any]:
+    """Копия конфига: соединение — на ``address``, имя сервера остаётся в SNI.
+
+    Официальный клиент сам разрешает имя сервера системным DNS, то есть DNS
+    провайдера: подменённый ответ («no such host» или чужой адрес) роняет
+    подключение к живому серверу.  Адрес из доверенного DoH приложения
+    подставляется в URI, а TLS по-прежнему проверяет сертификат по имени.
+    """
+
+    host = server_host(config)
+    pinned = deepcopy(config)
+    if not host:
+        return pinned
+    pinned.setdefault("tls", {}).setdefault("sni", host)
+    pinned["server"] = replace_server_host(str(config["server"]), address)
+    return pinned

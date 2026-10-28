@@ -130,6 +130,33 @@ class RuntimeStopTests(TestCase):
         AppController._on_network_changed(controller, 'old', 'new')
         controller._request_transition.assert_not_called()
 
+    def test_failed_connect_without_network_retries_once_when_network_appears(self):
+        controller = Mock()
+        controller.state.settings.tun_mode = True
+        controller.state.settings.reconnect_on_network_change = True
+        controller.connected = False
+        controller._desired_connected = False
+        controller._transition_active = False
+        controller._retry_connect_on_network = True
+        AppController._on_network_changed(controller, '0.0.0.0', '192.168.1.8')
+        controller._request_transition.assert_called_once_with("network returned")
+        self.assertTrue(controller._desired_connected)
+        self.assertFalse(controller._retry_connect_on_network)
+
+    def test_no_retry_after_the_user_stopped_or_without_network(self):
+        controller = Mock()
+        controller.state.settings.tun_mode = False
+        controller.state.settings.reconnect_on_network_change = True
+        controller.connected = False
+        controller._desired_connected = False
+        controller._transition_active = False
+        controller._active_tunnel_addresses.return_value = set()
+        controller._retry_connect_on_network = True
+        AppController._on_network_changed(controller, '192.168.1.8', '0.0.0.0')
+        controller._request_transition.assert_not_called()
+        AppController.toggle_connection(controller)
+        self.assertFalse(controller._retry_connect_on_network)
+
     def test_tunnel_self_address_change_does_not_reconnect(self):
         controller = Mock()
         controller.state.settings.tun_mode = False

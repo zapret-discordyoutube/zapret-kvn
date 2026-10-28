@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from xray_fluent.engines.hysteria.config_adapter import pin_server_address, replace_server_host
 from xray_fluent.network import latency_probe
 from xray_fluent.network.bootstrap_dns import BootstrapNameNotFound, BootstrapResolution
 from xray_fluent.profiles.models import Node
@@ -79,11 +80,12 @@ class CoreConfigTests(unittest.TestCase):
         self.assertEqual(config["inbounds"][0]["listen_port"], 19102)
 
     def test_hysteria_uri_points_at_the_address_and_keeps_the_name_in_sni(self) -> None:
-        uri = latency_probe._replace_uri_host("hy2://secret@hy.example:443,5000-6000/?obfs=salamander", "203.0.113.7")
+        uri = replace_server_host("hy2://secret@hy.example:443,5000-6000/?obfs=salamander", "203.0.113.7")
         self.assertEqual(uri, "hy2://secret@203.0.113.7:443,5000-6000/?obfs=salamander")
-        self.assertEqual(
-            latency_probe._replace_uri_host("hy2://a@[2001:db8::1]:443/", "2001:db8::2"), "hy2://a@[2001:db8::2]:443/",
-        )
+        self.assertEqual(replace_server_host("hy2://a@[2001:db8::1]:443/", "2001:db8::2"), "hy2://a@[2001:db8::2]:443/")
+        pinned = pin_server_address({"server": "hy2://a@hy.example:443/", "tls": {}}, "203.0.113.7")
+        self.assertEqual(pinned["server"], "hy2://a@203.0.113.7:443/")
+        self.assertEqual(pinned["tls"]["sni"], "hy.example")
 
     def test_each_protocol_goes_to_the_core_that_connects_it(self) -> None:
         paths = latency_probe.CorePaths()
