@@ -435,6 +435,7 @@ class AppController(QObject):
         # Пинг — долгоживущая служба без QThread; короткие QThread-воркеры
         # живут в _background_workers до своего finished (worker_keeper).
         self.ping = PingService(self)
+        self.ping.set_current_route(self._current_ping_route)
         self.ping.measured.connect(self._on_ping_measured)
         self.ping.progress.connect(self._on_ping_progress)
         self._background_workers: list = []
@@ -873,6 +874,13 @@ class AppController(QObject):
         if socks_port > 0 and http_port > 0:
             return socks_port, http_port
         return DEFAULT_SOCKS_PORT, DEFAULT_HTTP_PORT
+
+    def _current_ping_route(self) -> tuple[str, int] | None:
+        """Подключённый сервер и HTTP-порт его сессии — для пинга без второго ядра."""
+        session = self._active_session
+        if not self.connected or session is None or not session.node_id or session.http_port <= 0:
+            return None
+        return session.node_id, int(session.http_port)
 
     def get_effective_http_proxy_port(self) -> int | None:
         session = self._active_session

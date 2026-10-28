@@ -145,6 +145,8 @@ def on_ping_measured(controller: AppController, outcome: PingOutcome) -> None:
         remember_country_addresses(controller, node, outcome.peers, refresh=False)
         controller._country_ping_pending = True
     apply_ping_measurement(node, outcome.ping_ms, measured=outcome.measured)
+    if outcome.measured and outcome.ping_ms is None and outcome.reason:
+        controller._log(f"[ping] {node.name}: не ответил — {outcome.reason}")
     if not outcome.measured:
         if outcome.reason:
             controller._log(f"[ping] {node.name}: не измерен — {outcome.reason}")

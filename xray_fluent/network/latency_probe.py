@@ -306,6 +306,20 @@ def _wait_ready(process: subprocess.Popen, port: int, cancelled: Callable[[], bo
     return False
 
 
+def probe_session(port: int, *, measure: Callable[[int], int] | None = None) -> ProbeResult:
+    """Текущий сервер — через локальный прокси работающего подключения.
+
+    Путь уже проверен самим подключением: второе ядро рядом с работающим TUN
+    не нужно и не может дать ложное «мёртв» для сервера, через который сейчас
+    идёт весь трафик (жалоба 0.8.47: на панели 71 мс, в списке «--»).
+    """
+
+    try:
+        return ProbeResult(OK, (measure or warm_rtt_ms)(port))
+    except OSError as exc:
+        return ProbeResult(NO_ANSWER, reason=f"через подключение: {exc or type(exc).__name__}")
+
+
 def probe_node(
     node: Node,
     *,
@@ -314,7 +328,41 @@ def probe_node(
     measure: Callable[[int], int] = warm_rtt_ms,
     resolve=resolve_bootstrap,
 ) -> ProbeResult:
-    """Проверить один сервер; блокирующий вызов, только из рабочего потока."""
+    """Проверить один сервер; блокирующий вызов, только из рабочего потока.
+
+    Сначала ядро идёт на адрес из своего DoH; не дошло — ещё одна попытка, где
+    ядро разрешает имя само (в режиме TUN — через DNS sing-box): разовая
+    неудача закреплённого адреса не выдаётся за мёртвый сервер.
+    """
+
+    first = _probe_once(node, paths=paths, cancelled=cancelled, measure=measure, resolve=resolve)
+    if first.state != NO_ANSWER or first.reason == _NAME_MISSING or cancelled() or _is_ip(node.server):
+        return first
+    second = _probe_once(node, paths=paths, cancelled=cancelled, measure=measure, resolve=None)
+    if second.state == OK:
+        return second
+    return ProbeResult(NO_ANSWER, reason=f"{first.reason}; без закреплённого адреса: {second.reason}")
+
+
+_NAME_MISSING = "имя сервера не существует"
+
+
+def _is_ip(value: object) -> bool:
+    try:
+        ipaddress.ip_address(str(value or "").strip().strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def _probe_once(
+    node: Node,
+    *,
+    paths: CorePaths | None,
+    cancelled: Callable[[], bool],
+    measure: Callable[[int], int],
+    resolve,
+) -> ProbeResult:
 
     reason = unmeasurable_reason(node)
     if reason:
@@ -322,12 +370,15 @@ def probe_node(
     host = str(node.server or "").strip().strip("[]")
     if not host or not node.port:
         return ProbeResult(UNMEASURED, reason="у сервера нет адреса")
-    try:
-        addresses = server_addresses(host, resolve)
-    except BootstrapNameNotFound:
-        return ProbeResult(NO_ANSWER, reason="имя сервера не существует")
-    if not addresses:
-        return ProbeResult(UNMEASURED, reason="адрес сервера не узнать без открытого DNS")
+    if resolve is None:
+        addresses = [host]  # ядро разрешит имя само
+    else:
+        try:
+            addresses = server_addresses(host, resolve)
+        except BootstrapNameNotFound:
+            return ProbeResult(NO_ANSWER, reason=_NAME_MISSING)
+        if not addresses:
+            return ProbeResult(UNMEASURED, reason="адрес сервера не узнать без открытого DNS")
 
     port = _pick_port(PROXY_HOST, PROBE_HTTP_PORT)
     try:

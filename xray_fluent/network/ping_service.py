@@ -72,9 +72,11 @@ class PingTarget:
     settings: str = ""
     # Копия сервера на момент запроса — её и меряет ядро.
     node: Node | None = field(default=None, compare=False, hash=False, repr=False)
+    # Сервер сейчас подключён: HTTP-порт его сессии (0 — нет).
+    session_port: int = field(default=0, compare=False, hash=False)
 
     @classmethod
-    def of(cls, node: Node) -> "PingTarget":
+    def of(cls, node: Node, session_port: int = 0) -> "PingTarget":
         return cls(
             node_id=node.id,
             server=str(node.server or ""),
@@ -82,6 +84,7 @@ class PingTarget:
             hosts=endpoint_hosts(node),
             settings=_settings_key(node),
             node=Node.from_dict(node.to_dict()),
+            session_port=int(session_port or 0),
         )
 
     @property
@@ -121,6 +124,10 @@ Probe = Callable[[PingTarget, float], "latency_probe.ProbeResult"]
 def probe_target(target: PingTarget, timeout: float) -> latency_probe.ProbeResult:
     if target.node is None:
         return latency_probe.ProbeResult(latency_probe.UNMEASURED, reason="нет данных сервера")
+    if target.session_port:
+        result = latency_probe.probe_session(target.session_port)
+        if result.state == latency_probe.OK:
+            return result
     return latency_probe.probe_node(target.node, cancelled=_closing.is_set)
 
 
@@ -156,6 +163,8 @@ class PingService(QObject):
         self._start_jitter_sec = max(0.0, float(start_jitter_sec))
         self._pause = pause
         self._gate = gate
+        # (id подключённого сервера, HTTP-порт его сессии) или None.
+        self._current_route: Callable[[], tuple[str, int] | None] = lambda: None
 
         # Общее с потоками замеров — только под замком.
         self._lock = threading.Lock()
@@ -185,14 +194,20 @@ class PingService(QObject):
     def pending_ids(self) -> frozenset[str]:
         return frozenset(self._pending)
 
+    def set_current_route(self, route: Callable[[], tuple[str, int] | None]) -> None:
+        """Откуда узнать подключённый сервер: его меряют через его же подключение."""
+        self._current_route = route
+
     def request(self, nodes: Iterable[Node]) -> int:
         """Поставить серверы в очередь; вернуть, сколько из них новых."""
         fresh: list[PingTarget] = []
+        current = self._current_route()
         for node in nodes:
             if node.id in self._pending:
                 continue
             self._pending.add(node.id)
-            fresh.append(PingTarget.of(node))
+            port = current[1] if current is not None and current[0] == node.id else 0
+            fresh.append(PingTarget.of(node, port))
         if not fresh:
             return 0
         with self._lock:

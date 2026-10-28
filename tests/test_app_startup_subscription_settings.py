@@ -119,7 +119,8 @@ class Ac1ModelTests(unittest.TestCase):
         self.assertTrue(settings.subscriptions_check_on_startup)
         self.assertEqual(settings.subscriptions_check_interval_min, 15)
         self.assertEqual(settings.startup_connect_order, "immediate")
-        self.assertTrue(settings.auto_connect_last)
+        # С 2026-10-28: открыл программу — нажал «Подключить», как на Android.
+        self.assertFalse(settings.auto_connect_last)
 
     def test_to_dict_contains_new_keys(self) -> None:
         data = AppSettings().to_dict()
@@ -420,6 +421,8 @@ class Ac6StartupOrderTests(unittest.TestCase):
         self.transitions: list[str] = []
         self.controller._request_transition = self.transitions.append  # type: ignore[method-assign]
         self.controller._drain_subscription_update_queue = lambda: None  # type: ignore[method-assign]
+        # Порядок запуска проверяется при включённом «Подключаться при запуске».
+        self.controller.state.settings.auto_connect_last = True
         _select_node(self.controller)
 
     def tearDown(self) -> None:

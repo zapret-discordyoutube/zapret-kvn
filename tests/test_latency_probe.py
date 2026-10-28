@@ -103,6 +103,46 @@ class CoreConfigTests(unittest.TestCase):
         self.assertEqual(latency_probe.probe_node(node).state, latency_probe.UNMEASURED)
 
 
+class RouteTests(unittest.TestCase):
+    def test_connected_server_is_measured_through_its_session(self) -> None:
+        from xray_fluent.network.ping_service import PingTarget, probe_target
+
+        target = PingTarget.of(_vless(), session_port=1391)
+        with patch("xray_fluent.network.latency_probe.warm_rtt_ms", return_value=71) as measure, patch(
+            "xray_fluent.network.latency_probe.probe_node",
+        ) as second_core:
+            result = latency_probe.probe_session(target.session_port, measure=measure)
+            self.assertEqual((result.state, result.ping_ms), (latency_probe.OK, 71))
+            routed = probe_target(target, 2.0)
+        self.assertEqual(routed.ping_ms, 71)
+        second_core.assert_not_called()
+
+    def test_pinned_address_failure_is_retried_with_the_core_resolving(self) -> None:
+        calls = []
+
+        def once(node, *, paths, cancelled, measure, resolve):
+            calls.append(resolve is None)
+            if resolve is None:
+                return latency_probe.ProbeResult(latency_probe.OK, 64)
+            return latency_probe.ProbeResult(latency_probe.NO_ANSWER, reason="timed out")
+
+        with patch("xray_fluent.network.latency_probe._probe_once", once):
+            result = latency_probe.probe_node(_vless())
+        self.assertEqual(calls, [False, True])
+        self.assertEqual(result.ping_ms, 64)
+
+    def test_ip_server_is_not_probed_twice(self) -> None:
+        calls = []
+
+        def once(node, **_kwargs):
+            calls.append(1)
+            return latency_probe.ProbeResult(latency_probe.NO_ANSWER, reason="timed out")
+
+        with patch("xray_fluent.network.latency_probe._probe_once", once):
+            latency_probe.probe_node(_vless("198.51.100.4"))
+        self.assertEqual(len(calls), 1)
+
+
 class WarmRttTests(unittest.TestCase):
     def test_best_warm_request_is_the_rtt_not_the_cold_one(self) -> None:
         ticks = iter([0.0, 0.300, 1.0, 1.120, 2.0, 2.045])

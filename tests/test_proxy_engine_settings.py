@@ -20,7 +20,7 @@ class ProxyEngineSettingsTests(unittest.TestCase):
                 self.assertEqual(restored.xray_config_file, "custom-rules.json")
 
     def test_singbox_auto_connect_is_preserved(self) -> None:
-        self.assertTrue(AppSettings.from_dict(AppSettings().to_dict()).auto_connect_last)
+        self.assertTrue(AppSettings.from_dict(AppSettings(auto_connect_last=True).to_dict()).auto_connect_last)
 
 
 if __name__ == "__main__":

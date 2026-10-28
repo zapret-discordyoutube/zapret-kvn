@@ -541,7 +541,8 @@ _ZAPRET_ENABLED_FIELDS = {
 class AppSettings:
     theme: str = "system"  # system | light | dark
     accent_color: str = DEFAULT_ACCENT_COLOR
-    auto_connect_last: bool = True
+    # Открыл программу — нажал «Подключить»; одинаково с Android (решение владельца 2026-10-28).
+    auto_connect_last: bool = False
     start_minimized: bool = False
     enable_system_proxy: bool = True
     # Каким был «Системный прокси Windows» до включения VPN (TUN): режим его
@@ -707,7 +708,7 @@ class AppSettings:
             # Do not automatically connect with different routing after migration.
             # Keep the old raw Xray files, but require an explicit first connect.
             auto_connect_last=(
-                bool(data.get("auto_connect_last", True))
+                bool(data.get("auto_connect_last", False))
                 and str(data.get("proxy_engine") or "singbox") == "singbox"
                 and str(data.get("tun_engine") or "singbox") == "singbox"
             ),
