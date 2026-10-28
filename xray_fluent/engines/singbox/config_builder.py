@@ -157,6 +157,41 @@ def _apply_tls(sb: dict[str, Any], stream: dict[str, Any]) -> None:
     sb["tls"] = tls
 
 
+def _split_early_data(path: str) -> tuple[str, int]:
+    """``/ws?ed=2048`` → (``/ws``, 2048); остальные параметры пути остаются."""
+
+    base, mark, query = path.partition("?")
+    if not mark:
+        return path, 0
+    kept: list[str] = []
+    early = 0
+    for part in query.split("&"):
+        key, _, value = part.partition("=")
+        if key == "ed" and value.isdigit():
+            early = int(value)
+        elif part:
+            kept.append(part)
+    return (f"{base}?{'&'.join(kept)}" if kept else base), early
+
+
+def _http1_only(sb: dict[str, Any]) -> None:
+    """WebSocket и HTTP upgrade работают только поверх HTTP/1.1.
+
+    Ссылка с ``alpn=h2,http/1.1`` давала серверу выбрать h2: TLS
+    устанавливался, а запрос WebSocket — нет, и трафик не шёл (Xray в этом
+    случае сам оставляет только http/1.1).
+    """
+
+    tls = sb.get("tls")
+    if not isinstance(tls, dict) or not tls.get("alpn"):
+        return
+    alpn = [value for value in tls["alpn"] if str(value).lower() not in ("h2", "h3")]
+    if alpn:
+        tls["alpn"] = alpn
+    else:
+        tls.pop("alpn")
+
+
 def _apply_transport(sb: dict[str, Any], stream: dict[str, Any]) -> None:
     network = str(stream.get("network") or "tcp").lower()
     if network == "tcp":
@@ -165,13 +200,36 @@ def _apply_transport(sb: dict[str, Any], stream: dict[str, Any]) -> None:
     if network == "ws":
         ws_settings = dict(stream.get("wsSettings") or {})
         transport: dict[str, Any] = {"type": "ws"}
-        path = str(ws_settings.get("path") or "")
+        path, early_data = _split_early_data(str(ws_settings.get("path") or ""))
         if path:
             transport["path"] = path
+        if early_data:
+            # Xray читает «?ed=2048» из пути как ранние данные в заголовке
+            # Sec-WebSocket-Protocol; sing-box отправил бы его в пути, и сервер
+            # ответил бы 404.
+            transport["max_early_data"] = early_data
+            transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
         headers = dict(ws_settings.get("headers") or {})
+        host = str(ws_settings.get("host") or "")
+        if host and not any(str(key).lower() == "host" for key in headers):
+            headers["Host"] = host
         if headers:
             transport["headers"] = headers
         sb["transport"] = transport
+        _http1_only(sb)
+        return
+
+    if network == "httpupgrade":
+        upgrade_settings = dict(stream.get("httpupgradeSettings") or {})
+        transport = {"type": "httpupgrade"}
+        host = str(upgrade_settings.get("host") or "")
+        if host:
+            transport["host"] = host
+        path = str(upgrade_settings.get("path") or "")
+        if path:
+            transport["path"] = path
+        sb["transport"] = transport
+        _http1_only(sb)
         return
 
     if network in ("http", "h2"):

@@ -184,6 +184,49 @@ class SingboxProtocolParserTests(unittest.TestCase):
         with self.assertRaisesRegex(LinkParseError, "gecko obfs requires obfs-password"):
             parse_single("hy2://secret@example.com:443/?obfs=gecko")
 
+class WebSocketTransportConversionTests(unittest.TestCase):
+    """Trojan/VMess через sing-box: «подключается, но трафика нет» (0.8.45–0.8.47).
+
+    Проверено вживую против сервера Xray: alpn=h2,http/1.1 на WebSocket давал EOF,
+    «?ed=2048» в пути — 404; после исправления все варианты отдают 204.
+    """
+
+    def _outbound(self, link: str) -> dict:
+        from xray_fluent.engines.singbox.config_builder import build_singbox_outbound
+        from xray_fluent.importer.link_parser import parse_single
+
+        return build_singbox_outbound(parse_single(link))
+
+    def test_websocket_keeps_only_http1_alpn(self) -> None:
+        ob = self._outbound(
+            "trojan://pw@h.example:443?security=tls&type=ws&path=%2Fws&sni=h.example&alpn=h2%2Chttp%2F1.1#t"
+        )
+        self.assertEqual(ob["tls"]["alpn"], ["http/1.1"])
+
+    def test_websocket_without_http1_drops_alpn_for_core_default(self) -> None:
+        ob = self._outbound("trojan://pw@h.example:443?security=tls&type=ws&path=%2Fws&sni=h.example&alpn=h2#t")
+        self.assertNotIn("alpn", ob["tls"])
+
+    def test_early_data_moves_from_path_to_options(self) -> None:
+        ob = self._outbound(
+            "trojan://pw@h.example:443?security=tls&type=ws&path=%2Fws%3Fed%3D2048%26x%3D1&sni=h.example#t"
+        )
+        self.assertEqual(ob["transport"]["path"], "/ws?x=1")
+        self.assertEqual(ob["transport"]["max_early_data"], 2048)
+        self.assertEqual(ob["transport"]["early_data_header_name"], "Sec-WebSocket-Protocol")
+
+    def test_httpupgrade_is_converted(self) -> None:
+        ob = self._outbound(
+            "trojan://pw@h.example:443?security=tls&type=httpupgrade&path=%2Fup&host=cdn.example&sni=h.example#t"
+        )
+        self.assertEqual(ob["transport"], {"type": "httpupgrade", "host": "cdn.example", "path": "/up"})
+
+    def test_grpc_keeps_h2(self) -> None:
+        ob = self._outbound(
+            "trojan://pw@h.example:443?security=tls&type=grpc&serviceName=g&sni=h.example&alpn=h2#t"
+        )
+        self.assertEqual(ob["tls"]["alpn"], ["h2"])
+
 
 if __name__ == "__main__":
     unittest.main()

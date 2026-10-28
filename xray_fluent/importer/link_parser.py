@@ -388,6 +388,13 @@ def _build_stream_settings(
         if host:
             ws_settings["headers"] = {"Host": host}
         stream["wsSettings"] = ws_settings
+    elif network == "httpupgrade":
+        upgrade_settings: dict[str, Any] = {}
+        if path:
+            upgrade_settings["path"] = path
+        if host:
+            upgrade_settings["host"] = host
+        stream["httpupgradeSettings"] = upgrade_settings
     elif network in {"http", "h2"}:
         http_settings: dict[str, Any] = {}
         if host:
