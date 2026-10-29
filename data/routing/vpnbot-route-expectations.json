@@ -203,6 +203,15 @@
       ]
     },
     {
+      "domain": "emias.info",
+      "expected_route": "direct",
+      "policy_class": "russian-service-direct",
+      "inline_required": false,
+      "profile_modes": [
+        "all"
+      ]
+    },
+    {
       "domain": "xn--b1aew.xn--p1ai",
       "expected_route": "direct",
       "policy_class": "russian-service-direct",
