@@ -341,8 +341,11 @@ class ProxyManager:
         override = "<local>;localhost;127.*"
         if bypass_lan:
             override = (
-                "<local>;localhost;127.*;10.*;172.*;192.168.*;"
-                "*.local;::1"
+                # Частные 172.16.0.0/12 — только 172.16–172.31: «172.*» пускал
+                # мимо прокси и обычные адреса 172.0–15 и 172.32–255.
+                "<local>;localhost;127.*;10.*;"
+                + "".join(f"172.{octet}.*;" for octet in range(16, 32))
+                + "192.168.*;*.local;::1"
             )
 
         self._write_settings(

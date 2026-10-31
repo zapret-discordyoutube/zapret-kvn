@@ -233,6 +233,8 @@ from ..diagnostics.export import collect_runtime_diagnostics, export_diagnostics
 from ..diagnostics.transport_failure import amnezia_failure_message, hysteria_failure_message
 from .server_selection import ServerSelection
 from .transition_outcome import STALE_SERVER_ADDRESS_HINT, FailureRank, TransitionOutcome, failure_status
+from ..platform.windows import browser_proxy
+from concurrent.futures import ThreadPoolExecutor
 from ..profiles.models import (
     AppSettings,
     AppState,
@@ -302,6 +304,10 @@ def _find_free_api_port(preferred: int | None = None, excluded: set[int] | None 
             except OSError:
                 continue
     raise RuntimeError(f"No free port in range {preferred}-{preferred + 100}")
+
+
+#: Проверка браузеров на системный прокси: файлы профилей и реестр, не GUI-поток.
+_BROWSER_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xray_fluent_browser_proxy")
 
 
 def _process_alive(manager: object) -> bool:
@@ -2138,9 +2144,41 @@ class AppController(QObject):
         """Await one ProxyManager call in the ordered proxy thread."""
         call = getattr(self.proxy, method)
         try:
-            return (yield run_in_worker(lambda: call(*args, **kwargs), executor=PROXY_EXECUTOR))
+            result = yield run_in_worker(lambda: call(*args, **kwargs), executor=PROXY_EXECUTOR)
         finally:
             self._emit_system_proxy_state()
+        if method == "enable":
+            self._check_browsers_take_system_proxy(tuple(int(port) for port in args[:2]))
+        return result
+
+    def _check_browsers_take_system_proxy(self, ports: tuple[int, ...]) -> None:
+        """Сказать, если браузер не возьмёт только что включённый системный прокси.
+
+        Chrome и другие Chromium-браузеры идут мимо системного прокси (и мимо
+        VPN), когда их прокси задан расширением или политикой. Чтение реестра и
+        файлов профилей — в фоне; о каждом случае — один раз за запуск.
+        """
+        reported = self.__dict__.setdefault("_browser_bypass_reported", set())
+
+        def job() -> None:
+            try:
+                found = browser_proxy.find_bypasses(ports)
+            except Exception as exc:  # noqa: BLE001 — диагностика не ломает подключение
+                self._background_log.emit(f"[proxy] проверка браузеров не удалась: {exc!r}")
+                return
+            fresh = [item for item in found if (item.browser, item.source, item.detail) not in reported]
+            if not fresh:
+                return
+            reported.update((item.browser, item.source, item.detail) for item in fresh)
+            for item in fresh:
+                self._background_log.emit(
+                    f"[proxy] {item.browser}: прокси задан {item.source} ({item.mode}"
+                    f"{', ' + item.detail if item.detail else ''}) — системный прокси не берёт"
+                )
+            # Сигнал Qt доставит сообщение в GUI-поток.
+            self.status.emit("warning-long", browser_proxy.message(fresh))
+
+        _BROWSER_CHECK_EXECUTOR.submit(job)
 
     def _proxy_nowait(self, method: str, *args: Any, **kwargs: Any) -> None:
         """Queue one ProxyManager call without waiting (signal handlers)."""
