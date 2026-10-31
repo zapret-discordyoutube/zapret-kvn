@@ -37,6 +37,9 @@ class SelectionSource(Enum):
     # Выбранный сервер исчез из списка — выбран первый оставшийся.
     NODE_REMOVED = ("node-removed", "выбранный сервер удалён", False)
     SUBSCRIPTION = ("subscription", "подписка: выбранного сервера больше нет", False)
+    # Новый сервер не подключился, прежний runtime продолжает работать:
+    # выбор возвращается на сервер, который держит соединение.
+    SWITCH_FAILED = ("switch-failed", "новый сервер не подключился: выбран снова прежний", False)
 
     def __init__(self, code: str, label: str, manual: bool) -> None:
         self.code = code

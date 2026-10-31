@@ -36,6 +36,8 @@ SELECTION_WRITERS: dict[tuple[str, str], str] = {
     # Фиксация pending-выбора, уже записанного в лог при запросе
     # (set_selected_node для Amnezia, начало восстановления Hysteria).
     ("application/controller.py", "AppController._commit_pending_transport_selection"): "pending",
+    # Отказ нового сервера при живом прежнем runtime: выбор возвращается на него.
+    ("engines/singbox/operations.py", "_keep_serving_selection"): "self",
 }
 
 # Команды смены сервера: каждый вызов обязан передать source=.

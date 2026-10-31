@@ -175,6 +175,7 @@ class AmneziaManager(QObject):
         self._is_current = None
         self._health = BackgroundHealthCheck(self)
         self._pending_front_config = None
+        self.last_failure: tuple[str, str] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -185,6 +186,9 @@ class AmneziaManager(QObject):
         clean = redact_runtime_log(raw)
         identity = self._context.fields() if self._context else ""
         message = f"[amnezia][stage={stage} {identity}] {clean}"
+        if self.last_failure is None:
+            # The first report of an attempt is its cause; later ones are fallout.
+            self.last_failure = (stage, clean)
         self.log_received.emit(message)
         self.error.emit(message)
         self.failure.emit(core_failure("amnezia", stage, clean, **self._identity))
@@ -205,6 +209,7 @@ class AmneziaManager(QObject):
         if not (yield from self.stop_steps()):
             return False
         self._expected = self._failed = self._relay_ready = False
+        self.last_failure = None
         self._is_current = is_current
         self._buffer = b""
         self.stats = {}

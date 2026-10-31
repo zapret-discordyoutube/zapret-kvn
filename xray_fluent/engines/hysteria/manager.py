@@ -135,6 +135,16 @@ class HysteriaManager(QObject):
         return self._last_failure_code
 
     @property
+    def remote_authenticated(self) -> bool:
+        """The server answered and accepted this attempt (official CLI event)."""
+        return bool(self._remote_authenticated)
+
+    @property
+    def recent_output_lines(self) -> tuple[str, ...]:
+        """Redacted output of the current/last attempt, kept after a failed start."""
+        return tuple(self._last_output_lines)
+
+    @property
     def process_alive(self) -> bool:
         """A spawned process exists, even if readiness was never confirmed."""
         return self._process.state() != QProcess.ProcessState.NotRunning

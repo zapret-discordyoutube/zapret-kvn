@@ -230,6 +230,7 @@ from ..constants import (
     STATE_SCHEMA_VERSION,
 )
 from ..diagnostics.export import collect_runtime_diagnostics, export_diagnostics
+from ..diagnostics.transport_failure import amnezia_failure_message, hysteria_failure_message
 from ..profiles.models import (
     AppSettings,
     AppState,
@@ -531,6 +532,10 @@ class AppController(QObject):
         self._hysteria_automatic_switch_attempted = False
         self._hysteria_recovery_active = False
         self._pending_transport_node_id: str | None = None
+        # Plain-language cause of the last sidecar start failure (UDP not
+        # answered, no network, rejected password), shown instead of a
+        # generic «runtime не запустился».
+        self._last_sidecar_failure_message: str | None = None
         self._hysteria_cooldown_until: dict[str, float] = {}
         self._hysteria_failure_started_at = 0.0
         self._hysteria_return_episode = 0
@@ -1320,6 +1325,8 @@ class AppController(QObject):
     ) -> TransitionSteps:
         request_generation = getattr(self, "_transition_generation", None)
         owned_amnezia = prepared_amnezia or getattr(self, "amnezia", None)
+        if prepared_hysteria is None and prepared_amnezia is None:
+            self._last_sidecar_failure_message = None
 
         def request_cancelled() -> bool:
             return (
@@ -1351,6 +1358,10 @@ class AppController(QObject):
                 if not target_amnezia.is_running:
                     return False
             elif not (yield from self._start_amnezia_manager_steps(target_amnezia, plan)):
+                if not request_cancelled():
+                    self._last_sidecar_failure_message = self._sidecar_failure_message(
+                        target_amnezia, runtime_node
+                    )
                 return False
             if request_cancelled():
                 yield from target_amnezia.stop_steps()
@@ -1396,6 +1407,10 @@ class AppController(QObject):
                     process_generation=self._hysteria_process_generation,
                     should_continue=should_continue,
                 )):
+                    if not request_cancelled():
+                        self._last_sidecar_failure_message = self._sidecar_failure_message(
+                            target_manager, runtime_node
+                        )
                     return False
         elif plan.xray_sidecar is not None:
             self._protect_ss_port = plan.xray_sidecar.protect_port
@@ -1592,6 +1607,9 @@ class AppController(QObject):
         candidate = self._new_amnezia_manager()
         if (yield from self._start_amnezia_manager_steps(candidate, plan)):
             return candidate
+        self._last_sidecar_failure_message = self._sidecar_failure_message(
+            candidate, self._runtime_selected_node()
+        )
         yield from candidate.stop_steps()
         candidate.deleteLater()
         return None
@@ -1627,6 +1645,9 @@ class AppController(QObject):
         )):
             failure = replacement.last_failure_code or HysteriaFailureCode.LOCAL_RELAY_NOT_READY
             self._hysteria_last_failure_code = failure
+            self._last_sidecar_failure_message = self._sidecar_failure_message(
+                replacement, self._runtime_selected_node()
+            )
             self._hysteria_contract.terminal(
                 failure,
                 generation=self._hysteria_contract.session.session_generation,
@@ -1644,6 +1665,24 @@ class AppController(QObject):
             generation=self._hysteria_contract.session.session_generation,
         )
         return replacement
+
+    @staticmethod
+    def _sidecar_failure_message(manager, node: Node | None) -> str | None:
+        """What the user can act on, from the failed sidecar's own evidence."""
+        name = str(getattr(node, "name", "") or "")
+        code = getattr(manager, "last_failure_code", None)
+        if isinstance(manager, HysteriaManager) or isinstance(code, HysteriaFailureCode):
+            lines = getattr(manager, "recent_output_lines", ())
+            return hysteria_failure_message(
+                name,
+                code=code if isinstance(code, HysteriaFailureCode) else None,
+                remote_authenticated=getattr(manager, "remote_authenticated", False) is True,
+                output_lines=lines if isinstance(lines, (tuple, list)) else (),
+            )
+        failure = getattr(manager, "last_failure", None)
+        if isinstance(failure, tuple) and len(failure) == 2:
+            return amnezia_failure_message(name, stage=str(failure[0]), message=str(failure[1]))
+        return None
 
     def _commit_hysteria_replacement_steps(self, replacement: HysteriaManager | None) -> TransitionSteps:
         old = self.hysteria
@@ -2526,9 +2565,19 @@ class AppController(QObject):
                     self._blocked_transition_signature = ""
                     self._retry_connect_on_network = False
                 else:
-                    self._blocked_transition_signature = self._transition_signature(
-                        self._runtime_selected_node()
-                    )
+                    signature = self._transition_signature(self._runtime_selected_node())
+                    session = self._active_session
+                    if (
+                        self.connected
+                        and session is not None
+                        and session.transition_signature == signature
+                    ):
+                        # A failed switch rolled the selection back to the
+                        # server still serving: nothing to block, and blocking
+                        # its signature would stop a later reconnect to it.
+                        self._blocked_transition_signature = ""
+                    else:
+                        self._blocked_transition_signature = signature
                     # Подключение не удалось, пока сети ещё не было (старт Windows,
                     # Wi-Fi не поднялся): появится адрес — одна повторная попытка.
                     self._retry_connect_on_network = bool(self._desired_connected) and not self.connected
