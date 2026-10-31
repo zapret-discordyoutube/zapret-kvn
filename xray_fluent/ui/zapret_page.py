@@ -57,7 +57,11 @@ _KIND_ICONS = {"tcp": FIF.CONNECT, "quic": FIF.SPEED_HIGH, "wireguard": FIF.VPN}
 
 @dataclass(frozen=True)
 class ZapretStatus:
-    """What the status card shows: ``stopped`` | ``starting`` | ``running`` | ``error``."""
+    """What the status card shows: ``stopped`` | ``starting`` | ``running`` | ``server`` | ``error``.
+
+    ``server`` — winws2 runs only the selected VPN server's rule: Zapret is
+    off for sites, yet the process is there, and the card must not say «выключен».
+    """
 
     state: str = "stopped"
     preset: str = ""
@@ -450,6 +454,12 @@ class ZapretPage(StackedSection):
             visual, title, detail = Visual(FIF.SYNC, SPECIAL), "Zapret запускается…", ""
         elif status.state == "error":
             visual, title, detail = Visual(FIF.CLOSE, BLOCK), "Zapret остановлен из-за ошибки", status.message
+        elif status.state == "server":
+            visual, title = Visual(FIF.VPN, PROXY), "Zapret работает только для VPN-сервера"
+            detail = (
+                "Сайты Zapret не обрабатывает: пресет не запущен. "
+                "Остановится сам, когда VPN будет отключён."
+            )
         else:
             visual, title, detail = Visual(FIF.PAUSE_BOLD, NEUTRAL), "Zapret выключен", ""
             endpoint = endpoint_for_node(self._node)
@@ -496,7 +506,7 @@ class ZapretPage(StackedSection):
         rule = self._rule
         if self._server_status:
             text += f" · {self._server_status}"
-        elif rule is not None and rule.target.endpoint == endpoint and self._status.state == "running":
+        elif rule is not None and rule.target.endpoint == endpoint and self._status.state in ("running", "server"):
             text += f" · работает для {', '.join(rule.target.ips)}"
         elif enabled:
             text += " · применится при подключении"

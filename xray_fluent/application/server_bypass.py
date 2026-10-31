@@ -248,6 +248,22 @@ class ServerBypass(QObject):
         c.transition_state_changed.emit(True, f"Zapret: пресет по умолчанию «{fallback}»")
         return True
 
+    def release(self) -> None:
+        """No VPN session and none wanted: a rule-only winws2 has nothing to protect.
+
+        Before this, winws2 started just for the server rule (Zapret off for
+        sites) outlived the disconnect and ran until the app exited, while
+        the Zapret page said «выключен».  A preset the user runs keeps going:
+        its rule stays so the next connection needs no restart.
+        """
+
+        if self.waiting or self.manual_start_pending:
+            return
+        plan = self._zapret.plan
+        if plan is not None and not plan.preset:
+            self._controller._logger.info("Zapret: VPN disconnected, stopping the server-only rule")
+            self._zapret.stop()
+
     def _drop_rule(self) -> None:
         """A running winws2 keeps its preset but loses a stale server rule."""
 

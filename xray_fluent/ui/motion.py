@@ -73,6 +73,10 @@ class FrameGate(QObject):
     def is_running(self) -> bool:
         return self._timer.isActive()
 
+    def interval(self) -> int | None:
+        """Желаемый интервал кадров (``None`` — анимация не нужна)."""
+        return self._interval
+
     def motion_allowed(self) -> bool:
         return not (self._respect_reduced_motion and reduced_motion())
 

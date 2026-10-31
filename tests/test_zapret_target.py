@@ -250,6 +250,43 @@ class GateTests(unittest.TestCase):
         self.assertEqual(controller.state.settings.zapret_preset, "Default")
         controller._cancel_target_transition.assert_not_called()
 
+    def test_disconnect_stops_a_rule_only_winws2(self) -> None:
+        """winws2 started only for the server rule must not outlive the VPN."""
+
+        node = _vless()
+        controller = _controller(node, connected=False, _desired_connected=False)
+        bypass = self._bypass(controller)
+        rule = ServerRule(_resolved(node), load_strategy_catalog("tcp")["alt9"])
+        controller.zapret.apply(ZapretPlan("", rule))
+        controller.zapret.process_started()
+        bypass.release()
+        self.assertIsNone(controller.zapret.plan)
+        controller._request_stop.assert_not_called()
+
+    def test_disconnect_keeps_a_preset_the_user_runs(self) -> None:
+        node = _vless()
+        controller = _controller(node, connected=False, _desired_connected=False)
+        bypass = self._bypass(controller)
+        rule = ServerRule(_resolved(node), load_strategy_catalog("tcp")["alt9"])
+        plan = ZapretPlan("Default", rule)
+        controller.zapret.apply(plan)
+        controller.zapret.process_started()
+        launches = len(controller.zapret.launches)
+        bypass.release()
+        self.assertEqual(controller.zapret.plan, plan)
+        self.assertEqual(len(controller.zapret.launches), launches)
+
+    def test_release_waits_while_a_connection_prepares_the_rule(self) -> None:
+        node = _vless()
+        controller = _controller(node)
+        bypass = self._bypass(controller)
+        rule = ServerRule(_resolved(node), load_strategy_catalog("tcp")["alt9"])
+        controller.zapret.apply(ZapretPlan("", rule))
+        bypass.prepare(5)
+        self.assertTrue(bypass.waiting)
+        bypass.release()
+        self.assertIsNotNone(controller.zapret.plan)
+
     def test_restart_timeout_outside_a_transition_fails_closed(self) -> None:
         controller = _controller(_vless(), connected=True)
         bypass = self._bypass(controller)
@@ -637,3 +674,38 @@ class ApplyTargetSettingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReleaseAfterTransitionTests(unittest.TestCase):
+    """The coordinator releases the server rule once no session is wanted."""
+
+    def _finish(self, *, connected: bool, desired: bool, pending: bool = False) -> Mock:
+        from xray_fluent.application.controller import AppController
+
+        controller = Mock()
+        controller.connected = connected
+        controller._desired_connected = desired
+        controller._transition_generation = 3
+        controller._transition_pending = pending
+        controller._cleanup_pending = False
+        controller._needs_transition.return_value = False
+        controller._has_residual_processes.return_value = False
+        controller._pending_transport_node_id = None
+        runner = SimpleNamespace(
+            cancelled=False, error=None, result=True, profile=None, deleteLater=lambda: None,
+        )
+        controller._transition_runner = runner
+        AppController._on_transition_runner_finished(controller, runner, 3, "disconnect")
+        return controller
+
+    def test_disconnected_and_idle_releases(self) -> None:
+        self._finish(connected=False, desired=False).bypass.release.assert_called_once()
+
+    def test_wanted_or_live_session_keeps_the_rule(self) -> None:
+        for kwargs in (
+            {"connected": True, "desired": True},
+            {"connected": False, "desired": True},
+            {"connected": False, "desired": False, "pending": True},
+        ):
+            with self.subTest(**kwargs):
+                self._finish(**kwargs).bypass.release.assert_not_called()

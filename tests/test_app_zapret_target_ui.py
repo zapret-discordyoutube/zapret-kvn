@@ -59,6 +59,22 @@ class ZapretOverviewTests(unittest.TestCase):
         self.assertEqual(_page.status_detail.text(), "winws2 завершился с кодом 3")
         self.assertEqual(_page.toggle_btn.text(), "Запустить")
 
+    def test_rule_only_winws2_is_not_called_off(self) -> None:
+        """winws2 runs for the VPN server only: the card says so, not «выключен»."""
+
+        _page.set_selected_node(_TCP)
+        rule = ServerRule(
+            ResolvedEndpoint(endpoint_for_node(_TCP), ("203.0.113.5",)), load_strategy_catalog("tcp")["alt9"],
+        )
+        _page.set_rule(rule)
+        _page.set_status(ZapretStatus("server"))
+        self.assertEqual(_page.status_title.text(), "Zapret работает только для VPN-сервера")
+        self.assertIn("отключён", _page.status_detail.text())
+        self.assertIn("203.0.113.5", _page.server_rule.text())
+        self.assertNotIn("применится при подключении", _page.server_rule.text())
+        # Sites are not covered: the button offers to start the preset.
+        self.assertEqual(_page.toggle_btn.text(), "Запустить")
+
     def test_toggle_starts_the_chosen_preset_and_stops(self) -> None:
         started: list[str] = []
         stopped: list[bool] = []

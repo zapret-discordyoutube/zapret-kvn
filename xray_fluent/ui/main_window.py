@@ -1642,8 +1642,9 @@ class MainWindow(FluentWindow):
         zapret = self.controller.zapret
         preset = zapret.plan.preset if zapret.plan is not None else ""
         if zapret.plan is not None and not preset and not self.controller.bypass.manual_start_pending:
-            # Only the VPN-server rule runs: Zapret is off for sites.
-            status = ZapretStatus("stopped")
+            # Only the VPN-server rule runs: Zapret is off for sites, but the
+            # process is there — say so instead of «выключен».
+            status = ZapretStatus("server" if zapret.running else "stopped")
         elif zapret.running and zapret.plan is not None:
             self._zapret_error = ""
             status = ZapretStatus("running", preset)

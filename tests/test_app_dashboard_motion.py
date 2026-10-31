@@ -90,7 +90,8 @@ class SceneCpuBudgetTest(unittest.TestCase):
         self.assertFalse(self.scene.is_animating())
         self.assertFalse(self.page.connection_orb.is_animating())
 
-    def test_connected_without_traffic_rests_and_wakes_on_traffic(self) -> None:
+    def test_connected_without_traffic_keeps_flowing_slowly(self) -> None:
+        """Без трафика поток не замирает: идёт сам, а не только от действий."""
         self.page.set_connection(True)
         self.page._do_refresh_dashboard()
         self.assertTrue(self.scene.is_animating())
@@ -98,11 +99,15 @@ class SceneCpuBudgetTest(unittest.TestCase):
         self.scene.set_traffic(0.0, 0.0)
         self.scene._tick()  # первый тихий кадр запоминает начало покоя
         self.scene._quiet_since -= 10.0
+        self.scene._last_frame_s -= 0.1
+        phase = dict(self.scene._phase)
         self.scene._tick()
-        self.assertFalse(self.scene.is_animating())
+        self.assertTrue(self.scene.is_animating())
         self.assertTrue(self.scene.is_resting())
+        self.assertNotEqual(self.scene._phase, phase)  # огоньки движутся
         self.page.set_live_metrics(2e6, 1e5, 40)
         self.assertTrue(self.scene.is_animating())
+        self.assertFalse(self.scene.is_resting())
 
     def test_error_is_static(self) -> None:
         self.page.set_runtime_status("error", "Не удалось запустить sing-box")

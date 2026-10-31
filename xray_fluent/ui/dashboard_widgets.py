@@ -67,10 +67,14 @@ from .theme import (
 
 # Кадры: «комете» подключения нужна плавность, течению частиц хватает 24 fps.
 _SCENE_FRAME_MS = {CONNECTING: 33, CONNECTED: 42}
+# Подключено, но трафика почти нет: поток не замирает (раньше сцена вставала
+# и оживала только от действий пользователя), а идёт медленно и реже
+# перерисовывается — 15 fps на медленных огоньках не видно, CPU меньше.
+_IDLE_FRAME_MS = 66
 _BURST_S = 1.1
 _PULSE_PERIOD_S = 1.5
 _PATH_SAMPLES = 160
-# Подключено, но трафика нет дольше этого — сцена замирает (покой = без кадров).
+# Подключено, но трафика нет дольше этого — поток переходит на медленные кадры.
 _QUIET_BPS = 1024.0
 # Насколько видны огоньки, проходящие сквозь сферу (1 — как снаружи).
 _THROUGH_ORB_FADE = 0.55
@@ -312,13 +316,13 @@ class ConnectionScene(QWidget):
         self._up_bps = max(0.0, up_bps)
         if max(self._down_bps, self._up_bps) >= _QUIET_BPS:
             self._quiet_since = None
-            if self._state == CONNECTED and not self._frames.is_running():
+            if self._state == CONNECTED and self._frames.interval() != _SCENE_FRAME_MS[CONNECTED]:
                 self._last_frame_s = self._now()
                 self._frames.set_interval(_SCENE_FRAME_MS[CONNECTED])
 
     def is_resting(self) -> bool:
-        """Подключено, но трафика нет — кадров нет, туннель нарисован статично."""
-        return self._state == CONNECTED and not self._frames.is_running()
+        """Подключено, но трафика нет — поток идёт медленно, с редкими кадрами."""
+        return self._state == CONNECTED and self._frames.interval() == _IDLE_FRAME_MS
 
     def is_animating(self) -> bool:
         return self._frames.is_running()
@@ -337,10 +341,8 @@ class ConnectionScene(QWidget):
             if max(self._down_bps, self._up_bps) < _QUIET_BPS:
                 if self._quiet_since is None:
                     self._quiet_since = now
-                elif now - self._quiet_since >= _QUIET_AFTER_S:
-                    self._frames.set_interval(None)
-                    self.update()
-                    return
+                elif now - self._quiet_since >= _QUIET_AFTER_S and self._frames.interval() != _IDLE_FRAME_MS:
+                    self._frames.set_interval(_IDLE_FRAME_MS)
             else:
                 self._quiet_since = None
         dt = min(0.2, max(0.0, now - self._last_frame_s))

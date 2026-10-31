@@ -2625,6 +2625,10 @@ class AppController(QObject):
             elif self._transition_pending or self._cleanup_pending or self._needs_transition():
                 self._kick_transition(0)
             else:
+                if not self.connected and not self._desired_connected:
+                    # The queue is idle with no session wanted: the VPN-server
+                    # rule has nothing left to protect.
+                    self.bypass.release()
                 self.transition_state_changed.emit(False, "")
 
     def _has_residual_processes(self) -> bool:
