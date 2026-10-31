@@ -232,7 +232,7 @@ from ..constants import (
 from ..diagnostics.export import collect_runtime_diagnostics, export_diagnostics
 from ..diagnostics.transport_failure import amnezia_failure_message, hysteria_failure_message
 from .server_selection import ServerSelection
-from .transition_outcome import FailureRank, TransitionOutcome, failure_status
+from .transition_outcome import STALE_SERVER_ADDRESS_HINT, FailureRank, TransitionOutcome, failure_status
 from ..profiles.models import (
     AppSettings,
     AppState,
@@ -1689,6 +1689,8 @@ class AppController(QObject):
         phase, message, level = failure_status(
             failure, connected=bool(self.connected), serving_name=serving.name if serving is not None else "",
         )
+        if getattr(self, "_dns_lkg_generation", None) == self._transition_generation:
+            message = f"{message} {STALE_SERVER_ADDRESS_HINT}"
         self._set_connection_status(phase, message, level=level)
 
     @staticmethod
@@ -4160,18 +4162,25 @@ class AppController(QObject):
         self._log(line)
 
     def _report_dns_fallback(self, line: str) -> None:
+        if "DNS_FALLBACK server=app-bootstrap-lkg" in line:
+            # Подключение по запомненному адресу обычно просто работает, и
+            # тогда пользователю нечего делать. Подсказка нужна, только если
+            # подключение не удалось: её добавит _publish_transition_failure.
+            self._dns_lkg_generation = self._transition_generation
+            return
         if "DNS_FALLBACK server=local-system-dns" in line:
             level = 2
-            message = "DoH недоступен. Используется обычный DNS системы: запросы могут быть видны провайдеру."
-        elif "DNS_FALLBACK server=app-bootstrap-lkg" in line:
-            level = 2
             message = (
-                "Защищённый DNS недоступен. Адрес сервера взят из запомненных: "
-                "если сервер переехал, подключение не состоится."
+                "Зашифрованный DNS сейчас не отвечает. Пока так, адреса сайтов, которые открываются "
+                "без VPN, узнаются через обычный DNS, и провайдер видит эти запросы. "
+                "VPN работает, делать ничего не нужно."
             )
         elif "DNS_FALLBACK server=bootstrap-dns" in line:
             level = 1
-            message = "DNS через VPN недоступен. Используется резервное разрешение DNS с устройства."
+            message = (
+                "DNS-сервер VPN не отвечает, поэтому адреса сайтов узнаются через запасной DNS. "
+                "VPN работает, делать ничего не нужно."
+            )
         else:
             return
         generation = self._transition_generation

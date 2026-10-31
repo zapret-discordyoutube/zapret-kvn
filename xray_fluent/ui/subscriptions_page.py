@@ -23,8 +23,6 @@ from qfluentwidgets import (
     CheckBox,
     ComboBox,
     FluentIcon as FIF,
-    InfoBar,
-    InfoBarPosition,
     LineEdit,
     PasswordLineEdit,
     PrimaryPushButton,
@@ -55,6 +53,7 @@ from .detail_page import DetailPage, StackedSection
 from .fluent_dialog import FluentDialog
 from .theme import accent_color, on_accent_changed
 from .adaptive_buttons import AdaptiveButtonRow
+from .notifications import notify
 
 
 class ScreenRegionSelector(QWidget):
@@ -423,13 +422,7 @@ class SubscriptionEditPage(DetailPage):
             self._show_error(str(exc))
 
     def _show_error(self, message: str) -> None:
-        InfoBar.error(
-            "Ошибка",
-            message,
-            position=InfoBarPosition.TOP_RIGHT,
-            duration=5000,
-            parent=self,
-        )
+        notify(self, "error", message)
 
     def _update_match_count(self) -> None:
         if not self._provider_names:

@@ -942,7 +942,11 @@ def _server_bootstrap_resolver(payload: dict[str, Any], server: str) -> str:
                 "tag": _APP_NODE_BOOTSTRAP_TAG,
                 "servers": [_TRUSTED_BOOTSTRAP_TAG, _APP_BOOTSTRAP_LKG_TAG],
                 "strategy": "sequential",
-                "timeout": "4s",
+                # sequential делит общий срок поровну между звеньями: при 4s
+                # DoH доставалось 2s, первого TLS-рукопожатия через провайдера
+                # не хватало, и почти каждое подключение уходило на
+                # запомненный адрес. 6s дают direct-doh его собственные 3s.
+                "timeout": "6s",
             }
         )
     return _APP_NODE_BOOTSTRAP_TAG

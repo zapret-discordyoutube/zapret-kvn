@@ -157,11 +157,12 @@ class DashboardWordWrapTest(unittest.TestCase):
 
         with (
             patch("xray_fluent.ui.dashboard_page.QDesktopServices.openUrl", return_value=False),
-            patch("xray_fluent.ui.dashboard_page.InfoBar.warning") as warning,
+            patch("xray_fluent.ui.dashboard_page.notify") as warning,
         ):
             page.telegram_proxy_btn.click()
         warning.assert_called_once()
-        self.assertIn("порт 1390", warning.call_args.args[1])
+        self.assertEqual(warning.call_args.args[1], "warning")
+        self.assertIn("порт 1390", warning.call_args.args[2])
         page.deleteLater()
         QApplication.processEvents()
 

@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 from PyQt6.QtCore import QProcess
 from xray_fluent.application.controller import AppController
+from xray_fluent.application.transition_outcome import TransitionOutcome
 from xray_fluent.application.node_runtime_service import start_country_ip_resolution, on_countries_resolved
 from xray_fluent.engines.amnezia.manager import AmneziaManager
 from xray_fluent.profiles.models import Node
@@ -73,7 +74,7 @@ class DnsWarningTests(unittest.TestCase):
         self.assertEqual(controller.status.emit.call_count, 1)
         warn('local-system-dns')
         self.assertEqual(controller.status.emit.call_count, 2)
-        self.assertIn('видны провайдеру', controller.status.emit.call_args.args[1])
+        self.assertIn('провайдер видит', controller.status.emit.call_args.args[1])
         warn('bootstrap-dns')
         warn('local-system-dns')
         self.assertEqual(controller.status.emit.call_count, 2)
@@ -83,12 +84,33 @@ class DnsWarningTests(unittest.TestCase):
         self.assertTrue(all(call.args[0] == 'warning' for call in controller.status.emit.call_args_list))
 
 
-    def test_remembered_address_fallback_is_reported(self):
+    def test_remembered_address_is_silent_when_connection_works(self):
         controller = SimpleNamespace(_transition_generation=1, status=Mock())
         AppController._report_dns_fallback(controller, 'WARN DNS_FALLBACK server=app-bootstrap-lkg')
-        level, message = controller.status.emit.call_args.args
-        self.assertEqual(level, 'warning')
-        self.assertIn('запомненных', message)
+        controller.status.emit.assert_not_called()
+        self.assertEqual(controller._dns_lkg_generation, 1)
+
+    def test_failed_connection_after_remembered_address_says_what_to_do(self):
+        def publish(generation_of_fallback):
+            controller = SimpleNamespace(
+                _transition_generation=2,
+                _transition_outcome=TransitionOutcome(),
+                _active_session=None,
+                connected=False,
+                _set_connection_status=Mock(),
+            )
+            if generation_of_fallback is not None:
+                controller._dns_lkg_generation = generation_of_fallback
+            controller._transition_outcome.fail('Сервер не ответил.')
+            AppController._publish_transition_failure(controller)
+            return controller._set_connection_status.call_args.args[1]
+
+        message = publish(2)
+        self.assertTrue(message.startswith('Сервер не ответил.'))
+        self.assertIn('Обновите подписку', message)
+        # Запасной адрес был в прошлом подключении — к этой ошибке не относится.
+        self.assertEqual(publish(1), 'Сервер не ответил.')
+        self.assertEqual(publish(None), 'Сервер не ответил.')
 
 
 class CountrySourceTests(unittest.TestCase):

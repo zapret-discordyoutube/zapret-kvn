@@ -15,14 +15,12 @@ from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QSystemTr
 from qfluentwidgets import (
     FluentIcon as FIF,
     FluentWindow,
-    InfoBar,
-    InfoBarIcon,
-    InfoBarPosition,
     NavigationDisplayMode,
     NavigationItemPosition,
 )
 
 from ..diagnostics.connection_message import connection_message
+from .notifications import Notification, Notifier
 from ..diagnostics.runtime_logging import redact_server_addresses
 from ..diagnostics.startup_clock import since_process_start_ms
 from ..application.controller import AppController
@@ -122,15 +120,10 @@ class MainWindow(FluentWindow):
         self._startup_loader = None
         self._metadata_worker = None
         self._startup_started = time.perf_counter()
-        self._bulk_task_tip: InfoBar | None = None
+        # Все уведомления окна идут через одну очередь (ui/notifications.py).
+        self.notifier = Notifier(self)
+        self._bulk_task_tip: Notification | None = None
         self._bulk_task_type: str | None = None
-        # Один таймер на закрытие подсказки: новый раунд его останавливает.
-        # Раньше каждый раунд ставил свой singleShot, и запоздавший таймер
-        # прошлого раунда закрывал подсказку уже следующего.
-        self._bulk_task_tip_close_timer = QTimer(self)
-        self._bulk_task_tip_close_timer.setSingleShot(True)
-        self._bulk_task_tip_close_timer.setInterval(1000)
-        self._bulk_task_tip_close_timer.timeout.connect(self._clear_bulk_task_tip)
         self._speed_test_was_cancelled = False
         self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
         self._deferred_dashboard_metrics: tuple[float, float, int | None] | None = None
@@ -1004,12 +997,10 @@ class MainWindow(FluentWindow):
             self._ensure_unlocked(startup=False)
 
     def _on_auto_switch(self, node_name: str) -> None:
-        InfoBar.warning(
-            "Авто-переключение",
-            f"Сервер не отвечает. Переключение на {node_name}...",
-            position=InfoBarPosition.TOP_RIGHT,
-            duration=30000,
-            parent=self,
+        self.notifier.show(
+            "warning",
+            f"Сервер не отвечает. Переключаюсь на «{node_name}».",
+            title="Авто-переключение",
         )
 
     def _on_bulk_task_progress(self, task: str, current: int, total: int, completed: bool) -> None:
@@ -1020,7 +1011,6 @@ class MainWindow(FluentWindow):
         total = max(1, total)
         current = max(0, min(current, total))
         title = "Пинг серверов" if task == "ping" else "Тест скорости"
-        self._bulk_task_tip_close_timer.stop()
 
         if completed:
             if task == "ping":
@@ -1033,25 +1023,19 @@ class MainWindow(FluentWindow):
                     self._speed_test_was_cancelled = False
                 else:
                     self._set_bulk_task_tip_content(f"Завершено {current}/{total}")
-                self._bulk_task_tip_close_timer.start()
+                # Итог остаётся на экране обычным уведомлением: с паузой под
+                # мышью, а не гаснет через секунду.
+                self._bulk_task_tip.expire_in(4000)
             return
 
         content = f"{current}/{total}"
 
-        if self._bulk_task_tip is None or self._bulk_task_type != task:
+        # Итог прошлого раунда уже гаснет: новый раунд — новое уведомление.
+        if self._bulk_task_tip is None or self._bulk_task_type != task or not self._bulk_task_tip.sticky:
             self._clear_bulk_task_tip()
-            tip = InfoBar(
-                icon=InfoBarIcon.INFORMATION,
-                title=title,
-                content=content,
-                isClosable=True,
-                duration=-1,
-                position=InfoBarPosition.TOP_RIGHT,
-                parent=self,
-            )
+            tip = self.notifier.show("info", content, title=title, sticky=True)
             tip.setMinimumWidth(220)
-            tip.closedSignal.connect(self._on_bulk_task_tip_closed)
-            tip.show()
+            tip.closedSignal.connect(lambda tip=tip: self._on_bulk_task_tip_closed(tip))
             self._bulk_task_tip = tip
             self._bulk_task_type = task
             return
@@ -1061,15 +1045,17 @@ class MainWindow(FluentWindow):
             return
         self._set_bulk_task_tip_content(content)
 
-    def _on_bulk_task_tip_closed(self) -> None:
+    def _on_bulk_task_tip_closed(self, tip: Notification) -> None:
+        # Закрылся итог прошлого раунда, пока шёл новый: новый не трогаем.
+        if self._bulk_task_tip is not tip:
+            return
         self._bulk_task_tip = None
         self._bulk_task_type = None
 
     def _set_bulk_task_tip_content(self, content: str) -> None:
         if self._bulk_task_tip is None:
             return
-        self._bulk_task_tip.content = content
-        self._bulk_task_tip.contentLabel.setText(content)
+        self._bulk_task_tip.set_content(content)
 
     def _clear_bulk_task_tip(self) -> None:
         if self._bulk_task_tip is None:
@@ -1077,7 +1063,7 @@ class MainWindow(FluentWindow):
         tip = self._bulk_task_tip
         self._bulk_task_tip = None
         self._bulk_task_type = None
-        tip.close()
+        tip.dismiss()
 
     def _connect_startup_diagnostics(self) -> None:
         """Показать сообщения bootstrap и подписаться на признак подмены DNS."""
@@ -1105,36 +1091,14 @@ class MainWindow(FluentWindow):
 
     def _show_status(self, level: str, message: str) -> None:
         message = connection_message(message)
-        level = level.lower().strip()
-        long_duration = level.endswith("-long")
-        if long_duration:
-            level = level[:-5]
         dashboard = getattr(self, "dashboard_page", None)
-        if (level == "error" and dashboard is not None
+        if (level.lower().strip() == "error" and dashboard is not None
                 and dashboard._connection_phase == "error"
                 and dashboard._connection_message == message
                 and self._is_dashboard_active()):
+            # Ошибка уже крупно на главной, на которую пользователь смотрит.
             return
-        if level == "error":
-            InfoBar.error("Ошибка", message, position=InfoBarPosition.TOP_RIGHT, duration=6000, parent=self)
-        elif level == "warning":
-            InfoBar.warning(
-                "Внимание",
-                message,
-                position=InfoBarPosition.TOP_RIGHT,
-                duration=10000 if long_duration else 3000,
-                parent=self,
-            )
-        elif level == "success":
-            InfoBar.success("Успешно", message, position=InfoBarPosition.TOP_RIGHT, duration=2200, parent=self)
-        else:
-            InfoBar.info(
-                "Инфо",
-                message,
-                position=InfoBarPosition.TOP_RIGHT,
-                duration=10000 if long_duration else 2200,
-                parent=self,
-            )
+        self.notifier.show(level, message)
 
     def _import_nodes_from_clipboard(self) -> None:
         clipboard = QApplication.clipboard()

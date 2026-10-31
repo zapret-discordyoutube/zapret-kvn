@@ -44,8 +44,6 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon as FIF,
     IndeterminateProgressBar,
-    InfoBar,
-    InfoBarPosition,
     PushButton,
     StrongBodyLabel,
     SubtitleLabel,
@@ -67,6 +65,7 @@ from .theme import error_color, graph_down_color, graph_up_color, on_theme_or_ac
 from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 from .adaptive_buttons import AdaptiveButtonRow
 from .pending_state import PendingValue
+from .notifications import notify
 
 #: Ширина области прокрутки, ниже которой карточки встают в одну колонку.
 NARROW_WIDTH = 900
@@ -1128,13 +1127,12 @@ class DashboardPage(StackedSection):
             return
         if QDesktopServices.openUrl(QUrl(telegram_socks_url(self._proxy_socks_port))):
             return
-        InfoBar.warning(
-            "Telegram не открылся",
+        notify(
+            self,
+            "warning",
             "Похоже, Telegram на компьютере не установлен. Впишите прокси вручную: "
             f"SOCKS5, адрес 127.0.0.1, порт {self._proxy_socks_port}.",
-            position=InfoBarPosition.TOP_RIGHT,
-            duration=8000,
-            parent=self.window(),
+            title="Telegram не открылся",
         )
 
     def _proxy_ports_tooltip(self) -> str:
