@@ -216,35 +216,22 @@ def set_selected_node(controller: AppController, node_id: str, *, source: Select
 
     ``source`` обязателен: каждая смена пишет ``[select] source=…``, а ручной
     источник (``source.manual``) сбрасывает учёт авто-переключения.
+
+    Сама транзакция выбора — ``server_selection.ServerSelection``: пока
+    подключение живо, новый сервер только цель, выбранным он становится,
+    когда его runtime готов.
     """
-    from .protocol_core import ProtocolCore, protocol_core
-    target = next((node for node in controller.state.nodes if node.id == node_id), None)
-    session = getattr(controller, "_active_session", None)
-    # Re-selecting the current or already requested row is idempotent.
-    pending = getattr(controller, "_pending_transport_node_id", None)
-    current_id = pending or controller.state.selected_node_id
-    if node_id == current_id:
+    from .server_selection import SelectionRequest
+
+    selection = controller.selection
+    before = selection_snapshot(controller, selection.target_id)
+    serving = bool(controller.connected) and getattr(controller, "_active_session", None) is not None
+    outcome = selection.request(node_id, serving=serving)
+    if outcome is SelectionRequest.UNCHANGED:
         return
-    # До ветвления: и Amnezia-путь (через pending), и обычный пишут источник.
     # Пишется и без подключения — сохранённый выбор определяет следующий запуск.
-    log_selection_change(controller, source, selection_snapshot(controller, current_id), node_id)
-    manual = source.manual
-    if controller.connected and target is not None and (
-        protocol_core(target) is ProtocolCore.AMNEZIA or
-        (session is not None and session.sidecar_kind == "amnezia")
-    ):
-        controller._pending_transport_node_id = node_id
-        if manual:
-            controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
-            controller._auto_switch_manual_hold = True
-            note_manual_selection(controller)
-        controller._desired_connected = True
-        controller._request_transition("transport node switched")
-        return
-    if controller.state.selected_node_id == node_id:
-        return
-    controller.state.selected_node_id = node_id
-    if manual:
+    log_selection_change(controller, source, before, node_id)
+    if source.manual:
         # Ручной выбор сбрасывает cooldown/cycle авто-переключения; автоматика
         # (source.manual=False) свой учёт анти-дребезга не обнуляет (П4/A6).
         # Заодно ручной выбор
@@ -254,10 +241,15 @@ def set_selected_node(controller: AppController, node_id: str, *, source: Select
         controller._reset_auto_switch_state(reset_cooldown=True, reset_cycle=True)
         controller._auto_switch_manual_hold = True
         note_manual_selection(controller)
-    controller.selection_changed.emit(controller.selected_node)
-    controller.schedule_save()
-    if controller.connected or controller._desired_connected:
+    if outcome is SelectionRequest.PENDING:
         controller._desired_connected = True
-        if controller.connected and controller._try_hot_switch_selected_node():
-            return
+        if not controller._try_hot_switch_selected_node():
+            controller._request_transition("node switched")
+        return
+    if outcome is SelectionRequest.BACK_TO_SERVING:
+        # The in-flight switch is superseded by the new transition generation.
+        controller._desired_connected = True
+        controller._request_transition("node switched")
+        return
+    if controller._desired_connected:
         controller._request_transition("node switched")

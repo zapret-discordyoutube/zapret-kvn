@@ -37,6 +37,7 @@ from xray_fluent.application.smart_switch_service import (
 from xray_fluent.diagnostics.proxy_demand import clash_proxy_demand, local_proxy_demand
 from xray_fluent.network import probe_gate
 from xray_fluent.profiles.models import AppSettings, Node
+from tests.selection_fakes import attach_selection
 
 MIB = 1024 * 1024
 SLOW = 20 * 1024.0  # 20 KB/s — заметно ниже порога
@@ -337,6 +338,7 @@ class GateTests(SmartSwitchTestBase):
             _reset_auto_switch_state=lambda **kwargs: None,
             _log=lambda line: None,
         )
+        attach_selection(controller)
         with patch.object(smart.time, "monotonic", return_value=4242.0):
             node_service.set_selected_node(controller, "n2", source=SelectionSource.NODES_MENU)
         self.assertTrue(controller._auto_switch_manual_hold)
@@ -353,6 +355,7 @@ class GateTests(SmartSwitchTestBase):
             _reset_auto_switch_state=lambda **kwargs: None,
             _log=lambda line: None,
         )
+        attach_selection(auto)
         node_service.set_selected_node(auto, "n3", source=SelectionSource.SMART_SWITCH)
         self.assertFalse(hasattr(auto, "_smart_switch_manual_at"))
 

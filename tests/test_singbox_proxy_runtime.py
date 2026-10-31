@@ -22,6 +22,7 @@ from xray_fluent.engines.hysteria.manager import HysteriaManager
 from xray_fluent.importer.link_parser import LinkParseError, parse_single
 from xray_fluent.profiles.models import Node
 from tests.step_fakes import bridge, bridge_controller
+from tests.selection_fakes import SelectionMock, attach_selection
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,21 +61,16 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
             hybrid_relay_selector_tags=(),
             hybrid_relay_selected_tag="",
         )
-        controller = Mock()
+        controller = SelectionMock()
         controller.selected_node = node
         controller._runtime_selected_node.return_value = node
         controller.connected = True
         controller._desired_connected = True
         controller._transition_generation = 1
-        controller._pending_transport_node_id = None
         controller._hysteria_recovery_active = False
-        from xray_fluent.application.controller import AppController
-        controller._commit_pending_transport_selection.side_effect = lambda node: AppController._commit_pending_transport_selection(controller, node)
-        controller._clear_pending_transport_selection.side_effect = lambda: setattr(
-            controller,
-            "_pending_transport_node_id",
-            None,
-        )
+        controller.state.nodes = [node]
+        attach_selection(controller, bind_methods=True)
+        controller._pending_transport_node_id = None
         controller.state.selected_node_id = node.id
         controller.state.settings.enable_system_proxy = False
         controller.singbox.is_running = False
@@ -186,7 +182,7 @@ class SingboxProxyRuntimeTests(unittest.TestCase):
                         self.assertEqual(controller.state.selected_node_id, node.id)
                         self.assertIs(controller.amnezia, replacement)
                         controller.selection_changed.emit.assert_called_once_with(node)
-                        controller.schedule_save.assert_called_once()
+                        controller.schedule_save.assert_called()  # selection commit + session save
                         old_manager.stop.assert_called_once()
                     else:
                         self.assertEqual(controller.state.selected_node_id, "old-committed")

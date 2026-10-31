@@ -231,6 +231,8 @@ from ..constants import (
 )
 from ..diagnostics.export import collect_runtime_diagnostics, export_diagnostics
 from ..diagnostics.transport_failure import amnezia_failure_message, hysteria_failure_message
+from .server_selection import ServerSelection
+from .transition_outcome import FailureRank, TransitionOutcome, failure_status
 from ..profiles.models import (
     AppSettings,
     AppState,
@@ -531,11 +533,18 @@ class AppController(QObject):
         self._hysteria_last_failure_code: HysteriaFailureCode | None = None
         self._hysteria_automatic_switch_attempted = False
         self._hysteria_recovery_active = False
-        self._pending_transport_node_id: str | None = None
-        # Plain-language cause of the last sidecar start failure (UDP not
-        # answered, no network, rejected password), shown instead of a
-        # generic «runtime не запустился».
-        self._last_sidecar_failure_message: str | None = None
+        # Selection transaction (server_selection): committed = serving server,
+        # pending = target of a switch until its runtime is ready.
+        self.selection = ServerSelection(
+            lambda: self.state,
+            find_node=lambda node_id: self._get_node_by_id(node_id),
+            on_changed=lambda node: self.selection_changed.emit(node),
+            save=lambda: self.schedule_save(),
+            log=lambda line: self._log(line),
+        )
+        # Cause of the running transition's failure; published once by
+        # _on_transition_runner_finished (see transition_outcome).
+        self._transition_outcome = TransitionOutcome()
         self._hysteria_cooldown_until: dict[str, float] = {}
         self._hysteria_failure_started_at = 0.0
         self._hysteria_return_episode = 0
@@ -1325,8 +1334,6 @@ class AppController(QObject):
     ) -> TransitionSteps:
         request_generation = getattr(self, "_transition_generation", None)
         owned_amnezia = prepared_amnezia or getattr(self, "amnezia", None)
-        if prepared_hysteria is None and prepared_amnezia is None:
-            self._last_sidecar_failure_message = None
 
         def request_cancelled() -> bool:
             return (
@@ -1359,9 +1366,7 @@ class AppController(QObject):
                     return False
             elif not (yield from self._start_amnezia_manager_steps(target_amnezia, plan)):
                 if not request_cancelled():
-                    self._last_sidecar_failure_message = self._sidecar_failure_message(
-                        target_amnezia, runtime_node
-                    )
+                    self._fail_sidecar(target_amnezia, runtime_node)
                 return False
             if request_cancelled():
                 yield from target_amnezia.stop_steps()
@@ -1408,9 +1413,7 @@ class AppController(QObject):
                     should_continue=should_continue,
                 )):
                     if not request_cancelled():
-                        self._last_sidecar_failure_message = self._sidecar_failure_message(
-                            target_manager, runtime_node
-                        )
+                        self._fail_sidecar(target_manager, runtime_node)
                     return False
         elif plan.xray_sidecar is not None:
             self._protect_ss_port = plan.xray_sidecar.protect_port
@@ -1571,7 +1574,7 @@ class AppController(QObject):
         # Retired replacement candidates are not self.amnezia, so their noise
         # is still filtered.
         if manager is self.amnezia and event.stage == "startup":
-            self._set_connection_status("error", event.message, level="error")
+            self._fail_transition(event.message, rank=FailureRank.CORE)
             return
         # Retain old/candidate evidence, but only the committed manager owns
         # admission. Never let a retired process close the replacement.
@@ -1607,9 +1610,7 @@ class AppController(QObject):
         candidate = self._new_amnezia_manager()
         if (yield from self._start_amnezia_manager_steps(candidate, plan)):
             return candidate
-        self._last_sidecar_failure_message = self._sidecar_failure_message(
-            candidate, self._runtime_selected_node()
-        )
+        self._fail_sidecar(candidate, self._runtime_selected_node())
         yield from candidate.stop_steps()
         candidate.deleteLater()
         return None
@@ -1645,9 +1646,7 @@ class AppController(QObject):
         )):
             failure = replacement.last_failure_code or HysteriaFailureCode.LOCAL_RELAY_NOT_READY
             self._hysteria_last_failure_code = failure
-            self._last_sidecar_failure_message = self._sidecar_failure_message(
-                replacement, self._runtime_selected_node()
-            )
+            self._fail_sidecar(replacement, self._runtime_selected_node())
             self._hysteria_contract.terminal(
                 failure,
                 generation=self._hysteria_contract.session.session_generation,
@@ -1665,6 +1664,32 @@ class AppController(QObject):
             generation=self._hysteria_contract.session.session_generation,
         )
         return replacement
+
+    def _fail_sidecar(self, manager, node: Node | None) -> None:
+        cause = self._sidecar_failure_message(manager, node)
+        if cause:
+            self._fail_transition(cause, rank=FailureRank.CAUSE)
+
+    def _fail_transition(self, message: str, *, rank: FailureRank = FailureRank.STEP) -> None:
+        """Report why the running transition failed; its owner publishes it.
+
+        Only ``_on_transition_runner_finished`` turns the cause into a status,
+        once, and never for a superseded transition. Without an owning runner
+        (synchronous shutdown/test drivers) the message is shown directly.
+        """
+        if getattr(self, "_transition_active", False):
+            self._transition_outcome.fail(message, rank)
+            return
+        self._set_connection_status("error", message, level="error")
+
+    def _publish_transition_failure(self) -> None:
+        failure = self._transition_outcome.take()
+        session = self._active_session if self.connected else None
+        serving = self._get_node_by_id(session.node_id) if session is not None and session.node_id else None
+        phase, message, level = failure_status(
+            failure, connected=bool(self.connected), serving_name=serving.name if serving is not None else "",
+        )
+        self._set_connection_status(phase, message, level=level)
 
     @staticmethod
     def _sidecar_failure_message(manager, node: Node | None) -> str | None:
@@ -1792,11 +1817,7 @@ class AppController(QObject):
                     generation=self._hysteria_contract.session.session_generation,
                     automatic_switch=False,
                 )
-            self._set_connection_status(
-                "error",
-                message,
-                level="error",
-            )
+            self._fail_transition(message, rank=FailureRank.SECURITY)
             self._desired_connected = False
             # Fail closed: do not leave the front admitting connections into a
             # transport whose pin/CA/auth/obfs contract was rejected.
@@ -2168,11 +2189,7 @@ class AppController(QObject):
             else:
                 yield from self._proxy_steps("disable", restore_previous=True)
         except Exception as exc:
-            self._set_connection_status(
-                "error",
-                f"Не удалось применить системный прокси: {exc}",
-                level="error",
-            )
+            self._fail_transition(f"Не удалось применить системный прокси: {exc}")
             return False
 
         node = self.selected_node
@@ -2460,6 +2477,7 @@ class AppController(QObject):
             self._desired_connected = False
             self._handle_unexpected_disconnect()
         else:
+            self._settle_pending_transport_selection()
             self._desired_connected = self.connected
         self._blocked_transition_signature = self._transition_signature()
         self._set_connection_status("error", message, level="warning")
@@ -2512,12 +2530,14 @@ class AppController(QObject):
             action, reason = "cleanup", "cleanup"
         else:
             if not self._transition_pending and not self._needs_transition():
+                self._resolve_idle_pending_selection()
                 self.transition_state_changed.emit(False, "")
                 return
 
             action = self._compute_transition_action()
             if action is None:
                 self._transition_pending = False
+                self._resolve_idle_pending_selection()
                 self.transition_state_changed.emit(False, "")
                 return
 
@@ -2541,6 +2561,7 @@ class AppController(QObject):
         runner.requested_at = getattr(self, "_transition_requested_at", None)
         self._transition_requested_at = None
         self._transition_runner = runner
+        self._transition_outcome.reset()
         runner.start()
 
     def _on_transition_runner_finished(
@@ -2565,24 +2586,21 @@ class AppController(QObject):
                     self._blocked_transition_signature = ""
                     self._retry_connect_on_network = False
                 else:
-                    signature = self._transition_signature(self._runtime_selected_node())
-                    session = self._active_session
-                    if (
-                        self.connected
-                        and session is not None
-                        and session.transition_signature == signature
-                    ):
-                        # A failed switch rolled the selection back to the
-                        # server still serving: nothing to block, and blocking
-                        # its signature would stop a later reconnect to it.
-                        self._blocked_transition_signature = ""
-                    else:
-                        self._blocked_transition_signature = signature
+                    self._blocked_transition_signature = self._transition_signature(
+                        self._runtime_selected_node()
+                    )
+                    self._publish_transition_failure()
                     # Подключение не удалось, пока сети ещё не было (старт Windows,
                     # Wi-Fi не поднялся): появится адрес — одна повторная попытка.
                     self._retry_connect_on_network = bool(self._desired_connected) and not self.connected
                     self._desired_connected = self.connected
-            elif superseded and not runner.cancelled:
+            if superseded:
+                # A newer request owns the status now; this attempt's cause
+                # stays in the log only.
+                dropped = self._transition_outcome.take()
+                if dropped is not None:
+                    self._log(f"[transition] superseded attempt, not shown: {dropped.message}")
+            if superseded and not runner.cancelled:
                 # Устаревший переход не блокирует сигнатуру и не трогает
                 # desired_connected (их задаёт последний запрос), но обязан
                 # оставить связку процессов консистентной.
@@ -2596,8 +2614,9 @@ class AppController(QObject):
                 self._cleanup_pending = True
         finally:
             self._transition_active = False
+            self._transition_outcome.reset()
             if not superseded and self._pending_transport_node_id:
-                self._clear_pending_transport_selection()
+                self._settle_pending_transport_selection()
                 self._hysteria_recovery_active = False
             if runner.cancelled:
                 pass
@@ -2717,27 +2736,48 @@ class AppController(QObject):
     def selected_node(self) -> Node | None:
         return self._get_node_by_id(self.state.selected_node_id)
 
+    @property
+    def _pending_transport_node_id(self) -> str | None:
+        return self.selection.pending_id
+
+    @_pending_transport_node_id.setter
+    def _pending_transport_node_id(self, node_id: str | None) -> None:
+        self.selection.pending_id = node_id
+
     def _runtime_selected_node(self) -> Node | None:
-        pending = getattr(self, "_pending_transport_node_id", None)
-        if isinstance(pending, str) and pending:
-            return self._get_node_by_id(pending)
-        return self.selected_node
+        return self.selection.target()
 
     def _commit_pending_transport_selection(self, node: Node | None) -> bool:
-        """Commit a ready runtime's selection through one path for all transports."""
-        pending = getattr(self, "_pending_transport_node_id", None)
-        if not isinstance(pending, str) or not pending:
-            return True
-        if node is None or node.id != pending:
-            self._log("[transport-transition] ready runtime does not match pending selection")
-            return False
-        self.state.selected_node_id = node.id
-        self._clear_pending_transport_selection()
-        self.selection_changed.emit(node)
-        return True
+        """A ready runtime serves ``node``: commit it (one path for all transports)."""
+        return self.selection.commit(node)
 
     def _clear_pending_transport_selection(self) -> None:
-        self._pending_transport_node_id = None
+        self.selection.drop()
+
+    def _settle_pending_transport_selection(self) -> None:
+        """A finished transition left its target uncommitted (see server_selection)."""
+        self.selection.settle(
+            serving=bool(self.connected),
+            keep_intent=not getattr(self, "_hysteria_recovery_active", False),
+        )
+
+    def _resolve_idle_pending_selection(self) -> None:
+        """The coordinator found nothing to run for a pending target."""
+        node = self._get_node_by_id(self.selection.pending_id) if self.selection.pending_id else None
+        if node is None:
+            self.selection.drop()
+            return
+        session = self._active_session
+        if (
+            self.connected
+            and session is not None
+            and session.transition_signature == self._transition_signature(node)
+        ):
+            # The running session already serves this choice (e.g. the active
+            # raw JSON ignores the selected server): commit, nothing to start.
+            self.selection.commit(node)
+            return
+        self._settle_pending_transport_selection()
 
     def _get_node_by_id(self, node_id: str | None) -> Node | None:
         return get_node_by_id_operation(self, node_id)
@@ -3366,7 +3406,7 @@ class AppController(QObject):
         переходов (``_request_transition``).
         """
 
-        node = self.selected_node
+        node = self._runtime_selected_node()
         session = self._active_session
         if getattr(self, "_transition_active", False) is True:
             # Полный переход уже идёт: запрос сливается в очередь переходов,
@@ -3493,7 +3533,7 @@ class AppController(QObject):
 
         if not self.connected or not self._desired_connected:
             return
-        node = self.selected_node
+        node = self._runtime_selected_node()
         session = self._active_session
         if node is not None and session is not None and session.node_id == node.id:
             return  # обгоняющий запрос уже удовлетворён завершившимся свитчем
@@ -3622,6 +3662,7 @@ class AppController(QObject):
             hybrid_relay_selector_tags=session.hybrid_relay_selector_tags,
             hybrid_relay_selected_tag=hybrid_relay_selected_tag,
         )
+        self._commit_pending_transport_selection(node)
         self._set_connection_status("running", f"Переключено: {node.name}", level="success")
         # П4: авто-переключение, завершившееся горячим свитчем (без reconnect),
         # тоже обязано снять флаг «переход в процессе».
@@ -3829,7 +3870,8 @@ class AppController(QObject):
     def switch_next_node(self, *, source: SelectionSource) -> None:
         if not self.state.nodes:
             return
-        current_id = self.state.selected_node_id
+        requested = self._runtime_selected_node()
+        current_id = requested.id if requested is not None else self.state.selected_node_id
         index = 0
         if current_id:
             for idx, node in enumerate(self.state.nodes):
@@ -4153,7 +4195,9 @@ class AppController(QObject):
             )
         detailed = contextualize_runtime_log(message, context=context, error=True)
         self._log(detailed)
-        self._set_connection_status("error", detailed, level="error")
+        # During a transition the core's text is evidence for its outcome;
+        # a live connection's error is shown at once.
+        self._fail_transition(detailed, rank=FailureRank.CORE)
 
     def _record_core_failure(self, engine: str, stage: str, message: str) -> None:
         journal = getattr(self, "runtime_errors", None)

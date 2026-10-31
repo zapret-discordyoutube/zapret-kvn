@@ -173,7 +173,8 @@ class HysteriaDestinationRefusalTests(unittest.TestCase):
 
 class PlannedFullTransitionLogTests(unittest.TestCase):
     def _precheck(self, session):
-        ctrl = SimpleNamespace(selected_node=SimpleNamespace(id="next", server="next.example"),
+        target = SimpleNamespace(id="next", server="next.example")
+        ctrl = SimpleNamespace(_runtime_selected_node=lambda: target,
                                _active_session=session, connected=True, _log=Mock())
         self.assertIsNone(AppController._hot_switch_precheck(ctrl))
         return ctrl._log.call_args.args[0]

@@ -24,6 +24,8 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+
+from tests.selection_fakes import attach_selection
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -261,6 +263,11 @@ class HotSwitchController:
             (node for node in self.state.nodes if node.id == self.state.selected_node_id),
             None,
         )
+
+    def _runtime_selected_node(self):
+        # These tests drive the async hot-switch machinery with the target
+        # already in state; the selection transaction is covered elsewhere.
+        return self.selected_node
 
     def _log(self, line: str) -> None:
         self.logs.append(line)
@@ -577,6 +584,8 @@ class AutoSwitchController:
         self.selection_changed = SimpleNamespace(
             emit=lambda node: self.selection_emissions.append(node)
         )
+        self._active_session = SimpleNamespace(node_id=nodes[0].id)
+        attach_selection(self)
 
     @property
     def selected_node(self):
@@ -593,6 +602,9 @@ class AutoSwitchController:
 
     def _try_hot_switch_selected_node(self) -> bool:
         self.hot_switch_calls += 1
+        if self._hot_switch_result:
+            # The real hot switch commits the target once the core accepted it.
+            self.selection.commit(self.selection.target())
         return self._hot_switch_result
 
     def _request_transition(self, reason: str) -> None:

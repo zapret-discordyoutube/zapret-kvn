@@ -14,6 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
+from tests.selection_fakes import attach_selection
+
 from xray_fluent.application import node_service
 from xray_fluent.application.selection_source import SelectionSource
 from xray_fluent.diagnostics.runtime_logging import node_ref
@@ -25,7 +27,7 @@ PACKAGE = Path(__file__).resolve().parents[1] / "xray_fluent"
 # Функции, которым разрешено присваивать ``.selected_node_id``.  Для каждой
 # указано, кто пишет ``[select]``: сама функция (проверяется ниже) или вызывающий.
 SELECTION_WRITERS: dict[tuple[str, str], str] = {
-    ("application/node_service.py", "set_selected_node"): "self",
+    # set_selected_node пишет [select] и передаёт выбор транзакции (ServerSelection).
     ("application/node_service.py", "import_nodes_from_text"): "self",
     ("application/node_service.py", "remove_nodes"): "self",
     ("application/controller.py", "AppController._apply_subscription_update"): "self",
@@ -33,11 +35,10 @@ SELECTION_WRITERS: dict[tuple[str, str], str] = {
     ("application/subscription_service.py", "reconcile_subscription"): "caller",
     ("application/subscription_service.py", "remove_subscription"): "caller",
     ("application/subscription_service.py", "hide_subscription_node"): "caller",
-    # Фиксация pending-выбора, уже записанного в лог при запросе
-    # (set_selected_node для Amnezia, начало восстановления Hysteria).
-    ("application/controller.py", "AppController._commit_pending_transport_selection"): "pending",
-    # Отказ нового сервера при живом прежнем runtime: выбор возвращается на него.
-    ("engines/singbox/operations.py", "_keep_serving_selection"): "self",
+    # Транзакция выбора (server_selection): запрос пишет [select] в
+    # set_selected_node, фиксация готового runtime — тот же записанный выбор
+    # (и начало восстановления Hysteria).
+    ("application/server_selection.py", "ServerSelection._write"): "pending",
 }
 
 # Команды смены сервера: каждый вызов обязан передать source=.
@@ -187,7 +188,6 @@ def _controller(selected: str = "a"):
             selected_node_id=selected,
         ),
         _active_session=None,
-        _pending_transport_node_id=None,
         connected=False,
         _desired_connected=False,
         selected_node=None,
@@ -196,6 +196,7 @@ def _controller(selected: str = "a"):
         _reset_auto_switch_state=lambda **kwargs: resets.append(kwargs),
         _log=logs.append,
     )
+    attach_selection(controller)
     return controller, logs, resets
 
 

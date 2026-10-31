@@ -60,11 +60,7 @@ def _apply_system_proxy_steps(controller: AppController, plan: SingboxRuntimePla
                 bypass_lan=controller._system_proxy_bypass_lan(),
             )
         except Exception as exc:
-            controller._set_connection_status(
-                "error",
-                f"Не удалось включить системный прокси: {exc}",
-                level="error",
-            )
+            controller._fail_transition(f"Не удалось включить системный прокси: {exc}")
             return False
     else:
         yield from controller._proxy_steps("disable", restore_previous=True)
@@ -91,12 +87,11 @@ def start_proxy_steps(
         plan = controller._plan_proxy_runtime_singbox(node)
     except ValueError as exc:
         controller._active_core = prev_active_core
-        controller._set_connection_status("error", str(exc), level="error")
+        controller._fail_transition(str(exc))
         return None
 
     session_label = _proxy_session_label(plan, node)
     suffix = _runtime_suffix(plan)
-    requested_generation = getattr(controller, "_transition_generation", None)
     controller._set_connection_status("starting", f"Запуск прокси: {session_label}{suffix}...", level="info")
     _notify_proxy_port_change(controller, plan)
     controller._log(f"[proxy] sing-box planner outcome: {plan.outcome} from {plan.source_path}")
@@ -105,10 +100,10 @@ def start_proxy_steps(
     controller._xray_api_port = 0
     if not (yield from controller._start_singbox_runtime_plan_steps(plan)):
         controller._active_core = prev_active_core
-        _report_start_failure(
-            controller,
-            requested_generation,
-            "Не удалось запустить sing-box proxy runtime. Смотрите причину в последних строках лога sing-box.",
+        # Generic step message: a sidecar's own cause outranks it, and a start
+        # superseded by a newer click publishes nothing (transition_outcome).
+        controller._fail_transition(
+            "Не удалось запустить sing-box proxy runtime. Смотрите причину в последних строках лога sing-box."
         )
         return None
 
@@ -126,72 +121,6 @@ def start_proxy_steps(
         return None
 
     return SingboxStartResult(plan=plan, session_label=session_label)
-
-
-def _start_superseded(controller: AppController, requested_generation) -> bool:
-    """A newer selection or a disconnect replaced this start while it ran."""
-    return (
-        getattr(controller, "_desired_connected", True) is False
-        or getattr(controller, "_transition_generation", None) != requested_generation
-    )
-
-
-def _report_start_failure(controller: AppController, requested_generation, fallback: str) -> None:
-    # A cancelled start is not a failure: the newer request publishes its own
-    # status, and a stale error would blame sing-box for the user's own click.
-    if _start_superseded(controller, requested_generation):
-        controller._log("[transition] start superseded by a newer request; no error shown")
-        return
-    controller._set_connection_status("error", _sidecar_cause(controller, fallback), level="error")
-
-
-def _sidecar_cause(controller: AppController, fallback: str) -> str:
-    cause = getattr(controller, "_last_sidecar_failure_message", None)
-    return cause if isinstance(cause, str) and cause else fallback
-
-
-def _keep_serving_selection(controller: AppController, failed: Node | None) -> Node | None:
-    """The previous runtime still carries traffic: select its server again.
-
-    A Hysteria switch stores the new selection before the replacement proves
-    readiness. When the replacement fails the old runtime stays connected, so
-    the selection (and the saved state used by the next start) must name the
-    server that actually serves the user, not the one that failed.
-    """
-    session = getattr(controller, "_active_session", None)
-    if session is None or not getattr(controller, "connected", False):
-        return None
-    serving_id = getattr(session, "node_id", None)
-    serving = controller._get_node_by_id(serving_id) if isinstance(serving_id, str) and serving_id else None
-    if serving is None:
-        return None
-    controller._clear_pending_transport_selection()
-    if controller.state.selected_node_id != serving.id:
-        from ...application.node_service import log_selection_change, selection_snapshot
-        from ...application.selection_source import SelectionSource
-
-        before = selection_snapshot(controller, failed.id if failed is not None else None)
-        log_selection_change(controller, SelectionSource.SWITCH_FAILED, before, serving.id)
-        controller.state.selected_node_id = serving.id
-        controller.selection_changed.emit(serving)
-        controller.schedule_save()
-    return serving
-
-
-def _report_replacement_failure(
-    controller: AppController, failed: Node | None, fallback: str,
-) -> None:
-    cause = _sidecar_cause(controller, fallback)
-    serving = _keep_serving_selection(controller, failed)
-    if serving is None:
-        controller._set_connection_status("error", cause, level="error")
-        return
-    # Still connected: the headline must not say «Ошибка подключения».
-    controller._set_connection_status(
-        "running",
-        f"{cause} Соединение осталось на «{serving.name}».",
-        level="warning-long",
-    )
 
 
 def _log_unenforced_tls_pin(controller: AppController, node: Node | None) -> None:
@@ -220,14 +149,13 @@ def start_tun_steps(
         plan = controller._plan_runtime_singbox(node)
     except ValueError as exc:
         controller._active_core = prev_active_core
-        controller._set_connection_status("error", str(exc), level="error")
+        controller._fail_transition(str(exc))
         return None
 
     session_label = plan.source_path.name
     if plan.used_selected_node and node is not None:
         session_label = f"{plan.source_path.name} / {node.name}"
     start_message = f"Запуск VPN: {session_label}{_runtime_suffix(plan)}..."
-    requested_generation = getattr(controller, "_transition_generation", None)
     controller._set_connection_status("starting", start_message, level="info")
     controller._log(f"[tun] sing-box planner outcome: {plan.outcome} from {plan.source_path}")
     _log_unenforced_tls_pin(controller, node)
@@ -245,9 +173,7 @@ def start_tun_steps(
 
     if not (yield from controller._start_singbox_runtime_plan_steps(plan)):
         controller._active_core = prev_active_core
-        _report_start_failure(
-            controller,
-            requested_generation,
+        controller._fail_transition(
             (
                 "Не удалось запустить sing-box sidecar runtime. Смотрите причину в последних строках лога."
                 if plan.sidecar_kind
@@ -346,7 +272,6 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
     replacement_amnezia = None
     amnezia_committed = False
     controller._switching = True
-    controller._last_sidecar_failure_message = None
     try:
         if (yield from _abort_security_recovery_steps(controller, hysteria_recovery)):
             return False
@@ -355,7 +280,7 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
             planner = controller._plan_runtime_singbox if tun else controller._plan_proxy_runtime_singbox
             plan = planner(node, replacement=True)
         except ValueError as exc:
-            controller._set_connection_status("error", str(exc), level="error")
+            controller._fail_transition(str(exc))
             return False
         session_label = _proxy_session_label(plan, node)
         controller._set_connection_status("starting", f"Переключение на {session_label}...", level="info")
@@ -369,9 +294,7 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
         if getattr(plan, "amnezia_sidecar", None) is not None:
             replacement_amnezia = yield from controller._prepare_amnezia_replacement_steps(plan)
             if replacement_amnezia is None:
-                if (yield from _abort_superseded_transition_steps(controller, requested_generation)):
-                    return False
-                _report_replacement_failure(controller, node, "Новый сервер WG/AWG не прошёл проверку.")
+                controller._fail_transition("Новый сервер WG/AWG не прошёл проверку.")
                 return False
         replacement_hysteria = None
         if plan.hysteria_sidecar is not None:
@@ -384,16 +307,10 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
                 return False
             if replacement_hysteria is None:
                 if controller._hysteria_recovery_active:
-                    controller._set_connection_status(
-                        "error",
-                        _sidecar_cause(controller, "Резервный сервер Hysteria2 не прошёл проверку."),
-                        level="error",
-                    )
+                    controller._fail_transition("Резервный сервер Hysteria2 не прошёл проверку.")
                     yield from controller._handle_unexpected_disconnect_steps()
                     return False
-                if (yield from _abort_superseded_transition_steps(controller, requested_generation)):
-                    return False
-                _report_replacement_failure(controller, node, "Новый сервер Hysteria2 не прошёл проверку.")
+                controller._fail_transition("Новый сервер Hysteria2 не прошёл проверку.")
                 return False
 
         if (yield from _abort_superseded_transition_steps(controller, requested_generation, replacement_hysteria)):
@@ -401,12 +318,12 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
         if _manager_active(controller.singbox) and not (yield from controller.singbox.stop_steps()):
             if replacement_hysteria is not None:
                 yield from replacement_hysteria.stop_steps(expected=True)
-            controller._set_connection_status("error", "Не удалось остановить предыдущий процесс sing-box", level="error")
+            controller._fail_transition("Не удалось остановить предыдущий процесс sing-box")
             return False
         if _manager_active(controller.xray) and not (yield from controller.xray.stop_steps()):
             if replacement_hysteria is not None:
                 yield from replacement_hysteria.stop_steps(expected=True)
-            controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray sidecar", level="error")
+            controller._fail_transition("Не удалось остановить предыдущий процесс Xray sidecar")
             return False
         controller._xray_api_port = 0
         controller._protect_ss_port = 0
@@ -439,14 +356,10 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
                 generation=controller._hysteria_contract.session.session_generation,
                 degraded=rolled_back,
             )
-            controller._set_connection_status(
-                "error",
-                (
-                    "Новый front не запустился; прежняя generation восстановлена."
-                    if rolled_back
-                    else "Новый front не запустился и rollback прежней generation не удался."
-                ),
-                level="error",
+            controller._fail_transition(
+                "Новый сервер не запустился."
+                if rolled_back
+                else "Новый сервер не запустился, прежнее подключение восстановить не удалось."
             )
             if not rolled_back:
                 yield from controller._handle_unexpected_disconnect_steps()
@@ -484,11 +397,7 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
             if old_amnezia is not controller.amnezia:
                 old_amnezia.deleteLater()
         if not controller._commit_pending_transport_selection(session_node):
-            controller._set_connection_status(
-                "error",
-                "Новый runtime готов, но selection commit отклонён.",
-                level="error",
-            )
+            controller._fail_transition("Новый сервер готов, но выбор сменился во время переключения.")
             yield from controller._handle_unexpected_disconnect_steps()
             return False
         if hysteria_recovery:
@@ -507,7 +416,8 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
             else:
                 replacement_amnezia.deleteLater()
         if controller._transition_generation == requested_generation and node is not None and getattr(controller, "_pending_transport_node_id", None) == node.id:
-            controller._pending_transport_node_id = None
+            # The target was not committed: one rule for every failure exit.
+            controller._settle_pending_transport_selection()
         controller._switching = False
         controller._auto_switch_transitioning = False
         controller._hysteria_recovery_active = False

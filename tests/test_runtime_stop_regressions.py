@@ -10,6 +10,7 @@ from xray_fluent.application.connection_service import connect_selected, disconn
 from xray_fluent.application.node_service import set_selected_node
 from xray_fluent.profiles.models import Node
 from tests.step_fakes import bridge_controller, drive, steps_via
+from tests.selection_fakes import SelectionMock, attach_selection
 
 
 class RuntimeStopTests(TestCase):
@@ -79,7 +80,8 @@ class RuntimeStopTests(TestCase):
             controller = Mock()
             controller.state.nodes = [Node(id='old', scheme='awg'), Node(id='new', scheme='awg')]
             controller.state.selected_node_id = 'old'
-            controller._pending_transport_node_id = pending
+            attach_selection(controller)
+            controller.selection.pending_id = pending
             set_selected_node(controller, pending or 'old', source=SelectionSource.NODES_MENU)
             controller._request_transition.assert_not_called()
 
@@ -87,7 +89,9 @@ class RuntimeStopTests(TestCase):
         for scheme in ('awg', 'wireguard', 'hysteria2', 'vless', 'vmess', 'trojan', 'ss'):
             with self.subTest(scheme=scheme):
                 node = Node(id='new', name='New', scheme=scheme)
-                controller = bridge_controller(Mock())
+                controller = bridge_controller(SelectionMock())
+                controller.state.nodes = [Node(id='old'), node]
+                attach_selection(controller, bind_methods=True)
                 controller._connecting = controller._reconnecting = controller.locked = False
                 controller._transition_generation = 3
                 controller._desired_connected = True
@@ -96,8 +100,6 @@ class RuntimeStopTests(TestCase):
                 controller.state.selected_node_id = 'old'
                 controller._runtime_selected_node.return_value = node
                 controller._pending_transport_node_id = 'new'
-                controller._clear_pending_transport_selection.side_effect = lambda: setattr(controller, '_pending_transport_node_id', None)
-                controller._commit_pending_transport_selection.side_effect = lambda n: AppController._commit_pending_transport_selection(controller, n)
                 controller._infer_singbox_ping_target.return_value = ('', 0)
                 plan = SimpleNamespace(used_selected_node=True, selector_tags={}, is_hybrid=False,
                     is_hysteria_sidecar=False, sidecar_kind=scheme, socks_port=1390, http_port=1391,

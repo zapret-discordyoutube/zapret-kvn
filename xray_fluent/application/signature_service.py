@@ -22,6 +22,19 @@ class SingboxPlanFacts:
     used_selected_node: bool
 
 
+
+def _target_node(controller: AppController) -> Node | None:
+    """The server the runtime must serve next: the pending switch target if any.
+
+    A signature describes the *desired* runtime, so it follows the selection
+    transaction's target, not the committed (serving) server — otherwise a
+    pending switch looks like «nothing changed» and a hot swap becomes a full
+    reconnect that drops the serving connection first.
+    """
+    target = getattr(controller, "_runtime_selected_node", None)
+    node = target() if callable(target) else None
+    return node if node is not None else controller.selected_node
+
 def signature(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
@@ -139,7 +152,7 @@ def transition_signature(
     routing: RoutingSettings | None = None,
 ) -> str:
     settings = settings or controller.state.settings
-    node = node or controller.selected_node
+    node = node or _target_node(controller)
     payload = _singbox_runtime_signature_payload(controller, node, settings)
     if not settings.tun_mode:
         payload.update(
@@ -159,7 +172,7 @@ def xray_layer_signature(
 ) -> str:
     settings = settings or controller.state.settings
     return signature(_singbox_runtime_signature_payload(
-        controller, node or controller.selected_node, settings,
+        controller, node or _target_node(controller), settings,
     ))
 
 

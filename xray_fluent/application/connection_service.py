@@ -48,17 +48,13 @@ def connect_selected_steps(controller: AppController, allow_during_reconnect: bo
             return False
 
         if controller.locked:
-            controller._set_connection_status(
-                "error",
-                "Приложение заблокировано. Разблокируйте для подключения.",
-                level="warning",
-            )
+            controller._fail_transition("Приложение заблокировано. Разблокируйте для подключения.")
             return False
 
         node = controller._runtime_selected_node()
         if node is None and not controller._can_connect_without_selected_node():
             message = "В конфиге есть outbound tag `proxy`. Сначала выберите сервер."
-            controller._set_connection_status("error", message, level="warning")
+            controller._fail_transition(message)
             return False
 
         controller._reset_auto_switch_state(
@@ -77,10 +73,8 @@ def connect_selected_steps(controller: AppController, allow_during_reconnect: bo
 
             if not _is_admin():
                 controller._log("[tun] NOT admin — aborting")
-                controller._set_connection_status(
-                    "error",
-                    "Режим TUN требует прав Администратора. Запустите приложение от имени Администратора.",
-                    level="error",
+                controller._fail_transition(
+                    "Режим TUN требует прав Администратора. Запустите приложение от имени Администратора."
                 )
                 return False
 
@@ -177,7 +171,7 @@ def disconnect_current_steps(
             if stopped:
                 controller._set_connection_status("idle", "Отключено", level="info")
             else:
-                controller._set_connection_status("error", "Не удалось корректно остановить подключение", level="error")
+                controller._fail_transition("Не удалось корректно остановить подключение")
         return stopped
     finally:
         controller._disconnecting = False
@@ -198,7 +192,7 @@ def reconnect_steps(controller: AppController, reason: str) -> TransitionSteps:
         controller._set_connection_status("starting", "Переподключение...", level="info")
         stopped = yield from disconnect_current_steps(controller, disable_proxy=False, emit_status=False)
         if not stopped:
-            controller._set_connection_status("error", "Не удалось остановить предыдущий процесс Xray", level="error")
+            controller._fail_transition("Не удалось остановить предыдущий процесс")
             if controller.state.settings.enable_system_proxy:
                 yield from controller._proxy_steps("disable", restore_previous=True)
             return False

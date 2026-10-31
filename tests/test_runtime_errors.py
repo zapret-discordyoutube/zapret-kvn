@@ -1,3 +1,4 @@
+import functools
 import json
 from pathlib import Path
 import tempfile
@@ -85,6 +86,8 @@ class RuntimeErrorTests(unittest.TestCase):
         controller._hysteria_failure_episode_id = 0
         controller.selected_node = current
         controller.state = AppState(nodes=[current, replacement], selected_node_id=current.id)
+        controller._transition_active = False
+        controller._fail_transition = functools.partial(AppController._fail_transition, controller)
         journal = RuntimeErrorJournal()
         manager.log_received.connect(lambda message: journal.record(core_failure('hysteria', 'runtime', message)))
         manager.failure.connect(lambda code, message, generation:
@@ -145,7 +148,9 @@ class RuntimeErrorTests(unittest.TestCase):
                     connected=True, _disconnecting=False, _desired_connected=True,
                     _hysteria_contract=contract, singbox=Mock(is_running=True),
                     _log=Mock(), _set_connection_status=Mock(), _request_transition=Mock(),
+                    _transition_active=False,
                 )
+                controller._fail_transition = functools.partial(AppController._fail_transition, controller)
                 journal = RuntimeErrorJournal()
                 manager.log_received.connect(lambda message: journal.record(core_failure('hysteria', 'runtime', message)))
                 manager.failure.connect(lambda failure_code, message, generation:

@@ -1,4 +1,4 @@
-"""A failed UDP server is named by its cause; a failed switch keeps the serving server selected.
+"""A failed UDP server is named by its cause; a failed switch never selects the failed server.
 
 Diagnostics of 31.10.2026 (0.8.51): switching Hipse → 4stok (Hysteria2) got no
 reply over UDP. The old runtime kept serving traffic, yet the app showed
@@ -20,6 +20,14 @@ from xray_fluent.diagnostics.transport_failure import (
     amnezia_failure_message,
     hysteria_failure_message,
     udp_unanswered_message,
+)
+from xray_fluent.application.server_selection import SelectionRequest, ServerSelection
+from xray_fluent.application.transition_outcome import (
+    GENERIC_FAILURE,
+    FailureRank,
+    TransitionFailure,
+    TransitionOutcome,
+    failure_status,
 )
 from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
 from xray_fluent.engines.singbox.operations import restart_proxy_runtime, restart_runtime, start_proxy, start_tun
@@ -119,18 +127,15 @@ class UdpFailureMessageTests(unittest.TestCase):
         self.assertIsNone(AppController._sidecar_failure_message(Mock(spec=[]), node))
 
 
-class FailedSwitchKeepsServingSelectionTests(unittest.TestCase):
+class FailedSwitchNeverSelectsTheFailedServerTests(unittest.TestCase):
     def _switch_controller(self, *, tun: bool):
         controller, _ = proxy_runtime.SingboxProxyRuntimeTests._restart_controller(self, tun=tun)
         serving = parse_single("hy2://old@hipse.example:443/#Hipse")
         target = parse_single("hy2://new@4stok.example:443/#4stok")
         controller._runtime_selected_node.return_value = target
-        # A Hysteria switch stores the new selection before readiness.
-        controller.state.selected_node_id = target.id
-        controller._active_session = SimpleNamespace(node_id=serving.id)
-        nodes = {serving.id: serving, target.id: target}
-        controller._get_node_by_id.side_effect = nodes.get
-        controller.state.nodes = [serving, target]
+        # Selection transaction: the target is pending, the serving server committed.
+        controller.state.selected_node_id = serving.id
+        controller._pending_transport_node_id = target.id
         plan = controller._plan_runtime_singbox.return_value if tun else controller._plan_proxy_runtime_singbox.return_value
         plan.hysteria_sidecar = SimpleNamespace(relay_port=11810)
         plan.is_hysteria_sidecar = True
@@ -141,66 +146,142 @@ class FailedSwitchKeepsServingSelectionTests(unittest.TestCase):
         controller.hysteria.is_running = True
         return controller, serving, target
 
-    def test_failed_hysteria_switch_selects_the_serving_server_and_names_the_cause(self) -> None:
+    def test_failed_hysteria_switch_reports_a_cause_and_keeps_the_old_runtime(self) -> None:
         for tun in (False, True):
             with self.subTest(tun=tun):
-                controller, serving, target = self._switch_controller(tun=tun)
-                cause = udp_unanswered_message(target.name, "Hysteria2")
-
-                def fail(_plan):
-                    controller._last_sidecar_failure_message = cause
-                    return None
-
-                controller._prepare_hysteria_replacement.side_effect = fail
+                controller, serving, _ = self._switch_controller(tun=tun)
+                controller._prepare_hysteria_replacement.return_value = None
                 restart = restart_runtime if tun else restart_proxy_runtime
                 self.assertFalse(restart(controller, "node switched"))
 
                 self.assertEqual(controller.state.selected_node_id, serving.id)
-                controller.selection_changed.emit.assert_called_once_with(serving)
-                controller.schedule_save.assert_called()
-                logged = [call.args[0] for call in controller._log.call_args_list]
-                self.assertTrue(
-                    any(line.startswith("[select] source=switch-failed") and "4stok" in line and "Hipse" in line
-                        for line in logged),
-                    logged,
-                )
-                phase, message = controller._set_connection_status.call_args.args
-                self.assertEqual(phase, "running")
-                self.assertEqual(message, f"{cause} Соединение осталось на «Hipse».")
-                self.assertEqual(controller._set_connection_status.call_args.kwargs, {"level": "warning-long"})
+                controller.selection_changed.emit.assert_not_called()
+                controller._fail_transition.assert_called_once_with("Новый сервер Hysteria2 не прошёл проверку.")
+                # Steps never publish a failure themselves.
+                self.assertNotIn("error", [c.args[0] for c in controller._set_connection_status.call_args_list])
                 controller.singbox.stop.assert_not_called()
                 controller._handle_unexpected_disconnect.assert_not_called()
-
-    def test_failed_switch_without_evidence_still_says_the_old_server_serves(self) -> None:
-        controller, serving, _ = self._switch_controller(tun=False)
-        controller._prepare_hysteria_replacement.return_value = None
-
-        self.assertFalse(restart_proxy_runtime(controller, "node switched"))
-
-        self.assertEqual(controller.state.selected_node_id, serving.id)
-        _, message = controller._set_connection_status.call_args.args
-        self.assertIn("не прошёл проверку", message)
-        self.assertIn("осталось на «Hipse»", message)
-        self.assertNotIn("readiness", message)
-
-    def test_superseded_switch_neither_rolls_back_nor_reports(self) -> None:
-        controller, _, target = self._switch_controller(tun=False)
-
-        def superseded(_plan):
-            controller._transition_generation += 1
-            controller._last_sidecar_failure_message = "should not be shown"
-            return None
-
-        controller._prepare_hysteria_replacement.side_effect = superseded
-        self.assertFalse(restart_proxy_runtime(controller, "node switched"))
-
-        self.assertEqual(controller.state.selected_node_id, target.id)
-        controller.selection_changed.emit.assert_not_called()
-        for call in controller._set_connection_status.call_args_list:
-            self.assertNotIn(call.args[0], {"error", "running"})
+                controller._settle_pending_transport_selection.assert_called_once_with()
 
 
-class StartFailureMessageTests(unittest.TestCase):
+class ServerSelectionTests(unittest.TestCase):
+    def _selection(self, *ids):
+        nodes = {node_id: SimpleNamespace(id=node_id, name=node_id) for node_id in ids}
+        state = SimpleNamespace(selected_node_id=ids[0])
+        events: list[str] = []
+        selection = ServerSelection(
+            lambda: state,
+            find_node=lambda node_id: nodes.get(node_id),
+            on_changed=lambda node: events.append(f"changed:{node.id}"),
+            save=lambda: events.append("save"),
+            log=lambda line: events.append(line),
+        )
+        return selection, state, nodes, events
+
+    def test_connected_choice_is_pending_until_its_runtime_is_ready(self) -> None:
+        selection, state, nodes, events = self._selection("hipse", "4stok")
+        self.assertIs(selection.request("4stok", serving=True), SelectionRequest.PENDING)
+        self.assertEqual(state.selected_node_id, "hipse")
+        self.assertEqual(selection.target().id, "4stok")
+        self.assertTrue(selection.commit(nodes["4stok"]))
+        self.assertEqual(state.selected_node_id, "4stok")
+        self.assertEqual(events, ["changed:4stok", "save"])
+
+    def test_failed_switch_while_serving_never_selected_the_failed_server(self) -> None:
+        selection, state, _, events = self._selection("hipse", "4stok")
+        selection.request("4stok", serving=True)
+        selection.settle(serving=True, keep_intent=True)
+        self.assertEqual(state.selected_node_id, "hipse")
+        self.assertIsNone(selection.pending_id)
+        self.assertEqual(events, [])
+
+    def test_failed_transition_with_nothing_serving_keeps_the_users_choice(self) -> None:
+        selection, state, _, _ = self._selection("hipse", "4stok")
+        selection.request("4stok", serving=True)
+        selection.settle(serving=False, keep_intent=True)
+        self.assertEqual(state.selected_node_id, "4stok")
+
+    def test_automatic_replacement_is_never_kept(self) -> None:
+        selection, state, _, _ = self._selection("hipse", "backup")
+        selection.pending_id = "backup"
+        selection.settle(serving=False, keep_intent=False)
+        self.assertEqual(state.selected_node_id, "hipse")
+
+    def test_back_to_serving_and_idempotent_requests(self) -> None:
+        selection, state, _, events = self._selection("hipse", "4stok")
+        self.assertIs(selection.request("hipse", serving=True), SelectionRequest.UNCHANGED)
+        selection.request("4stok", serving=True)
+        self.assertIs(selection.request("4stok", serving=True), SelectionRequest.UNCHANGED)
+        self.assertIs(selection.request("hipse", serving=True), SelectionRequest.BACK_TO_SERVING)
+        self.assertIsNone(selection.pending_id)
+        self.assertEqual(events, [])
+
+    def test_disconnected_choice_commits_at_once(self) -> None:
+        selection, state, _, events = self._selection("hipse", "4stok")
+        self.assertIs(selection.request("4stok", serving=False), SelectionRequest.COMMITTED)
+        self.assertEqual(state.selected_node_id, "4stok")
+        self.assertEqual(events, ["changed:4stok", "save"])
+
+    def test_commit_rejects_a_runtime_for_another_target(self) -> None:
+        selection, state, nodes, _ = self._selection("hipse", "4stok", "tinul")
+        selection.request("tinul", serving=True)
+        self.assertFalse(selection.commit(nodes["4stok"]))
+        self.assertEqual(state.selected_node_id, "hipse")
+        self.assertEqual(selection.pending_id, "tinul")
+
+    def test_removed_target_falls_back_to_the_serving_server(self) -> None:
+        selection, _, nodes, _ = self._selection("hipse", "4stok")
+        selection.request("4stok", serving=True)
+        del nodes["4stok"]
+        self.assertEqual(selection.target().id, "hipse")
+        self.assertIsNone(selection.pending_id)
+
+
+class SignatureFollowsTheSwitchTargetTests(unittest.TestCase):
+    def test_desired_runtime_signature_uses_the_pending_target(self) -> None:
+        # E2E (31.10.2026): with the committed server in the signature a
+        # pending Hysteria switch looked unchanged, the coordinator chose a
+        # full reconnect and stopped the serving connection first.
+        from xray_fluent.application import signature_service
+
+        serving = SimpleNamespace(id="hipse")
+        target = SimpleNamespace(id="4stok")
+        controller = SimpleNamespace(selected_node=serving, _runtime_selected_node=lambda: target)
+        self.assertIs(signature_service._target_node(controller), target)
+        controller._runtime_selected_node = lambda: None
+        self.assertIs(signature_service._target_node(controller), serving)
+
+
+class TransitionOutcomeTests(unittest.TestCase):
+    def test_most_specific_cause_wins_and_ties_keep_the_first(self) -> None:
+        outcome = TransitionOutcome()
+        outcome.fail("Не удалось запустить sing-box proxy runtime.")
+        outcome.fail("второй общий текст")
+        self.assertEqual(outcome.failure.message, "Не удалось запустить sing-box proxy runtime.")
+        outcome.fail("hysteria core text", FailureRank.CORE)
+        cause = udp_unanswered_message("4stok", "Hysteria2")
+        outcome.fail(cause, FailureRank.CAUSE)
+        outcome.fail("generic after the cause")
+        self.assertEqual(outcome.take().message, cause)
+        self.assertIsNone(outcome.failure)
+
+    def test_security_outranks_every_other_cause(self) -> None:
+        outcome = TransitionOutcome()
+        outcome.fail(udp_unanswered_message("x", "Hysteria2"), FailureRank.CAUSE)
+        outcome.fail("pin mismatch", FailureRank.SECURITY)
+        self.assertEqual(outcome.failure.message, "pin mismatch")
+
+    def test_status_is_derived_from_what_still_runs(self) -> None:
+        cause = TransitionFailure("Сервер «4stok» не ответил по UDP.", FailureRank.CAUSE)
+        self.assertEqual(
+            failure_status(cause, connected=True, serving_name="Hipse"),
+            ("running", "Сервер «4stok» не ответил по UDP. Соединение осталось на «Hipse».", "warning-long"),
+        )
+        self.assertEqual(failure_status(cause, connected=False), ("error", cause.message, "error"))
+        self.assertEqual(failure_status(None, connected=False)[1], GENERIC_FAILURE)
+
+
+class StartFailureReportsThroughTheOutcomeTests(unittest.TestCase):
     def _start_controller(self):
         node = parse_single("hy2://secret@4stok.example:443/#4stok")
         plan = SimpleNamespace(
@@ -209,54 +290,20 @@ class StartFailureMessageTests(unittest.TestCase):
             proxy_ports_changed=False, outcome="hysteria_sidecar",
         )
         controller = Mock()
-        controller._transition_generation = 5
-        controller._desired_connected = True
         controller._plan_proxy_runtime_singbox.return_value = plan
         controller._plan_runtime_singbox.return_value = plan
-        controller._last_sidecar_failure_message = None
+        controller._start_singbox_runtime_plan.return_value = False
         return bridge_controller(controller), node
 
-    def _statuses(self, controller):
-        return [call.args for call in controller._set_connection_status.call_args_list]
-
-    def test_sidecar_cause_replaces_the_generic_singbox_message(self) -> None:
-        for start in (start_proxy, start_tun):
+    def test_failed_start_reports_a_step_message_and_publishes_nothing(self) -> None:
+        for start, text in ((start_proxy, "sing-box proxy runtime"), (start_tun, "sing-box sidecar runtime")):
             with self.subTest(start=start.__name__):
                 controller, node = self._start_controller()
-                cause = udp_unanswered_message("4stok", "Hysteria2")
-
-                def fail(_plan, **_kwargs):
-                    controller._last_sidecar_failure_message = cause
-                    return False
-
-                controller._start_singbox_runtime_plan.side_effect = fail
                 self.assertIsNone(start(controller, node, prev_active_core="xray"))
-                self.assertEqual(self._statuses(controller)[-1], ("error", cause))
+                (message,), _ = controller._fail_transition.call_args
+                self.assertIn(text, message)
                 self.assertEqual(controller._active_core, "xray")
-
-    def test_start_superseded_by_a_newer_click_publishes_no_error(self) -> None:
-        for change in ("selection", "disconnect"):
-            with self.subTest(change=change):
-                controller, node = self._start_controller()
-
-                def superseded(_plan, **_kwargs):
-                    if change == "selection":
-                        controller._transition_generation += 1
-                    else:
-                        controller._desired_connected = False
-                    return False
-
-                controller._start_singbox_runtime_plan.side_effect = superseded
-                self.assertIsNone(start_proxy(controller, node, prev_active_core="singbox"))
-                self.assertNotIn("error", [phase for phase, _ in self._statuses(controller)])
-
-    def test_failure_without_cause_keeps_the_generic_message(self) -> None:
-        controller, node = self._start_controller()
-        controller._start_singbox_runtime_plan.return_value = False
-        start_proxy(controller, node, prev_active_core="singbox")
-        phase, message = self._statuses(controller)[-1]
-        self.assertEqual(phase, "error")
-        self.assertIn("sing-box proxy runtime", message)
+                self.assertNotIn("error", [c.args[0] for c in controller._set_connection_status.call_args_list])
 
 
 if __name__ == "__main__":

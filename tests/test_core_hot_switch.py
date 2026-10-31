@@ -11,6 +11,7 @@ from xray_fluent.application.controller import AppController
 from tests.step_fakes import bridge_controller, drive
 from xray_fluent.engines.hysteria.runtime_contract import HysteriaFailureCode
 from xray_fluent.application.node_service import set_selected_node
+from tests.selection_fakes import attach_selection
 from xray_fluent.application.signature_service import transition_signature
 from xray_fluent.application.outbound_pool_service import (
     XRAY_BALANCER_TAG,
@@ -259,10 +260,10 @@ class ManualSelectionTests(unittest.TestCase):
         controller = Mock()
         controller.state.selected_node_id = nodes[0].id
         controller.state.nodes = nodes
-        controller.selected_node = nodes[1]
         controller.connected = True
         controller._desired_connected = True
         controller._try_hot_switch_selected_node.return_value = hot_result
+        attach_selection(controller)
         return controller, nodes
 
     def test_successful_core_switch_skips_transition_queue(self) -> None:
@@ -312,7 +313,8 @@ class LiveConnectionCutoverTests(unittest.TestCase):
             hybrid_relay_selected_tag="relay-a" if hybrid else "",
         )
         controller = Mock()
-        controller.selected_node = nodes[1]
+        # The switch target (pending in the selection transaction).
+        controller._runtime_selected_node.return_value = nodes[1]
         controller._active_session = session
         controller.connected = True
         controller.bypass.ready_for.return_value = True
