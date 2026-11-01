@@ -45,6 +45,9 @@ def _controller() -> AppController:
         controller.schedule_save = lambda: None  # type: ignore[method-assign]
         controller.save = lambda: None  # type: ignore[method-assign]
         controller._request_transition = lambda *_args, **_kw: None  # type: ignore[method-assign]
+        # Определение стран серверов после загрузки — свой поток: тесту он не нужен
+        # и под нагрузкой переживал бы выход процесса (QThread destroyed while running).
+        controller._start_country_ip_resolution = lambda: None  # type: ignore[method-assign]
         _shared["controller"] = controller
     return controller
 

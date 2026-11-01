@@ -203,6 +203,47 @@ class BrowserStackSubscriptionTest(unittest.TestCase):
             self._fetch(BrowserResponse(status=302, redirect_refused="http://sub.example/plain"))
         self.assertIn("http://", str(caught.exception))
 
+    def test_local_network_http_goes_direct_through_urllib(self) -> None:
+        """Подписка из локальной сети по http://: стек Chromium открытый текст не берёт."""
+
+        import http.server
+        import threading
+
+        from xray_fluent.network import browser_fetch
+        from xray_fluent.profiles.models import Subscription
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?security=tls#Node\n"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        class _Service:
+            calls = 0
+
+            def available(self):
+                return True
+
+            def fetch(self, *_args, **_kwargs):
+                _Service.calls += 1
+                raise browser_fetch.BrowserFetchError("browserfetch: only https is allowed: http")
+
+        subscription = Subscription(url=f"http://127.0.0.1:{server.server_port}/sub", parser_revision=SUBSCRIPTION_PARSER_REVISION)
+        with patch.object(browser_fetch, "SERVICE", _Service()):
+            result = fetch_subscription(subscription, mode="auto", proxy_port=None)
+        self.assertEqual((result.status, result.via_proxy, _Service.calls), (200, False, 0))
+        self.assertTrue(result.data.startswith(b"vless://"))
+
     def test_not_modified_needs_a_conditional_request(self) -> None:
         from xray_fluent.network.browser_fetch import BrowserResponse
 

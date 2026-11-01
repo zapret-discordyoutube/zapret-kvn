@@ -612,9 +612,11 @@ def _fetch_once(
         headers["If-None-Match"] = subscription.etag
     if not force_refresh and subscription.last_modified:
         headers["If-Modified-Since"] = subscription.last_modified
-    if not via_proxy and browser_fetch.SERVICE.available():
+    if not via_proxy and urlsplit(url).scheme.lower() == "https" and browser_fetch.SERVICE.available():
         # Напрямую провайдер видит рукопожатие: стеком Chromium оно как у
-        # Chrome. Через туннель его не видно — там прежний urllib.
+        # Chrome. Через туннель его не видно — там прежний urllib. Открытый
+        # http:// напрямую бывает только к локальной сети (cleartext_over_internet):
+        # рукопожатия там нет, а стек Chromium открытый текст не берёт.
         try:
             return _fetch_direct_in_browser(
                 url, headers, timeout=timeout, max_bytes=max_bytes,
