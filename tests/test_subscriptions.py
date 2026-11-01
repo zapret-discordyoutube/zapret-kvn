@@ -647,6 +647,20 @@ class SubscriptionSchedulingAndHttpTests(unittest.TestCase):
         stale.auto_update = False
         self.assertFalse(subscription_due(stale, now))
 
+    def test_failure_without_tunnel_is_remembered_until_success(self) -> None:
+        subscription = Subscription(parser_revision=SUBSCRIPTION_PARSER_REVISION)
+        mark_subscription_failure(subscription, "напрямую: сервер не ответил", retry_via_tunnel=True)
+        self.assertTrue(subscription.retry_via_tunnel)
+        restored = Subscription.from_dict(subscription.to_dict())
+        self.assertTrue(restored.retry_via_tunnel)
+        self.assertFalse(Subscription.from_dict({}).retry_via_tunnel)
+        # Отказ, где VPN уже пробовали, флаг снимает.
+        mark_subscription_failure(subscription, "ни напрямую, ни через VPN")
+        self.assertFalse(subscription.retry_via_tunnel)
+        mark_subscription_failure(subscription, "снова без VPN", retry_via_tunnel=True)
+        apply_not_modified(subscription, SubscriptionFetchResult(status=304, not_modified=True))
+        self.assertFalse(subscription.retry_via_tunnel)
+
     def test_auto_fetch_retries_once_through_active_proxy(self) -> None:
         subscription = Subscription(url="https://sub.example/path?token=secret")
         calls: list[tuple[bool, int | None]] = []

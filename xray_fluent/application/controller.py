@@ -574,6 +574,7 @@ class AppController(QObject):
         self._background_log.connect(self._log)
         self._proxy_operation_done.connect(self._emit_system_proxy_state)
         self.connection_changed.connect(lambda _: self._sync_rotation_timer())
+        self.connection_changed.connect(lambda _: self._retry_subscriptions_via_tunnel())
         # П3 (AC10): любое изменение нод инвалидирует кэш пула явно — идентичность
         # списка не видит in-place правок содержимого outbound-словаря.
         self.nodes_changed.connect(lambda _nodes: self._invalidate_xray_outbound_pool_cache())
@@ -3181,6 +3182,7 @@ class AppController(QObject):
             subscription.last_error = ""
             subscription.failure_count = 0
             subscription.backoff_until = None
+            subscription.retry_via_tunnel = False
             node_count = len(
                 [node for node in self.state.nodes if node.subscription_id == subscription.id]
                 if fetched.not_modified
@@ -3236,11 +3238,15 @@ class AppController(QObject):
         self.save()
         self.subscription_update_finished.emit(result)
 
-    def _on_subscription_update_failed(self, worker_subscription, message: str) -> None:
+    def _on_subscription_update_failed(
+        self, worker_subscription, message: str, tunnel_untried: bool = False
+    ) -> None:
         self._log(f"[subscription] {worker_subscription.name or 'новая'}: {message}")
         subscription = self.get_subscription(worker_subscription.id)
         if subscription is not None:
-            result = mark_subscription_failure(subscription, message)
+            # Проверка без обновления не превращается в обновление после подключения.
+            retry = tunnel_untried and worker_subscription.id not in self._subscription_check_ids
+            result = mark_subscription_failure(subscription, message, retry_via_tunnel=retry)
             self.subscriptions_changed.emit(self.state.subscriptions)
             self.save()
         else:
@@ -3257,8 +3263,27 @@ class AppController(QObject):
             self._subscription_workers.pop(subscription_id, None)
         self._subscription_check_ids.discard(subscription_id)
         worker.deleteLater()
+        # VPN мог подключиться, пока шла попытка без него.
+        self._retry_subscriptions_via_tunnel()
         self._drain_subscription_update_queue()
         self._maybe_finish_startup_connect()
+
+    def _retry_subscriptions_via_tunnel(self) -> None:
+        """Повторить через VPN подписки, которые не загрузились, пока его не было.
+
+        Попытка без туннеля знала только прямой маршрут; её отказ не
+        окончательный и не ждёт backoff. Повтор идёт только при живом
+        HTTP-порте VPN: тогда в попытке есть маршрут через туннель, и её
+        отказ уже не ставит флаг снова.
+        """
+
+        if self.locked or not self.connected or self.get_effective_http_proxy_port() is None:
+            return
+        for subscription in self.state.subscriptions:
+            if subscription.retry_via_tunnel:
+                self._enqueue_subscription_update(
+                    subscription, "auto", pending_add=False, apply_result=True
+                )
 
     def _check_due_subscriptions(self) -> None:
         # AC3: global toggle is an outer AND-gate on top of per-subscription

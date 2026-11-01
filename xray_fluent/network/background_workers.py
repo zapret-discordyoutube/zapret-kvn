@@ -98,7 +98,7 @@ class SubscriptionUpdateWorker(QThread):
     """Fetch and parse a subscription without mutating application state."""
 
     completed = pyqtSignal(object, object, object)  # Subscription, fetch result, parsed result | None
-    failed = pyqtSignal(object, str)                # Subscription, sanitized message
+    failed = pyqtSignal(object, str, bool)          # Subscription, sanitized message, VPN route untried
     progress = pyqtSignal(str, str)                 # subscription id, phase
 
     def __init__(
@@ -147,6 +147,10 @@ class SubscriptionUpdateWorker(QThread):
             )
             self.completed.emit(self._subscription, fetched, parsed)
         except Exception as exc:
-            from ..importer.subscription_http import sanitize_fetch_error
+            from ..importer.subscription_http import (
+                SubscriptionUnreachableError,
+                sanitize_fetch_error,
+            )
 
-            self.failed.emit(self._subscription, sanitize_fetch_error(exc))
+            tunnel_untried = isinstance(exc, SubscriptionUnreachableError) and exc.tunnel_untried
+            self.failed.emit(self._subscription, sanitize_fetch_error(exc), tunnel_untried)

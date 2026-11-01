@@ -45,9 +45,15 @@ def subscription_due(subscription: Subscription, now: datetime | None = None) ->
     return last_success + timedelta(hours=subscription.effective_interval_hours) <= now
 
 
-def mark_subscription_failure(subscription: Subscription, message: str) -> SubscriptionUpdateResult:
+def mark_subscription_failure(
+    subscription: Subscription,
+    message: str,
+    *,
+    retry_via_tunnel: bool = False,
+) -> SubscriptionUpdateResult:
     now = datetime.now(timezone.utc)
     subscription.last_checked_at = now.isoformat()
+    subscription.retry_via_tunnel = bool(retry_via_tunnel)
     subscription.failure_count += 1
     delay_minutes = 15 if subscription.failure_count == 1 else 60 if subscription.failure_count == 2 else 360
     subscription.backoff_until = (now + timedelta(minutes=delay_minutes)).isoformat()
@@ -68,6 +74,7 @@ def apply_not_modified(
     subscription.last_success_at = now
     subscription.failure_count = 0
     subscription.backoff_until = None
+    subscription.retry_via_tunnel = False
     subscription.last_error = ""
     _apply_cache_headers(subscription, fetch)
     return SubscriptionUpdateResult(
@@ -259,6 +266,7 @@ def _apply_success_metadata(
     subscription.last_success_at = now
     subscription.failure_count = 0
     subscription.backoff_until = None
+    subscription.retry_via_tunnel = False
     subscription.last_error = ""
     metadata = parsed.metadata
     if not subscription.name:

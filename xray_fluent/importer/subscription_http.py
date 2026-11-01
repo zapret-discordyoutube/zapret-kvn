@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import http.client
 import ipaddress
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import locale
+import logging
 import platform
 import queue
 import re
@@ -18,9 +20,12 @@ from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 from ..constants import APP_VERSION, PROXY_HOST, SUBSCRIPTION_PARSER_REVISION
 from .happ_crypt import HappCryptError, decrypt_happ_link, is_happ_crypt_link
 from ..network import browser_fetch
+from ..network.fetch_failure import SlowTransferError, describe_transport_failure, no_answer
 from ..network.http_utils import build_opener
 from ..profiles.models import Subscription
 
+
+_LOG = logging.getLogger(__name__)
 
 MAX_SUBSCRIPTION_BYTES = 10 * 1024 * 1024
 # Потолок на всё обновление целиком. ``timeout`` у urllib ограничивает одну
@@ -73,6 +78,43 @@ class SubscriptionServerResponseError(SubscriptionFetchError):
     by the proxy attempt's transport error.  Only a transport failure — no
     response reached us — is worth retrying through the proxy.
     """
+
+
+_ROUTE_NAMES = {False: "напрямую", True: "через VPN"}
+
+
+@dataclass(frozen=True, slots=True)
+class RouteFailure:
+    """Маршрут, по которому ответ сервера не пришёл; ``reason`` — простыми словами."""
+
+    via_proxy: bool
+    reason: str
+
+
+class SubscriptionUnreachableError(SubscriptionFetchError):
+    """Ни один опробованный маршрут не получил ответа сервера.
+
+    ``tunnel_untried`` — маршрут через VPN был разрешён, но не существовал
+    (VPN не подключён): такой отказ не окончательный, после подключения
+    подписку повторяют через туннель.
+    """
+
+    def __init__(self, failures: tuple[RouteFailure, ...], *, tunnel_untried: bool) -> None:
+        self.failures = failures
+        self.tunnel_untried = tunnel_untried
+        super().__init__(_unreachable_message(failures, tunnel_untried))
+
+
+def _unreachable_message(failures: tuple[RouteFailure, ...], tunnel_untried: bool) -> str:
+    if len(failures) == 1:
+        failure = failures[0]
+        text = f"Не удалось загрузить подписку {_ROUTE_NAMES[failure.via_proxy]}: {failure.reason}"
+    else:
+        parts = "; ".join(f"{_ROUTE_NAMES[item.via_proxy]} — {item.reason}" for item in failures)
+        text = f"Не удалось загрузить подписку ни напрямую, ни через VPN: {parts}"
+    if tunnel_untried:
+        text += ". VPN не был подключён, через VPN не пробовали"
+    return text
 
 
 @dataclass(slots=True)
@@ -417,7 +459,9 @@ def fetch_subscription(
 
     Маршруты не ждут друг друга: прямой стартует сразу, прокси — после
     ``PROXY_HEAD_START`` или сразу, если прямой путь уже отвалился. Вся
-    загрузка укладывается в ``deadline`` при любом поведении сети.
+    загрузка укладывается в ``deadline`` при любом поведении сети. Ответа нет
+    ни по одному маршруту — ``SubscriptionUnreachableError`` с причиной для
+    каждого маршрута простыми словами.
     """
 
     url = validate_subscription_url(subscription.url)
@@ -436,6 +480,8 @@ def fetch_subscription(
             raise SubscriptionFetchError(CLEARTEXT_DIRECT_ERROR)
         raise SubscriptionFetchError("Активный HTTP-прокси недоступен")
 
+    # Маршрут через VPN разрешён, но его нет: VPN не подключён.
+    tunnel_untried = mode == "auto" and not any(via_proxy for via_proxy, _port in attempts)
     unconditional = bool(force_refresh) or (
         int(subscription.parser_revision) != SUBSCRIPTION_PARSER_REVISION
     )
@@ -461,10 +507,12 @@ def fetch_subscription(
 
     pending = list(attempts)
     running: set[bool] = set()
+    route_started: dict[bool, float] = {}
 
     def start_next() -> None:
         via_proxy, port = pending.pop(0)
         running.add(via_proxy)
+        route_started[via_proxy] = time.monotonic()
         if on_route is not None:
             on_route(via_proxy)
         # urllib нельзя прервать снаружи, поэтому попытка живёт в daemon-потоке:
@@ -475,7 +523,7 @@ def fetch_subscription(
 
     start_next()
     next_start = started + PROXY_HEAD_START
-    errors: list[str] = []
+    failures: list[RouteFailure] = []
     held: SubscriptionServerResponseError | None = None
     while running:
         if cancel is not None and cancel.is_set():
@@ -515,15 +563,26 @@ def fetch_subscription(
             ) from outcome
         # No response reached us on this path (DNS, connect, TLS handshake,
         # timeout).  Only this case is worth retrying through the proxy.
-        errors.append(sanitize_fetch_error(outcome))  # type: ignore[arg-type]
+        waited = time.monotonic() - route_started[via_proxy]
+        if isinstance(outcome, SubscriptionFetchError):
+            # Отказ нашей же проверки (редирект на http:// напрямую) уже сказан словами.
+            reason = str(outcome)
+        elif isinstance(outcome, (OSError, http.client.HTTPException)):
+            reason = describe_transport_failure(outcome, waited)
+        else:
+            raise outcome  # type: ignore[misc]  # ошибка кода, а не сети: не повод идти через VPN
+        _LOG.info(
+            "subscription %s: no response after %.1f s: %s",
+            _ROUTE_NAMES[via_proxy], waited, sanitize_fetch_error(outcome),  # type: ignore[arg-type]
+        )
+        failures.append(RouteFailure(via_proxy, reason))
         if pending:
             start_next()
     if held is not None:
         raise SubscriptionFetchError(f"Не удалось загрузить подписку: {held}") from held
-    if running:
-        errors.append(f"сервер не ответил за {time.monotonic() - started:.0f} с")
-    detail = "; ".join(dict.fromkeys(errors)) or "неизвестная ошибка"
-    raise SubscriptionFetchError(f"Не удалось загрузить подписку: {detail}")
+    now = time.monotonic()
+    failures.extend(RouteFailure(via_proxy, no_answer(now - route_started[via_proxy])) for via_proxy in sorted(running))
+    raise SubscriptionUnreachableError(tuple(failures), tunnel_untried=tunnel_untried)
 
 
 def _fetch_once(
@@ -665,7 +724,7 @@ def _read_body(response, limit: int, expires_at: float | None) -> bytes:
     size = 0
     while size < limit:
         if time.monotonic() >= expires_at:
-            raise TimeoutError("сервер слишком медленно отдаёт подписку")
+            raise SlowTransferError("сервер слишком медленно отдаёт подписку")
         chunk = read1(min(_READ_CHUNK, limit - size))
         if not chunk:
             break

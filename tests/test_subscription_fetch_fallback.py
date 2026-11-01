@@ -11,16 +11,16 @@ same host times out through a degraded tunnel.
 from __future__ import annotations
 
 import unittest
+import urllib.error
 from types import SimpleNamespace
 from unittest.mock import patch
-import urllib.error
 
 from xray_fluent.importer import subscription_http as sh
 from xray_fluent.importer.subscription_http import (
+    SUBSCRIPTION_PARSER_REVISION,
     SubscriptionFetchError,
     SubscriptionFetchResult,
     SubscriptionServerResponseError,
-    SUBSCRIPTION_PARSER_REVISION,
     fetch_subscription,
 )
 
@@ -209,3 +209,108 @@ class BrowserStackSubscriptionTest(unittest.TestCase):
         result, calls = self._fetch(BrowserResponse(status=304), sub=self._model(etag="v1"))
         self.assertTrue(result.not_modified)
         self.assertEqual(calls[0][1]["If-None-Match"], "v1")
+
+
+class UnreachableSubscriptionMessageTest(unittest.TestCase):
+    """Таймаут прямого пути не виден, если VPN довёз подписку; полный отказ — простыми словами."""
+
+    _DEADLINE = "browser-fetch: context deadline exceeded"
+
+    def _browser(self, error):
+        from xray_fluent.network import browser_fetch
+
+        class _Service:
+            def available(self):
+                return True
+
+            def fetch(self, url, *, headers, timeout, max_bytes):
+                raise error
+
+        return patch.object(browser_fetch, "SERVICE", _Service())
+
+    def test_direct_deadline_is_hidden_when_the_vpn_route_succeeds(self) -> None:
+        from xray_fluent.network.browser_fetch import BrowserFetchError
+
+        proxied = SubscriptionFetchResult(data=b"ok", status=200, via_proxy=True)
+        real_once = sh._fetch_once
+
+        from xray_fluent.profiles.models import Subscription
+
+        subscription = Subscription(url="https://sub.example/a", parser_revision=SUBSCRIPTION_PARSER_REVISION)
+        directs: list[BaseException] = []
+
+        def direct(sub, **kw):
+            try:
+                return real_once(sub, **kw)
+            except Exception as exc:  # тест: запомнить, чем кончился прямой путь
+                directs.append(exc)
+                raise
+
+        def route(sub, **kw):
+            return proxied if kw["via_proxy"] else direct(sub, **kw)
+
+        with self._browser(BrowserFetchError(self._DEADLINE)), patch.object(sh, "_fetch_once", side_effect=route):
+            result = fetch_subscription(subscription, mode="auto", proxy_port=1080)
+        self.assertIsInstance(directs[0], urllib.error.URLError)
+        self.assertIs(result, proxied)
+
+    def test_direct_deadline_without_vpn_says_what_failed(self) -> None:
+        from xray_fluent.network.browser_fetch import BrowserFetchError
+        from xray_fluent.profiles.models import Subscription
+
+        subscription = Subscription(url="https://sub.example/a", parser_revision=SUBSCRIPTION_PARSER_REVISION)
+        with self._browser(BrowserFetchError(self._DEADLINE)), self.assertRaises(sh.SubscriptionUnreachableError) as caught:
+            fetch_subscription(subscription, mode="auto", proxy_port=None)
+        message = str(caught.exception)
+        self.assertRegex(
+            message,
+            r"^Не удалось загрузить подписку напрямую: сервер не ответил за \d+ с\. "
+            r"VPN не был подключён, через VPN не пробовали$",
+        )
+        self.assertNotIn("deadline", message)
+        self.assertNotIn("urlopen", message)
+        self.assertTrue(caught.exception.tunnel_untried)
+
+    def test_explicit_direct_mode_is_not_waiting_for_the_vpn(self) -> None:
+        def fake(_sub, *, via_proxy, **_kw):
+            raise urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+
+        with patch.object(sh, "_fetch_once", side_effect=fake), self.assertRaises(sh.SubscriptionUnreachableError) as caught:
+            fetch_subscription(_subscription(), mode="direct", proxy_port=1080)
+        self.assertEqual(str(caught.exception), "Не удалось загрузить подписку напрямую: сервер отклонил подключение")
+        self.assertFalse(caught.exception.tunnel_untried)
+
+    def test_both_routes_failed_names_each_route(self) -> None:
+        def fake(_sub, *, via_proxy, **_kw):
+            if via_proxy:
+                raise urllib.error.URLError(OSError("Tunnel connection failed: 502 Bad Gateway"))
+            raise urllib.error.URLError(self._DEADLINE)
+
+        with patch.object(sh, "_fetch_once", side_effect=fake), self.assertRaises(sh.SubscriptionUnreachableError) as caught:
+            fetch_subscription(_subscription(), mode="auto", proxy_port=1080)
+        self.assertRegex(
+            str(caught.exception),
+            r"^Не удалось загрузить подписку ни напрямую, ни через VPN: "
+            r"напрямую — сервер не ответил за \d+ с; через VPN — VPN не пропустил запрос к серверу$",
+        )
+        self.assertFalse(caught.exception.tunnel_untried)
+
+    def test_route_still_silent_at_the_deadline(self) -> None:
+        import threading
+
+        release = threading.Event()
+
+        def fake(_sub, *, via_proxy, **_kw):
+            release.wait(5)
+            raise urllib.error.URLError("late")
+
+        try:
+            with patch.object(sh, "_fetch_once", side_effect=fake), self.assertRaises(sh.SubscriptionUnreachableError) as caught:
+                fetch_subscription(_subscription(), mode="auto", proxy_port=None, deadline=0.3)
+        finally:
+            release.set()
+        self.assertEqual(
+            str(caught.exception),
+            "Не удалось загрузить подписку напрямую: сервер не ответил за 1 с. "
+            "VPN не был подключён, через VPN не пробовали",
+        )

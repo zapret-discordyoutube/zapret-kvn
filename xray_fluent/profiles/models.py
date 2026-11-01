@@ -222,6 +222,9 @@ class Subscription:
     last_error: str = ""
     failure_count: int = 0
     backoff_until: str | None = None
+    # Последний отказ — только прямой маршрут при выключенном VPN: после
+    # подключения подписку повторяют через туннель, не дожидаясь backoff.
+    retry_via_tunnel: bool = False
     info: SubscriptionInfo = field(default_factory=SubscriptionInfo)
     pending_url: str = ""
     hidden_source_keys: list[str] = field(default_factory=list)
@@ -257,6 +260,7 @@ class Subscription:
             "last_error": self.last_error,
             "failure_count": self.failure_count,
             "backoff_until": self.backoff_until,
+            "retry_via_tunnel": self.retry_via_tunnel,
             "info": self.info.to_dict(),
             "pending_url": self.pending_url,
             "hidden_source_keys": list(self.hidden_source_keys),
@@ -302,6 +306,7 @@ class Subscription:
             last_error=str(data.get("last_error") or ""),
             failure_count=_non_negative_int("failure_count"),
             backoff_until=data.get("backoff_until"),
+            retry_via_tunnel=bool(data.get("retry_via_tunnel", False)),
             info=SubscriptionInfo.from_dict(dict(data.get("info") or {})),
             pending_url=str(data.get("pending_url") or ""),
             hidden_source_keys=[str(item) for item in (data.get("hidden_source_keys") or [])],
