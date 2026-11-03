@@ -22,7 +22,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from urllib.request import Request
 
 from ..network.http_utils import (
@@ -54,6 +54,10 @@ FORGEJO_RELEASE_DOWNLOAD_PREFIXES = (
     "/zapretdiscordyoutube/zapret-kvn/releases/download/",
 )
 FORGEJO_HOST = "git.zapret.moe"
+# Те же файлы выпусков лежат на GitHub (решение владельца 2026-11-03: архив обновления качается с GitHub,
+# Forgejo — запасной путь; выпуски копирует forgejo_releases_to_github.py на хосте). Тот же тег и то же имя
+# файла; подлинность проверяет подписанный список выпуска и SHA-256 архива.
+GITHUB_RELEASE_DOWNLOAD_ORIGIN = "https://github.com/zapret-discordyoutube/zapret-kvn/releases/download/"
 # Основное имя режут по TLS; тот же Forgejo открывается под зеркалами git2, git3, …
 # (список имён отдаёт сам сервер). Проверка обновления идёт под первым открытым
 # именем, а ссылки на файлы выпуска остаются теми, под которым ответил сервер.
@@ -227,6 +231,20 @@ def _is_trusted_release_url(url: str) -> bool:
         and port in {None, 443}
         and parsed.path.startswith(FORGEJO_RELEASE_DOWNLOAD_PREFIXES)
     )
+
+
+def github_asset_url(download_url: str) -> str:
+    """Адрес того же файла выпуска на GitHub по проверенному адресу на Forgejo; пусто — не выходит."""
+    try:
+        path = unquote(urlsplit(download_url).path)
+    except ValueError:
+        return ""
+    for prefix in FORGEJO_RELEASE_DOWNLOAD_PREFIXES:
+        if path.startswith(prefix):
+            tag, _, name = path[len(prefix):].partition("/")
+            if tag and name and "/" not in name:
+                return f"{GITHUB_RELEASE_DOWNLOAD_ORIGIN}{quote(tag, safe='')}/{quote(name, safe='')}"
+    return ""
 
 
 def _is_trusted_release_api_url(url: str) -> bool:
@@ -613,13 +631,18 @@ class UpdateDownloader(QThread):
                     if total > 0:
                         self.progress.emit(int(downloaded * 100 / total))
 
-    def _download(self, zip_path: Path, proxy_url: str | None) -> None:
+    def _archive_urls(self) -> tuple[str, ...]:
+        """Откуда качать архив: сначала копия на GitHub, затем Forgejo, под которым ответила проверка."""
+        github = github_asset_url(self._update.download_url)
+        return (github, self._update.download_url) if github else (self._update.download_url,)
+
+    def _download(self, zip_path: Path, proxy_url: str | None, url: str | None = None) -> None:
         """Download update zip with multi-segment acceleration.
 
         Tries parallel Range-based download first; falls back to single
         connection if the server doesn't support Range requests.
         """
-        url = self._update.download_url
+        url = url or self._update.download_url
         opener = self._build_opener(proxy_url)
 
         # Check if server supports Range requests
@@ -793,12 +816,21 @@ class UpdateDownloader(QThread):
         update = self._update
         if not update.files or update.size <= 0:
             return None
+        for url in self._archive_urls():
+            source_dir = self._try_delta_from(url, work_dir)
+            if source_dir is not None:
+                return source_dir
+        return None
+
+    def _try_delta_from(self, url: str, work_dir: Path) -> Path | None:
+        """Частичная загрузка из одного места (GitHub или Forgejo); ``None`` — не вышло."""
+        update = self._update
         destination = work_dir / "extracted"
         for status, proxy_url in self._routes():
             self.status.emit("Сравнение с установленной версией...")
             self.progress.emit(0)
             source = HttpRangeSource(
-                update.download_url,
+                url,
                 self._build_opener(proxy_url),
                 total=update.size,
                 user_agent=USER_AGENT,
@@ -846,17 +878,26 @@ class UpdateDownloader(QThread):
         """Скачать архив напрямую, а при неудаче — через активный прокси."""
 
         routes = self._routes()
-        for status, proxy_url in routes:
-            self.status.emit(status)
-            self.progress.emit(0)
-            try:
-                self._download(archive, proxy_url)
+        for url in self._archive_urls():
+            from_github = url != self._update.download_url
+            for status, proxy_url in routes:
+                self.status.emit(status)
+                self.progress.emit(0)
+                try:
+                    self._download(archive, proxy_url, url)
+                except _NETWORK_ERRORS as exc:
+                    # Другой путь помогает только от сетевых сбоев; ошибка в самой
+                    # программе поднимается как есть, а не выдаётся за «нет сети».
+                    _log.warning("[update] Архив не скачался (%s%s): %s", status, ", GitHub" if from_github else "", exc)
+                    archive.unlink(missing_ok=True)
+                    continue
+                expected = _extract_digest(self._update.digest_sha256)
+                if from_github and expected and _sha256_file(archive).lower() != expected:
+                    # Копия на GitHub не та — берём файл с Forgejo, а не отказываем в обновлении.
+                    _log.warning("[update] Архив с GitHub не сошёлся по SHA-256, качаем с Forgejo")
+                    archive.unlink(missing_ok=True)
+                    break
                 return
-            except _NETWORK_ERRORS as exc:
-                # Другой путь помогает только от сетевых сбоев; ошибка в самой
-                # программе поднимается как есть, а не выдаётся за «нет сети».
-                _log.warning("[update] Архив не скачался (%s): %s", status, exc)
-                archive.unlink(missing_ok=True)
         if self._proxy_url:
             raise DownloadFailed(
                 "Не удалось скачать обновление ни напрямую, ни через прокси.\n"

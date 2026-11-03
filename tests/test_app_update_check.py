@@ -201,7 +201,7 @@ class UpdateDownloaderTests(unittest.TestCase):
             digest_sha256=hashlib.sha256(payload).hexdigest() if digest is None else digest,
         )
         downloader = app_updater.UpdateDownloader(update)
-        downloader._download = lambda archive, proxy_url: archive.write_bytes(payload)
+        downloader._download = lambda archive, proxy_url, url=None: archive.write_bytes(payload)
         self.errors: list[str] = []
         downloader.error.connect(self.errors.append)
         return downloader
@@ -257,7 +257,7 @@ class UpdateDownloaderTests(unittest.TestCase):
     def test_network_failure_is_not_permanent(self) -> None:
         downloader = self._downloader({"ZapretKVN/ZapretKVN.exe": "exe"})
 
-        def offline(archive, proxy_url):
+        def offline(archive, proxy_url, url=None):
             raise OSError("no route")
 
         downloader._download = offline

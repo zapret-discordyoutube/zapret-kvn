@@ -1,6 +1,6 @@
 import unittest
 
-from xray_fluent.updates.app_updater import _is_trusted_release_url
+from xray_fluent.updates.app_updater import _is_trusted_release_url, github_asset_url
 
 
 class AppUpdaterUrlPolicyTests(unittest.TestCase):
@@ -32,6 +32,17 @@ class AppUpdaterUrlPolicyTests(unittest.TestCase):
         for url in rejected:
             with self.subTest(url=url):
                 self.assertFalse(_is_trusted_release_url(url))
+
+
+    def test_github_copy_only_of_a_forgejo_release_asset(self) -> None:
+        base = "https://git2.zapret.moe/zapretkvn/zapret-kvn/releases/download/v0.8.56/"
+        self.assertEqual(
+            github_asset_url(base + "ZapretKVN-v0.8.56-windows-x64.zip"),
+            "https://github.com/zapret-discordyoutube/zapret-kvn/releases/download/v0.8.56/ZapretKVN-v0.8.56-windows-x64.zip",
+        )
+        for url in ("https://example.com/a.zip", base + "x/a.zip", base):
+            with self.subTest(url=url):
+                self.assertEqual(github_asset_url(url), "")
 
 
 if __name__ == "__main__":

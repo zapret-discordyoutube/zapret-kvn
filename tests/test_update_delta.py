@@ -491,6 +491,28 @@ class DownloaderDeltaTests(_TempCase):
         self.assert_tree(downloader.prepared.source_dir, new)
         self.assertGreaterEqual(server.served, len(payload))
 
+    def test_github_copy_is_used_first_and_forgejo_stays_untouched(self) -> None:
+        old, new, payload = self._scenario()
+        forgejo, github = self.server(payload), self.server(payload)
+        downloader = self._downloader(new, payload, forgejo, self.install(old))
+        with patch.object(app_updater, "github_asset_url", return_value=github.url):
+            downloader.run()
+        self.assertEqual(self.errors, [])
+        self.assert_tree(downloader.prepared.source_dir, new)
+        self.assertGreater(github.served, 0)
+        self.assertEqual(forgejo.served, 0)
+
+    def test_corrupted_github_copy_falls_back_to_forgejo(self) -> None:
+        old, new, payload = self._scenario()
+        forgejo, github = self.server(payload), self.server(bytes(len(payload)))
+        downloader = self._downloader(new, payload, forgejo, self.install(old), with_files=False)
+        with patch.object(app_updater, "github_asset_url", return_value=github.url):
+            downloader.run()
+        self.assertEqual(self.errors, [])
+        self.assert_tree(downloader.prepared.source_dir, new)
+        self.assertGreater(github.served, 0)
+        self.assertGreaterEqual(forgejo.served, len(payload))
+
     def test_network_failure_of_delta_is_followed_by_the_normal_path(self) -> None:
         old, new, payload = self._scenario()
         server = self.server(payload)
