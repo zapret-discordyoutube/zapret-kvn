@@ -49,21 +49,32 @@ class BundleTests(unittest.TestCase):
             logs.mkdir()
             (logs / "update.log").write_text(r"swap C:\Users\Ivan\app token=ABC", encoding="utf-8")
             (logs / "startup.log").write_text("started\n", encoding="utf-8")
+            (logs / "app.log").write_text(
+                "2026-11-04 19:40:05  subscription ur***.ex***.com:443#3fa9c2: ответа нет через VPN за 15.0 с "
+                "fetch https://sub.example.com/abc123token/x C:\\Users\\Ivan\\data\n",
+                encoding="utf-8",
+            )
             (logs / "private_dump.log").write_text("DO NOT SHIP", encoding="utf-8")
             archive_path = make_zip(root / "diagnostics.zip")
             bundle = support_bundle.append_support_files(archive_path, logs, mirror_tag="cw***.za***.moe:443#abc123")
-            self.assertEqual(sorted(bundle.included), ["startup.log", "update.log"])
+            self.assertEqual(sorted(bundle.included), ["app.log", "startup.log", "update.log"])
             self.assertIn("update_error.log", bundle.missing)
             with zipfile.ZipFile(archive_path) as archive:
                 names = set(archive.namelist())
-                self.assertEqual(names, {"meta.json", "logs/update.log", "logs/startup.log", "support.json"})
+                self.assertEqual(
+                    names, {"meta.json", "logs/app.log", "logs/update.log", "logs/startup.log", "support.json"}
+                )
                 body = archive.read("logs/update.log").decode()
                 self.assertNotIn("Ivan", body)
                 self.assertNotIn("ABC", body)
+                app_log = archive.read("logs/app.log").decode()
+                self.assertIn("ur***.ex***.com:443#3fa9c2", app_log)  # маска сервера читается
+                for leaked in ("Ivan", "abc123token", "sub.example.com"):
+                    self.assertNotIn(leaked, app_log)
                 info = json.loads(archive.read("support.json"))
             self.assertEqual(info["support_format"], 1)
             self.assertEqual(info["mirror"], "cw***.za***.moe:443#abc123")
-            self.assertEqual(info["log_files"], ["update.log", "startup.log"])
+            self.assertEqual(info["log_files"], ["app.log", "update.log", "startup.log"])
 
     def test_big_log_is_cut_to_its_tail_without_a_torn_first_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

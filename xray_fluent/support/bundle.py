@@ -15,7 +15,10 @@ from ..diagnostics.export import _redact_log_line
 
 # Только эти файлы журналов попадают в архив: остальное в data/logs (например,
 # дампы с чужими данными) без явного решения не берём.
-SUPPORT_LOG_FILES = ("update.log", "update_error.log", "update_stall.log", "startup.log")
+# app.log — основной журнал приложения: в нём причины отказов подписки по каждому маршруту
+# (адрес сервера замаскирован), запуск ядер и переключения. Без него разбор «подписка не
+# добавилась» шёл вслепую.
+SUPPORT_LOG_FILES = ("app.log", "update.log", "update_error.log", "update_stall.log", "startup.log")
 # С каждого файла берётся хвост: свежее важнее, а архив должен остаться маленьким.
 MAX_TAIL_BYTES = 256 * 1024
 SUPPORT_FORMAT = 1
