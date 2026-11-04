@@ -62,6 +62,42 @@ class JudgeTests(unittest.TestCase):
         self.assertIn("Через VPN не пробовали", d.advice)
         self.assertIn("(вероятно)", d.message())
 
+    def test_probable_block_with_servers_says_to_connect_to_any_server_and_keeps_the_note(self) -> None:
+        d = judge(Evidence(HOST, 443, (fail("tls"), OK), None, servers_available=True))
+        self.assertIn("Подключитесь к любому серверу", d.advice)
+        self.assertIn("повторять, пока не получится", d.advice)
+        self.assertIn("Через VPN не пробовали", d.advice)
+
+    def test_probable_block_without_any_server_asks_for_a_single_key_not_a_vpn(self) -> None:
+        d = judge(Evidence(HOST, 443, (fail("tls"), OK), None, servers_available=False))
+        self.assertEqual((d.culprit, d.certain), (CULPRIT_BLOCK, False))
+        self.assertIn("хотя бы один сервер", d.advice)
+        self.assertIn("одиночный ключ", d.advice)
+        self.assertIn("не подписку", d.advice)
+        self.assertIn("Ctrl+V", d.advice)
+        self.assertIn("загрузится сама через этот сервер", d.advice)
+        self.assertNotIn("Включите VPN", d.advice)
+        self.assertNotIn("Через VPN не пробовали", d.advice)
+
+    def test_the_server_flag_changes_nothing_once_the_vpn_is_connected(self) -> None:
+        with_flag = judge(Evidence(HOST, 443, (fail("tls"), OK), (OK, OK), servers_available=True))
+        without_flag = judge(Evidence(HOST, 443, (fail("tls"), OK), (OK, OK), servers_available=False))
+        self.assertEqual(with_flag.advice, without_flag.advice)
+        self.assertEqual((with_flag.culprit, with_flag.certain), (CULPRIT_BLOCK, True))
+
+    def test_the_server_flag_does_not_touch_other_verdicts(self) -> None:
+        for flag in (True, False):
+            d = judge(Evidence(HOST, 443, (fail("tcp"), OK), (fail("tcp"), OK), servers_available=flag))
+            self.assertEqual((d.culprit, d.certain), (CULPRIT_SERVER, True))
+
+    def test_collect_evidence_carries_the_server_flag(self) -> None:
+        def direct(host, port):
+            return OK
+
+        ev = fd.collect_evidence(HOST, 443, tunnel_port=None, direct_probe=direct, servers_available=False)
+        self.assertFalse(ev.servers_available)
+        self.assertTrue(fd.collect_evidence(HOST, 443, tunnel_port=None, direct_probe=direct).servers_available)
+
     def test_vpn_connected_but_control_fails_is_vpn(self) -> None:
         d = self.verdict((fail("tcp"), OK), (fail("proxy", "status", "ответ прокси 502"), fail("proxy", "status", "ответ прокси 502")))
         self.assertEqual((d.culprit, d.certain), (CULPRIT_VPN, True))

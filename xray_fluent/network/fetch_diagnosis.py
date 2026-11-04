@@ -229,6 +229,8 @@ class Evidence:
     port: int
     direct: tuple[HostProbe, HostProbe] | None = None  # (сервер, контроль)
     vpn: tuple[HostProbe, HostProbe] | None = None     # None — VPN не подключён
+    # Есть ли в приложении хоть один сервер: без него VPN не включить, и совет «включите VPN» тупиковый.
+    servers_available: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +261,7 @@ def collect_evidence(
     direct_probe: Callable[[str, int], HostProbe] = probe_direct,
     proxy_probe: Callable[[int, str, int], HostProbe] = probe_via_proxy,
     control_host: str = CONTROL_HOST,
+    servers_available: bool = True,
 ) -> Evidence:
     """Проверить сервер и контроль по каждому маршруту параллельно."""
 
@@ -273,7 +276,9 @@ def collect_evidence(
         futures = {name: pool.submit(job) for name, job in jobs.items()}
         results = {name: future.result() for name, future in futures.items()}
     vpn = (results["vpn_target"], results["vpn_control"]) if tunnel_port else None
-    return Evidence(host, port, (results["direct_target"], results["direct_control"]), vpn)
+    return Evidence(
+        host, port, (results["direct_target"], results["direct_control"]), vpn, servers_available=servers_available
+    )
 
 
 def describe_failure(probe: HostProbe, route: str) -> str:
@@ -320,6 +325,17 @@ def _log_lines(ev: Evidence, verdict: str, certain: bool) -> tuple[str, ...]:
             lines.append(f"diagnosis {tag}: {label}, {name}: {state}; {probe.timings()}")
     lines.append(f"diagnosis {tag}: вердикт {verdict}{'' if certain else ' (вероятно)'}")
     return tuple(lines)
+
+
+ADVICE_CONNECT_ANY_SERVER = (
+    "Подключитесь к любому серверу: подписка остаётся в списке, приложение загрузит её через этот сервер само "
+    "и будет повторять, пока не получится. Если и так не откроется, сервер подписки выключен."
+)
+ADVICE_NO_SERVERS = (
+    "Сначала нужен хотя бы один сервер, через который можно дойти до сервера подписки: добавьте любой одиночный ключ "
+    "(ссылку vless://, hysteria2:// и подобные, не подписку; на странице «Серверы» кнопка «Импорт из буфера» "
+    "или Ctrl+V) и подключитесь. Подписка остаётся в списке и загрузится сама через этот сервер."
+)
 
 
 def judge(ev: Evidence) -> Diagnosis:
@@ -374,10 +390,9 @@ def judge(ev: Evidence) -> Diagnosis:
                 where + "; " + describe_failure(v_target, "через VPN"),
                 "Сервер недоступен и напрямую, и через VPN.",
             )
-        return done(
-            CULPRIT_BLOCK, False, where,
-            "Включите VPN — приложение повторит загрузку само. Если и так не откроется, сервер подписки выключен." + vpn_note,
-        )
+        if not ev.servers_available:
+            return done(CULPRIT_BLOCK, False, where, ADVICE_NO_SERVERS)
+        return done(CULPRIT_BLOCK, False, where, ADVICE_CONNECT_ANY_SERVER + vpn_note)
 
     # Рукопожатие напрямую проходит — запрос приняли и не ответили.
     return done(
@@ -394,10 +409,16 @@ def diagnose(
     tunnel_port: int | None,
     direct_probe: Callable[[str, int], HostProbe] = probe_direct,
     proxy_probe: Callable[[int, str, int], HostProbe] = probe_via_proxy,
+    servers_available: bool = True,
 ) -> Diagnosis:
     return judge(
         collect_evidence(
-            host, port, tunnel_port=tunnel_port, direct_probe=direct_probe, proxy_probe=proxy_probe
+            host,
+            port,
+            tunnel_port=tunnel_port,
+            direct_probe=direct_probe,
+            proxy_probe=proxy_probe,
+            servers_available=servers_available,
         )
     )
 

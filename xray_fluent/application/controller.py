@@ -159,6 +159,7 @@ from .runtime import (
 )
 from .signature_service import SingboxPlanFacts
 from .subscription_service import (
+    AWAITING_NAME,
     apply_not_modified,
     hide_subscription_node as hide_subscription_node_operation,
     mark_subscription_failure,
@@ -3124,6 +3125,7 @@ class AppController(QObject):
                 mode=mode,
                 proxy_port=proxy_port,
                 force_refresh=force_refresh,
+                servers_available=bool(self.state.nodes),
                 parent=self,
             )
             self._subscription_workers[subscription.id] = worker
@@ -3221,11 +3223,18 @@ class AppController(QObject):
             result = apply_not_modified(subscription, fetched)
         else:
             selected_before = selection_snapshot(self)
+            # Подписка, которую сохранили после неудачной первой загрузки, догружается впервые:
+            # ей нужны название из подписки и выбранный сервер, как при обычном добавлении.
+            first_load = pending_add or not any(node.subscription_id == subscription.id for node in self.state.nodes)
             outcome = reconcile_subscription(self.state, subscription, parsed, fetched)
             result = outcome.result
             if pending_add:
                 self.state.subscriptions.append(subscription)
-            if pending_add and self.state.selected_node_id is None:
+            elif first_load and subscription.name == AWAITING_NAME and parsed is not None:
+                subscription.name = self._unique_subscription_name(
+                    parsed.metadata.title or "Подписка", exclude_id=subscription.id
+                )
+            if first_load and self.state.selected_node_id is None:
                 first = next((node for node in self.state.nodes if node.subscription_id == subscription.id), None)
                 self.state.selected_node_id = first.id if first else None
             log_selection_change(self, SelectionSource.SUBSCRIPTION, selected_before, self.state.selected_node_id)
@@ -3257,12 +3266,23 @@ class AppController(QObject):
             self.subscriptions_changed.emit(self.state.subscriptions)
             self.save()
         else:
-            self._pending_subscription_additions.pop(worker_subscription.id, None)
-            result = SubscriptionUpdateResult(
-                subscription_id=worker_subscription.id,
-                success=False,
-                message=message,
-            )
+            pending = self._pending_subscription_additions.pop(worker_subscription.id, None)
+            if pending is not None and tunnel_untried:
+                # До сервера подписки не дойти без VPN, а VPN ещё нет: новую подписку не теряем.
+                # Она остаётся в списке без серверов, повторяется через туннель, как только он
+                # появится, и дальше по расписанию с паузами (15 минут, час, шесть часов).
+                pending.name = self._unique_subscription_name(pending.name or AWAITING_NAME)
+                result = mark_subscription_failure(pending, message, retry_via_tunnel=True)
+                self.state.subscriptions.append(pending)
+                self._log(f"[subscription] «{pending.name}» сохранена: загрузится через VPN, когда он появится")
+                self.subscriptions_changed.emit(self.state.subscriptions)
+                self.save()
+            else:
+                result = SubscriptionUpdateResult(
+                    subscription_id=worker_subscription.id,
+                    success=False,
+                    message=message,
+                )
         self.subscription_update_finished.emit(result)
 
     def _on_subscription_worker_finished(self, subscription_id: str, worker) -> None:

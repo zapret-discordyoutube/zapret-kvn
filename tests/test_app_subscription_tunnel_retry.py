@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import QApplication
 app = QApplication.instance() or QApplication([])
 
 from xray_fluent.application.controller import AppController
+from xray_fluent.application.subscription_service import AWAITING_NAME
 from xray_fluent.importer import subscription_http as sh
 from xray_fluent.network import browser_fetch
 from xray_fluent.profiles.models import AppState, Subscription
@@ -105,7 +106,9 @@ class _VpnHttpPort:
         return _Opener()
 
 
-class TunnelRetryTest(unittest.TestCase):
+class _RetryCase(unittest.TestCase):
+    """Общая подготовка: настоящий контроллер, прямой путь молчит, VPN-порт отдаёт подписку."""
+
     def setUp(self) -> None:
         self.controller = _controller()
         self.controller.state = AppState()
@@ -155,10 +158,12 @@ class TunnelRetryTest(unittest.TestCase):
         self.assertEqual(self.controller._subscription_workers, {})
         return results[0]
 
+
+class TunnelRetryTest(_RetryCase):
     def test_failure_without_vpn_is_plain_and_retried_through_vpn_on_connect(self) -> None:
         from xray_fluent.network import fetch_diagnosis as fd
 
-        def offline_diagnose(host, port, *, tunnel_port):
+        def offline_diagnose(host, port, *, tunnel_port, servers_available=True):
             # Без VPN: сервер молчит на TLS, контроль отвечает — проба сети не ходит наружу.
             self.assertIsNone(tunnel_port)
             return fd.judge(fd.Evidence(host, port, (fd.HostProbe(False, "tls", "timeout"), fd.HostProbe(True))))
@@ -211,6 +216,115 @@ class TunnelRetryTest(unittest.TestCase):
             self.controller.connection_changed.emit(True)
         self.assertEqual(self.controller._subscription_workers, {})
         self.assertEqual(self.controller._subscription_update_queue, [])
+
+
+class NewSubscriptionTest(_RetryCase):
+    """Подписка, добавленная без VPN, не теряется: остаётся в списке и догружается через VPN.
+
+    Раньше первая неудачная загрузка новой подписки её выбрасывала, хотя текст отказа обещал
+    «приложение повторит загрузку само»: в списке не оставалось ничего, что можно повторить.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.controller.state = AppState()
+        self.controller._pending_subscription_additions.clear()
+        self.new = Subscription(name="", url="https://sub.example/new-token")
+
+    @staticmethod
+    def _tls_blocked_diagnose(host, port, *, tunnel_port, servers_available=True):
+        from xray_fluent.network import fetch_diagnosis as fd
+
+        direct = (fd.HostProbe(False, "tls", "timeout"), fd.HostProbe(True))
+        return fd.judge(fd.Evidence(host, port, direct, None, servers_available=servers_available))
+
+    def _add_and_fail(self) -> object:
+        from xray_fluent.network import fetch_diagnosis as fd
+
+        with patch.object(fd, "diagnose", self._tls_blocked_diagnose):
+            self.assertTrue(self.controller.add_subscription(self.new))
+            return self._wait_finished()
+
+    def test_unreachable_new_subscription_is_kept_for_a_retry_through_the_vpn(self) -> None:
+        failed = self._add_and_fail()
+
+        self.assertFalse(failed.success)
+        self.assertEqual([item.id for item in self.controller.state.subscriptions], [self.new.id])
+        self.assertTrue(self.new.retry_via_tunnel)
+        self.assertEqual(self.new.failure_count, 1)
+        self.assertIsNotNone(self.new.backoff_until)
+        self.assertEqual(self.new.name, AWAITING_NAME)
+        self.assertEqual(self.controller._pending_subscription_additions, {})
+        self.assertEqual(self.controller.state.nodes, [])
+
+    def test_without_any_server_the_advice_asks_for_a_single_key(self) -> None:
+        failed = self._add_and_fail()
+
+        self.assertIn("добавьте любой одиночный ключ", failed.message)
+        self.assertIn("не подписку", failed.message)
+        self.assertIn("загрузится сама через этот сервер", failed.message)
+        self.assertNotIn("Включите VPN", failed.message)
+
+    def test_with_a_server_present_the_advice_is_to_connect_to_it(self) -> None:
+        from xray_fluent.profiles.models import Node
+
+        self.controller.state.nodes = [Node(name="one", link="vless://x", server="198.51.100.7")]
+        failed = self._add_and_fail()
+
+        self.assertIn("Подключитесь к любому серверу", failed.message)
+        self.assertNotIn("одиночный ключ", failed.message)
+
+    def test_kept_subscription_loads_through_the_vpn_gets_a_name_and_a_server(self) -> None:
+        self._add_and_fail()
+
+        self.controller.connected = True
+        self.controller.connection_changed.emit(True)
+        loaded = self._wait_finished()
+
+        self.assertTrue(loaded.success, getattr(loaded, "message", ""))
+        self.assertEqual(self.vpn.ports, ["http://127.0.0.1:1391"])
+        # Название то же, что при обычном добавлении: заголовок из подписки, а у простого списка ссылок
+        # парсер берёт его из адреса.
+        self.assertEqual(self.new.name, "new-token")
+        self.assertNotEqual(self.new.name, AWAITING_NAME)
+        self.assertFalse(self.new.retry_via_tunnel)
+        self.assertEqual(self.new.last_error, "")
+        nodes = [node for node in self.controller.state.nodes if node.subscription_id == self.new.id]
+        self.assertEqual([node.server for node in nodes], ["203.0.113.10"])
+        self.assertEqual(self.controller.state.selected_node_id, nodes[0].id)
+
+    def test_a_kept_subscription_does_not_replace_a_name_the_user_typed(self) -> None:
+        self.new.name = "Моя подписка"
+        self._add_and_fail()
+
+        self.controller.connected = True
+        self.controller.connection_changed.emit(True)
+        self._wait_finished()
+
+        self.assertEqual(self.new.name, "Моя подписка")
+
+    def test_failure_that_is_not_about_the_vpn_route_still_drops_the_new_subscription(self) -> None:
+        self.controller._pending_subscription_additions[self.new.id] = self.new
+        results: list[object] = []
+        self.controller.subscription_update_finished.connect(results.append)
+        self.addCleanup(self.controller.subscription_update_finished.disconnect, results.append)
+
+        self.controller._on_subscription_update_failed(self.new, "Сервер подписки ответил 404", False)
+
+        self.assertEqual(self.controller.state.subscriptions, [])
+        self.assertEqual(self.controller._pending_subscription_additions, {})
+        self.assertFalse(results[0].success)
+
+    def test_the_second_attempt_through_the_vpn_keeps_backing_off_instead_of_giving_up(self) -> None:
+        self._add_and_fail()
+        self.new.backoff_until = None  # пауза прошла
+        self.assertTrue(self.new.retry_via_tunnel)
+
+        from datetime import datetime, timezone
+
+        from xray_fluent.application.subscription_service import subscription_due
+
+        self.assertTrue(subscription_due(self.new, datetime.now(timezone.utc)))
 
 
 if __name__ == "__main__":

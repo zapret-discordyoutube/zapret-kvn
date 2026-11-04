@@ -23,6 +23,11 @@ from ..importer.subscription_parser import (
 )
 
 
+#: Имя подписки, которая ещё ни разу не загрузилась и поэтому не знает своего названия; после первой
+#: успешной загрузки заменяется названием из подписки.
+AWAITING_NAME = "Подписка (ждёт VPN)"
+
+
 @dataclass(slots=True)
 class ReconcileOutcome:
     result: SubscriptionUpdateResult

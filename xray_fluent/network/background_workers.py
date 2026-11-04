@@ -111,6 +111,7 @@ class SubscriptionUpdateWorker(QThread):
         mode: str,
         proxy_port: int | None,
         force_refresh: bool = False,
+        servers_available: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -118,6 +119,8 @@ class SubscriptionUpdateWorker(QThread):
         self._mode = mode
         self._proxy_port = proxy_port
         self._force_refresh = bool(force_refresh)
+        # Есть ли в приложении хоть один сервер: от этого зависит совет в тексте отказа.
+        self._servers_available = bool(servers_available)
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -173,7 +176,9 @@ class SubscriptionUpdateWorker(QThread):
             from ..network.fetch_diagnosis import diagnose
 
             tunnel_port = self._proxy_port if self._mode in {"auto", "proxy"} and self._proxy_port and self._proxy_port > 0 else None
-            diagnosis = diagnose(exc.host, exc.port, tunnel_port=tunnel_port)
+            diagnosis = diagnose(
+                exc.host, exc.port, tunnel_port=tunnel_port, servers_available=self._servers_available
+            )
             for line in diagnosis.log_lines:
                 _LOG.info(line)
             return diagnosis.message()
