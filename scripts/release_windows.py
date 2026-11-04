@@ -28,6 +28,11 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Фазы выпуска импортируют zapret_update лениво, на ходу. Возобновление с середины (после обрыва
+# сессии или перезагрузки хоста) начинается в новом процессе и до этих импортов не проходит через
+# шаги, которые раньше добавляли корень в sys.path, поэтому корень добавляется сразу при загрузке.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 CONSTANTS_PATH = ROOT / "xray_fluent" / "constants.py"
 GEOIP_LOCK_PATH = ROOT / "scripts" / "geoip-lock.json"
 CORE_LOCK_PATH = ROOT / "scripts" / "core-lock.windows-x64.json"
