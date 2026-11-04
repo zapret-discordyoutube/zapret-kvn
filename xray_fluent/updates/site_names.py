@@ -56,4 +56,13 @@ def resolve(url: str) -> str:
     return git_mirrors.with_host(url, _NAMES.choose())
 
 
-__all__ = ["remember", "resolve"]
+def proven() -> bool:
+    """Одно из имён только что ответило с этого компьютера (а не взято наугад из списка).
+
+    Читает состояние списка без сети; нужна ссылкам, которым после ``resolve`` надо знать,
+    открывается ли хоть одно зеркало: иначе ссылка ведёт на запасной сайт.
+    """
+    return _NAMES._good is not None and _NAMES._clock() < _NAMES._good_until  # noqa: SLF001 — свой список программы
+
+
+__all__ = ["proven", "remember", "resolve"]

@@ -83,11 +83,21 @@ class BundleTests(unittest.TestCase):
 
 
 class SiteTests(unittest.TestCase):
-    def test_open_mirror_is_used(self) -> None:
-        with patch.object(support_site.site_names, "resolve", lambda url: MIRROR_URL):
+    def test_open_mirror_is_used_when_it_proved_itself(self) -> None:
+        with patch.object(support_site.site_names, "resolve", lambda url: MIRROR_URL), patch.object(
+            support_site.site_names, "proven", lambda: True
+        ):
             self.assertEqual(support_site.support_url(), MIRROR_URL)
 
-    def test_main_name_is_the_fallback_when_discovery_fails(self) -> None:
+    def test_github_is_the_page_when_no_mirror_answered(self) -> None:
+        with patch.object(support_site.site_names, "resolve", lambda url: "https://git2.zapret.moe/x"), patch.object(
+            support_site.site_names, "proven", lambda: False
+        ):
+            url = support_site.support_url()
+        self.assertEqual(url, support_site.GITHUB_SUPPORT_URL)
+        self.assertEqual(url, "https://github.com/zapret-discordyoutube/zapret-kvn/issues/new")
+
+    def test_main_name_is_the_fallback_when_discovery_itself_fails(self) -> None:
         def broken(url):
             raise OSError("network down")
 

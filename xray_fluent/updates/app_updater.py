@@ -58,6 +58,17 @@ FORGEJO_HOST = "git.zapret.moe"
 # Forgejo — запасной путь; выпуски копирует forgejo_releases_to_github.py на хосте). Тот же тег и то же имя
 # файла; подлинность проверяет подписанный список выпуска и SHA-256 архива.
 GITHUB_RELEASE_DOWNLOAD_ORIGIN = "https://github.com/zapret-discordyoutube/zapret-kvn/releases/download/"
+# Не отвечает ни одно зеркало Forgejo (и входные страницы Zapret Links не помогли): о выпуске
+# спрашивается GitHub (решение владельца 2026-11-04). Подлинность та же — подписанный список выпуска.
+GITHUB_RELEASE_API = "https://api.github.com/repos/zapret-discordyoutube/zapret-kvn/releases/latest"
+GITHUB_REPO_URL = "https://github.com/zapret-discordyoutube/zapret-kvn"
+# GitHub отдаёт файлы выпуска с github.com и перенаправляет на свои хранилища.
+_GITHUB_FILE_HOSTS = frozenset({
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+})
 # Основное имя режут по TLS; тот же Forgejo открывается под зеркалами git2, git3, …
 # (список имён отдаёт сам сервер). Проверка обновления идёт под первым открытым
 # именем, а ссылки на файлы выпуска остаются теми, под которым ответил сервер.
@@ -247,6 +258,48 @@ def github_asset_url(download_url: str) -> str:
     return ""
 
 
+def is_trusted_github_file_url(url: str) -> bool:
+    """Файл выпуска, пришедший с GitHub: только https и его собственные хосты."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() in _GITHUB_FILE_HOSTS
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+    )
+
+
+def normalize_github_release(payload: dict) -> dict:
+    """Ответ GitHub о выпуске в виде ответа Forgejo, который разбирает остальной код.
+
+    Адреса файлов записываются как у Forgejo: проверки доверия и подписи идут как
+    обычно, а скачивание само берёт тот же файл с GitHub (``github_asset_url``).
+    """
+    tag = str(payload.get("tag_name") or "")
+    if not tag or "/" in tag or ".." in tag:
+        raise ValueError("GitHub вернул выпуск без корректного тега")
+    assets = []
+    for asset in payload.get("assets") or []:
+        name = str(asset.get("name") or "")
+        if not name or "/" in name or name.startswith("."):
+            continue
+        assets.append({
+            "name": name,
+            "size": asset.get("size") or 0,
+            "digest": str(asset.get("digest") or ""),
+            "browser_download_url": (
+                f"https://{FORGEJO_HOST}{FORGEJO_RELEASE_DOWNLOAD_PREFIXES[0]}"
+                f"{quote(tag, safe='')}/{quote(name, safe='')}"
+            ),
+        })
+    return {"tag_name": tag, "assets": assets}
+
+
 def _is_trusted_release_api_url(url: str) -> bool:
     try:
         parsed = urlsplit(url)
@@ -269,6 +322,8 @@ class _ReleaseClient:
 
     def __init__(self, proxy_url: str | None = None):
         self._proxy_url = proxy_url
+        # Выпуск взят с GitHub: его файлы и качаются оттуда в первую очередь.
+        self.github_fallback = False
         self._mirrors = git_mirrors.MirrorList(
             self._fetch_mirror_list,
             report=lambda message: _log.info("[update] Forgejo, имена сервера: %s", message),
@@ -302,13 +357,55 @@ class _ReleaseClient:
         )
 
     def fetch_release(self) -> dict:
-        response = self._fetch_release_response()
+        try:
+            response = self._fetch_release_response()
+        except HttpFetchError as mirrors_failed:
+            return self._release_from_github(mirrors_failed)
         if not _is_trusted_release_api_url(response.final_url):
             raise ValueError("Сервер обновлений перенаправил запрос на недоверенный адрес")
         payload = json.loads(response.data.decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("Сервер обновлений вернул некорректный ответ")
         return payload
+
+    def _release_from_github(self, mirrors_failed: HttpFetchError) -> dict:
+        """Ни одно зеркало не ответило по сети: тот же выпуск спрашивается у GitHub."""
+        _log.warning("[update] Зеркала Forgejo не ответили, выпуск спрашивается у GitHub")
+        try:
+            response = self._fetch(
+                Request(GITHUB_RELEASE_API, headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT}),
+                max_bytes=_MAX_RELEASE_METADATA_BYTES,
+            )
+            if urlsplit(response.final_url).hostname != "api.github.com":
+                raise ValueError("GitHub перенаправил запрос на недоверенный адрес")
+            payload = json.loads(response.data.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("GitHub вернул некорректный ответ")
+            release = normalize_github_release(payload)
+        except (HttpFetchError, ValueError) as github_error:
+            _log.warning("[update] GitHub тоже не помог: %s: %s", type(github_error).__name__, github_error)
+            raise mirrors_failed from github_error
+        self.github_fallback = True
+        _log.info("[update] Выпуск %s получен с GitHub", release["tag_name"])
+        return release
+
+    def _fetch_release_file(self, url: str, max_bytes: int):
+        """Файл выпуска: Forgejo, а при отказе сети — тот же файл на GitHub (с GitHub первым, если выпуск оттуда)."""
+        github = github_asset_url(url)
+        routes = [url]
+        if github:
+            routes = [github, url] if self.github_fallback else [url, github]
+        last_error: HttpFetchError | None = None
+        for route in routes:
+            try:
+                response = self._fetch(Request(route, headers={"User-Agent": USER_AGENT}), max_bytes=max_bytes)
+            except HttpFetchError as exc:
+                last_error = exc
+                continue
+            if not (_is_trusted_release_url(response.final_url) or is_trusted_github_file_url(response.final_url)):
+                raise ValueError("Файл выпуска перенаправлен на недоверенный адрес")
+            return response
+        raise last_error  # type: ignore[misc]  # routes не пуст: хотя бы один отказ записан
 
     def _fetch_release_response(self):
         """Ответ о последнем выпуске под первым открытым именем сервера.
@@ -341,18 +438,12 @@ class _ReleaseClient:
     def fetch_signed(self, url: str, max_bytes: int) -> bytes:
         if not _is_trusted_release_url(url):
             raise ValueError("Forgejo вернул недоверенную ссылку на список выпуска")
-        response = self._fetch(Request(url, headers={"User-Agent": USER_AGENT}), max_bytes=max_bytes)
-        if not _is_trusted_release_url(response.final_url):
-            raise ValueError("Forgejo перенаправил список выпуска на недоверенный адрес")
-        return response.data
+        return self._fetch_release_file(url, max_bytes).data
 
     def fetch_checksum(self, url: str) -> str:
         if not _is_trusted_release_url(url):
             raise ValueError("Forgejo вернул недоверенную ссылку на контрольную сумму")
-        request = Request(url, headers={"User-Agent": USER_AGENT})
-        response = self._fetch(request, max_bytes=_MAX_CHECKSUM_BYTES)
-        if not _is_trusted_release_url(response.final_url):
-            raise ValueError("Forgejo перенаправил контрольную сумму на недоверенный адрес")
+        response = self._fetch_release_file(url, _MAX_CHECKSUM_BYTES)
         return response.data.decode("utf-8", errors="replace")
 
 
