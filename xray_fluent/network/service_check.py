@@ -8,7 +8,9 @@
 - ``slow`` — обычный запрос ждёт больше двух с половиной секунд;
 - ``pause`` — один-два запроса ждали секунды, остальные получили ответ за доли секунды (так видео «замирает»);
 - ``partial`` — открывается не каждое имя сервиса;
-- ``blocked`` — не открылось ни одно имя.
+- ``blocked`` — не открылось ни одно имя;
+- ``region`` — имена открываются, но сервис сам не пускает из страны узла (Gemini отвечает «user location
+  is not supported»): это не сбой узла, а вывод по одному запросу с разбором статуса и текста ответа.
 
 Сбор (запросы) и вывод (``judge``) разделены: вывод проверяется без сети.
 """
@@ -25,12 +27,15 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 __all__ = [
+    "GeoRule",
+    "GeoRun",
     "SERVICES",
     "ServiceSpec",
     "ServiceVerdict",
     "check_all",
     "judge",
     "probe_endpoint",
+    "probe_geo",
     "summary_text",
 ]
 
@@ -39,6 +44,7 @@ CODE_SLOW = "slow"
 CODE_PAUSE = "pause"
 CODE_PARTIAL = "partial"
 CODE_BLOCKED = "blocked"
+CODE_REGION = "region"
 CODE_UNKNOWN = "unknown"
 
 # Сколько запросов по одному соединению; первый (с подключением и рукопожатием) во время не входит.
@@ -54,11 +60,28 @@ PARALLEL = 6
 
 
 @dataclass(frozen=True, slots=True)
+class GeoRule:
+    """Один запрос, по ответу которого видно, что сервис не работает из страны узла.
+
+    Блок по региону приходит не обрывом, а обычным ответом: [statuses] и [marker] (строчными буквами)
+    в тексте ответа вместе значат «из этой страны нельзя». Тот же статус без текста региона (например,
+    403 «нужен ключ») означает, что регион поддерживается.
+    """
+
+    host: str
+    path: str
+    statuses: frozenset[int]
+    marker: str
+
+
+@dataclass(frozen=True, slots=True)
 class ServiceSpec:
     key: str
     title: str
     # (хост, путь): каждое имя сервиса, которое должно открываться.
     endpoints: tuple[tuple[str, str], ...]
+    # Проверки региона; делаются только если имена сервиса открылись.
+    geo: tuple[GeoRule, ...] = ()
 
 
 SERVICES: tuple[ServiceSpec, ...] = (
@@ -71,6 +94,20 @@ SERVICES: tuple[ServiceSpec, ...] = (
     ServiceSpec("whatsapp", "WhatsApp", (("web.whatsapp.com", "/"),)),
     ServiceSpec("spotify", "Spotify", (("www.spotify.com", "/"),)),
     ServiceSpec("chatgpt", "ChatGPT", (("chatgpt.com", "/"),)),
+    # Без ключа API отвечает 403 там, где регион поддерживается; 400 «user location is not supported» там, где нет.
+    ServiceSpec(
+        "gemini",
+        "Gemini",
+        (("gemini.google.com", "/"),),
+        geo=(
+            GeoRule(
+                "generativelanguage.googleapis.com",
+                "/v1beta/models",
+                frozenset({400, 403, 451}),
+                "user location is not supported",
+            ),
+        ),
+    ),
     ServiceSpec("twitch", "Twitch", (("www.twitch.tv", "/"),)),
     ServiceSpec("linkedin", "LinkedIn", (("www.linkedin.com", "/"),)),
 )
@@ -100,6 +137,17 @@ class EndpointRun:
 
     host: str
     ttfb_ms: tuple[float, ...] = ()
+    failed: bool = False
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class GeoRun:
+    """Итог запроса региона: ``blocked`` — сервис ответил «из вашей страны нельзя»; ``failed`` — узнать не удалось."""
+
+    host: str
+    blocked: bool = False
+    status: int = 0
     failed: bool = False
     reason: str = ""
 
@@ -160,7 +208,38 @@ def probe_endpoint(
     return EndpointRun(host, tuple(times[1:] if len(times) > 1 else times))
 
 
-def judge(spec: ServiceSpec, runs: list[EndpointRun]) -> ServiceVerdict:
+def probe_geo(
+    proxy_host: str,
+    proxy_port: int,
+    rule: GeoRule,
+    *,
+    cancelled: Callable[[], bool] = lambda: False,
+    connect: Callable[..., http.client.HTTPSConnection] = _open_connection,
+) -> GeoRun:
+    """Один запрос региона через прокси: блок виден по статусу и тексту ответа, а не по обрыву."""
+    if cancelled():
+        return GeoRun(rule.host, failed=True, reason="cancelled")
+    try:
+        connection = connect(proxy_host, proxy_port, rule.host)
+    except (OSError, ValueError) as error:
+        return GeoRun(rule.host, failed=True, reason=str(error)[:80])
+    try:
+        connection.request("GET", rule.path, headers={"User-Agent": _USER_AGENT, "Accept": "*/*"})
+        response = connection.getresponse()
+        status = int(response.status)
+        body = response.read(8192)
+    except (OSError, http.client.HTTPException, ssl.SSLError, socket.timeout, ValueError) as error:
+        return GeoRun(rule.host, failed=True, reason=type(error).__name__)
+    finally:
+        try:
+            connection.close()
+        except OSError:
+            pass
+    text = body.decode("utf-8", errors="replace").lower() if isinstance(body, (bytes, bytearray)) else ""
+    return GeoRun(rule.host, blocked=status in rule.statuses and rule.marker in text, status=status)
+
+
+def judge(spec: ServiceSpec, runs: list[EndpointRun], geo_runs: list[GeoRun] | tuple[GeoRun, ...] = ()) -> ServiceVerdict:
     """Вывод по сервису из серий по всем его именам. Новых запросов не делает."""
     if not runs:
         return ServiceVerdict(spec.key, CODE_UNKNOWN, "не проверялся")
@@ -172,6 +251,16 @@ def judge(spec: ServiceSpec, runs: list[EndpointRun]) -> ServiceVerdict:
     all_times = [value for run in opened for value in run.ttfb_ms]
     median = statistics.median(all_times)
     worst = max(all_times)
+    # Блок по региону точнее любой оценки скорости: сервис отвечает, но из страны узла не пускает.
+    region = next((run for run in geo_runs if run.blocked), None)
+    if region is not None:
+        return ServiceVerdict(
+            spec.key,
+            CODE_REGION,
+            f"сервис не работает из страны этого узла (ответ {region.status} от {region.host}); нужен узел в другой стране",
+            median,
+            worst,
+        )
     if closed:
         return ServiceVerdict(spec.key, CODE_PARTIAL, f"не открылось: {', '.join(closed)}", median, worst)
     if len(all_times) >= 3 and worst >= PAUSE_MS and worst >= PAUSE_RATIO * max(median, 1.0) and median < 1200:
@@ -183,9 +272,23 @@ def judge(spec: ServiceSpec, runs: list[EndpointRun]) -> ServiceVerdict:
     return ServiceVerdict(spec.key, CODE_OK, f"ответы быстрые: обычно {median:.0f} мс", median, worst)
 
 
-def check_service(proxy_host: str, proxy_port: int, spec: ServiceSpec, *, cancelled=lambda: False, probe=probe_endpoint) -> ServiceVerdict:
+def check_service(
+    proxy_host: str,
+    proxy_port: int,
+    spec: ServiceSpec,
+    *,
+    cancelled=lambda: False,
+    probe=probe_endpoint,
+    geo_probe=probe_geo,
+) -> ServiceVerdict:
     runs = [probe(proxy_host, proxy_port, host, path, cancelled=cancelled) for host, path in spec.endpoints]
-    return judge(spec, runs)
+    # Регион спрашиваем, только если имена сервиса открылись: иначе причина в узле, а не в стране.
+    geo_runs = (
+        [geo_probe(proxy_host, proxy_port, rule, cancelled=cancelled) for rule in spec.geo]
+        if spec.geo and any(run.ttfb_ms for run in runs)
+        else []
+    )
+    return judge(spec, runs, geo_runs)
 
 
 def check_all(
@@ -195,18 +298,24 @@ def check_all(
     services: tuple[ServiceSpec, ...] = SERVICES,
     cancelled: Callable[[], bool] = lambda: False,
     probe=probe_endpoint,
+    geo_probe=probe_geo,
 ) -> dict[str, ServiceVerdict]:
     """Все сервисы каталога через один поднятый прокси; по ``PARALLEL`` одновременно."""
     with ThreadPoolExecutor(max_workers=PARALLEL, thread_name_prefix="service-check") as pool:
         futures = {
-            spec.key: pool.submit(check_service, proxy_host, proxy_port, spec, cancelled=cancelled, probe=probe) for spec in services
+            spec.key: pool.submit(
+                check_service, proxy_host, proxy_port, spec, cancelled=cancelled, probe=probe, geo_probe=geo_probe
+            )
+            for spec in services
         }
         return {key: future.result() for key, future in futures.items()}
 
 
 def summary_text(verdicts: dict[str, dict] | dict[str, ServiceVerdict]) -> str:
     """Одна строка для карточки узла: значок и название каждого сервиса, о проблемах — словами."""
-    icons = {CODE_OK: "✓", CODE_SLOW: "⚠", CODE_PAUSE: "⚠", CODE_PARTIAL: "⚠", CODE_BLOCKED: "✗", CODE_UNKNOWN: "?"}
+    icons = {
+        CODE_OK: "✓", CODE_SLOW: "⚠", CODE_PAUSE: "⚠", CODE_PARTIAL: "⚠", CODE_BLOCKED: "✗", CODE_REGION: "✗", CODE_UNKNOWN: "?",
+    }
     titles = {spec.key: spec.title for spec in SERVICES}
     parts = []
     for key, verdict in verdicts.items():

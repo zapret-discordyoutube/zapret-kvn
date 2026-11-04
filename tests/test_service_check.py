@@ -51,6 +51,171 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(sc.judge(YOUTUBE, [_run("www.youtube.com", 90, 2900)]).code, sc.CODE_OK)
 
 
+GEMINI = next(spec for spec in sc.SERVICES if spec.key == "gemini")
+_GEMINI_BLOCK_BODY = b'{"error": {"code": 400, "message": "User location is not supported for the API use.", "status": "FAILED_PRECONDITION"}}'
+
+
+class GeoJudgeTests(unittest.TestCase):
+    OPEN = [_run("gemini.google.com", 120, 110, 115, 118)]
+
+    def test_service_that_opens_but_refuses_the_region_is_region_not_ok(self) -> None:
+        verdict = sc.judge(GEMINI, self.OPEN, [sc.GeoRun("generativelanguage.googleapis.com", blocked=True, status=400)])
+
+        self.assertEqual(verdict.code, sc.CODE_REGION)
+        self.assertIn("400", verdict.text)
+        self.assertIn("generativelanguage.googleapis.com", verdict.text)
+        self.assertAlmostEqual(verdict.ttfb_median_ms, 116.5)
+
+    def test_a_supported_region_or_an_unknown_answer_leaves_the_speed_verdict(self) -> None:
+        for geo in (sc.GeoRun("g", status=403), sc.GeoRun("g", failed=True, reason="timeout")):
+            with self.subTest(geo=geo):
+                self.assertEqual(sc.judge(GEMINI, self.OPEN, [geo]).code, sc.CODE_OK)
+
+    def test_region_block_does_not_hide_a_node_that_opens_nothing(self) -> None:
+        verdict = sc.judge(GEMINI, [_run("gemini.google.com", failed=True, reason="timeout")], [sc.GeoRun("g", blocked=True, status=400)])
+
+        self.assertEqual(verdict.code, sc.CODE_BLOCKED)
+
+    def test_region_block_wins_over_a_slow_or_partial_service(self) -> None:
+        slow = [_run("gemini.google.com", 3100, 3000, 2900, 3200)]
+
+        self.assertEqual(sc.judge(GEMINI, slow, [sc.GeoRun("g", blocked=True, status=400)]).code, sc.CODE_REGION)
+
+    def test_judge_without_geo_runs_is_unchanged(self) -> None:
+        self.assertEqual(sc.judge(GEMINI, self.OPEN).code, sc.CODE_OK)
+
+
+class _GeoResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status, self.body = status, body
+
+    def read(self, _size: int) -> bytes:
+        return self.body
+
+
+class _GeoConnection:
+    def __init__(self, status: int = 200, body: bytes = b"", *, fail: Exception | None = None) -> None:
+        self.status, self.body, self.fail = status, body, fail
+        self.requests: list[tuple[str, str]] = []
+        self.closed = False
+
+    def request(self, method, path, headers=None) -> None:
+        self.requests.append((method, path))
+        if self.fail is not None:
+            raise self.fail
+
+    def getresponse(self) -> _GeoResponse:
+        return _GeoResponse(self.status, self.body)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ProbeGeoTests(unittest.TestCase):
+    RULE = GEMINI.geo[0]
+
+    def _probe(self, connection: _GeoConnection, **kwargs) -> sc.GeoRun:
+        return sc.probe_geo("127.0.0.1", 1, self.RULE, connect=lambda *_a: connection, **kwargs)
+
+    def test_status_and_text_together_mean_blocked(self) -> None:
+        connection = _GeoConnection(400, _GEMINI_BLOCK_BODY)
+
+        run = self._probe(connection)
+
+        self.assertTrue(run.blocked)
+        self.assertEqual(run.status, 400)
+        self.assertEqual(connection.requests, [("GET", "/v1beta/models")])
+        self.assertTrue(connection.closed)
+
+    def test_403_without_the_region_text_means_the_region_is_supported(self) -> None:
+        run = self._probe(_GeoConnection(403, b'{"error": {"message": "Method doesn\'t allow unregistered callers."}}'))
+
+        self.assertFalse(run.blocked)
+        self.assertEqual(run.status, 403)
+
+    def test_the_region_text_with_a_status_outside_the_rule_is_not_a_block(self) -> None:
+        self.assertFalse(self._probe(_GeoConnection(200, _GEMINI_BLOCK_BODY)).blocked)
+
+    def test_text_is_matched_without_regard_to_case(self) -> None:
+        self.assertTrue(self._probe(_GeoConnection(403, b"USER LOCATION IS NOT SUPPORTED")).blocked)
+
+    def test_network_failure_is_unknown_not_blocked(self) -> None:
+        run = self._probe(_GeoConnection(fail=ConnectionResetError("reset")))
+
+        self.assertTrue(run.failed)
+        self.assertFalse(run.blocked)
+        self.assertEqual(run.reason, "ConnectionResetError")
+
+    def test_proxy_that_refuses_the_tunnel_is_unknown_not_blocked(self) -> None:
+        def refuse(*_a):
+            raise OSError("proxy refused")
+
+        run = sc.probe_geo("127.0.0.1", 1, self.RULE, connect=refuse)
+
+        self.assertTrue(run.failed)
+        self.assertFalse(run.blocked)
+
+    def test_cancelled_check_makes_no_request(self) -> None:
+        connection = _GeoConnection(400, _GEMINI_BLOCK_BODY)
+
+        run = self._probe(connection, cancelled=lambda: True)
+
+        self.assertTrue(run.failed)
+        self.assertEqual(connection.requests, [])
+
+
+class GeoCheckTests(unittest.TestCase):
+    @staticmethod
+    def _open(_h, _p, host, path, cancelled):
+        return _run(host, 120, 110, 115, 118)
+
+    def test_gemini_is_in_the_catalog_with_a_region_rule(self) -> None:
+        self.assertEqual(GEMINI.title, "Gemini")
+        self.assertEqual(len(GEMINI.geo), 1)
+        self.assertEqual(GEMINI.geo[0].host, "generativelanguage.googleapis.com")
+        self.assertIn(400, GEMINI.geo[0].statuses)
+
+    def test_check_service_reports_region_when_the_site_opens_and_the_api_refuses(self) -> None:
+        def geo(_h, _p, rule, cancelled):
+            return sc.GeoRun(rule.host, blocked=True, status=400)
+
+        verdict = sc.check_service("127.0.0.1", 1, GEMINI, probe=self._open, geo_probe=geo)
+
+        self.assertEqual(verdict.code, sc.CODE_REGION)
+
+    def test_region_is_not_asked_when_the_site_does_not_open(self) -> None:
+        calls: list[str] = []
+
+        def closed(_h, _p, host, path, cancelled):
+            return _run(host, failed=True, reason="timeout")
+
+        def geo(_h, _p, rule, cancelled):
+            calls.append(rule.host)
+            return sc.GeoRun(rule.host)
+
+        verdict = sc.check_service("127.0.0.1", 1, GEMINI, probe=closed, geo_probe=geo)
+
+        self.assertEqual(verdict.code, sc.CODE_BLOCKED)
+        self.assertEqual(calls, [])
+
+    def test_services_without_a_region_rule_never_ask(self) -> None:
+        calls: list[str] = []
+
+        def geo(_h, _p, rule, cancelled):
+            calls.append(rule.host)
+            return sc.GeoRun(rule.host)
+
+        verdict = sc.check_service("127.0.0.1", 1, YOUTUBE, probe=self._open, geo_probe=geo)
+
+        self.assertEqual(verdict.code, sc.CODE_OK)
+        self.assertEqual(calls, [])
+
+    def test_summary_marks_a_region_block_like_a_blocked_service(self) -> None:
+        verdicts = {"youtube": sc.ServiceVerdict("youtube", sc.CODE_OK), "gemini": {"code": "region"}}
+
+        self.assertEqual(sc.summary_text(verdicts), "✓ YouTube  ✗ Gemini")
+
+
 class _Response:
     def __init__(self, will_close: bool = False) -> None:
         self.will_close = will_close
@@ -149,7 +314,10 @@ class CheckAllTests(unittest.TestCase):
         def probe(_h, _p, host, path, cancelled):
             return _run(host, 80, 90, 85, 88) if host != "gateway.discord.gg" else _run(host, failed=True, reason="timeout")
 
-        verdicts = sc.check_all("127.0.0.1", 1, probe=probe)
+        def no_geo(_h, _p, rule, cancelled):
+            return sc.GeoRun(rule.host, status=403)
+
+        verdicts = sc.check_all("127.0.0.1", 1, probe=probe, geo_probe=no_geo)
 
         self.assertEqual(set(verdicts), {spec.key for spec in sc.SERVICES})
         self.assertEqual(verdicts["youtube"].code, sc.CODE_OK)
