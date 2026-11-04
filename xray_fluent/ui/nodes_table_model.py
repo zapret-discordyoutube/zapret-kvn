@@ -126,6 +126,19 @@ def _format_time(value: str | None) -> str:
         return value
 
 
+def _last_ping_time(node: Node) -> str:
+    """Время последнего замера пинга по местным часам («04.11 14:32»); пусто, если замеров не было."""
+    if not node.ping_history:
+        return ""
+    try:
+        stamp = datetime.fromisoformat(str(node.ping_history[-1][0]).replace("Z", "+00:00"))
+    except (ValueError, IndexError, TypeError):
+        return ""
+    if stamp.tzinfo is not None:
+        stamp = stamp.astimezone()
+    return stamp.strftime("%d.%m %H:%M")
+
+
 def ping_status(node: Node) -> tuple[int, str | None]:
     """Статус, который рисуется на ячейке пинга (бывшая колонка «Статус»)."""
     if node.is_alive is None:
@@ -161,6 +174,23 @@ def latency_band(ping_ms: int | None) -> str | None:
 def latency_band_word(ping_ms: int | None) -> str | None:
     band = latency_band(ping_ms)
     return _BAND_WORDS[band] if band else None
+
+
+def fastest_node_id(nodes) -> str | None:
+    """Сервер с наименьшим пингом среди ответивших; ``None``, если таких нет.
+
+    Недоступные и «вероятно заблокированные» (пинг есть, скорости нет) не
+    годятся: быстрый пинг до сервера, который режет трафик, ничего не стоит.
+    """
+    best: Node | None = None
+    for node in nodes:
+        if node is None or node.ping_ms is None or node.is_alive is False:
+            continue
+        if ping_status(node)[0] == STATUS_DEGRADED:
+            continue
+        if best is None or node.ping_ms < best.ping_ms:
+            best = node
+    return best.id if best is not None else None
 
 
 class NodeRow:
@@ -589,13 +619,17 @@ class NodesTableModel(QAbstractTableModel):
             if node.id in self._busy_ping_ids:
                 return "Проверка пинга..."
             status, text = ping_status(node)
-            if text:
-                if node.ping_ms is None:
-                    return text
+            lines: list[str] = []
+            if node.ping_ms is not None:
                 word = latency_band_word(node.ping_ms) if status == STATUS_ALIVE else None
-                head = f"Пинг: {node.ping_ms} ms ({word})" if word else f"Пинг: {node.ping_ms} ms"
-                return f"{head}\n{text}"
-            return f"Пинг: {node.ping_ms} ms" if node.ping_ms is not None else None
+                lines.append(f"Пинг: {node.ping_ms} ms ({word})" if word else f"Пинг: {node.ping_ms} ms")
+            if text:
+                lines.append(text)
+            checked = _last_ping_time(node)
+            if lines and checked:
+                # Старый замер сразу виден: цвет и число без даты выглядят свежими.
+                lines.append(f"Проверено: {checked}")
+            return "\n".join(lines) or None
         if col == COL_SPEED and node.id in self._speed_progress:
             return f"Тест скорости: {self._speed_progress[node.id]}%"
         return None

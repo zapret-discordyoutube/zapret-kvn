@@ -6,11 +6,12 @@ from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QKeyEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView,
-    QVBoxLayout, QWidget,
+    QToolTip, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     ComboBox,
     BodyLabel,
+    CaptionLabel,
     PushButton,
     TransparentToggleToolButton,
     FluentIcon as FIF,
@@ -49,6 +50,7 @@ from .nodes_table_model import (
     NODE_ROW_HEIGHT,
     SORT_KEYS,
     NodesTableModel,
+    fastest_node_id,
 )
 from .privacy import HoldToRevealButton
 from .theme import on_accent_changed
@@ -122,6 +124,7 @@ class NodesPage(StackedSection):
         self._source_names: dict[str, str] = {}
         self._cached_sources: tuple[str, ...] = ()
         self._pending_ping_ids: set[str] = set()
+        self._ping_done = 0
         self._ping_batch_ids: set[str] = set()
         self._pending_speed_progress: dict[str, int] = {}
         self._speed_test_running = False
@@ -221,6 +224,15 @@ class NodesPage(StackedSection):
         self.stop_ping_btn.setToolTip("Остановить пинг")
         self.stop_ping_btn.setVisible(False)
         toolbar.addWidget(self.stop_ping_btn)
+
+        # Сколько серверов уже ответило в идущем раунде пинга.
+        self.ping_progress_label = CaptionLabel("", self)
+        self.ping_progress_label.setVisible(False)
+        toolbar.addWidget(self.ping_progress_label)
+
+        self.fastest_btn = TransparentToolButton(FIF.CONNECT, self)
+        self.fastest_btn.setToolTip("Подключиться к самому быстрому среди показанных (по пингу)")
+        toolbar.addWidget(self.fastest_btn)
 
 
         self.speed_test_btn = TransparentToolButton(FIF.SPEED_HIGH, self)
@@ -416,6 +428,7 @@ class NodesPage(StackedSection):
         self.speed_test_all_btn.clicked.connect(self._on_speed_test_all)
         self.stop_speed_test_btn.clicked.connect(self.cancel_speed_test_requested.emit)
         self.stop_ping_btn.clicked.connect(self.cancel_ping_requested.emit)
+        self.fastest_btn.clicked.connect(self._on_connect_fastest)
         self.delete_btn.clicked.connect(self._on_delete_selected)
         self.move_up_btn.clicked.connect(self._on_move_up)
         self.move_down_btn.clicked.connect(self._on_move_down)
@@ -510,6 +523,8 @@ class NodesPage(StackedSection):
         self._table_model.set_active_node_id(node_id)
 
     def update_ping(self, node_id: str, _ping_ms: int | None) -> None:
+        if node_id in self._pending_ping_ids:
+            self._ping_done += 1
         self._pending_ping_ids.discard(node_id)
         self._ping_batch_ids.add(node_id)
         if not self._ping_batch_timer.isActive():
@@ -631,6 +646,16 @@ class NodesPage(StackedSection):
         self._pending_ping_ids |= targets
         self._table_model.set_ping_busy_ids(self._pending_ping_ids)
         self.stop_ping_btn.setVisible(True)
+        self._refresh_ping_progress()
+
+    def _refresh_ping_progress(self) -> None:
+        """«Пинг: 12 из 80» пока идёт раунд; скрыто, когда ждать больше нечего."""
+        waiting = len(self._pending_ping_ids)
+        if not waiting:
+            self.ping_progress_label.setVisible(False)
+            return
+        self.ping_progress_label.setText(f"Пинг: {self._ping_done} из {self._ping_done + waiting}")
+        self.ping_progress_label.setVisible(True)
 
     def start_speed_activity(self) -> None:
         self._speed_progress_timer.stop()
@@ -658,9 +683,12 @@ class NodesPage(StackedSection):
         ids = self._ping_batch_ids
         self._ping_batch_ids = set()
         self._table_model.finish_ping_batch(ids)
+        self._refresh_ping_progress()
 
     def finish_ping_activity(self) -> None:
         self.stop_ping_btn.setVisible(False)
+        self.ping_progress_label.setVisible(False)
+        self._ping_done = 0
         self._ping_batch_timer.stop()
         self._flush_ping_batch()
         if not self._pending_ping_ids:
@@ -1090,6 +1118,19 @@ class NodesPage(StackedSection):
 
     def _on_ping_all(self) -> None:
         self.ping_requested.emit(set())
+
+    def _on_connect_fastest(self) -> None:
+        """Подключиться к самому быстрому по пингу среди серверов, видимых после фильтра."""
+        model = self._table_model
+        best = fastest_node_id(model.node(node_id) for node_id in model.visible_node_ids())
+        if best is None:
+            QToolTip.showText(
+                QCursor.pos(),
+                "Нет серверов с ответом на пинг: сначала проверьте пинг",
+                self.fastest_btn,
+            )
+            return
+        self._connect_node(best, SelectionSource.NODES_FASTEST)
 
     def _on_speed_test_selected(self) -> None:
         ids = self._selected_ids()

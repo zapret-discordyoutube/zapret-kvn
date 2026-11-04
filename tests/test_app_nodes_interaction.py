@@ -197,6 +197,61 @@ class NodesInteractionTests(unittest.TestCase):
         self.assertNotIn('Подключить к этому серверу', actions)
         self.assertEqual(switches, [])
 
+    def test_fastest_button_connects_lowest_ping_among_visible_rows(self):
+        self.nodes[0].ping_ms = 300  # раньше был самым быстрым (0 мс)
+        requests = []
+        self.connect(self.page.connect_node_requested, lambda node_id, source: requests.append((node_id, source)))
+
+        self.page.fastest_btn.click()
+
+        self.assertEqual(requests, [('1', SelectionSource.NODES_FASTEST)])
+
+    def test_fastest_button_ignores_rows_hidden_by_the_filter(self):
+        requests = []
+        self.connect(self.page.connect_node_requested, lambda node_id, source: requests.append((node_id, source)))
+        self.page.search_edit.setText('Server 5')
+        self.page._apply_search()
+        self.assertEqual(self.model.visible_node_ids(), ['5'])
+
+        self.page.fastest_btn.click()
+
+        self.assertEqual(requests, [('5', SelectionSource.NODES_FASTEST)])
+
+    def test_fastest_button_without_any_ping_connects_nothing_and_explains(self):
+        for node in self.nodes:
+            node.ping_ms = None
+        requests = []
+        self.connect(self.page.connect_node_requested, lambda node_id, source: requests.append(node_id))
+
+        with patch('xray_fluent.ui.nodes_page.QToolTip.showText') as tip:
+            self.page.fastest_btn.click()
+
+        self.assertEqual(requests, [])
+        tip.assert_called_once()
+        self.assertIn('сначала проверьте пинг', tip.call_args.args[1])
+
+    def test_ping_progress_counts_answers_and_hides_when_the_round_ends(self):
+        label = self.page.ping_progress_label
+        self.assertFalse(label.isVisibleTo(self.page))
+
+        self.page.start_ping_activity({'1', '2', '3'})
+        self.assertTrue(label.isVisibleTo(self.page))
+        self.assertEqual(label.text(), 'Пинг: 0 из 3')
+
+        self.page.update_ping('1', 10)
+        self.page._flush_ping_batch()
+        self.assertEqual(label.text(), 'Пинг: 1 из 3')
+
+        # Новый запрос вливается в идущий раунд: всего становится больше.
+        self.page.start_ping_activity({'4'})
+        self.assertEqual(label.text(), 'Пинг: 1 из 4')
+
+        self.page.finish_ping_activity()
+        self.assertFalse(label.isVisibleTo(self.page))
+        self.page.start_ping_activity({'2'})
+        self.assertEqual(label.text(), 'Пинг: 0 из 1')
+        self.page.finish_ping_activity()
+
     def test_right_click_on_other_row_only_selects_and_menu_connects(self):
         self.click('1')
         switches = []

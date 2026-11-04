@@ -28,6 +28,7 @@ from xray_fluent.ui.nodes_table_model import (
     PING_BUSY_ROLE,
     SPEED_PROGRESS_ROLE,
     NodesTableModel,
+    fastest_node_id,
     latency_band,
     latency_band_word,
 )
@@ -457,6 +458,57 @@ class NodesTableModelTests(unittest.TestCase):
         tip = self.model.index(0, COL_PING).data(Qt.ItemDataRole.ToolTipRole)
         self.assertIn("700 ms (медленно)", tip)
         self.assertIn("Сервер работает", tip)
+
+    def test_ping_tooltip_shows_when_the_last_measurement_was_taken(self) -> None:
+        node = Node(
+            id="t",
+            name="T",
+            ping_ms=80,
+            speed_mbps=5.0,
+            is_alive=True,
+            ping_history=[("2026-01-01T10:00:00+00:00", 90), ("2026-11-04T12:30:00+00:00", 80)],
+        )
+        self.model.set_nodes([node])
+        tip = self.model.index(0, COL_PING).data(Qt.ItemDataRole.ToolTipRole)
+        self.assertRegex(tip, r"Проверено: \d\d\.\d\d \d\d:\d\d")
+        self.assertTrue(tip.index("Пинг: 80 ms") < tip.index("Проверено:"))
+
+    def test_ping_tooltip_has_no_time_line_without_history_or_with_bad_stamp(self) -> None:
+        plain = Node(id="p", name="P", ping_ms=80, speed_mbps=5.0, is_alive=True)
+        broken = Node(id="b", name="B", ping_ms=80, speed_mbps=5.0, is_alive=True, ping_history=[("not-a-date", 80)])
+        self.model.set_nodes([plain, broken])
+        for row in range(2):
+            tip = self.model.index(row, COL_PING).data(Qt.ItemDataRole.ToolTipRole)
+            self.assertNotIn("Проверено", tip)
+            self.assertIn("Пинг: 80 ms", tip)
+
+    def test_fastest_node_is_lowest_ping_among_answering_servers(self) -> None:
+        nodes = [
+            Node(id="slow", name="Slow", ping_ms=300, speed_mbps=10.0, is_alive=True),
+            Node(id="fast", name="Fast", ping_ms=40, speed_mbps=10.0, is_alive=True),
+            Node(id="mid", name="Mid", ping_ms=120, is_alive=None),
+        ]
+        self.assertEqual(fastest_node_id(nodes), "fast")
+
+    def test_fastest_node_skips_dead_blocked_and_unmeasured_servers(self) -> None:
+        nodes = [
+            Node(id="dead", name="Dead", ping_ms=5, is_alive=False),
+            Node(
+                id="blocked",
+                name="Blocked",
+                ping_ms=8,
+                speed_mbps=None,
+                is_alive=True,
+                speed_history=[("2026-01-01T00:00:00+00:00", None)],
+            ),
+            Node(id="unmeasured", name="Unmeasured", ping_ms=None, is_alive=None),
+            Node(id="ok", name="Ok", ping_ms=200, speed_mbps=3.0, is_alive=True),
+        ]
+        self.assertEqual(fastest_node_id(nodes), "ok")
+
+    def test_fastest_node_is_none_without_candidates(self) -> None:
+        self.assertIsNone(fastest_node_id([]))
+        self.assertIsNone(fastest_node_id([None, Node(id="x", name="X", ping_ms=None)]))
 
     def test_dead_node_keeps_red_regardless_of_old_ping(self) -> None:
         node = Node(id="d", name="D", ping_ms=20, is_alive=False)

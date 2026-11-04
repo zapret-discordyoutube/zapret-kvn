@@ -28,6 +28,7 @@ class SelectionSource(Enum):
     NODES_DOUBLE_CLICK = ("nodes-double-click", "двойной клик в таблице серверов", True)
     NODES_ENTER = ("nodes-enter", "Enter в таблице серверов", True)
     NODES_MENU = ("nodes-menu", "меню таблицы серверов → «Подключить»", True)
+    NODES_FASTEST = ("nodes-fastest", "кнопка «К самому быстрому» над таблицей серверов", True)
     NODES_IMPORTED = ("nodes-imported", "импорт серверов: выбран первый новый", True)
     # Автоматика.
     AUTO_SWITCH = ("auto-switch", "авто-переключение: сервер недоступен", False)
