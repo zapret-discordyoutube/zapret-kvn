@@ -5,6 +5,8 @@ description: Preserve and edit Zapret KVN native raw JSON routing for sing-box a
 
 # Zapret KVN Native JSON Routing
 
+> Architecture basis (owner decision 2026-11-04, read it first): each protocol runs on its own complete native core and sing-box is only the gasket that owns TUN, routing, DNS and protected sockets. See the "Architecture basis" section of `/home/codex-pve/zapret-kvn/AGENTS.md`.
+
 ## Keep the architecture native
 
 - Treat the active raw sing-box or Xray JSON as the runtime routing and DNS source of truth.

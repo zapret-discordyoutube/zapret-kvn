@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, PlainTextEdit, PrimaryPushButton, PushButton, SearchLineEdit, SubtitleLabel
 from qfluentwidgets import FluentIcon as FIF
@@ -46,6 +47,10 @@ class LogsPage(QWidget):
         root.addWidget(BodyLabel("Логи работы", self))
         self.log_edit = PlainTextEdit(self)
         self.log_edit.setReadOnly(True)
+        # Моноширинный шрифт: столбцы времени и уровня в логах ядер выравниваются.
+        mono = QFont("Consolas", 10)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        self.log_edit.setFont(mono)
         self.log_edit.document().setMaximumBlockCount(2000)
         root.addWidget(self.log_edit, 1)
 

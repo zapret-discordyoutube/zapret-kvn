@@ -276,6 +276,72 @@ class DashboardEffectivePortsWiringTest(unittest.TestCase):
         dashboard.set_proxy_ports.assert_called_once_with(1390, 1391)
 
 
+class TrayConnectionToggleTest(unittest.TestCase):
+    """Меню трея «Подключение»: те же настройки, что у плиток и переключателя панели."""
+
+    @staticmethod
+    def _window(tun_mode: bool, system_proxy: bool) -> SimpleNamespace:
+        settings = SimpleNamespace(tun_mode=tun_mode, enable_system_proxy=system_proxy)
+        return SimpleNamespace(
+            controller=SimpleNamespace(state=SimpleNamespace(settings=settings)),
+            tray_conn_proxy=Mock(),
+            tray_conn_tun=Mock(),
+            tray_system_proxy_action=Mock(),
+            _on_dashboard_tun_toggled=Mock(),
+            _on_dashboard_proxy_toggled=Mock(),
+        )
+
+    def test_sync_in_tun_mode_disables_system_proxy_item(self) -> None:
+        window = self._window(tun_mode=True, system_proxy=True)
+
+        MainWindow._sync_tray_connection(window, window.controller.state.settings)
+
+        window.tray_conn_tun.setChecked.assert_called_once_with(True)
+        window.tray_conn_proxy.setChecked.assert_called_once_with(False)
+        window.tray_system_proxy_action.setEnabled.assert_called_once_with(False)
+        window.tray_system_proxy_action.setChecked.assert_called_once_with(False)
+
+    def test_sync_in_proxy_mode_mirrors_system_proxy_flag(self) -> None:
+        window = self._window(tun_mode=False, system_proxy=True)
+
+        MainWindow._sync_tray_connection(window, window.controller.state.settings)
+
+        window.tray_conn_tun.setChecked.assert_called_once_with(False)
+        window.tray_conn_proxy.setChecked.assert_called_once_with(True)
+        window.tray_system_proxy_action.setEnabled.assert_called_once_with(True)
+        window.tray_system_proxy_action.setChecked.assert_called_once_with(True)
+
+    def test_sync_without_tray_does_nothing(self) -> None:
+        window = SimpleNamespace(tray_conn_tun=None)
+
+        MainWindow._sync_tray_connection(window, SimpleNamespace(tun_mode=True, enable_system_proxy=False))
+
+    def test_tun_choice_is_forwarded_only_when_it_changes_the_mode(self) -> None:
+        window = self._window(tun_mode=False, system_proxy=False)
+
+        MainWindow._set_tun_from_tray(window, False)
+        window._on_dashboard_tun_toggled.assert_not_called()
+
+        MainWindow._set_tun_from_tray(window, True)
+        window._on_dashboard_tun_toggled.assert_called_once_with(True)
+
+    def test_system_proxy_choice_is_ignored_in_tun_mode(self) -> None:
+        window = self._window(tun_mode=True, system_proxy=False)
+
+        MainWindow._set_system_proxy_from_tray(window, True)
+
+        window._on_dashboard_proxy_toggled.assert_not_called()
+
+    def test_system_proxy_choice_is_forwarded_when_it_changes(self) -> None:
+        window = self._window(tun_mode=False, system_proxy=False)
+
+        MainWindow._set_system_proxy_from_tray(window, False)
+        window._on_dashboard_proxy_toggled.assert_not_called()
+
+        MainWindow._set_system_proxy_from_tray(window, True)
+        window._on_dashboard_proxy_toggled.assert_called_once_with(True)
+
+
 class DashboardActiveModeWiringTest(unittest.TestCase):
     """Плитки сверяют выбор с режимом сессии: он приходит раньше «занято»."""
 

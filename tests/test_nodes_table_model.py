@@ -7,6 +7,9 @@ from xray_fluent.profiles.models import Node
 from xray_fluent.ui.theme import error_color, positive_color, success_color, warning_color
 from xray_fluent.ui.nodes_table_model import (
     ACTIVE_ROLE,
+    BAND_FAST,
+    BAND_NORMAL,
+    BAND_SLOW,
     COL_ADDRESS,
     COL_GROUP,
     COL_LAST_USED,
@@ -25,6 +28,8 @@ from xray_fluent.ui.nodes_table_model import (
     PING_BUSY_ROLE,
     SPEED_PROGRESS_ROLE,
     NodesTableModel,
+    latency_band,
+    latency_band_word,
 )
 
 
@@ -423,6 +428,41 @@ class NodesTableModelTests(unittest.TestCase):
         self.assertIsNotNone(brush)
         self.assertEqual(brush.color().name(), warning_color().name())
         self.assertIn("вероятно заблокирован", index.data(Qt.ItemDataRole.ToolTipRole))
+
+    def test_latency_band_thresholds_match_android(self) -> None:
+        # Пороги те же, что в android core/ui-model LatencyBand.kt.
+        self.assertIsNone(latency_band(None))
+        self.assertEqual(latency_band(0), BAND_FAST)
+        self.assertEqual(latency_band(149), BAND_FAST)
+        self.assertEqual(latency_band(150), BAND_NORMAL)
+        self.assertEqual(latency_band(399), BAND_NORMAL)
+        self.assertEqual(latency_band(400), BAND_SLOW)
+        self.assertEqual(latency_band_word(100), "быстро")
+        self.assertEqual(latency_band_word(200), "нормально")
+        self.assertEqual(latency_band_word(900), "медленно")
+
+    def test_ping_cell_color_follows_latency_band_for_alive_node(self) -> None:
+        fast = Node(id="f", name="F", ping_ms=80, speed_mbps=10.0, is_alive=True)
+        normal = Node(id="n", name="N", ping_ms=250, speed_mbps=10.0, is_alive=True)
+        slow = Node(id="s", name="S", ping_ms=700, speed_mbps=10.0, is_alive=True)
+        self.model.set_nodes([fast, normal, slow])
+        brushes = [self.model.index(row, COL_PING).data(Qt.ItemDataRole.ForegroundRole) for row in range(3)]
+        self.assertEqual(brushes[0].color().name(), positive_color().name())
+        self.assertIsNone(brushes[1])  # обычная задержка — цвет темы
+        self.assertEqual(brushes[2].color().name(), warning_color().name())
+
+    def test_ping_tooltip_names_latency_band_for_alive_node(self) -> None:
+        slow = Node(id="s", name="S", ping_ms=700, speed_mbps=10.0, is_alive=True)
+        self.model.set_nodes([slow])
+        tip = self.model.index(0, COL_PING).data(Qt.ItemDataRole.ToolTipRole)
+        self.assertIn("700 ms (медленно)", tip)
+        self.assertIn("Сервер работает", tip)
+
+    def test_dead_node_keeps_red_regardless_of_old_ping(self) -> None:
+        node = Node(id="d", name="D", ping_ms=20, is_alive=False)
+        self.model.set_nodes([node])
+        brush = self.model.index(0, COL_PING).data(Qt.ItemDataRole.ForegroundRole)
+        self.assertEqual(brush.color().name(), error_color().name())
 
     # ── Existing activity behaviour ──
 

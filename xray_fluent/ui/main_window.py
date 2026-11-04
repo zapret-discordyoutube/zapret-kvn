@@ -160,6 +160,11 @@ class MainWindow(FluentWindow):
         self.tray_mode_global: QAction | None = None
         self.tray_mode_rule: QAction | None = None
         self.tray_mode_direct: QAction | None = None
+        self.tray_conn_menu: QMenu | None = None
+        self.tray_conn_group: QActionGroup | None = None
+        self.tray_conn_proxy: QAction | None = None
+        self.tray_conn_tun: QAction | None = None
+        self.tray_system_proxy_action: QAction | None = None
 
         self._app_icon = QIcon(str(APP_ICON_PATH))
         self.setWindowTitle(APP_NAME)
@@ -451,15 +456,36 @@ class MainWindow(FluentWindow):
         self.tray_mode_menu.addAction(self.tray_mode_rule)
         self.tray_mode_menu.addAction(self.tray_mode_direct)
 
+        # Способ подключения — те же переключатели, что на панели: «Прокси» ↔
+        # «VPN (TUN)» и системный прокси Windows (в TUN его нет). Состояние
+        # берётся из настроек, без чтения реестра при открытии меню.
+        self.tray_conn_menu = QMenu("Подключение", menu)
+        self.tray_conn_group = QActionGroup(self)
+        self.tray_conn_group.setExclusive(True)
+        self.tray_conn_proxy = QAction("Прокси", self)
+        self.tray_conn_proxy.setCheckable(True)
+        self.tray_conn_tun = QAction("VPN (TUN)", self)
+        self.tray_conn_tun.setCheckable(True)
+        self.tray_system_proxy_action = QAction("Системный прокси Windows", self)
+        self.tray_system_proxy_action.setCheckable(True)
+        self.tray_conn_group.addAction(self.tray_conn_proxy)
+        self.tray_conn_group.addAction(self.tray_conn_tun)
+        self.tray_conn_menu.addAction(self.tray_conn_proxy)
+        self.tray_conn_menu.addAction(self.tray_conn_tun)
+        self.tray_conn_menu.addSeparator()
+        self.tray_conn_menu.addAction(self.tray_system_proxy_action)
+
         menu.addAction(self.tray_show_action)
         menu.addAction(self.tray_connect_action)
         menu.addAction(self.tray_next_action)
         menu.addMenu(self.tray_mode_menu)
+        menu.addMenu(self.tray_conn_menu)
         menu.addSeparator()
         menu.addAction(self.tray_quit_action)
 
         self.tray.setContextMenu(menu)
         self.tray.show()
+        self._sync_tray_connection(self.controller.state.settings)
 
         self.tray.activated.connect(self._on_tray_activated)
         self.tray_show_action.triggered.connect(self._toggle_window_visible)
@@ -471,6 +497,31 @@ class MainWindow(FluentWindow):
         self.tray_mode_global.triggered.connect(lambda: self._set_mode_from_tray("global"))
         self.tray_mode_rule.triggered.connect(lambda: self._set_mode_from_tray("rule"))
         self.tray_mode_direct.triggered.connect(lambda: self._set_mode_from_tray("direct"))
+        self.tray_conn_proxy.triggered.connect(lambda: self._set_tun_from_tray(False))
+        self.tray_conn_tun.triggered.connect(lambda: self._set_tun_from_tray(True))
+        self.tray_system_proxy_action.triggered.connect(self._set_system_proxy_from_tray)
+
+    def _sync_tray_connection(self, settings: AppSettings) -> None:
+        """Отражает в меню трея настройки «Прокси/TUN» и системного прокси."""
+        if self.tray_conn_tun is None:
+            return
+        tun = bool(settings.tun_mode)
+        self.tray_conn_tun.setChecked(tun)
+        self.tray_conn_proxy.setChecked(not tun)
+        # В VPN (TUN) локальных прокси-входов нет, системный прокси там выключен.
+        self.tray_system_proxy_action.setEnabled(not tun)
+        self.tray_system_proxy_action.setChecked(bool(settings.enable_system_proxy) and not tun)
+
+    def _set_tun_from_tray(self, tun: bool) -> None:
+        if bool(self.controller.state.settings.tun_mode) == tun:
+            return
+        self._on_dashboard_tun_toggled(tun)
+
+    def _set_system_proxy_from_tray(self, checked: bool) -> None:
+        settings = self.controller.state.settings
+        if settings.tun_mode or bool(settings.enable_system_proxy) == checked:
+            return
+        self._on_dashboard_proxy_toggled(checked)
 
     def _connect_signals(self) -> None:
         self.dashboard_page.logs_requested.connect(lambda: self.switchTo(self.logs_page))
@@ -905,6 +956,7 @@ class MainWindow(FluentWindow):
             self.tray_mode_direct.setChecked(routing.mode == "direct")
 
     def _on_settings_changed(self, settings: AppSettings) -> None:
+        self._sync_tray_connection(settings)
         self.settings_page.set_values(settings, self.controller.state.security)
         self.zapret_page.set_target_settings(settings.zapret_target)
         self.settings_page.set_encryption_active(self.controller.is_data_encrypted())

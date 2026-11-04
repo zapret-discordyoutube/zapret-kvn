@@ -139,6 +139,30 @@ def ping_status(node: Node) -> tuple[int, str | None]:
     return STATUS_DEAD, "Сервер недоступен"
 
 
+# Пороги задержки те же, что на Android (core/ui-model LatencyBand.kt): замер
+# идёт через сам сервер, именно его чувствует пользователь.
+LATENCY_FAST_BELOW_MS = 150
+LATENCY_NORMAL_BELOW_MS = 400
+BAND_FAST, BAND_NORMAL, BAND_SLOW = "fast", "normal", "slow"
+_BAND_WORDS = {BAND_FAST: "быстро", BAND_NORMAL: "нормально", BAND_SLOW: "медленно"}
+
+
+def latency_band(ping_ms: int | None) -> str | None:
+    """Полоса задержки для живого сервера; ``None`` — замера нет."""
+    if ping_ms is None:
+        return None
+    if ping_ms < LATENCY_FAST_BELOW_MS:
+        return BAND_FAST
+    if ping_ms < LATENCY_NORMAL_BELOW_MS:
+        return BAND_NORMAL
+    return BAND_SLOW
+
+
+def latency_band_word(ping_ms: int | None) -> str | None:
+    band = latency_band(ping_ms)
+    return _BAND_WORDS[band] if band else None
+
+
 class NodeRow:
     """Строка-сервер. ``texts``/``ping_status`` считаются лениво."""
 
@@ -535,6 +559,13 @@ class NodesTableModel(QAbstractTableModel):
             return text_muted_color() if row.node.is_alive is False else None
         status = self.status(row)
         if status == STATUS_ALIVE:
+            # Живой сервер красится по задержке: быстрый — зелёный, обычный —
+            # цвет темы, медленный — предупреждение (как слова на Android).
+            band = latency_band(row.node.ping_ms)
+            if band == BAND_SLOW:
+                return warning_color()
+            if band == BAND_NORMAL:
+                return None
             return positive_color()
         if status == STATUS_DEGRADED:
             return warning_color()
@@ -557,9 +588,13 @@ class NodesTableModel(QAbstractTableModel):
         if col == COL_PING:
             if node.id in self._busy_ping_ids:
                 return "Проверка пинга..."
-            _, text = ping_status(node)
+            status, text = ping_status(node)
             if text:
-                return f"Пинг: {node.ping_ms} ms\n{text}" if node.ping_ms is not None else text
+                if node.ping_ms is None:
+                    return text
+                word = latency_band_word(node.ping_ms) if status == STATUS_ALIVE else None
+                head = f"Пинг: {node.ping_ms} ms ({word})" if word else f"Пинг: {node.ping_ms} ms"
+                return f"{head}\n{text}"
             return f"Пинг: {node.ping_ms} ms" if node.ping_ms is not None else None
         if col == COL_SPEED and node.id in self._speed_progress:
             return f"Тест скорости: {self._speed_progress[node.id]}%"
