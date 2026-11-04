@@ -177,7 +177,7 @@ class TunnelRetryTest(_RetryCase):
             self.subscription.last_error,
             r"^Не удалось загрузить подписку\. Виноват: блокировка сети или провайдера \(вероятно\)\. "
             r"Где оборвалось: напрямую TCP есть, но рукопожатие TLS повисло.*"
-            r"Через VPN не пробовали: он не подключён\.$",
+            r"Через VPN не пробовали: он не подключён\. Итог самой загрузки: напрямую — сервер не ответил за \d+ с\.$",
         )
         self.assertTrue(self.subscription.retry_via_tunnel)
         self.assertIsNotNone(self.subscription.backoff_until)

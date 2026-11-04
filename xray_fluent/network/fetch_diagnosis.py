@@ -28,7 +28,10 @@ from ..constants import PROXY_HOST
 
 # Та же цель, которой приложение проверяет задержку и которой Chrome проверяет сеть.
 CONTROL_HOST = "www.gstatic.com"
-PROBE_TIMEOUT = 4.0
+PROBE_TIMEOUT = 6.0
+# После рукопожатия стадии «настоящий запрос» всегда достаётся хотя бы столько времени.
+_HTTP_MIN_BUDGET = 2.5
+_PROBE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZapretKVN-check"
 
 CULPRIT_SERVER = "server"      # бот или сервер подписки
 CULPRIT_REFUSED = "refused"    # сервер ответил отказом клиенту (бан приложения)
@@ -96,7 +99,7 @@ def redact_host(text: str, host: str) -> str:
 @dataclass(frozen=True, slots=True)
 class HostProbe:
     ok: bool
-    failed: str = ""   # "dns" | "tcp" | "tls" | "proxy" | "proxy_local"; пусто, если всё прошло
+    failed: str = ""   # "dns" | "tcp" | "tls" | "http" | "proxy" | "proxy_local"; пусто, если всё прошло
     how: str = ""      # "timeout" | "reset" | "refused" | "dns" | "cert" | "tls_error" | "error" | "status"
     ms: tuple[tuple[str, int], ...] = ()
     detail: str = ""   # технический текст для журнала, без адреса
@@ -116,18 +119,51 @@ def _how(exc: BaseException) -> str:
         return "refused"
     if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, ssl.SSLEOFError)):
         return "reset"
+    if "timed out" in str(exc):
+        return "timeout"
     if isinstance(exc, ssl.SSLError):
         return "tls_error"
     return "error"
 
 
-def _tls(sock: socket.socket, host: str, deadline: float) -> None:
+def _tls(sock: socket.socket, host: str, deadline: float) -> ssl.SSLSocket:
+    """Рукопожатие TLS; возвращает открытое соединение для стадии «настоящий запрос»."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("общий срок пробы вышел")
     sock.settimeout(remaining)
     context = ssl.create_default_context()
-    context.wrap_socket(sock, server_hostname=host).close()
+    return context.wrap_socket(sock, server_hostname=host)
+
+
+def _http_path(host: str) -> str:
+    # Контрольный узел отвечает на generate_204 мгновенно; у нашего сервера берётся корень сайта:
+    # путь и токен ссылки подписки в пробу не попадают никогда.
+    return "/generate_204" if host == CONTROL_HOST else "/"
+
+
+def _http_stage(sock: ssl.SSLSocket, host: str, deadline: float) -> None:
+    """Один настоящий запрос по готовому соединению: отвечает ли сервер на HTTP, а не только на TLS.
+
+    Любой ответ (хоть 404) значит «да». Молчание или обрыв после рукопожатия — так ведут себя
+    серверы, которые не отвечают на запросы с чужого адреса или с этой подписью клиента.
+    """
+    sock.settimeout(max(deadline - time.monotonic(), _HTTP_MIN_BUDGET))
+    request = (
+        f"GET {_http_path(host)} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {_PROBE_USER_AGENT}\r\n"
+        "Accept: */*\r\nConnection: close\r\n\r\n"
+    )
+    sock.sendall(request.encode("ascii", "ignore"))
+    head = b""
+    while len(head) < 12:
+        chunk = sock.recv(256)
+        if not chunk:
+            break
+        head += chunk
+    if not head:
+        raise ConnectionResetError("соединение закрыто без ответа")
+    if not head.startswith(b"HTTP/"):
+        raise OSError("ответ не похож на HTTP")
 
 
 def _ms(started: float) -> int:
@@ -170,11 +206,26 @@ def probe_direct(host: str, port: int = 443, timeout: float = PROBE_TIMEOUT) -> 
 
     started = time.monotonic()
     try:
-        _tls(sock, host, deadline)
+        secure = _tls(sock, host, deadline)
     except (OSError, ssl.SSLError) as exc:
         sock.close()
         return HostProbe(False, "tls", _how(exc), tuple(timings), type(exc).__name__)
     timings.append(("tls", _ms(started)))
+    return _http_probe(secure, host, deadline, timings)
+
+
+def _http_probe(secure: ssl.SSLSocket, host: str, deadline: float, timings: list[tuple[str, int]]) -> HostProbe:
+    started = time.monotonic()
+    try:
+        _http_stage(secure, host, deadline)
+    except (OSError, ssl.SSLError) as exc:
+        return HostProbe(False, "http", _how(exc), tuple(timings), type(exc).__name__)
+    finally:
+        try:
+            secure.close()
+        except OSError:
+            pass
+    timings.append(("http", _ms(started)))
     return HostProbe(True, "", "", tuple(timings))
 
 
@@ -212,12 +263,12 @@ def probe_via_proxy(
 
     started = time.monotonic()
     try:
-        _tls(sock, host, deadline)
+        secure = _tls(sock, host, deadline)
     except (OSError, ssl.SSLError) as exc:
         sock.close()
         return HostProbe(False, "tls", _how(exc), tuple(timings), type(exc).__name__)
     timings.append(("tls", _ms(started)))
-    return HostProbe(True, "", "", tuple(timings))
+    return _http_probe(secure, host, deadline, timings)
 
 
 # --- улики и вердикт ---------------------------------------------------------
@@ -303,6 +354,10 @@ def describe_failure(probe: HostProbe, route: str) -> str:
         if how == "timeout":
             return f"{route} TCP есть, но рукопожатие TLS повисло — типичная блокировка по имени сервера (SNI)"
         return f"{route} TCP есть, но защищённое соединение (TLS) не установилось"
+    if stage == "http":
+        if how == "timeout":
+            return f"{route} соединение и TLS проходят, но на запрос сайта ответа нет: сервер молчит или не принимает запросы с этого адреса"
+        return f"{route} соединение и TLS проходят, но после запроса сайта соединение оборвалось"
     if stage == "proxy_local":
         return f"{route} приложение не достучалось до локального прокси VPN"
     if stage == "proxy":
@@ -383,6 +438,14 @@ def judge(ev: Evidence) -> Diagnosis:
             return done(
                 CULPRIT_BLOCK, True, where,
                 "Через VPN сервер подписки открывается: обновите подписку при включённом VPN.",
+            )
+        if v_target is not None and v_target.failed == "http":
+            return done(
+                CULPRIT_SERVER, True,
+                where + "; " + describe_failure(v_target, "через VPN"),
+                "Напрямую путь закрыт, а через VPN соединение с сервером есть, но на запрос он не отвечает: "
+                "возможно, сервер подписки не пускает адрес этого VPN-сервера. Подключитесь к другому серверу и обновите "
+                "подписку или возьмите ссылку подписки заново.",
             )
         if v_target is not None:
             return done(

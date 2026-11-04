@@ -97,6 +97,19 @@ class StateWriter(QObject):
                     self._cond.notify_all()
 
 
+def _route_outcomes(failures) -> str:
+    """Что на самом деле вышло при загрузке по каждому маршруту, простыми словами.
+
+    Проба проверяет рукопожатие и один запрос к корню сайта, но сама загрузка идёт другим
+    клиентом и с другим запросом. Если их итоги расходятся, человек должен видеть оба, а не
+    только вывод пробы.
+    """
+
+    names = {False: "напрямую", True: "через VPN"}
+    parts = [f"{names.get(bool(item.via_proxy), '?')} — {item.reason}" for item in failures if getattr(item, "reason", "")]
+    return f" Итог самой загрузки: {'; '.join(parts)}." if parts else ""
+
+
 class SubscriptionUpdateWorker(QThread):
     """Fetch and parse a subscription without mutating application state."""
 
@@ -181,7 +194,7 @@ class SubscriptionUpdateWorker(QThread):
             )
             for line in diagnosis.log_lines:
                 _LOG.info(line)
-            return diagnosis.message()
+            return diagnosis.message() + _route_outcomes(getattr(exc, "failures", ()))
         except Exception as error:  # noqa: BLE001 — диагностика не должна ломать отчёт об отказе
             _LOG.warning("diagnosis failed: %s: %s", type(error).__name__, error)
             return fallback

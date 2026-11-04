@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import threading
 import unittest
+from types import SimpleNamespace
 
 from xray_fluent.network import fetch_diagnosis as fd
 from xray_fluent.network.fetch_diagnosis import (
@@ -214,3 +215,126 @@ class RealProbeStageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HttpStageTests(unittest.TestCase):
+    """Стадия «настоящий запрос»: TLS проходит, а отвечает ли сервер на HTTP."""
+
+    def run_stage(self, server_action):
+        left, right = socket.socketpair()
+        try:
+            threading.Thread(target=server_action, args=(right,), daemon=True).start()
+            fd._http_stage(left, "sub.example.com", fd.time.monotonic() + 0.3)
+        finally:
+            left.close()
+            right.close()
+
+    def setUp(self) -> None:
+        self._budget = fd._HTTP_MIN_BUDGET
+        fd._HTTP_MIN_BUDGET = 0.3
+
+    def tearDown(self) -> None:
+        fd._HTTP_MIN_BUDGET = self._budget
+
+    def test_any_http_answer_counts_even_a_404(self) -> None:
+        def answer(conn):
+            conn.recv(512)
+            conn.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+
+        self.run_stage(answer)  # не бросает
+
+    def test_silence_after_the_request_is_a_timeout(self) -> None:
+        def silent(conn):
+            conn.recv(512)
+            threading.Event().wait(1.0)
+
+        with self.assertRaises(TimeoutError):
+            self.run_stage(silent)
+
+    def test_close_without_an_answer_is_a_reset(self) -> None:
+        def close(conn):
+            conn.recv(512)
+            conn.close()
+
+        with self.assertRaises(ConnectionResetError):
+            self.run_stage(close)
+
+    def test_non_http_bytes_are_refused(self) -> None:
+        def garbage(conn):
+            conn.recv(512)
+            conn.sendall(b"\x16\x03\x01 not http at all")
+
+        with self.assertRaises(OSError):
+            self.run_stage(garbage)
+
+    def test_request_never_carries_a_subscription_path(self) -> None:
+        seen: list[bytes] = []
+
+        def answer(conn):
+            seen.append(conn.recv(1024))
+            conn.sendall(b"HTTP/1.1 204 No Content\r\n\r\n")
+
+        self.run_stage(answer)
+        request = seen[0].decode()
+        self.assertTrue(request.startswith("GET / HTTP/1.1\r\nHost: sub.example.com\r\n"), request)
+        self.assertEqual(fd._http_path(fd.CONTROL_HOST), "/generate_204")
+
+
+class HttpProbeTests(unittest.TestCase):
+    def test_a_silent_http_stage_becomes_a_probe_failure_on_stage_http(self) -> None:
+        class Secure:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        secure = Secure()
+
+        def fake_stage(sock, host, deadline):
+            raise TimeoutError("молчит")
+
+        original = fd._http_stage
+        fd._http_stage = fake_stage
+        try:
+            probe = fd._http_probe(secure, "sub.example.com", fd.time.monotonic() + 1, [("dns", 5), ("tcp", 8), ("tls", 40)])
+        finally:
+            fd._http_stage = original
+        self.assertEqual((probe.ok, probe.failed, probe.how), (False, "http", "timeout"))
+        self.assertTrue(secure.closed)
+        self.assertEqual([name for name, _ in probe.ms], ["dns", "tcp", "tls"])
+
+
+class VpnAcceptsTlsButServerIsSilentTests(unittest.TestCase):
+    def test_the_verdict_does_not_claim_the_vpn_route_opens_when_it_does_not(self) -> None:
+        ok = fd.HostProbe(True)
+        direct_target = fd.HostProbe(False, "tcp", "timeout")
+        vpn_target = fd.HostProbe(False, "http", "timeout")
+        d = fd.judge(fd.Evidence("sub.example.com", 443, (direct_target, ok), (vpn_target, ok)))
+        self.assertEqual(d.culprit, fd.CULPRIT_SERVER)
+        self.assertTrue(d.certain)
+        self.assertNotIn("открывается: обновите подписку при включённом VPN", d.advice)
+        self.assertIn("на запрос он не отвечает", d.advice)
+        self.assertIn("через VPN соединение и TLS проходят", d.where)
+        self.assertIn("другому серверу", d.advice)
+
+    def test_describe_failure_words_for_the_http_stage(self) -> None:
+        silent = fd.describe_failure(fd.HostProbe(False, "http", "timeout"), "через VPN")
+        reset = fd.describe_failure(fd.HostProbe(False, "http", "reset"), "через VPN")
+        self.assertIn("на запрос сайта ответа нет", silent)
+        self.assertIn("оборвалось", reset)
+
+
+class RouteOutcomesTests(unittest.TestCase):
+    def test_real_download_results_are_listed_per_route(self) -> None:
+        from xray_fluent.network.background_workers import _route_outcomes
+
+        failures = (
+            SimpleNamespace(via_proxy=False, reason="сервер не ответил за 15 с"),
+            SimpleNamespace(via_proxy=True, reason="соединение оборвалось — похоже на блокировку"),
+        )
+        text = _route_outcomes(failures)
+        self.assertEqual(
+            text,
+            " Итог самой загрузки: напрямую — сервер не ответил за 15 с; через VPN — соединение оборвалось — похоже на блокировку.",
+        )
+        self.assertEqual(_route_outcomes(()), "")
