@@ -255,6 +255,13 @@ from ..importer.subscription_http import (
 from ..importer.subscription_parser import validate_filter_patterns
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
+from ..network.physical_route import (
+    has_network,
+    is_physical_fingerprint,
+    physical_fingerprint,
+    read_route_table,
+    tun_networks,
+)
 from ..network.ping_service import PingService
 from ..platform.windows.proxy_manager import PROXY_EXECUTOR, ProxyManager, SystemProxyState
 from ..platform.windows.security import create_password_hash, get_idle_seconds, verify_password
@@ -411,7 +418,7 @@ class AppController(QObject):
         self.zapret = ZapretManager(self)
         self.bypass = ServerBypass(self)
         self.proxy = ProxyManager()
-        self.network_monitor = NetworkMonitor(parent=self)
+        self.network_monitor = NetworkMonitor(parent=self, provider=self._network_fingerprint)
 
         self.state = AppState()
         self._node_lookup_source_id = 0
@@ -4408,11 +4415,28 @@ class AppController(QObject):
         addresses = ((sidecar.config or {}).get("endpoint") or {}).get("address") or []
         return {str(item).split("/", 1)[0].strip() for item in addresses if str(item).strip()}
 
+    def _network_fingerprint(self) -> str:
+        """Отпечаток сети для монитора; считается в его потоке, только читает состояние.
+
+        В TUN-сессии путь в интернет всегда ведёт через наш адаптер, и обычный отпечаток не
+        замечает смену Wi-Fi или кабеля. Поэтому там смотрим физический маршрут по умолчанию
+        без строк нашего TUN (``network/physical_route.py``). Не удалось прочитать таблицу
+        или TUN не найден — обычный отпечаток: монитор не принимает смену вида за смену сети.
+        """
+        plan = getattr(self, "_active_singbox_plan", None)
+        if plan is not None and self.active_tun_mode():
+            networks = tun_networks(getattr(plan, "singbox_config", None))
+            if networks:
+                text = read_route_table()
+                if text:
+                    return physical_fingerprint(text, networks)
+        return NetworkMonitor._fingerprint()
+
     def _on_network_changed(self, old: str, new: str) -> None:
         self._log(f"[network] changed: {old} -> {new}")
         if (
             getattr(self, "_retry_connect_on_network", False)
-            and new != "0.0.0.0"
+            and has_network(new)
             and not self.connected
             and not self._desired_connected
             and not self._transition_active
@@ -4424,9 +4448,11 @@ class AppController(QObject):
             self._desired_connected = True
             self._request_transition("network returned")
             return
-        # TUN mode creates a virtual adapter which triggers network change —
-        # reconnecting would kill the TUN and cause an infinite loop
-        if self.state.settings.tun_mode:
+        # With the plain fingerprint, TUN mode creates a virtual adapter which triggers a
+        # network change — reconnecting would kill the TUN and cause an infinite loop.
+        # The physical fingerprint leaves our own TUN out, so a change in it is a real
+        # change of the uplink and is handled like in proxy mode.
+        if self.state.settings.tun_mode and not (is_physical_fingerprint(new) or is_physical_fingerprint(old)):
             self._log("[network] ignoring change in TUN mode")
             return
         # A proxy-mode AWG/WireGuard sidecar owns a virtual tunnel whose address
