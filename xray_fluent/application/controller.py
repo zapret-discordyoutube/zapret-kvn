@@ -283,6 +283,7 @@ from ..platform.windows.lan_firewall import apply_lan_proxy_firewall
 from ..platform.windows.subprocess_utils import result_output_text, run_text
 from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistoryStorage
 from .server_bypass import ServerBypass
+from .zapret_conflict import ZapretConflictCheck
 from ..engines.zapret.manager import ZapretManager
 
 if TYPE_CHECKING:
@@ -587,6 +588,9 @@ class AppController(QObject):
         self._proxy_operation_done.connect(self._emit_system_proxy_state)
         self.connection_changed.connect(lambda _: self._sync_rotation_timer())
         self.connection_changed.connect(lambda _: self._retry_subscriptions_via_tunnel())
+        # Самопроверка после подключения TUN: не мешает ли Zapret туннелю (чужой — предупреждение, свой — остановка).
+        self.zapret_conflict = ZapretConflictCheck(self)
+        self.connection_changed.connect(self.zapret_conflict.on_connection_changed)
         # П3 (AC10): любое изменение нод инвалидирует кэш пула явно — идентичность
         # списка не видит in-place правок содержимого outbound-словаря.
         self.nodes_changed.connect(lambda _nodes: self._invalidate_xray_outbound_pool_cache())
