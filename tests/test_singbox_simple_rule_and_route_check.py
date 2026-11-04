@@ -153,14 +153,14 @@ class RouteExplainTests(unittest.TestCase):
         self.assertEqual(self.explain("youtube.com").target, "proxy")
         self.assertEqual(self.explain("ifconfig.me").target, "block")
         gov = self.explain("www.gosuslugi.ru")
-        self.assertEqual((gov.target, gov.rule_index), ("direct", 5))
+        self.assertEqual((gov.target, gov.rule_index), ("direct", 8))
         other = self.explain("example.com")
         self.assertEqual((other.target, other.rule_index), ("proxy", None))
 
     def test_process_rule_is_reported_as_maybe_not_as_hit(self) -> None:
         verdict = self.explain("2ip.ru")
-        self.assertEqual((verdict.target, verdict.rule_index), ("direct", 10))
-        self.assertEqual([item.index for item in verdict.maybe], [4])
+        self.assertEqual((verdict.target, verdict.rule_index), ("direct", 13))
+        self.assertEqual([item.index for item in verdict.maybe], [4, 6])
         self.assertIn("процессы", verdict.maybe[0].reason)
 
     def test_ip_rules_need_the_address_only_tun_has(self) -> None:

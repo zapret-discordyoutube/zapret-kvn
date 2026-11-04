@@ -156,14 +156,23 @@ class TunnelRetryTest(unittest.TestCase):
         return results[0]
 
     def test_failure_without_vpn_is_plain_and_retried_through_vpn_on_connect(self) -> None:
-        self.assertTrue(self.controller.update_subscription(self.subscription.id))
-        failed = self._wait_finished()
+        from xray_fluent.network import fetch_diagnosis as fd
+
+        def offline_diagnose(host, port, *, tunnel_port):
+            # Без VPN: сервер молчит на TLS, контроль отвечает — проба сети не ходит наружу.
+            self.assertIsNone(tunnel_port)
+            return fd.judge(fd.Evidence(host, port, (fd.HostProbe(False, "tls", "timeout"), fd.HostProbe(True))))
+
+        with patch.object(fd, "diagnose", offline_diagnose):
+            self.assertTrue(self.controller.update_subscription(self.subscription.id))
+            failed = self._wait_finished()
         self.assertFalse(failed.success)
         self.assertEqual(self.vpn.ports, [])  # VPN выключен: маршрута через него не было
         self.assertRegex(
             self.subscription.last_error,
-            r"^Не удалось загрузить подписку напрямую: сервер не ответил за \d+ с\. "
-            r"VPN не был подключён, через VPN не пробовали$",
+            r"^Не удалось загрузить подписку\. Виноват: блокировка сети или провайдера \(вероятно\)\. "
+            r"Где оборвалось: напрямую TCP есть, но рукопожатие TLS повисло.*"
+            r"Через VPN не пробовали: он не подключён\.$",
         )
         self.assertTrue(self.subscription.retry_via_tunnel)
         self.assertIsNotNone(self.subscription.backoff_until)

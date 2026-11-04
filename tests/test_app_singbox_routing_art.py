@@ -60,7 +60,7 @@ def _arts():
 
 class VisualsTests(unittest.TestCase):
     def test_stock_rules_split_into_outcomes(self) -> None:
-        self.assertEqual(rule_outcomes(TEMPLATE), (2, 5, 2))
+        self.assertEqual(rule_outcomes(TEMPLATE), (2, 8, 2))
 
     def test_user_outbounds_count_by_their_type(self) -> None:
         document = {

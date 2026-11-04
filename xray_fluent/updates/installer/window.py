@@ -150,7 +150,7 @@ class UpdateWindow(QWidget):
             metrics.boundingRect(
                 QRect(0, 0, text_width, 1000), int(Qt.TextFlag.TextWordWrap), text
             ).height()
-            for text in (*phrases.WAITING, *phrases.DONE, *phrases.FAILED)
+            for text in (*phrases.WAITING, *phrases.DONE, *phrases.FAILED, phrases.STALLED)
         ))
         self._phrase_opacity = QGraphicsOpacityEffect(self._phrase_label)
         self._phrase_opacity.setOpacity(1.0)
@@ -174,8 +174,11 @@ class UpdateWindow(QWidget):
 
         self._phrase_timer = QTimer(self)
         self._phrase_timer.setInterval(_PHRASE_INTERVAL_MS)
-        self._phrase_timer.timeout.connect(lambda: self._show_phrase(self._deck.next()))
+        self._phrase_timer.timeout.connect(self._on_phrase_tick)
         self._phrase_timer.start()
+        self._stage = Stage.PREPARE
+        self._stage_since = time.monotonic()
+        self._stalled_shown = False
 
         self.adjustSize()
         self._place()
@@ -205,7 +208,24 @@ class UpdateWindow(QWidget):
 
     # ── ход установки ───────────────────────────────────────────
 
+    def _on_phrase_tick(self) -> None:
+        # Фразы про «ТСПУ-куна» уместны, пока установка движется. Зависший шаг
+        # они выдавали за нормальный ход (полчаса на «Заменяем файлы»).
+        stalled = phrases.stalled_text(time.monotonic() - self._stage_since)
+        if stalled is None:
+            self._show_phrase(self._deck.next())
+        elif not self._stalled_shown:
+            self._stalled_shown = True
+            self._show_phrase(stalled)
+        minutes = int((time.monotonic() - self._stage_since) // 60)
+        if stalled is not None and minutes >= 1:
+            self._status_label.setText(f"{_STAGE_TEXT[self._stage]} — уже {minutes} мин")
+
     def on_progress(self, stage: Stage, fraction: float) -> None:
+        if stage is not self._stage:
+            self._stage = stage
+            self._stage_since = time.monotonic()
+            self._stalled_shown = False
         self._status_label.setText(_STAGE_TEXT[stage])
         value = overall_progress(stage, fraction)
         if value is not None:

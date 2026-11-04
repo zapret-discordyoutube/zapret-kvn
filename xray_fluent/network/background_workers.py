@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -8,6 +9,8 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from ..importer.subscription_http import fetch_subscription
 from ..importer.subscription_parser import parse_subscription_payload
+
+_LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..profiles.models import AppState
@@ -153,4 +156,27 @@ class SubscriptionUpdateWorker(QThread):
             )
 
             tunnel_untried = isinstance(exc, SubscriptionUnreachableError) and exc.tunnel_untried
-            self.failed.emit(self._subscription, sanitize_fetch_error(exc), tunnel_untried)
+            message = sanitize_fetch_error(exc)
+            if isinstance(exc, SubscriptionUnreachableError) and exc.host and not self._cancel.is_set():
+                message = self._explain_unreachable(exc, message)
+            self.failed.emit(self._subscription, message, tunnel_untried)
+
+    def _explain_unreachable(self, exc, fallback: str) -> str:
+        """Ни один маршрут не ответил: проверить по стадиям и назвать виновника.
+
+        Проба идёт один раз после отказа и сама ограничена по времени; её сбой
+        не должен заменить отказ загрузки, поэтому при любой ошибке остаётся
+        прежний текст.
+        """
+
+        try:
+            from ..network.fetch_diagnosis import diagnose
+
+            tunnel_port = self._proxy_port if self._mode in {"auto", "proxy"} and self._proxy_port and self._proxy_port > 0 else None
+            diagnosis = diagnose(exc.host, exc.port, tunnel_port=tunnel_port)
+            for line in diagnosis.log_lines:
+                _LOG.info(line)
+            return diagnosis.message()
+        except Exception as error:  # noqa: BLE001 — диагностика не должна ломать отчёт об отказе
+            _LOG.warning("diagnosis failed: %s: %s", type(error).__name__, error)
+            return fallback

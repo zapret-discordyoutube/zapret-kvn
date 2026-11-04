@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import socket
+import threading
+import unittest
+
+from xray_fluent.network import fetch_diagnosis as fd
+from xray_fluent.network.fetch_diagnosis import (
+    CULPRIT_BLOCK,
+    CULPRIT_NETWORK,
+    CULPRIT_REFUSED,
+    CULPRIT_SERVER,
+    CULPRIT_VPN,
+    Evidence,
+    HostProbe,
+    blame_for_http,
+    host_tag,
+    judge,
+    mask_host,
+    redact_host,
+)
+
+OK = HostProbe(True)
+HOST = "url.globalinetforall.example.com"
+
+
+def fail(stage: str, how: str = "timeout", detail: str = "") -> HostProbe:
+    return HostProbe(False, stage, how, (("dns", 5),), detail)
+
+
+class MaskingTests(unittest.TestCase):
+    def test_host_is_recognisable_but_not_complete(self) -> None:
+        self.assertEqual(mask_host("url.globalinetforall.example.com"), "url.gl***.ex***.com")
+        self.assertEqual(mask_host("203.0.113.9"), "203.0.*.*")
+        self.assertEqual(mask_host("sub.zapret.moe"), "sub.za***.moe")
+
+    def test_tag_has_stable_fingerprint_and_no_full_host(self) -> None:
+        tag = host_tag(HOST, 443)
+        self.assertEqual(tag, host_tag(HOST.upper(), 443))
+        self.assertNotIn("globalinetforall", tag)
+        self.assertRegex(tag, r":443#[0-9a-f]{6}$")
+        self.assertNotEqual(tag, host_tag("other.example.com", 443))
+
+    def test_raw_error_text_loses_the_host(self) -> None:
+        text = redact_host(f"connect to {HOST} failed", HOST)
+        self.assertNotIn(HOST, text)
+        self.assertIn("#", text)
+
+
+class JudgeTests(unittest.TestCase):
+    def verdict(self, direct, vpn=None):
+        return judge(Evidence(HOST, 443, direct, vpn))
+
+    def test_tls_hang_with_vpn_working_is_a_block(self) -> None:
+        d = self.verdict((fail("tls"), OK), (OK, OK))
+        self.assertEqual((d.culprit, d.certain), (CULPRIT_BLOCK, True))
+        self.assertIn("SNI", d.where)
+
+    def test_tls_hang_without_vpn_is_a_probable_block_with_hint(self) -> None:
+        d = self.verdict((fail("tls", "reset"), OK))
+        self.assertEqual((d.culprit, d.certain), (CULPRIT_BLOCK, False))
+        self.assertIn("Через VPN не пробовали", d.advice)
+        self.assertIn("(вероятно)", d.message())
+
+    def test_vpn_connected_but_control_fails_is_vpn(self) -> None:
+        d = self.verdict((fail("tcp"), OK), (fail("proxy", "status", "ответ прокси 502"), fail("proxy", "status", "ответ прокси 502")))
+        self.assertEqual((d.culprit, d.certain), (CULPRIT_VPN, True))
+
+    def test_everything_down_is_the_users_network(self) -> None:
+        d = self.verdict((fail("dns", "dns"), fail("dns", "dns")), (fail("proxy_local", "refused"), fail("proxy_local", "refused")))
+        self.assertEqual(d.culprit, CULPRIT_NETWORK)
+
+    def test_server_down_everywhere_is_the_bot(self) -> None:
+        d = self.verdict((fail("tcp"), OK), (fail("tcp"), OK))
+        self.assertEqual((d.culprit, d.certain), (CULPRIT_SERVER, True))
+        self.assertIn("и напрямую, и через VPN", d.advice)
+
+    def test_handshake_ok_but_no_answer_is_a_silent_server(self) -> None:
+        d = self.verdict((OK, OK), (OK, OK))
+        self.assertEqual((d.culprit, d.certain), (CULPRIT_SERVER, False))
+        self.assertIn("ответа на запрос нет", d.where)
+
+    def test_direct_internet_dead_but_vpn_reaches_server_is_a_block(self) -> None:
+        d = self.verdict((fail("tcp"), fail("tcp")), (OK, OK))
+        self.assertEqual(d.culprit, CULPRIT_BLOCK)
+
+    def test_log_names_masked_host_and_every_probe_without_the_full_address(self) -> None:
+        d = self.verdict((fail("tls"), OK), (OK, OK))
+        joined = "\n".join(d.log_lines)
+        self.assertIn(host_tag(HOST, 443), joined)
+        self.assertNotIn("globalinetforall", joined)
+        self.assertIn("напрямую, сервер: сбой на tls", joined)
+        self.assertIn("через VPN, контроль: ok", joined)
+        self.assertIn("вердикт block", joined)
+
+
+class HttpBlameTests(unittest.TestCase):
+    def test_codes_map_to_culprits(self) -> None:
+        self.assertEqual(blame_for_http(403, "Провайдер отклонил запрос клиента (HTTP 403)")[0], CULPRIT_REFUSED)
+        self.assertEqual(blame_for_http(200, "Достигнут лимит устройств подписки")[0], CULPRIT_REFUSED)
+        self.assertEqual(blame_for_http(404)[0], CULPRIT_SERVER)
+        self.assertIn("недействительна", blame_for_http(404)[1])
+        self.assertIn("сломан", blame_for_http(503)[1])
+
+
+class CollectEvidenceTests(unittest.TestCase):
+    def test_probes_server_and_control_on_every_route_and_skips_vpn_when_down(self) -> None:
+        calls: list[tuple] = []
+
+        def direct(host, port):
+            calls.append(("direct", host))
+            return OK
+
+        def proxy(port, host, target_port):
+            calls.append(("vpn", host, port))
+            return OK
+
+        ev = fd.collect_evidence(HOST, 443, tunnel_port=None, direct_probe=direct, proxy_probe=proxy)
+        self.assertIsNone(ev.vpn)
+        self.assertEqual({c[1] for c in calls}, {HOST, fd.CONTROL_HOST})
+        calls.clear()
+        ev = fd.collect_evidence(HOST, 443, tunnel_port=1080, direct_probe=direct, proxy_probe=proxy)
+        self.assertIsNotNone(ev.vpn)
+        self.assertEqual(len(calls), 4)
+
+
+class RealProbeStageTests(unittest.TestCase):
+    def test_dns_failure(self) -> None:
+        probe = fd.probe_direct("no-such-host.invalid", 443, timeout=3)
+        self.assertEqual((probe.ok, probe.failed, probe.how), (False, "dns", "dns"))
+
+    def test_tcp_refused(self) -> None:
+        with socket.socket() as probe_socket:
+            probe_socket.bind(("127.0.0.1", 0))
+            port = probe_socket.getsockname()[1]
+        probe = fd.probe_direct("127.0.0.1", port, timeout=3)
+        self.assertEqual((probe.failed, probe.how), ("tcp", "refused"))
+
+    def test_tls_hang_after_tcp_connect_is_reported_as_tls_timeout(self) -> None:
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        held: list[socket.socket] = []
+
+        def accept() -> None:
+            conn, _ = server.accept()
+            held.append(conn)  # принять и молчать, как фильтр, замораживающий рукопожатие
+
+        threading.Thread(target=accept, daemon=True).start()
+        try:
+            probe = fd.probe_direct("127.0.0.1", server.getsockname()[1], timeout=1.0)
+        finally:
+            for conn in held:
+                conn.close()
+            server.close()
+        self.assertEqual((probe.failed, probe.how), ("tls", "timeout"))
+        self.assertEqual([name for name, _ in probe.ms], ["dns", "tcp"])
+
+    def test_proxy_rejecting_connect_is_reported_with_its_status(self) -> None:
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+
+        def serve() -> None:
+            conn, _ = server.accept()
+            conn.recv(1024)
+            conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            conn.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        try:
+            probe = fd.probe_via_proxy(server.getsockname()[1], "example.com", 443, timeout=2.0)
+        finally:
+            server.close()
+        self.assertEqual((probe.failed, probe.how), ("proxy", "status"))
+        self.assertIn("502", probe.detail)
+
+
+if __name__ == "__main__":
+    unittest.main()

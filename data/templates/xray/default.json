@@ -88,6 +88,46 @@
       },
       {
         "type": "field",
+        "protocol": [
+          "bittorrent"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "process": [
+          "qbittorrent.exe",
+          "qBittorrent.exe",
+          "utorrent.exe",
+          "uTorrent.exe",
+          "bittorrent.exe",
+          "BitTorrent.exe",
+          "deluge.exe",
+          "transmission-qt.exe",
+          "tixati.exe",
+          "Tixati.exe",
+          "vuze.exe",
+          "Vuze.exe",
+          "biglybt.exe",
+          "BiglyBT.exe",
+          "bitcomet.exe",
+          "BitComet.exe",
+          "webtorrent.exe",
+          "WebTorrent.exe",
+          "FrostWire.exe"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "port": "6881-6889,51413",
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
         "domain": [
           "domain:gov.ru",
           "domain:government.ru",

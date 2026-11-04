@@ -36,6 +36,8 @@ ALLOWED: dict[str, set[str]] = {
     "platform/windows/process_traffic_collector.py": {"urlopen"},
     "engines/singbox/selector_api.py": {"build_opener"},
     "engines/sidecar/readiness.py": {"create_connection"},
+    # Только 127.0.0.1: после отказа «xray api» — открыт ли локальный порт API ядра (в журнал).
+    "engines/xray/balancer_api.py": {"create_connection"},
     "network/proxy_readiness.py": {"create_connection"},
     # Проверки через локальный SOCKS ядра — внутри туннеля.
     "engines/socks_probe.py": {"create_connection"},
@@ -45,6 +47,11 @@ ALLOWED: dict[str, set[str]] = {
     "network/bootstrap_dns.py": {"HTTPSConnection", "getaddrinfo"},
     # Подписка: https напрямую или через туннель; http:// — только через туннель.
     "importer/subscription_http.py": {"build_opener"},
+    # Причина отказа подписки: один раз, когда ни один маршрут не ответил (сигнал
+    # «нет ответа»), и только к хосту самой подписки и к www.gstatic.com (та же
+    # цель, что у замера задержки). DNS → TCP → TLS напрямую и CONNECT через
+    # локальный прокси VPN; узлы-серверы не затрагиваются.
+    "network/fetch_diagnosis.py": {"create_connection", "getaddrinfo", "socket"},
     # Обновления приложения и ядер — наш сервер обновлений и GitHub, HTTPS.
     "network/http_utils.py": {"build_opener", "urlopen"},
     "updates/app_updater.py": {"build_opener"},

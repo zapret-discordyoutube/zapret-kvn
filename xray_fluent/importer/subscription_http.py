@@ -20,6 +20,7 @@ from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 from ..constants import APP_VERSION, PROXY_HOST, SUBSCRIPTION_PARSER_REVISION
 from .happ_crypt import HappCryptError, decrypt_happ_link, is_happ_crypt_link
 from ..network import browser_fetch
+from ..network.fetch_diagnosis import CULPRIT_REFUSED, blame_for_http, host_tag, redact_host
 from ..network.fetch_failure import SlowTransferError, describe_transport_failure, no_answer
 from ..network.http_utils import build_opener
 from ..profiles.models import Subscription
@@ -77,7 +78,14 @@ class SubscriptionServerResponseError(SubscriptionFetchError):
     server has already answered directly, otherwise a definitive 404 is masked
     by the proxy attempt's transport error.  Only a transport failure — no
     response reached us — is worth retrying through the proxy.
+
+    ``status`` is the HTTP code when there was one: the blame shown to the user
+    (the bot, or a refusal of this client) follows from it.
     """
+
+    def __init__(self, message: str = "", *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 _ROUTE_NAMES = {False: "напрямую", True: "через VPN"}
@@ -99,10 +107,27 @@ class SubscriptionUnreachableError(SubscriptionFetchError):
     подписку повторяют через туннель.
     """
 
-    def __init__(self, failures: tuple[RouteFailure, ...], *, tunnel_untried: bool) -> None:
+    def __init__(
+        self,
+        failures: tuple[RouteFailure, ...],
+        *,
+        tunnel_untried: bool,
+        host: str = "",
+        port: int = 443,
+    ) -> None:
         self.failures = failures
         self.tunnel_untried = tunnel_untried
+        self.host = host
+        self.port = port
         super().__init__(_unreachable_message(failures, tunnel_untried))
+
+
+def _answered_message(answer: SubscriptionServerResponseError) -> str:
+    """Сервер ответил: кто виноват — по коду ответа, без проб сети."""
+
+    culprit, phrase = blame_for_http(answer.status, str(answer))
+    who = "сервер подписки отказал приложению (бан клиента)" if culprit == CULPRIT_REFUSED else "сервер подписки (бот)"
+    return f"Не удалось загрузить подписку. Виноват: {who}. {phrase[:1].upper()}{phrase[1:]}. Ответ сервера: {answer}"
 
 
 def _unreachable_message(failures: tuple[RouteFailure, ...], tunnel_untried: bool) -> str:
@@ -465,6 +490,10 @@ def fetch_subscription(
     """
 
     url = validate_subscription_url(subscription.url)
+    _target = urlsplit(url)
+    target_host = _target.hostname or ""
+    target_port = _target.port or (443 if _target.scheme.lower() == "https" else 80)
+    tag = host_tag(target_host, target_port)
     if mode not in {"auto", "direct", "proxy"}:
         raise SubscriptionFetchError(f"Неизвестный режим загрузки: {mode}")
     # Открытый http:// напрямую показал бы провайдеру весь список серверов —
@@ -488,6 +517,13 @@ def fetch_subscription(
     started = time.monotonic()
     expires = started + max(0.0, float(deadline))
     results: queue.SimpleQueue[tuple[bool, object]] = queue.SimpleQueue()
+    _LOG.info(
+        "subscription %s: загрузка начата, режим=%s, маршруты=%s, таймаут=%.0f с, срок=%.0f с, "
+        "VPN=%s, без кэша=%s, клиент=%s",
+        tag, mode, "+".join(_ROUTE_NAMES[via] for via, _port in attempts), timeout, deadline,
+        "подключён" if proxy_port and proxy_port > 0 else "не подключён", unconditional,
+        getattr(subscription, "client_profile", "") or "—",
+    )
 
     def run(via_proxy: bool, port: int | None) -> None:
         try:
@@ -513,6 +549,12 @@ def fetch_subscription(
         via_proxy, port = pending.pop(0)
         running.add(via_proxy)
         route_started[via_proxy] = time.monotonic()
+        _LOG.info(
+            "subscription %s: маршрут %s начат через %.1f с, транспорт=%s",
+            tag, _ROUTE_NAMES[via_proxy], route_started[via_proxy] - started,
+            "Chromium (browser-fetch)" if not via_proxy and browser_fetch.SERVICE.available() and target_port == 443
+            else "urllib",
+        )
         if on_route is not None:
             on_route(via_proxy)
         # urllib нельзя прервать снаружи, поэтому попытка живёт в daemon-потоке:
@@ -546,8 +588,17 @@ def fetch_subscription(
         running.discard(via_proxy)
         if isinstance(outcome, SubscriptionFetchResult):
             outcome.elapsed = time.monotonic() - started
+            _LOG.info(
+                "subscription %s: ответ получен %s, HTTP %s, %d байт, за %.1f с",
+                tag, _ROUTE_NAMES[via_proxy], outcome.status, len(outcome.data or b""), outcome.elapsed,
+            )
             return outcome
         if isinstance(outcome, SubscriptionServerResponseError):
+            _LOG.info(
+                "subscription %s: сервер ответил %s за %.1f с: HTTP %s, %s",
+                tag, _ROUTE_NAMES[via_proxy], time.monotonic() - route_started[via_proxy],
+                outcome.status if outcome.status is not None else "—", sanitize_fetch_error(outcome),
+            )
             if via_proxy and False in running:
                 # Прямой маршрут ещё в пути, а его ответ главнее: отказ через
                 # прокси бывает отказом выходному адресу VPN, а не подписке.
@@ -558,9 +609,7 @@ def fetch_subscription(
             # VPN proxy, so surface it now instead of masking it behind the
             # proxy attempt's transport error.  This is the direct 404 the user
             # must see, not a "loading failed via VPN".
-            raise SubscriptionFetchError(
-                f"Не удалось загрузить подписку: {outcome}"
-            ) from outcome
+            raise SubscriptionFetchError(_answered_message(outcome)) from outcome
         # No response reached us on this path (DNS, connect, TLS handshake,
         # timeout).  Only this case is worth retrying through the proxy.
         waited = time.monotonic() - route_started[via_proxy]
@@ -572,17 +621,21 @@ def fetch_subscription(
         else:
             raise outcome  # type: ignore[misc]  # ошибка кода, а не сети: не повод идти через VPN
         _LOG.info(
-            "subscription %s: no response after %.1f s: %s",
-            _ROUTE_NAMES[via_proxy], waited, sanitize_fetch_error(outcome),  # type: ignore[arg-type]
+            "subscription %s: ответа нет %s за %.1f с: %s [%s]; причина: %s",
+            tag, _ROUTE_NAMES[via_proxy], waited,
+            redact_host(sanitize_fetch_error(outcome), target_host),  # type: ignore[arg-type]
+            type(outcome).__name__, reason,
         )
         failures.append(RouteFailure(via_proxy, reason))
         if pending:
             start_next()
     if held is not None:
-        raise SubscriptionFetchError(f"Не удалось загрузить подписку: {held}") from held
+        raise SubscriptionFetchError(_answered_message(held)) from held
     now = time.monotonic()
     failures.extend(RouteFailure(via_proxy, no_answer(now - route_started[via_proxy])) for via_proxy in sorted(running))
-    raise SubscriptionUnreachableError(tuple(failures), tunnel_untried=tunnel_untried)
+    raise SubscriptionUnreachableError(
+        tuple(failures), tunnel_untried=tunnel_untried, host=target_host, port=target_port
+    )
 
 
 def _fetch_once(
@@ -642,7 +695,7 @@ def _fetch_once(
                 via_proxy=via_proxy,
             )
         raise SubscriptionServerResponseError(
-            describe_http_failure(exc.code, _response_headers(exc.headers))
+            describe_http_failure(exc.code, _response_headers(exc.headers)), status=exc.code
         ) from exc
     with response:
         final_url = response.geturl()
@@ -653,8 +706,9 @@ def _fetch_once(
             # Отказ по HWID часто приходит как HTTP 200 с узлами-заглушками
             # ``0.0.0.0:1``, где текст ошибки спрятан в именах. Импортировать их
             # нельзя: они затрут рабочий список серверов подписки.
+            hwid_status = int(getattr(response, "status", 200) or 200)
             raise SubscriptionServerResponseError(
-                describe_http_failure(int(getattr(response, "status", 200) or 200), response_headers)
+                describe_http_failure(hwid_status, response_headers), status=hwid_status
             )
         data = _read_body(response, max_bytes + 1, expires_at)
         if len(data) > max_bytes:
@@ -703,9 +757,13 @@ def _fetch_direct_in_browser(
             )
         return SubscriptionFetchResult(headers=response_headers, status=304, not_modified=True)
     if response.status >= 400 or response.status < 200:
-        raise SubscriptionServerResponseError(describe_http_failure(response.status, response_headers))
+        raise SubscriptionServerResponseError(
+            describe_http_failure(response.status, response_headers), status=response.status
+        )
     if _HWID_REFUSAL_HEADERS.intersection(response_headers):
-        raise SubscriptionServerResponseError(describe_http_failure(response.status, response_headers))
+        raise SubscriptionServerResponseError(
+            describe_http_failure(response.status, response_headers), status=response.status
+        )
     if response.truncated or len(response.body) > max_bytes:
         raise SubscriptionServerResponseError(f"Ответ подписки превышает {max_bytes // (1024 * 1024)} МиБ")
     return SubscriptionFetchResult(data=response.body, headers=response_headers, status=response.status)

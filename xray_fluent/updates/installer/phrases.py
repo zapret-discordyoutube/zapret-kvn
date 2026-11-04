@@ -136,3 +136,18 @@ class PhraseDeck:
                 self._queue.insert(0, self._queue.pop())
         self._last = self._queue.pop()
         return self._last
+
+
+# Шаг идёт без движения дольше этого — шутки пора сменить честным текстом.
+STALL_AFTER_S = 90
+
+STALLED = (
+    "Этот шаг идёт дольше обычного. Подождите ещё немного. Если ничего не меняется "
+    "больше трёх минут, пришлите нам файл data\\logs\\update.log и update_stall.log из папки программы."
+)
+
+
+def stalled_text(seconds_in_stage: float) -> str | None:
+    """Честный текст вместо смены фраз, когда шаг установки завис; иначе None."""
+
+    return STALLED if seconds_in_stage >= STALL_AFTER_S else None

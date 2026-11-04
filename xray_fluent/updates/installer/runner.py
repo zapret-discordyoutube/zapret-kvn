@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -26,6 +27,10 @@ FAILURE_CODE_NAME = "app_update_failure.txt"
 BLOCKER_CODE_NAME = "app_update_blocker.txt"
 # Подготовленные и вынесенные файлы замены лежат рядом с программой.
 STAGE_ROOT_NAME = "app_update"
+# Установка дольше этого — стеки всех потоков пишутся в update_stall.log (и потом
+# каждые столько же секунд): по ним видно, на чём повисла замена файлов.
+STALL_DUMP_AFTER_S = 120
+STALL_LOG_NAME = "update_stall.log"
 # Столько последних строк startup.log упавшего запуска попадает в update.log.
 STARTUP_LOG_TAIL_LINES = 40
 
@@ -109,9 +114,56 @@ class KvnHooks(apply.Hooks):
             _log.exception("Не удалось показать сообщение об ошибке")
 
 
+class StallDump:
+    """Файл дампа стеков; убирается, если установка уложилась и дампа не потребовалось."""
+
+    def __init__(self, handle, path: Path, header_size: int) -> None:
+        self.handle = handle
+        self.path = path
+        self.header_size = header_size
+
+
+def arm_stall_dump(app_dir: Path) -> StallDump | None:
+    """Включить дамп стеков на зависание; вернуть то, что принимает ``disarm_stall_dump``."""
+
+    try:
+        log_dir = app_dir / "data" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / STALL_LOG_NAME
+        # Отдельный файл: общий update.log ротируется, а открытый вторым
+        # дескриптором он на Windows не переименовался бы.
+        handle = open(path, "a", encoding="utf-8")
+        handle.write(f"--- установка {os.getpid()}: стеки потоков, если она не закончится за {STALL_DUMP_AFTER_S} с ---\n")
+        handle.flush()
+        header_size = path.stat().st_size
+        faulthandler.dump_traceback_later(STALL_DUMP_AFTER_S, repeat=True, file=handle)
+        return StallDump(handle, path, header_size)
+    except Exception:  # диагностика не должна мешать установке
+        _log.exception("Дамп стеков на зависание не включён")
+        return None
+
+
+def disarm_stall_dump(dump: StallDump | None) -> None:
+    try:
+        faulthandler.cancel_dump_traceback_later()
+    finally:
+        if dump is not None:
+            try:
+                dump.handle.close()
+                # Ничего сверх заголовка не записано — установка шла нормально, файл не нужен.
+                if dump.path.stat().st_size <= dump.header_size:
+                    dump.path.unlink()
+            except OSError:
+                pass
+
+
 def run_install(plan: InstallPlan, report: Report | None = None) -> bool:
     """Установить обновление; при любой ошибке вернуть прежнюю версию."""
-    return apply.run_apply(core_plan(plan), KvnHooks(), report)
+    dump = arm_stall_dump(Path(plan.app_dir))
+    try:
+        return apply.run_apply(core_plan(plan), KvnHooks(), report)
+    finally:
+        disarm_stall_dump(dump)
 
 
 def _startup_log(plan: apply.ApplyPlan) -> Path:

@@ -101,6 +101,46 @@
         "outbound": "direct"
       },
       {
+        "protocol": "bittorrent",
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "process_name": [
+          "qbittorrent.exe",
+          "qBittorrent.exe",
+          "utorrent.exe",
+          "uTorrent.exe",
+          "bittorrent.exe",
+          "BitTorrent.exe",
+          "deluge.exe",
+          "transmission-qt.exe",
+          "tixati.exe",
+          "Tixati.exe",
+          "vuze.exe",
+          "Vuze.exe",
+          "biglybt.exe",
+          "BiglyBT.exe",
+          "bitcomet.exe",
+          "BitComet.exe",
+          "webtorrent.exe",
+          "WebTorrent.exe",
+          "FrostWire.exe"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "port": [
+          51413
+        ],
+        "port_range": [
+          "6881:6889"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
         "domain_suffix": [
           "gov.ru",
           "government.ru",

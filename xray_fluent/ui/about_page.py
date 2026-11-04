@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import webbrowser
+from pathlib import Path
 
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     FluentIcon as FIF,
+    InfoBar,
+    InfoBarPosition,
     PrimaryPushButton,
     PushButton,
     SubtitleLabel,
@@ -14,7 +19,9 @@ from qfluentwidgets import (
     setCustomStyleSheet,
 )
 
-from ..constants import APP_VERSION
+from ..constants import APP_VERSION, LOG_DIR
+from ..support.service import SupportAction, SupportResult
+from .file_manager import reveal_file
 from .theme import token_pair
 
 # Рекламная метка deep-link бота: источник kvnwin + место about.
@@ -105,6 +112,14 @@ class AboutPage(QWidget):
         )
         btn_row.addWidget(tg_bot_btn)
 
+        self._support_button = PushButton(FIF.HELP, "Поддержка", self)
+        self._support_button.setToolTip(
+            "Собрать архив журналов без ссылок и паролей и открыть страницу обращения на рабочем зеркале сайта"
+        )
+        self._support_button.clicked.connect(self._on_support_clicked)
+        btn_row.addWidget(self._support_button)
+        self._support: SupportAction | None = None
+
         btn_row.addStretch()
         root.addLayout(btn_row)
 
@@ -114,3 +129,57 @@ class AboutPage(QWidget):
         root.addWidget(footer)
 
         root.addStretch()
+
+    # ── Поддержка ──
+
+    def _support_action(self) -> SupportAction | None:
+        if self._support is not None:
+            return self._support
+        # Контроллер живёт в главном окне; страница строится лениво и ссылки на него не хранит.
+        controller = getattr(self.window(), "controller", None)
+        if controller is None:
+            return None
+        action = SupportAction(
+            controller.build_diagnostics,
+            LOG_DIR,
+            open_url=lambda url: QDesktopServices.openUrl(QUrl(url)),
+            reveal_file=reveal_file,
+            parent=self,
+        )
+        action.started.connect(lambda: self._set_support_busy(True))
+        action.finished_ok.connect(self._on_support_ready)
+        action.failed.connect(self._on_support_failed)
+        self._support = action
+        return action
+
+    def _set_support_busy(self, busy: bool) -> None:
+        self._support_button.setEnabled(not busy)
+        self._support_button.setText("Собираем архив…" if busy else "Поддержка")
+
+    def _on_support_clicked(self) -> None:
+        action = self._support_action()
+        if action is None:
+            self._on_support_failed("главное окно приложения недоступно")
+            return
+        action.start()
+
+    def _on_support_ready(self, result: SupportResult) -> None:
+        self._set_support_busy(False)
+        InfoBar.success(
+            "Архив для поддержки готов",
+            f"{Path(result.zip_path).name} — приложите его к обращению на открывшейся странице. "
+            "В нём нет ссылок подписок и паролей.",
+            duration=15000,
+            position=InfoBarPosition.TOP,
+            parent=self.window(),
+        )
+
+    def _on_support_failed(self, message: str) -> None:
+        self._set_support_busy(False)
+        InfoBar.error(
+            "Поддержка",
+            f"Не получилось подготовить обращение: {message}",
+            duration=12000,
+            position=InfoBarPosition.TOP,
+            parent=self.window(),
+        )
