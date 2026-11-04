@@ -179,6 +179,7 @@ from .outbound_pool_service import (
     XRAY_BALANCER_TAG,
     XrayOutboundPool,
     build_xray_outbound_pool,
+    single_node_xray_config,
 )
 from ..profiles.country_flags import CountryResolver
 from ..network.background_workers import (
@@ -534,6 +535,9 @@ class AppController(QObject):
         # останавливать запуск для всех.
         self._xray_pool_quarantine: dict[str, tuple[int, str]] = {}
         self._xray_pool_quarantine_version = 0
+        # Аварийный режим: управляющий порт Xray не ответил, ядро работает с пулом из одного сервера.
+        # Держится до выхода из приложения: каждый новый запуск не ждёт заведомо молчащий порт.
+        self._xray_single_node_pool = False
         self._core_log_contexts: dict[str, RuntimeLogContext] = {}
         self._core_notices = RepeatedNoticeFilter()
         self._active_singbox_plan: SingboxRuntimePlan | None = None
@@ -1454,14 +1458,18 @@ class AppController(QObject):
                     self.xray.error.emit(rejected_selected)
                     return False
             self._xray_api_port = plan.xray_sidecar.api_port
-            if plan.selected_outbound_tag and not (yield from self._apply_core_outbound_tag_steps(
+            single_node = getattr(self, "_xray_single_node_pool", False) is True
+            if plan.selected_outbound_tag and not single_node and not (yield from self._apply_core_outbound_tag_steps(
                 "xray", plan.selected_outbound_tag
             )):
-                yield from self.xray.stop_steps()
-                self._xray_api_port = 0
-                self._protect_ss_port = 0
-                self._protect_ss_password = ""
-                return False
+                # Управляющий порт не ответил: без него выбор не зафиксировать. Вместо отказа ядро
+                # перезапускается с пулом из одного выбранного сервера.
+                if not (yield from self._xray_single_node_fallback_steps(plan)):
+                    yield from self.xray.stop_steps()
+                    self._xray_api_port = 0
+                    self._protect_ss_port = 0
+                    self._protect_ss_password = ""
+                    return False
         else:
             self._protect_ss_port = 0
             self._protect_ss_password = ""
@@ -3436,6 +3444,8 @@ class AppController(QObject):
         подменил сервер.
         """
 
+        if getattr(self, "_xray_single_node_pool", False) is True and selected is not None:
+            return [selected]
         reasons = self._xray_pool_quarantine_reasons()
         if not reasons:
             return self.state.nodes
@@ -3502,6 +3512,9 @@ class AppController(QObject):
         переходов (``_request_transition``).
         """
 
+        if getattr(self, "_xray_single_node_pool", False) is True:
+            # В пуле один сервер, горячо переключаться некуда: смена сервера идёт перезапуском.
+            return None
         node = self._runtime_selected_node()
         session = self._active_session
         if getattr(self, "_transition_active", False) is True:
@@ -3642,6 +3655,28 @@ class AppController(QObject):
         runner = self._hot_switch_runner
         if runner is not None:
             runner.cancel()
+
+    def _xray_single_node_fallback_steps(self, plan: SingboxRuntimePlan) -> TransitionSteps:
+        """Перезапустить сайдкар Xray с пулом из одного выбранного сервера.
+
+        Нужен, когда ``xray api`` не дозвонился до управляющего порта (причина на
+        некоторых ПК не найдена): подключение с одним сервером работает без него.
+        Отказ по-прежнему пишется в журнал выше (``core-switch ... rejected``).
+        """
+
+        sidecar = plan.xray_sidecar
+        reduced = single_node_xray_config(sidecar.config, plan.selected_outbound_tag) if sidecar is not None else None
+        if reduced is None:
+            return False
+        self._log(
+            "[core-switch] xray: управляющий порт не ответил, ядро перезапускается с пулом из одного "
+            "выбранного сервера; смена сервера теперь идёт перезапуском, режим держится до выхода из приложения"
+        )
+        yield from self.xray.stop_steps()
+        if not (yield from self.xray.start_steps(self.state.settings.xray_path, reduced)):
+            return False
+        self._xray_single_node_pool = True
+        return True
 
     def _apply_core_outbound_tag_steps(
         self,

@@ -115,6 +115,33 @@ def route_xray_proxy_rules_to_balancer(rules: list[object]) -> int:
     return changed
 
 
+def single_node_xray_config(config: dict, selected_tag: str) -> dict | None:
+    """Копия конфига сайдкара Xray с пулом из одного выбранного сервера.
+
+    Аварийный режим: когда управляющий порт ядра не отвечает, зафиксировать выбор
+    балансировщика нельзя, а случайный из сотни серверов недопустим. Если в пуле
+    остался только выбранный outbound, балансировщик выбирает его без единого
+    вызова ``xray api``. ``None`` — выбранного outbound'а в конфиге нет.
+    """
+
+    outbounds = config.get("outbounds")
+    if not isinstance(outbounds, list):
+        return None
+    if not any(isinstance(item, dict) and item.get("tag") == selected_tag for item in outbounds):
+        return None
+    reduced = deepcopy(config)
+    reduced["outbounds"] = [
+        item
+        for item in reduced["outbounds"]
+        if not (
+            isinstance(item, dict)
+            and str(item.get("tag", "")).startswith(XRAY_OUTBOUND_PREFIX)
+            and item.get("tag") != selected_tag
+        )
+    ]
+    return reduced
+
+
 def ensure_xray_pool_control_plane(config: dict, pool: XrayOutboundPool) -> None:
     routing = config.setdefault("routing", {})
     if not isinstance(routing, dict):
