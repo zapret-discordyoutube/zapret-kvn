@@ -57,6 +57,8 @@ class StallDumpTests(unittest.TestCase):
         with patch.object(runner.faulthandler, "dump_traceback_later", side_effect=RuntimeError("boom")):
             with tempfile.TemporaryDirectory() as directory:
                 self.assertIsNone(runner.arm_stall_dump(Path(directory)))
+                # Файл закрыт и убран: на Windows открытый дескриптор не дал бы удалить каталог.
+                self.assertFalse((Path(directory) / "data" / "logs" / runner.STALL_LOG_NAME).exists())
         runner.disarm_stall_dump(None)
 
 

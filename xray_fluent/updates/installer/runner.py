@@ -126,6 +126,7 @@ class StallDump:
 def arm_stall_dump(app_dir: Path) -> StallDump | None:
     """Включить дамп стеков на зависание; вернуть то, что принимает ``disarm_stall_dump``."""
 
+    handle = None
     try:
         log_dir = app_dir / "data" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -140,6 +141,13 @@ def arm_stall_dump(app_dir: Path) -> StallDump | None:
         return StallDump(handle, path, header_size)
     except Exception:  # диагностика не должна мешать установке
         _log.exception("Дамп стеков на зависание не включён")
+        if handle is not None:
+            # Открытый дескриптор на Windows не даёт ни удалить, ни убрать каталог установки.
+            try:
+                handle.close()
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return None
 
 

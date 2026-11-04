@@ -317,7 +317,12 @@ class ReleaseClientMirrorNamesTests(unittest.TestCase):
             with self.assertRaises(HttpFetchError):
                 client.fetch_release()
 
-        self.assertEqual(fetch.call_count, 3)
+        # Три имени Forgejo, и только потом GitHub (запасной путь); его отказ не подменяет ошибку зеркал.
+        self.assertEqual(fetch.call_count, 4)
+        asked = [call.args[0].full_url for call in fetch.call_args_list]
+        self.assertEqual(asked[-1], app_updater.GITHUB_RELEASE_API)
+        self.assertTrue(all("api.github.com" not in url for url in asked[:-1]))
+        self.assertFalse(client.github_fallback)
 
     def test_answer_from_a_mirror_is_trusted_but_a_foreign_redirect_is_not(self) -> None:
         client = self._client()
