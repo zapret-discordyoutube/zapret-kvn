@@ -89,21 +89,31 @@ class SiteTests(unittest.TestCase):
         ):
             self.assertEqual(support_site.support_url(), MIRROR_URL)
 
-    def test_github_is_the_page_when_no_mirror_answered(self) -> None:
+    def test_entry_page_is_the_page_when_no_mirror_answered_the_app(self) -> None:
         with patch.object(support_site.site_names, "resolve", lambda url: "https://git2.zapret.moe/x"), patch.object(
             support_site.site_names, "proven", lambda: False
         ):
             url = support_site.support_url()
-        self.assertEqual(url, support_site.GITHUB_SUPPORT_URL)
-        self.assertEqual(url, "https://github.com/zapret-discordyoutube/zapret-kvn/issues/new")
+        self.assertEqual(url, support_site.entry_page_url())
+        self.assertTrue(url.startswith("https://script.google.com/macros/s/"))
+        self.assertIn("?s=git&p=zapretkvn/zapret-kvn/issues/new", url)
+        self.assertNotIn("format=json", url)
+        self.assertNotIn("github.com", url)
 
-    def test_main_name_is_the_fallback_when_discovery_itself_fails(self) -> None:
+    def test_entry_page_is_also_used_when_discovery_itself_fails(self) -> None:
         def broken(url):
             raise OSError("network down")
 
         with patch.object(support_site.site_names, "resolve", broken):
-            self.assertEqual(support_site.support_url(), support_site.CANONICAL_SUPPORT_URL)
+            self.assertEqual(support_site.support_url(), support_site.entry_page_url())
+
+    def test_github_is_never_a_support_page(self) -> None:
+        self.assertFalse(hasattr(support_site, "GITHUB_SUPPORT_URL"))
         self.assertTrue(support_site.CANONICAL_SUPPORT_URL.endswith(support_site.SUPPORT_PATH))
+
+    def test_entry_page_url_keeps_a_custom_path_and_drops_the_leading_slash(self) -> None:
+        url = support_site.entry_page_url("/zapretkvn/zapret-kvn/issues")
+        self.assertTrue(url.endswith("?s=git&p=zapretkvn/zapret-kvn/issues"), url)
 
 
 class PrepareTests(unittest.TestCase):
