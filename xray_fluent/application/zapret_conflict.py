@@ -44,6 +44,22 @@ CONFLICT_NOTICE = (
 )
 
 
+CRASH_HINT = (
+    " Рядом работает Zapret из другой папки ({names}): в режиме VPN (TUN) такие программы перехватывают одни "
+    "и те же пакеты и могут ронять ядро. Закройте тот Zapret или используйте режим «Прокси»."
+)
+
+
+def foreign_crash_hint(finder: Callable[[], list[str]] | None = None) -> str:
+    """Подсказка к аварии ядра в режиме TUN, если рядом работает чужой Zapret; иначе пустая строка."""
+
+    try:
+        names = (finder or ZapretConflictCheck._find_foreign)()
+    except Exception:  # noqa: BLE001 — подсказка не должна ломать разбор аварии
+        return ""
+    return CRASH_HINT.format(names=", ".join(names)) if names else ""
+
+
 class _Call:
     """Запрос рабочего потока в GUI-поток: действие, аргумент и ответ."""
 
@@ -222,4 +238,4 @@ class ZapretConflictCheck(QObject):
         raise ValueError(action)
 
 
-__all__ = ["CONFLICT_NOTICE", "FOREIGN_NOTICE", "ZapretConflictCheck", "tunnel_probe"]
+__all__ = ["CONFLICT_NOTICE", "CRASH_HINT", "FOREIGN_NOTICE", "ZapretConflictCheck", "foreign_crash_hint", "tunnel_probe"]

@@ -11,6 +11,7 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 
+from ..exit_codes import describe_exit_code
 from ...application.async_steps import (
     TransitionSteps,
     run_in_worker,
@@ -404,6 +405,9 @@ class SingBoxManager(QObject):
         if self._stop_requested and process_error == QProcess.ProcessError.Crashed:
             return
         message = f"sing-box process error: {process_error.name} ({self._process.errorString()})"
+        if process_error == QProcess.ProcessError.Crashed:
+            # Qt сообщает код выхода раньше, чем об ошибке: пустое «Crashed ()» человеку ничего не говорит.
+            message = f"sing-box аварийно завершился: {describe_exit_code(self._process.exitCode())}"
         if self._starting:
             self._report_startup_failure(message)
             return

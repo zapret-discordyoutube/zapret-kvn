@@ -283,7 +283,7 @@ from ..platform.windows.lan_firewall import apply_lan_proxy_firewall
 from ..platform.windows.subprocess_utils import result_output_text, run_text
 from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistoryStorage
 from .server_bypass import ServerBypass
-from .zapret_conflict import ZapretConflictCheck
+from .zapret_conflict import ZapretConflictCheck, foreign_crash_hint
 from ..engines.zapret.manager import ZapretManager
 
 if TYPE_CHECKING:
@@ -4335,6 +4335,9 @@ class AppController(QObject):
                 mode="tun" if self.state.settings.tun_mode else "proxy",
                 generation=int(self._transition_generation),
             )
+        if "аварийно завершился" in message and context.mode == "tun":
+            # Ядро упало в режиме TUN: если рядом работает чужой Zapret, это самая частая причина.
+            message += foreign_crash_hint()
         detailed = contextualize_runtime_log(message, context=context, error=True)
         self._log(detailed)
         # During a transition the core's text is evidence for its outcome;
