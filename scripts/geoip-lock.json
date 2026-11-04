@@ -1,11 +1,11 @@
 {
   "schema": 1,
   "provider": "DB-IP Country Lite",
-  "version": "2026-10",
-  "url": "https://download.db-ip.com/free/dbip-country-lite-2026-10.mmdb.gz",
-  "archive_sha256": "4cd44536ddfd40fec7eca94a233f7d19f38d470e6522e653cb8d27001f5fe177",
-  "sha256": "dbd70ccfa2a13627eaf4913d19920a1a229f1b3c5439ac01c509995b6364202a",
-  "size": 8348509,
+  "version": "2026-11",
+  "url": "https://download.db-ip.com/free/dbip-country-lite-2026-11.mmdb.gz",
+  "archive_sha256": "75fe430010f6d38a8c4331c202bf0df6ce3221a6e6d823b9e5a6d951e4cf9758",
+  "sha256": "145ce5dfb812d8de28547e6289bb5c5f8b3df2f1dea21d324d5b575e0431311f",
+  "size": 8515063,
   "country_codes": [
     "AD",
     "AE",
