@@ -38,31 +38,36 @@ from PyQt6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QUrl,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QRegion
+from PyQt6.QtGui import QColor, QDesktopServices, QPainter, QPainterPath, QPen, QRegion
 from PyQt6.QtWidgets import (
     QApplication,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
+    HyperlinkButton,
     PrimaryPushButton,
     PushButton,
     SubtitleLabel,
     TransparentPushButton,
 )
 
+from ...support.site import entry_page_url
 from ..motion import reduced_motion
 from ..qt_lifecycle import dispose_later
 from ..theme import accent_color, surface_color, text_color
-from .steps import TourStep
+from .steps import ARTICLE_LABEL, ARTICLE_PATH, TourStep
 
 _log = logging.getLogger(__name__)
 
@@ -203,6 +208,17 @@ class _TourCard(QWidget):
         content_layout.addWidget(self.title_label)
         content_layout.addWidget(self.body_label)
 
+        # Ссылка на статью вики стоит на каждой карточке. Она открывает входную страницу,
+        # а не готовое имя сайта: страница сама выбирает зеркало, которое открывается
+        # у человека в браузере, и приложению не нужно ходить в сеть из окна.
+        self.article_link = HyperlinkButton(self.content)
+        self.article_link.setText(ARTICLE_LABEL)
+        self.article_link.setIcon(FIF.LINK)
+        self.article_link.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.article_link.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.article_link.clicked.connect(self._open_article)
+        content_layout.addWidget(self.article_link, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.counter_label = CaptionLabel(self)
         self.skip_btn = TransparentPushButton("Пропустить", self)
         self.back_btn = PushButton("Назад", self)
@@ -226,6 +242,10 @@ class _TourCard(QWidget):
         layout.setSpacing(16)
         layout.addWidget(self.content)
         layout.addLayout(buttons)
+
+    @staticmethod
+    def _open_article() -> None:
+        QDesktopServices.openUrl(QUrl(entry_page_url(ARTICLE_PATH, family="wiki")))
 
     def set_step(self, step: TourStep, index: int, total: int) -> None:
         self.title_label.setText(step.title)

@@ -290,6 +290,19 @@ class OverlayTests(unittest.TestCase):
     def _settle(self) -> None:
         _spin(700)
 
+    def test_article_link_opens_the_wiki_entry_page(self) -> None:
+        """Ссылка на статью — входная страница вики: она сама выбирает рабочее зеркало."""
+        from unittest.mock import patch
+
+        card = self.overlay.card
+        self.assertTrue(card.article_link.isVisibleTo(card))
+        with patch("xray_fluent.ui.tour.overlay.QDesktopServices.openUrl") as open_url:
+            card.article_link.click()
+        open_url.assert_called_once()
+        url = open_url.call_args.args[0].toString()
+        self.assertIn("?s=wiki&p=ZapretKVN/zapret-kvn-windows", url)
+        self.assertNotIn("zapret.moe", url)
+
     def test_covers_window_and_shows_intro_without_spotlight(self) -> None:
         self.assertEqual(self.overlay.geometry(), self.window.rect())
         self.assertIs(active_tour(self.window), self.overlay)
@@ -612,6 +625,7 @@ class RealStepsFitTests(unittest.TestCase):
                 overlay.card.set_step(step, index, len(TOUR_STEPS))
                 width = 560 if step.hero else 440
                 self.assertLessEqual(overlay.card.height_for(width), available, step.key)
+                self.assertTrue(overlay.card.article_link.isVisibleTo(overlay.card), step.key)
         finally:
             overlay.finish("interrupted")
             _spin(10)

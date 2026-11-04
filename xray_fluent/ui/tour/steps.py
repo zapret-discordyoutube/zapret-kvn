@@ -18,6 +18,11 @@ from PyQt6.QtWidgets import QWidget
 
 TourTargets = Callable[[QWidget], list[QWidget]]
 
+#: Статья вики о программе: её ссылка стоит на каждой карточке экскурсии. Путь, а не адрес:
+#: имя сайта может смениться, поэтому ссылку собирает входная страница (``support.site``).
+ARTICLE_PATH = "ZapretKVN/zapret-kvn-windows"
+ARTICLE_LABEL = "Подробнее в статье"
+
 
 @dataclass(frozen=True, slots=True)
 class TourStep:

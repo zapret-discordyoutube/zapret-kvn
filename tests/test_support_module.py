@@ -126,6 +126,11 @@ class SiteTests(unittest.TestCase):
         url = support_site.entry_page_url("/zapretkvn/zapret-kvn/issues")
         self.assertTrue(url.endswith("?s=git&p=zapretkvn/zapret-kvn/issues"), url)
 
+    def test_entry_page_url_takes_the_wiki_family(self) -> None:
+        url = support_site.entry_page_url("ZapretKVN/zapret-kvn-windows", family="wiki")
+        self.assertTrue(url.endswith("?s=wiki&p=ZapretKVN/zapret-kvn-windows"), url)
+        self.assertTrue(support_site.entry_page_url().find("?s=git&p=") > 0)
+
 
 class PrepareTests(unittest.TestCase):
     def test_support_json_names_the_mirror_only_masked(self) -> None:

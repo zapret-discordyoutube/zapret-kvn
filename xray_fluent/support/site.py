@@ -17,21 +17,22 @@ CANONICAL_SUPPORT_URL = f"https://{git_mirrors.CANONICAL_HOST}{SUPPORT_PATH}"
 _ENTRY_HOST = "script.google.com"
 
 
-def entry_page_url(path: str = SUPPORT_PATH) -> str:
+def entry_page_url(path: str = SUPPORT_PATH, family: str = "git") -> str:
     """Входная страница Zapret Links на script.google.com с путём нашего сайта.
 
     Страница работает в браузере человека: она проверяет зеркала там, где их будет открывать
     он, и предлагает то, что действительно грузится (фильтр провайдера видит только
     script.google.com). Это запас, когда приложение само не нашло открывающееся зеркало:
     его сеть и сеть браузера доходят до сайта по-разному. Адрес берётся из общего ядра
-    (``ENTRY_LISTS``): та же страница без ``?format=json``, семейство ``git``.
+    (``ENTRY_LISTS``): та же страница без ``?format=json``. Семейство ``git`` — сервер Forgejo
+    (по умолчанию), ``wiki`` — вики проекта.
     """
 
     for listed in git_mirrors.ENTRY_LISTS:
         parsed = urlsplit(listed)
         if parsed.hostname == _ENTRY_HOST:
             base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-            return f"{base}?s=git&p={quote(path.strip('/'), safe='/')}"
+            return f"{base}?s={family}&p={quote(path.strip('/'), safe='/')}"
     return CANONICAL_SUPPORT_URL
 
 
