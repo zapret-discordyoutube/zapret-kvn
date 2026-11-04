@@ -62,7 +62,7 @@ def proven() -> bool:
     Читает состояние списка без сети; нужна ссылкам, которым после ``resolve`` надо знать,
     открывается ли хоть одно зеркало: иначе ссылка ведёт на запасной сайт.
     """
-    return _NAMES._good is not None and _NAMES._clock() < _NAMES._good_until  # noqa: SLF001 — свой список программы
+    return _NAMES.proven()
 
 
 __all__ = ["proven", "remember", "resolve"]
