@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "zapret_update"
-DEFAULT_SOURCE = Path("/home/codex-pve/zapretgui/public_zapretgui/src/zapret_update")
+DEFAULT_SOURCE = Path.home() / "zapretgui" / "public_zapretgui" / "src" / "zapret_update"
 HASH_FILE = "CORE_SHA256"
 
 

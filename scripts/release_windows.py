@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -28,6 +29,7 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HOME = Path.home()
 # Фазы выпуска импортируют zapret_update лениво, на ходу. Возобновление с середины (после обрыва
 # сессии или перезагрузки хоста) начинается в новом процессе и до этих импортов не проходит через
 # шаги, которые раньше добавляли корень в sys.path, поэтому корень добавляется сразу при загрузке.
@@ -48,7 +50,7 @@ WINDOWS_ROOT = os.getenv(
 )
 WINDOWS_SCP_ROOT = WINDOWS_ROOT.replace("\\", "/")
 RELEASE_ROOT = Path(
-    os.getenv("ZAPRETKVN_RELEASE_ROOT", "/home/codex-pve/releases/zapret-kvn")
+    os.getenv("ZAPRETKVN_RELEASE_ROOT", str(HOME / "releases" / "zapret-kvn"))
 )
 # Published assets are immutable in Forgejo, so the local archive only needs
 # the newest bundles for quick re-checks; older ones are pruned after success.
@@ -58,23 +60,25 @@ FORGEJO_REPO = os.getenv("ZAPRETKVN_FORGEJO_REPO", "zapretkvn/zapret-kvn")
 FORGEJO_TOKEN_PATH = Path(
     os.getenv(
         "ZAPRETKVN_FORGEJO_TOKEN",
-        "/home/codex-pve/.config/forgejo/zapret-kvn-release-token",
+        str(HOME / ".config" / "forgejo" / "zapret-kvn-release-token"),
     )
 )
-PUBLISHER_PYTHON = Path("/home/codex-pve/zapretgpt/.venv/bin/python")
-PUBLISHER_SYNC = Path("/home/codex-pve/zapretgpt/zapretkvn_publisher.py")
-PUBLISHER_COMMAND = Path(
-    "/home/codex-pve/zapretgpt/scripts/publish_zapretkvn_stable.py"
-)
-PUBLISHER_STATE = Path(
-    "/home/codex-pve/zapretgpt/data/zapretkvn_publisher_state.json"
-)
+PUBLISHER_PYTHON = HOME / "zapretgpt" / ".venv" / "bin" / "python"
+PUBLISHER_SYNC = HOME / "zapretgpt" / "zapretkvn_publisher.py"
+PUBLISHER_COMMAND = HOME / "zapretgpt" / "scripts" / "publish_zapretkvn_stable.py"
+PUBLISHER_STATE = HOME / "zapretgpt" / "data" / "zapretkvn_publisher_state.json"
+PUBLISHER_SOCKET = HOME / "zapretgpt" / "data" / "zapretgpt-admin.sock"
+# Бот ZapretGPT может жить в другом контейнере (с 2026-11-07 CT 202 на US2-7). Тогда
+# ZAPRETKVN_BOT_BRIDGE — ssh-алиас его моста (принудительная команда на стороне бота:
+# kvn-check, kvn-state, kvn-publish ...), а файлы выпуска уходят туда через rsync.
+# Пусто — бот на этой же машине, как раньше.
+BOT_BRIDGE = os.getenv("ZAPRETKVN_BOT_BRIDGE", "").strip()
 # The publisher only ever syncs the newest installer into this cache, so older
 # version directories are safe to prune (same env name as the publisher).
 PUBLISHER_WINDOWS_CACHE = Path(
     os.getenv(
         "ZAPRETKVN_WINDOWS_CACHE_ROOT",
-        "/home/codex-pve/zapretkvn-release-work/windows",
+        str(HOME / "zapretkvn-release-work" / "windows"),
     )
 )
 EXPECTED_ASSET_NAMES = (
@@ -89,7 +93,7 @@ EXPECTED_ASSET_NAMES = (
 SIGNING_KEY_PATH = Path(
     os.getenv(
         "ZAPRETKVN_UPDATE_SIGNING_KEY",
-        "/home/codex-pve/.config/zapret-signing/kvn-2026a.key",
+        str(HOME / ".config" / "zapret-signing" / "kvn-2026a.key"),
     )
 )
 SIGNED_ASSET_NAMES = ("update-manifest.json", "update-manifest.json.sig")
@@ -100,12 +104,12 @@ SIGNED_ASSET_NAMES = ("update-manifest.json", "update-manifest.json.sig")
 STORE_PYTHON = Path(
     os.getenv(
         "ZAPRET_UPDATE_STORE_PYTHON",
-        "/home/codex-pve/.local/share/uv/python/cpython-3.14.6-linux-x86_64-gnu/bin/python3.14",
+        str(HOME / ".local" / "share" / "uv" / "python" / "cpython-3.14.6-linux-x86_64-gnu" / "bin" / "python3.14"),
     )
 )
 STORE_CACHE = RELEASE_ROOT / "update-store"
 STORE_TOKEN_PATH = Path(
-    os.getenv("ZAPRET_UPDATE_STORE_TOKEN", "/home/codex-pve/.config/forgejo/zapret-update-store-token")
+    os.getenv("ZAPRET_UPDATE_STORE_TOKEN", str(HOME / ".config" / "forgejo" / "zapret-update-store-token"))
 )
 STORE_OWNER = "zapretkvn"
 STORE_PRODUCT = "zapret-kvn"
@@ -1031,10 +1035,20 @@ def verify_published_release(
         raise ReleaseError("published release is not Latest")
 
 
-def telegram_has_version(version: str) -> bool:
+def _publisher_state() -> dict[str, Any] | None:
+    """Журнал публикаций бота: локальный файл или ответ моста (``kvn-state``)."""
+    if BOT_BRIDGE:
+        text = run(["ssh", BOT_BRIDGE, "kvn-state"], capture=True, timeout=60).stdout
+        return json.loads(text) if text.strip() else None
     if not PUBLISHER_STATE.is_file():
+        return None
+    return read_json(PUBLISHER_STATE)
+
+
+def telegram_has_version(version: str) -> bool:
+    state = _publisher_state()
+    if state is None:
         return False
-    state = read_json(PUBLISHER_STATE)
     return f"windows|v{version}|ZapretKVN-v{version}-windows-x64.exe|" in json.dumps(
         state.get("published", {}), ensure_ascii=False
     )
@@ -1063,21 +1077,35 @@ def published_changes(version: str, changes: list[str]) -> list[str]:
     return joked
 
 
+def push_installer_to_bot(version: str) -> None:
+    """Положить установщик версии в кэш бота на мосту: ``<кэш>/v<версия>/ZapretKVN-v<версия>-windows-x64.exe``."""
+    name = f"ZapretKVN-v{version}-windows-x64.exe"
+    source = RELEASE_ROOT / f"v{version}" / name
+    if not source.is_file() or source.stat().st_size <= 0:
+        raise ReleaseError(f"installer for the bot is missing: {source}")
+    run(["rsync", "-t", "--partial", str(source), f"{BOT_BRIDGE}:windows/v{version}/{name}"], timeout=3600)
+
+
 def publish_telegram(version: str, changes: list[str]) -> None:
     if telegram_has_version(version):
         log(f"Telegram already contains v{version}")
         return
-    run([PUBLISHER_PYTHON, PUBLISHER_SYNC, "--sync-windows"], timeout=1200)
-    if not PUBLISHER_COMMAND.is_file():
-        raise ReleaseError(f"Telegram publisher command is missing: {PUBLISHER_COMMAND}")
-    arguments: list[str | os.PathLike[str]] = [
-        PUBLISHER_PYTHON,
-        PUBLISHER_COMMAND,
-        "windows",
-        version,
-    ]
+    if BOT_BRIDGE:
+        push_installer_to_bot(version)
+        arguments: list[str | os.PathLike[str]] = ["ssh", BOT_BRIDGE, "kvn-publish", "windows", version]
+    else:
+        run([PUBLISHER_PYTHON, PUBLISHER_SYNC, "--sync-windows"], timeout=1200)
+        if not PUBLISHER_COMMAND.is_file():
+            raise ReleaseError(f"Telegram publisher command is missing: {PUBLISHER_COMMAND}")
+        arguments = [
+            PUBLISHER_PYTHON,
+            PUBLISHER_COMMAND,
+            "windows",
+            version,
+        ]
     for item in changes:
-        arguments.extend(("--change", item))
+        # Через ssh команда уходит одной строкой: каждый пункт берём в кавычки для удалённой оболочки.
+        arguments.extend(("--change", shlex.quote(item) if BOT_BRIDGE else item))
     # Large installers over DPI-throttled MTProto can take well over the old
     # 1800 s cap; align with the publisher's own timeout and, if the client still
     # times out, trust the bot's publish ledger (the upload often completes after
@@ -1101,11 +1129,14 @@ def preflight(version: str | None, changes: list[str], telegram: bool) -> str:
     Forgejo.load()
     run(["ssh", WINDOWS_HOST, "powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], capture=True, timeout=30)
     if telegram:
-        if not PUBLISHER_COMMAND.is_file():
-            raise ReleaseError("ZapretGPT stable publisher helper is not installed")
-        socket = Path("/home/codex-pve/zapretgpt/data/zapretgpt-admin.sock")
-        if not socket.exists() or not stat.S_ISSOCK(socket.stat().st_mode):
-            raise ReleaseError("ZapretGPT admin Unix socket is unavailable")
+        if BOT_BRIDGE:
+            # Мост сам проверяет помощник публикации и админ-сокет бота на своей стороне.
+            run(["ssh", BOT_BRIDGE, "kvn-check"], capture=True, timeout=60)
+        else:
+            if not PUBLISHER_COMMAND.is_file():
+                raise ReleaseError("ZapretGPT stable publisher helper is not installed")
+            if not PUBLISHER_SOCKET.exists() or not stat.S_ISSOCK(PUBLISHER_SOCKET.stat().st_mode):
+                raise ReleaseError("ZapretGPT admin Unix socket is unavailable")
     log(
         json.dumps(
             {"status": "ready", "version": version, "telegram": telegram, "changes": changes},
