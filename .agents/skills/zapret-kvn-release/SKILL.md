@@ -1,6 +1,6 @@
 ---
 name: zapret-kvn-release
-description: Build, verify, package, publish, resume, or deliver Zapret KVN Windows x64 stable releases with the repository one-command runner, local Windows dev/stable gates, immutable Forgejo assets, and stable-only Telegram delivery through ZapretGPT. Use for release, build, version bump, stable publication, release assets, Telegram channel delivery, or recovery of an interrupted Windows release in /home/codex-pve/zapret-kvn/windows.
+description: Build, verify, package, publish, resume, or deliver Zapret KVN Windows x64 stable releases with the repository one-command runner, local Windows dev/stable gates, immutable Forgejo assets, and stable-only Telegram delivery through ZapretGPT. Use for release, build, version bump, stable publication, release assets, Telegram channel delivery, or recovery of an interrupted Windows release in ~/zapret-kvn/windows.
 ---
 
 # Release Zapret KVN Windows stable
@@ -108,7 +108,7 @@ cancelled version would have shipped. Never delete the state file by hand.
 
 ## Update the user guides
 
-A release with user-visible changes is not finished until the wiki guides describe it (owner decision 15.10.2026). Before or right after publishing, compare the change list with the guide notes in the wiki vault `/home/codex-pve/Privacy` and update them in the same task: `Zapret/premium.md`, `premium/apps.md` (Windows section), `premium/discord.md` (local proxy port, discord-drover), `premium/v2rayn.md`. Retake screenshots whose screens changed. Follow the `AGENTS.md` section «Пользовательские гайды следуют за приложением» and the procedure in `/home/codex-pve/vpnbot/vpnbot_codex/.claude/skills/vpnbot-maintain-user-guides/SKILL.md`. In the final report, name the guide commit or state that no user-visible behaviour changed.
+A release with user-visible changes is not finished until the wiki guides describe it (owner decision 15.10.2026). Before or right after publishing, compare the change list with the guide notes in the wiki vault `~/Privacy` and update them in the same task: `Zapret/premium.md`, `premium/apps.md` (Windows section), `premium/discord.md` (local proxy port, discord-drover), `premium/v2rayn.md`. Retake screenshots whose screens changed. Follow the `AGENTS.md` section «Пользовательские гайды следуют за приложением» and the procedure in `~/vpnbot/vpnbot_codex/.claude/skills/vpnbot-maintain-user-guides/SKILL.md`. In the final report, name the guide commit or state that no user-visible behaviour changed.
 
 ## Preserve safety boundaries
 
@@ -117,5 +117,7 @@ A release with user-visible changes is not finished until the wiki guides descri
 - Never publish dev, test, RC, draft, or prerelease files to stable or Telegram.
 - Never print or put Forgejo/Telegram credentials in argv, logs, Git, or Windows.
 - Never start a second bot or Pyrogram client. Telegram publication must use
-  `/home/codex-pve/zapretgpt/data/zapretgpt-admin.sock`.
+  the bot's admin socket (`zapretgpt/data/zapretgpt-admin.sock`); since 2026-11-07 the bot runs in CT 202,
+  so the runner reaches it through the bridge (`ZAPRETKVN_BOT_BRIDGE=kvn-bots`: `kvn-check`, `kvn-state`,
+  `kvn-publish`, installer by rsync to `kvn-bots:windows/vX.Y.Z/ZapretKVN-vX.Y.Z-windows-x64.exe`).
 - Keep generated assets and release state outside tracked source.

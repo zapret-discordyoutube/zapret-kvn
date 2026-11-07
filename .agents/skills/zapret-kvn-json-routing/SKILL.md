@@ -1,11 +1,11 @@
 ---
 name: zapret-kvn-json-routing
-description: Preserve and edit Zapret KVN native raw JSON routing for sing-box and Xray. Use when working in /home/codex-pve/zapret-kvn/windows on data/templates or data/configs JSON; adding direct, proxy, or block rules; matching processes, paths, domains, IPs, or rule sets; changing system-proxy or sing-box/Xray TUN behavior; synchronizing templates with active configs; or deciding whether routing belongs in JSON versus Python runtime code. Treat the original core JSON formats as the source of truth and prevent custom routing DSLs, overlays, generated policy layers, or hidden route injection.
+description: Preserve and edit Zapret KVN native raw JSON routing for sing-box and Xray. Use when working in ~/zapret-kvn/windows on data/templates or data/configs JSON; adding direct, proxy, or block rules; matching processes, paths, domains, IPs, or rule sets; changing system-proxy or sing-box/Xray TUN behavior; synchronizing templates with active configs; or deciding whether routing belongs in JSON versus Python runtime code. Treat the original core JSON formats as the source of truth and prevent custom routing DSLs, overlays, generated policy layers, or hidden route injection.
 ---
 
 # Zapret KVN Native JSON Routing
 
-> Architecture basis (owner decision 2026-11-04, read it first): each protocol runs on its own complete native core and sing-box is only the gasket that owns TUN, routing, DNS and protected sockets. See the "Architecture basis" section of `/home/codex-pve/zapret-kvn/AGENTS.md`.
+> Architecture basis (owner decision 2026-11-04, read it first): each protocol runs on its own complete native core and sing-box is only the gasket that owns TUN, routing, DNS and protected sockets. See the "Architecture basis" section of `~/zapret-kvn/AGENTS.md`.
 
 ## Keep the architecture native
 
