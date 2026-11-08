@@ -59,7 +59,7 @@ class SingboxTemplateDnsContractTests(unittest.TestCase):
                     servers["proxy-dns"]["servers"],
                     ["vpn-node-dns-udp", "vpn-node-dns-tcp"],
                 )
-                self.assertEqual(servers["proxy-dns"]["strategy"], "sequential")
+                self.assertEqual(servers["proxy-dns"]["strategy"], "parallel")
                 for tag, transport in (
                     ("vpn-node-dns-udp", "udp"),
                     ("vpn-node-dns-tcp", "tcp"),

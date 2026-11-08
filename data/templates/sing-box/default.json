@@ -381,7 +381,7 @@
           "vpn-node-dns-udp",
           "vpn-node-dns-tcp"
         ],
-        "strategy": "sequential",
+        "strategy": "parallel",
         "timeout": "6s"
       }
     ],
