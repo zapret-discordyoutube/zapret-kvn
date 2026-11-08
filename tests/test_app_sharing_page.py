@@ -93,6 +93,26 @@ class SharingPageTests(unittest.TestCase):
         self.addCleanup(page.deleteLater)
         self.assertEqual(page.table.rowCount(), 0)
 
+    def test_empty_page_stays_compact_at_the_top_instead_of_spreading_over_the_window(self) -> None:
+        from PyQt6.QtCore import QPoint
+
+        page, _ = self._page(snapshot_of([], notes=["Раздача по интернету недоступна: роутер с UPnP не нашёлся"]))
+        page.resize(1100, 1000)
+        page.show()
+        for _ in range(5):
+            app.processEvents()
+
+        def top(widget):
+            return widget.mapTo(page, QPoint(0, 0)).y()
+
+        def bottom(widget):
+            return top(widget) + widget.height()
+
+        # Раньше свободное место делилось между надписями поровну, и подпись внизу уезжала к краю окна.
+        self.assertLess(top(page.empty_label) - bottom(page.summary_label), 80)
+        self.assertLess(top(page.hint_label) - bottom(page.empty_label), 60)
+        self.assertLess(bottom(page.hint_label), 700)
+
     def test_timer_runs_only_while_the_page_is_shown(self) -> None:
         page, _ = self._page({"available": False})
         self.assertFalse(page._timer.isActive())

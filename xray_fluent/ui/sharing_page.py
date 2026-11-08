@@ -75,7 +75,7 @@ class SharingPage(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(WHAT_COLUMN, QHeaderView.ResizeMode.Stretch)
         self.table.setAccessibleName("Журнал обращений к раздаче обновлений")
-        root.addWidget(self.table, 1)
+        root.addWidget(self.table, 100)
 
         self.empty_label = CaptionLabel("", self)
         self.empty_label.setWordWrap(True)
@@ -85,6 +85,8 @@ class SharingPage(QWidget):
         )
         self.hint_label.setWordWrap(True)
         root.addWidget(self.hint_label)
+        # Пока таблица спрятана (журнал пуст), лишнее место уходит сюда, а не растаскивает надписи по окну.
+        root.addStretch(1)
         self.refresh()
 
     def refresh(self) -> None:
