@@ -41,6 +41,17 @@ class NormalizeTests(unittest.TestCase):
             "https://github.com/zapret-discordyoutube/zapret-kvn/releases/download/v0.8.99/ZapretKVN-windows-x64.zip",
         )
 
+    def test_the_archive_is_asked_from_our_server_first_and_from_github_only_after_a_github_release(self) -> None:
+        # Наш сервер быстрее; GitHub с российских адресов отдаёт файл струйкой и полоса стоит на 0%.
+        forgejo = au.normalize_github_release(GITHUB_PAYLOAD)["assets"][0]["browser_download_url"]
+        github = au.github_asset_url(forgejo)
+        for from_github, expected in ((False, (forgejo, github)), (True, (github, forgejo))):
+            downloader = SimpleNamespace(_update=SimpleNamespace(download_url=forgejo, from_github=from_github))
+            self.assertEqual(au.UpdateDownloader._archive_urls(downloader), expected)
+        # Адрес без GitHub-двойника остаётся единственным.
+        alone = SimpleNamespace(_update=SimpleNamespace(download_url="https://git.zapret.moe/x/y.zip", from_github=False))
+        self.assertEqual(au.UpdateDownloader._archive_urls(alone), ("https://git.zapret.moe/x/y.zip",))
+
     def test_bad_tags_are_rejected(self) -> None:
         for tag in ("", "v1/../x", "a/b"):
             with self.assertRaises(ValueError):

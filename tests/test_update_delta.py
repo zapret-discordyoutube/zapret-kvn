@@ -420,7 +420,7 @@ class DownloaderDeltaTests(_TempCase):
         path.mkdir()
         return str(path)
 
-    def _downloader(self, new, payload, server, installed, *, digest=None, with_files=True):
+    def _downloader(self, new, payload, server, installed, *, digest=None, with_files=True, from_github=False):
         update = app_updater.AppUpdate(
             version="9.9.9",
             tag="v9.9.9",
@@ -429,6 +429,7 @@ class DownloaderDeltaTests(_TempCase):
             notes="",
             digest_sha256=digest or hashlib.sha256(payload).hexdigest(),
             files=tuple(signed_for(new)) if with_files else (),
+            from_github=from_github,
         )
         downloader = app_updater.UpdateDownloader(update, app_dir=installed)
         self.errors: list[str] = []
@@ -491,10 +492,23 @@ class DownloaderDeltaTests(_TempCase):
         self.assert_tree(downloader.prepared.source_dir, new)
         self.assertGreaterEqual(server.served, len(payload))
 
-    def test_github_copy_is_used_first_and_forgejo_stays_untouched(self) -> None:
+    def test_our_server_is_used_first_and_github_stays_untouched(self) -> None:
+        # Наш сервер быстрее GitHub; GitHub нужен лишь запасным путём.
         old, new, payload = self._scenario()
         forgejo, github = self.server(payload), self.server(payload)
         downloader = self._downloader(new, payload, forgejo, self.install(old))
+        with patch.object(app_updater, "github_asset_url", return_value=github.url):
+            downloader.run()
+        self.assertEqual(self.errors, [])
+        self.assert_tree(downloader.prepared.source_dir, new)
+        self.assertGreater(forgejo.served, 0)
+        self.assertEqual(github.served, 0)
+
+    def test_github_copy_is_used_first_after_a_release_named_by_github(self) -> None:
+        # Сервер не ответил на проверку, выпуск назвал GitHub: архив сначала там.
+        old, new, payload = self._scenario()
+        forgejo, github = self.server(payload), self.server(payload)
+        downloader = self._downloader(new, payload, forgejo, self.install(old), from_github=True)
         with patch.object(app_updater, "github_asset_url", return_value=github.url):
             downloader.run()
         self.assertEqual(self.errors, [])
@@ -505,7 +519,7 @@ class DownloaderDeltaTests(_TempCase):
     def test_corrupted_github_copy_falls_back_to_forgejo(self) -> None:
         old, new, payload = self._scenario()
         forgejo, github = self.server(payload), self.server(bytes(len(payload)))
-        downloader = self._downloader(new, payload, forgejo, self.install(old), with_files=False)
+        downloader = self._downloader(new, payload, forgejo, self.install(old), with_files=False, from_github=True)
         with patch.object(app_updater, "github_asset_url", return_value=github.url):
             downloader.run()
         self.assertEqual(self.errors, [])

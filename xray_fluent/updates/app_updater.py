@@ -110,6 +110,9 @@ class AppUpdate:
     # Проверенный список выпуска целиком (общее ядро zapret_update): в нём же
     # размеры файлов в хранилище и заплатки от прежних версий.
     manifest: object = None
+    # Выпуск назвал GitHub, потому что ни одно имя нашего сервера не ответило: тогда и архив
+    # сначала просится у GitHub, а не у недоступного сервера.
+    from_github: bool = False
 
 
 @dataclass(slots=True)
@@ -533,6 +536,7 @@ def _find_available_update(proxy_url: str | None = None) -> AppUpdate | None:
         digest_sha256=archive.sha256,
         files=tuple(SignedFile(item.path, item.size, item.sha256) for item in manifest.files),
         manifest=manifest,
+        from_github=client.github_fallback,
     )
 
 
@@ -738,9 +742,19 @@ class UpdateDownloader(QThread):
                         self.progress.emit(int(downloaded * 100 / total))
 
     def _archive_urls(self) -> tuple[str, ...]:
-        """Откуда качать архив: сначала копия на GitHub, затем Forgejo, под которым ответила проверка."""
+        """Откуда качать архив: сначала наш сервер (Forgejo, под которым ответила проверка), затем копия на GitHub.
+
+        Наш сервер быстрее GitHub, а GitHub с российских адресов часто отдаёт файл тонкой струйкой:
+        сокет не отваливается по таймауту, а полоса показывает 0% (решение владельца 2026-11-08,
+        раньше с 2026-11-03 порядок был обратным). Исключение: выпуск назван GitHub, когда сервер
+        не отвечает, тогда сначала GitHub.
+        """
         github = github_asset_url(self._update.download_url)
-        return (github, self._update.download_url) if github else (self._update.download_url,)
+        if not github:
+            return (self._update.download_url,)
+        if self._update.from_github:
+            return (github, self._update.download_url)
+        return (self._update.download_url, github)
 
     def _download(self, zip_path: Path, proxy_url: str | None, url: str | None = None) -> None:
         """Download update zip with multi-segment acceleration.
