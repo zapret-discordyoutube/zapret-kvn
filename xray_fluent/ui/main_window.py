@@ -276,6 +276,7 @@ class MainWindow(FluentWindow):
             self.controller.resume_after_app_update(resume)
         self._app_update_scheduler_ready = True
         self._sync_app_update_timer(state.settings)
+        self._apply_share_updates(state.settings)
         self._start_update_signal()
         self._consume_update_error_log()
         self.controller.repair_launch_on_startup()
@@ -972,6 +973,7 @@ class MainWindow(FluentWindow):
         self._refresh_tray_tooltip()
         if self._app_update_scheduler_ready:
             self._sync_app_update_timer(settings)
+            self._apply_share_updates(settings)
 
     def _on_ping_updated(self, node_id: str, ping_ms: int | None) -> None:
         self.nodes_page.update_ping(node_id, ping_ms)
@@ -1752,6 +1754,16 @@ class MainWindow(FluentWindow):
         checker.start()
         if not silent:
             self.updates_page.show_checking()
+
+    def _apply_share_updates(self, settings: AppSettings) -> None:
+        """Включить или закрыть раздачу обновлений соседям по сети, когда выключатель изменился."""
+        value = bool(settings.share_updates_lan)
+        if value == getattr(self, "_share_updates_applied", None):
+            return
+        self._share_updates_applied = value
+        from ..updates import share_wiring
+
+        share_wiring.apply_setting(value)
 
     def _sync_app_update_timer(self, settings: AppSettings) -> None:
         """Keep the one-shot/periodic application update timer in sync."""

@@ -439,6 +439,12 @@ class SettingsPage(ScrollablePage):
             "Приложение само обновится, перезапустится и вернёт подключение",
             parent=updates_group,
         )
+        self.share_updates_lan_card = SwitchSettingCard(
+            FIF.SHARE, "Делиться обновлениями с компьютерами в моей сети",
+            "Соседние компьютеры с этой программой в домашней или рабочей сети берут новые файлы у вас, "
+            "а не с серверов. Файлы проверяются по подписи выпуска; в публичном Wi-Fi и в интернет ничего не раздаётся",
+            parent=updates_group,
+        )
         self.xray_auto_update_card = SwitchSettingCard(
             FIF.CLOUD_DOWNLOAD, "Обновлять ядро Xray",
             "Проверять и ставить новую версию ядра при запуске",
@@ -447,6 +453,7 @@ class SettingsPage(ScrollablePage):
 
         updates_group.addSettingCard(self.check_updates_card)
         updates_group.addSettingCard(self.allow_updates_card)
+        updates_group.addSettingCard(self.share_updates_lan_card)
         updates_group.addSettingCard(self.xray_auto_update_card)
         root.addWidget(updates_group)
 
@@ -547,6 +554,7 @@ class SettingsPage(ScrollablePage):
         self.reconnect_card.checkedChanged.connect(self._auto_save)
         self.check_updates_card.checkedChanged.connect(self._auto_save)
         self.allow_updates_card.checkedChanged.connect(self._auto_save)
+        self.share_updates_lan_card.checkedChanged.connect(self._auto_save)
         self.xray_auto_update_card.checkedChanged.connect(self._auto_save)
 
         self.auto_switch_card.checkedChanged.connect(self._auto_save)
@@ -615,6 +623,7 @@ class SettingsPage(ScrollablePage):
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)
         self.check_updates_card.setChecked(settings.check_updates)
         self.allow_updates_card.setChecked(settings.allow_updates)
+        self.share_updates_lan_card.setChecked(settings.share_updates_lan)
         self.xray_auto_update_card.setChecked(settings.xray_auto_update)
 
         self.auto_switch_card.setChecked(settings.auto_switch_enabled)
@@ -722,6 +731,7 @@ class SettingsPage(ScrollablePage):
         data.reconnect_on_network_change = self.reconnect_card.isChecked()
         data.check_updates = self.check_updates_card.isChecked()
         data.allow_updates = self.allow_updates_card.isChecked()
+        data.share_updates_lan = self.share_updates_lan_card.isChecked()
         data.xray_auto_update = self.xray_auto_update_card.isChecked()
         data.auto_switch_enabled = self.auto_switch_card.isChecked()
         data.auto_switch_low_speed_enabled = self.auto_switch_low_speed_card.isChecked()

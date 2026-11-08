@@ -39,7 +39,7 @@ from . import site_names
 from .delta_zip import DeltaUnavailable, HttpRangeSource, SignedFile, prepare_delta
 from .installer.plan import APP_EXE_NAME, WORK_DIR_PREFIX
 from .installer.runner import STAGE_ROOT_NAME
-from .signed_release import signed_asset_urls, verified_manifest
+from .signed_release import PRODUCT, signed_asset_urls, verified_manifest
 from zapret_update import mirrors as git_mirrors
 from zapret_update.manifest import ManifestError
 
@@ -842,9 +842,14 @@ class UpdateDownloader(QThread):
         files = getattr(manifest, "files", ())
         if not files or not all(entry.zsize for entry in files):
             return None
-        from zapret_update import fetch, plan as update_plan, stage, store
+        from zapret_update import fetch, plan as update_plan, share_client, stage, store
+
+        from . import share_wiring
 
         cache = self._app_dir / "data" / "runtime" / STAGE_ROOT_NAME / f"store-{self._update.version}"
+        # Соседи по сети ищутся в фоне, пока считается план (zapret_update.share_*);
+        # выключатель в настройках отключает и раздачу, и этот вопрос.
+        neighbours = share_client.start_search(PRODUCT, self._update.version, enabled=share_wiring.is_enabled())
         try:
             self.status.emit("Сравнение с установленной версией...")
             planned = update_plan.make_plan(
@@ -865,6 +870,14 @@ class UpdateDownloader(QThread):
             f"Загрузка изменений: {_format_megabytes(planned.download_size)} из {_format_megabytes(self._update.size)}..."
         )
         self.progress.emit(0)
+        share_client.fill_from_neighbours(
+            planned,
+            work_dir=cache,
+            search=neighbours,
+            cancelled=self.isInterruptionRequested,
+            on_stage=self.status.emit,
+            report=_log.info,
+        )
         try:
             ready = fetch.fetch_plan(
                 planned,

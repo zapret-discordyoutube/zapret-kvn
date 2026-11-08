@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from xray_fluent.updates import app_updater
+from xray_fluent.updates import app_updater, share_wiring
 from zapret_update import manifest as update_manifest
 
 
@@ -25,6 +25,10 @@ class StoreStepTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.app = Path(self._tmp.name) / "app"
         self.app.mkdir()
+        # Тесты не шлют в сеть настоящий вопрос соседям: выключатель раздачи выключен.
+        switch = patch.object(share_wiring, "_enabled", False)
+        switch.start()
+        self.addCleanup(switch.stop)
 
     def _downloader(self, manifest):
         update = app_updater.AppUpdate("9.9.9", "v9.9.9", "https://git.zapret.moe/x.zip", 100, "", "b" * 64, (), manifest)
@@ -50,6 +54,38 @@ class StoreStepTests(unittest.TestCase):
         # Скачанное лежит в постоянной папке: после перезапуска загрузка продолжится.
         self.assertEqual(fetch.call_args.kwargs["work_dir"], tree.parent)
         self.assertIn("zapretkvn/generic/zapret-kvn-store/1/", fetch.call_args.kwargs["sources"][0].url_for("x.zst"))
+
+    def test_neighbours_are_asked_after_the_plan_and_before_the_servers(self) -> None:
+        calls: list[str] = []
+
+        def search(product, version, **kwargs):
+            calls.append(f"search {product} {version} enabled={kwargs.get('enabled')}")
+            return object()
+
+        def servers(*_a, **_k):
+            calls.append("servers")
+            raise OSError("stop here")
+
+        real_plan = app_updater.__dict__.get("update_plan")
+        with patch("zapret_update.share_client.start_search", search), patch(
+            "zapret_update.share_client.fill_from_neighbours",
+            lambda planned, **kw: calls.append(f"neighbours {kw['work_dir'].name}"),
+        ), patch("zapret_update.fetch.fetch_plan", servers), patch(
+            "zapret_update.store.codecs", return_value=frozenset({"zstd"})
+        ):
+            self.assertIsNone(self._downloader(_manifest(with_store=True))._try_store())
+        self.assertEqual(calls, ["search zapret-kvn 9.9.9 enabled=False", "neighbours store-9.9.9", "servers"])
+        del real_plan
+
+    def test_switch_on_lets_the_search_run(self) -> None:
+        seen = {}
+        with patch.object(share_wiring, "_enabled", True), patch(
+            "zapret_update.share_client.start_search", lambda *a, **k: seen.update(k) or object()
+        ), patch("zapret_update.share_client.fill_from_neighbours", lambda *a, **k: None), patch(
+            "zapret_update.fetch.fetch_plan", side_effect=OSError("stop")
+        ), patch("zapret_update.store.codecs", return_value=frozenset({"zstd"})):
+            self._downloader(_manifest(with_store=True))._try_store()
+        self.assertTrue(seen["enabled"])
 
     def test_log_names_patch_kinds(self) -> None:
         import hashlib
