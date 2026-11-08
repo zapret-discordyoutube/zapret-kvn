@@ -1009,7 +1009,7 @@ class DashboardPage(StackedSection):
         )
         bypass = "включён" if self._routing.bypass_lan else "выключен"
         self.routing_bypass_label.setText(f"Обход локальной сети: {bypass}")
-        self.routing_dns_label.setText(f"DNS: {self._routing.dns_mode.title()}")
+        self.routing_dns_label.setText("DNS и правила меняются в редакторе конфига.")
 
     def _refresh_detail_stats(self) -> None:
         self._detail_down_label.setText(f"Загрузка: {_format_speed(self._last_down_bps)}")

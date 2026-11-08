@@ -318,14 +318,4 @@ def build_xray_config(
     if outbound_pool is not None and outbound_pool.contains(node.id):
         ensure_xray_pool_control_plane(config, outbound_pool)
 
-    if routing.dns_mode == "builtin":
-        config["dns"] = {
-            "servers": [
-                "1.1.1.1",
-                "8.8.8.8",
-                "localhost",
-            ],
-            "queryStrategy": "UseIP",
-        }
-
     return config

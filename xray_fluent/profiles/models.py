@@ -342,11 +342,6 @@ class RoutingSettings:
     direct_domains: list[str] = field(default_factory=list)
     proxy_domains: list[str] = field(default_factory=list)
     block_domains: list[str] = field(default_factory=list)
-    dns_mode: str = "system"  # system | builtin
-    dns_bootstrap_server: str = "1.1.1.1"  # DNS for direct traffic
-    dns_bootstrap_type: str = "udp"        # udp | tcp | tls | https
-    dns_proxy_server: str = "8.8.8.8"     # DNS for proxy traffic
-    dns_proxy_type: str = "tcp"            # tcp | tls | https
     process_rules: list[dict[str, str]] = field(default_factory=list)  # [{"process": "chrome.exe", "action": "direct|proxy|block"}]
     tun_default_outbound: str = "direct"  # "proxy" | "direct"
 
@@ -357,11 +352,6 @@ class RoutingSettings:
             "direct_domains": list(self.direct_domains),
             "proxy_domains": list(self.proxy_domains),
             "block_domains": list(self.block_domains),
-            "dns_mode": self.dns_mode,
-            "dns_bootstrap_server": self.dns_bootstrap_server,
-            "dns_bootstrap_type": self.dns_bootstrap_type,
-            "dns_proxy_server": self.dns_proxy_server,
-            "dns_proxy_type": self.dns_proxy_type,
             "process_rules": list(self.process_rules),
             "tun_default_outbound": self.tun_default_outbound,
         }
@@ -374,11 +364,6 @@ class RoutingSettings:
             direct_domains=list(data.get("direct_domains") or []),
             proxy_domains=list(data.get("proxy_domains") or []),
             block_domains=list(data.get("block_domains") or []),
-            dns_mode=str(data.get("dns_mode") or "system"),
-            dns_bootstrap_server=str(data.get("dns_bootstrap_server") or "1.1.1.1"),
-            dns_bootstrap_type=str(data.get("dns_bootstrap_type") or "udp"),
-            dns_proxy_server=str(data.get("dns_proxy_server") or "8.8.8.8"),
-            dns_proxy_type=str(data.get("dns_proxy_type") or "tcp"),
             process_rules=list(data.get("process_rules") or []),
             tun_default_outbound=str(data.get("tun_default_outbound") or "direct"),
         )
