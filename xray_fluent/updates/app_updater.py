@@ -449,7 +449,22 @@ class _ReleaseClient:
 
 def _find_available_update(proxy_url: str | None = None) -> AppUpdate | None:
     client = _ReleaseClient(proxy_url)
-    data = client.fetch_release()
+    try:
+        data = client.fetch_release()
+    except Exception:
+        # Ни Forgejo, ни зеркала не ответили: если человек включил раздачу через интернет,
+        # новую версию могут назвать соседи (их подписанный список проверяется той же подписью).
+        from . import share_wiring
+
+        try:
+            from_peers = share_wiring.update_from_peers()
+        except Exception as exc:  # noqa: BLE001 — соседи не обязаны помогать
+            _log.info("[update] Соседи по интернету не помогли: %s", exc)
+            from_peers = None
+        if from_peers is None:
+            raise
+        _log.info("[update] Сервер выпусков не ответил; версию %s назвали соседи по интернету", from_peers.version)
+        return from_peers
     tag = str(data.get("tag_name") or "")
 
     if not _is_newer_version(tag, APP_VERSION):

@@ -18,7 +18,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from zapret_update import share_adopt, share_discover, share_internet, share_peers, share_service
+from zapret_update import share_adopt, share_discover, share_internet, share_manifest, share_peers, share_service
 from zapret_update.manifest import MAX_MANIFEST_BYTES, ManifestError, load_signed
 
 from ..constants import APP_VERSION, BASE_DIR
@@ -62,6 +62,48 @@ def registry_bases() -> list[str]:
 
     url = site_names.resolve(release_watch.WAIT_URL)
     return [url[: -len("/wait")]] if url.endswith("/wait") else []
+
+
+def manifest_blob():
+    """Подписанный список своей версии (текст и подпись) для соседей без доступа к серверам; нет — ``None``."""
+    path = Path(BASE_DIR).joinpath(*INSTALLED_LIST)
+    try:
+        return path.read_bytes(), path.with_name(path.name + ".sig").read_bytes()
+    except OSError:
+        return None
+
+
+def update_from_peers():
+    """Новая версия, названная соседями по интернету, когда сервер выпусков не ответил; иначе ``None``.
+
+    Работает только при включённой раздаче через интернет. Обновление собирается из
+    ПРОВЕРЕННОГО подписанного списка (имя архива, размер, SHA-256, файлы), а адрес архива —
+    обычный адрес выпуска на Forgejo, собранный здесь, а не присланный соседом.
+    """
+    if not _internet:
+        return None
+    from urllib.parse import quote
+
+    from .app_updater import FORGEJO_HOST, FORGEJO_RELEASE_DOWNLOAD_PREFIXES, AppUpdate, SignedFile
+
+    neighbours = share_internet.find_internet_neighbours(peer_book(), PRODUCT, None, bases=registry_bases())
+    found = share_manifest.fetch_from_peers(
+        neighbours, trusted=TRUSTED_KEYS, product=PRODUCT, channel=CHANNEL, current_version=APP_VERSION
+    )
+    if found is None or found.manifest.installer is None:
+        return None
+    manifest, archive = found.manifest, found.manifest.installer
+    tag = f"v{manifest.version}"
+    return AppUpdate(
+        version=manifest.version,
+        tag=tag,
+        download_url=f"https://{FORGEJO_HOST}{FORGEJO_RELEASE_DOWNLOAD_PREFIXES[0]}{quote(tag, safe='')}/{quote(archive.name, safe='')}",
+        size=archive.size,
+        notes="",
+        digest_sha256=archive.sha256,
+        files=tuple(SignedFile(item.path, item.size, item.sha256) for item in manifest.files),
+        manifest=manifest,
+    )
 
 
 def internet_finder(version: str):
@@ -165,6 +207,7 @@ def default_service() -> share_service.SharingService:
                 report=report,
                 internet_enabled=is_internet_enabled,
                 internet=side,
+                manifest_blob=manifest_blob,
             )
         return _service
 
@@ -191,5 +234,5 @@ def apply_setting(enabled: bool, internet: bool = False, *, wait: bool = False) 
 
 __all__ = [
     "INSTALLED_LIST", "apply_setting", "default_service", "installed_manifest", "internet_finder", "is_enabled",
-    "is_internet_enabled", "peer_book", "registry_bases",
+    "is_internet_enabled", "manifest_blob", "peer_book", "registry_bases", "update_from_peers",
 ]
