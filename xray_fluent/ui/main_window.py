@@ -61,6 +61,7 @@ from .window_presence import WindowPresence, is_native_minimize_command, is_nati
 from .window_reveal import cloak_until_painted, is_system_show_event
 from .theme import apply_theme, stop_system_theme_listener, sync_system_theme_listener
 from .tour import TOUR_STEPS, TourOverlay, TourStep, active_tour
+from .sharing_page import SharingPage
 from .updates_page import UpdatesPage
 from .zapret_page import ZapretPage
 
@@ -189,6 +190,7 @@ class MainWindow(FluentWindow):
         self.logs_page = DeferredPage(LogsPage, "logs", self)
         self.settings_page = DeferredPage(SettingsPage, "settings", self)
         self.updates_page = DeferredPage(UpdatesPage, "updates", self)
+        self.sharing_page = DeferredPage(SharingPage, "sharing", self)
         self.history_page = DeferredPage(HistoryPage, "history", self)
         self.about_page = DeferredPage(AboutPage, "about", self)
         # Запуск в трей: страницы, которые человек нажмёт первыми, строятся заранее, пока
@@ -358,6 +360,7 @@ class MainWindow(FluentWindow):
         )
         self.addSubInterface(self.about_page, FIF.INFO, "О проекте", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.updates_page, FIF.UPDATE, "Обновления", NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.sharing_page, FIF.SHARE, "Кто подключается", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.settings_page, FIF.SETTING, "Настройки", NavigationItemPosition.BOTTOM)
         # Подключаемся после внутреннего toggle() панели — к моменту вызова
         # слота режим уже выбран.

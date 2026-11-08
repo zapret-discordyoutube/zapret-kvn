@@ -64,6 +64,34 @@ def registry_bases() -> list[str]:
     return [url[: -len("/wait")]] if url.endswith("/wait") else []
 
 
+def activity_snapshot() -> dict:
+    """Что показывает вкладка «Кто подключается»: состояние раздачи и журнал событий.
+
+    Только читает уже созданное в памяти (службу не создаёт и на диск не ходит): вкладка
+    спрашивает это каждые пару секунд. Службы ещё нет — «пока ничего».
+    """
+    service = _service
+    if service is None:
+        return {"available": False}
+    side = service._internet
+    mapping = getattr(side, "mapping", None) if side is not None else None
+    notes = [text for _when, text in list(service.notes) + (list(side.notes) if side is not None else [])]
+    return {
+        "available": True,
+        "lan_port": service.port,
+        "internet_running": service.internet_running,
+        "internet_address": f"{mapping.external_ip}:{mapping.external_port}" if mapping is not None else "",
+        "notes": notes[-6:],
+        "events": service.activity.snapshot(),
+        "summary": service.activity.summary(),
+    }
+
+
+def clear_activity() -> None:
+    if _service is not None:
+        _service.activity.clear()
+
+
 def manifest_blob():
     """Подписанный список своей версии (текст и подпись) для соседей без доступа к серверам; нет — ``None``."""
     path = Path(BASE_DIR).joinpath(*INSTALLED_LIST)
@@ -233,6 +261,6 @@ def apply_setting(enabled: bool, internet: bool = False, *, wait: bool = False) 
 
 
 __all__ = [
-    "INSTALLED_LIST", "apply_setting", "default_service", "installed_manifest", "internet_finder", "is_enabled",
+    "INSTALLED_LIST", "activity_snapshot", "apply_setting", "clear_activity", "default_service", "installed_manifest", "internet_finder", "is_enabled",
     "is_internet_enabled", "manifest_blob", "peer_book", "registry_bases", "update_from_peers",
 ]
