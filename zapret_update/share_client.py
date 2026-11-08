@@ -23,6 +23,7 @@ SEARCH_WAIT = discover.FIND_TIMEOUT + 1.0
 
 class Search:
     def __init__(self, product: str, version: str, *, enabled: bool = True, find=discover.find_neighbours) -> None:
+        """Поиск соседей по локальной сети; ``enabled=False`` — не спрашивать (выключатель выключен)."""
         self._found: list[discover.Neighbour] = []
         self._thread: threading.Thread | None = None
         if not enabled:
@@ -76,4 +77,39 @@ def fill_from_neighbours(
         return prefill.PrefillResult()
 
 
-__all__ = ["Search", "fill_from_neighbours", "start_search"]
+def fill_from_internet(
+    plan: UpdatePlan,
+    *,
+    work_dir: Path,
+    find: Callable[[], list[discover.Neighbour]],
+    cancelled: Callable[[], bool] = lambda: False,
+    on_stage: Callable[[str], None] = lambda _text: None,
+    report: Callable[[str], None] = lambda _text: None,
+    fill=prefill.prefill_from_neighbours,
+) -> prefill.PrefillResult:
+    """Запасной путь: серверы не отдали файлы, берём их у копий программы в интернете.
+
+    Зовётся только после неудачи серверов: при живых серверах адрес человека
+    соседям по интернету не показывается. Берём всё нужное целиком, даже то, что
+    с сервера пришло бы маленькой заплаткой: серверов нет, а файл нужен.
+    """
+    try:
+        if not plan.want:
+            return prefill.PrefillResult()
+        on_stage("Серверы не отвечают — ищем копии программы в интернете…")
+        neighbours = find()
+        if not neighbours:
+            report("Серверы обновлений не отдали файлы, а в интернете никого не нашлось")
+            return prefill.PrefillResult()
+        result = fill(plan, work_dir=work_dir, neighbours=neighbours, cancelled=cancelled, everything=True)
+        report(
+            f"Серверы не отдали файлы: у копий в интернете найдено {len(neighbours)}, взято файлов {result.files} "
+            f"({result.bytes / 1048576:.1f} МБ)"
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        report(f"Копии в интернете не помогли: {exc}")
+        return prefill.PrefillResult()
+
+
+__all__ = ["Search", "fill_from_internet", "fill_from_neighbours", "start_search"]

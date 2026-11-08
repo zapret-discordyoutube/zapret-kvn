@@ -554,6 +554,7 @@ class AppSettings:
     xray_update_feed_url: str = ""
     xray_auto_update: bool = False
     share_updates_lan: bool = True  # отдавать файлы обновления соседям по локальной сети
+    share_updates_internet: bool = False  # раздача и запасной забор файлов через интернет: только по желанию человека
     tun_mode: bool = False
     proxy_engine: str = "singbox"  # "singbox" | "xray"
     tun_engine: str = "singbox"  # "singbox" | "xray" | "tun2socks"
@@ -644,6 +645,7 @@ class AppSettings:
             "xray_update_feed_url": self.xray_update_feed_url,
             "xray_auto_update": self.xray_auto_update,
             "share_updates_lan": self.share_updates_lan,
+            "share_updates_internet": self.share_updates_internet,
             "tun_mode": self.tun_mode,
             "proxy_engine": self.proxy_engine,
             "tun_engine": self.tun_engine,
@@ -721,6 +723,7 @@ class AppSettings:
             xray_update_feed_url=str(data.get("xray_update_feed_url") or ""),
             xray_auto_update=bool(data.get("xray_auto_update", False)),
             share_updates_lan=bool(data.get("share_updates_lan", True)),
+            share_updates_internet=bool(data.get("share_updates_internet", False)),
             tun_mode=bool(data.get("tun_mode", False)),
             proxy_engine="singbox",
             tun_engine="singbox",

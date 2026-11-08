@@ -77,6 +77,48 @@ class StoreStepTests(unittest.TestCase):
         self.assertEqual(calls, ["search zapret-kvn 9.9.9 enabled=False", "neighbours store-9.9.9", "servers"])
         del real_plan
 
+    def _fallback_run(self, *, finder, taken):
+        from zapret_update import fetch, share_prefill
+
+        calls: list[str] = []
+
+        def servers(*_a, **_k):
+            calls.append("servers")
+            if calls.count("servers") == 1 or not taken:
+                raise fetch.FetchError("blocked", "net")
+            return {}
+
+        def internet(planned, **kwargs):
+            calls.append("internet")
+            return share_prefill.PrefillResult(files=taken, bytes=0)
+
+        def stop_after(*_a, **_k):
+            calls.append("stage")
+            raise OSError("downloaded")
+
+        with patch("zapret_update.fetch.fetch_plan", servers), patch(
+            "zapret_update.share_client.fill_from_internet", internet
+        ), patch.object(share_wiring, "internet_finder", lambda version: finder), patch(
+            "zapret_update.stage.build_stage", stop_after
+        ), patch("zapret_update.store.codecs", return_value=frozenset({"zstd"})):
+            result = self._downloader(_manifest(with_store=True))._try_store()
+        return calls, result
+
+    def test_internet_copies_are_asked_only_after_the_servers_failed(self) -> None:
+        calls, result = self._fallback_run(finder=lambda: [], taken=2)
+        self.assertEqual(calls, ["servers", "internet", "servers", "stage"])
+        self.assertIsNone(result)  # сборка дерева в тесте оборвана: ступень честно отдаёт следующую
+
+    def test_without_the_internet_switch_the_server_failure_hands_over_to_the_next_step(self) -> None:
+        calls, result = self._fallback_run(finder=None, taken=2)
+        self.assertEqual(calls, ["servers"])
+        self.assertIsNone(result)
+
+    def test_if_internet_copies_gave_nothing_the_next_step_takes_over(self) -> None:
+        calls, result = self._fallback_run(finder=lambda: [], taken=0)
+        self.assertEqual(calls, ["servers", "internet"])
+        self.assertIsNone(result)
+
     def test_switch_on_lets_the_search_run(self) -> None:
         seen = {}
         with patch.object(share_wiring, "_enabled", True), patch(

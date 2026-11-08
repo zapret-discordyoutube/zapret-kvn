@@ -445,6 +445,13 @@ class SettingsPage(ScrollablePage):
             "а не с серверов. Файлы проверяются по подписи выпуска; в публичном Wi-Fi и в интернет ничего не раздаётся",
             parent=updates_group,
         )
+        self.share_updates_internet_card = SwitchSettingCard(
+            FIF.GLOBE, "Делиться обновлениями через интернет",
+            "Если серверы обновлений не отдают файлы (их заблокировали), приложение возьмёт файлы у таких же "
+            "копий в интернете, а ваш компьютер будет отдавать файлы им. Роутер откроет порт, а ваш IP-адрес увидят "
+            "те, кто с вами соединится. Файлы проверяются по подписи выпуска. Выключено, пока вы сами не включите",
+            parent=updates_group,
+        )
         self.xray_auto_update_card = SwitchSettingCard(
             FIF.CLOUD_DOWNLOAD, "Обновлять ядро Xray",
             "Проверять и ставить новую версию ядра при запуске",
@@ -454,6 +461,7 @@ class SettingsPage(ScrollablePage):
         updates_group.addSettingCard(self.check_updates_card)
         updates_group.addSettingCard(self.allow_updates_card)
         updates_group.addSettingCard(self.share_updates_lan_card)
+        updates_group.addSettingCard(self.share_updates_internet_card)
         updates_group.addSettingCard(self.xray_auto_update_card)
         root.addWidget(updates_group)
 
@@ -555,6 +563,7 @@ class SettingsPage(ScrollablePage):
         self.check_updates_card.checkedChanged.connect(self._auto_save)
         self.allow_updates_card.checkedChanged.connect(self._auto_save)
         self.share_updates_lan_card.checkedChanged.connect(self._auto_save)
+        self.share_updates_internet_card.checkedChanged.connect(self._auto_save)
         self.xray_auto_update_card.checkedChanged.connect(self._auto_save)
 
         self.auto_switch_card.checkedChanged.connect(self._auto_save)
@@ -624,6 +633,7 @@ class SettingsPage(ScrollablePage):
         self.check_updates_card.setChecked(settings.check_updates)
         self.allow_updates_card.setChecked(settings.allow_updates)
         self.share_updates_lan_card.setChecked(settings.share_updates_lan)
+        self.share_updates_internet_card.setChecked(settings.share_updates_internet)
         self.xray_auto_update_card.setChecked(settings.xray_auto_update)
 
         self.auto_switch_card.setChecked(settings.auto_switch_enabled)
@@ -732,6 +742,7 @@ class SettingsPage(ScrollablePage):
         data.check_updates = self.check_updates_card.isChecked()
         data.allow_updates = self.allow_updates_card.isChecked()
         data.share_updates_lan = self.share_updates_lan_card.isChecked()
+        data.share_updates_internet = self.share_updates_internet_card.isChecked()
         data.xray_auto_update = self.xray_auto_update_card.isChecked()
         data.auto_switch_enabled = self.auto_switch_card.isChecked()
         data.auto_switch_low_speed_enabled = self.auto_switch_low_speed_card.isChecked()

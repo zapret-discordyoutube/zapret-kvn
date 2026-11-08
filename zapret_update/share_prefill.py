@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import os
+import ssl
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -83,7 +84,12 @@ class _Neighbours:
 
 def _download(neighbour: Neighbour, want: Want, part: Path, timeout: float, cancelled: Callable[[], bool]) -> None:
     entry = want.entry
-    connection = http.client.HTTPConnection(neighbour.host, neighbour.port, timeout=timeout)
+    if neighbour.tls:
+        from .share_cert import client_context
+
+        connection = http.client.HTTPSConnection(neighbour.host, neighbour.port, timeout=timeout, context=client_context())
+    else:
+        connection = http.client.HTTPConnection(neighbour.host, neighbour.port, timeout=timeout)
     try:
         connection.request("GET", ROUTE + entry.sha256, headers={"User-Agent": "ZapretShare/1"})
         response = connection.getresponse()
@@ -116,8 +122,13 @@ def prefill_from_neighbours(
     timeout: float = STALL_TIMEOUT,
     cancelled: Callable[[], bool] = lambda: False,
     threads: int = THREADS,
+    everything: bool = False,
 ) -> PrefillResult:
-    """Кладёт в ``ready/`` всё, что нашлось у соседей; остальное — забота ``fetch_plan``."""
+    """Кладёт в ``ready/`` всё, что нашлось у соседей; остальное — забота ``fetch_plan``.
+
+    ``everything`` — просить и то, что обычно выгоднее взять с сервера (мелочь, файлы с
+    маленькой заплаткой): так делают, когда серверов нет и файл нужен любой ценой.
+    """
     result = PrefillResult()
     if not neighbours:
         return result
@@ -126,7 +137,7 @@ def prefill_from_neighbours(
     parts_dir.mkdir(parents=True, exist_ok=True)
     unique: dict[str, Want] = {}
     for want in plan.want:
-        if worth_asking(want):
+        if everything or worth_asking(want):
             unique.setdefault(want.entry.sha256, want)
     pool_state = _Neighbours(neighbours)
     lock = threading.Lock()
@@ -146,7 +157,7 @@ def prefill_from_neighbours(
                 continue
             except _Mismatch:
                 pool_state.strike(neighbour, heavy=True)
-            except (OSError, http.client.HTTPException):
+            except (OSError, http.client.HTTPException, ssl.SSLError):
                 pool_state.strike(neighbour)
             else:
                 os.replace(part, ready)

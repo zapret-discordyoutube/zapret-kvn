@@ -878,8 +878,8 @@ class UpdateDownloader(QThread):
             on_stage=self.status.emit,
             report=_log.info,
         )
-        try:
-            ready = fetch.fetch_plan(
+        def download():
+            return fetch.fetch_plan(
                 planned,
                 root=self._app_dir,
                 work_dir=cache,
@@ -888,6 +888,23 @@ class UpdateDownloader(QThread):
                 cancelled=self.isInterruptionRequested,
                 progress=lambda done, total: self.progress.emit(min(99, int(done * 100 / max(1, total)))),
             )
+
+        try:
+            try:
+                ready = download()
+            except fetch.FetchError:
+                # Серверы файлы не отдали: если человек включил раздачу по интернету, берём недостающее
+                # у таких же копий. Пока серверы живы, адрес человека соседям по интернету не показывается.
+                find = share_wiring.internet_finder(self._update.version)
+                if find is None:
+                    raise
+                taken = share_client.fill_from_internet(
+                    planned, work_dir=cache, find=find, cancelled=self.isInterruptionRequested,
+                    on_stage=self.status.emit, report=_log.info,
+                )
+                if not taken.files:
+                    raise
+                ready = download()
             tree = stage.build_stage(planned, root=self._app_dir, ready=ready, stage_dir=cache / "tree")
         except Exception as exc:  # noqa: BLE001 — любой сбой ведёт на следующую ступень
             _log.warning("[update] Загрузка из хранилища не удалась, пробуем куски архива: %s", exc)

@@ -1757,13 +1757,13 @@ class MainWindow(FluentWindow):
 
     def _apply_share_updates(self, settings: AppSettings) -> None:
         """Включить или закрыть раздачу обновлений соседям по сети, когда выключатель изменился."""
-        value = bool(settings.share_updates_lan)
+        value = (bool(settings.share_updates_lan), bool(settings.share_updates_internet))
         if value == getattr(self, "_share_updates_applied", None):
             return
         self._share_updates_applied = value
         from ..updates import share_wiring
 
-        share_wiring.apply_setting(value)
+        share_wiring.apply_setting(*value)
 
     def _sync_app_update_timer(self, settings: AppSettings) -> None:
         """Keep the one-shot/periodic application update timer in sync."""

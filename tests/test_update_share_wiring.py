@@ -15,7 +15,7 @@ from zapret_update.manifest import ManifestError
 
 class WiringTests(unittest.TestCase):
     def setUp(self) -> None:
-        for name, value in (("_service", None), ("_enabled", True)):
+        for name, value in (("_service", None), ("_enabled", True), ("_internet", False), ("_book", None)):
             patcher = patch.object(share_wiring, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -34,6 +34,36 @@ class WiringTests(unittest.TestCase):
         self.assertTrue(AppSettings.from_dict({}).share_updates_lan)
         off = AppSettings.from_dict(AppSettings(share_updates_lan=False).to_dict())
         self.assertFalse(off.share_updates_lan)
+
+    def test_internet_sharing_is_off_by_default_and_roundtrips(self) -> None:
+        self.assertFalse(AppSettings().share_updates_internet)
+        self.assertFalse(AppSettings.from_dict({}).share_updates_internet)
+        self.assertTrue(AppSettings.from_dict(AppSettings(share_updates_internet=True).to_dict()).share_updates_internet)
+        self.assertFalse(share_wiring.is_internet_enabled())
+
+    def test_service_has_an_internet_side_that_follows_its_own_flag(self) -> None:
+        service = share_wiring.default_service()  # без зависания: у книги свой замок
+        self.assertIsNotNone(service._internet)
+        self.assertIs(service._internet_enabled, share_wiring.is_internet_enabled)
+
+    def test_apply_setting_sets_both_flags(self) -> None:
+        fake = SimpleNamespace(refresh=lambda: None)
+        with patch.object(share_wiring, "default_service", return_value=fake):
+            share_wiring.apply_setting(False, True, wait=True)
+            self.assertEqual((share_wiring.is_enabled(), share_wiring.is_internet_enabled()), (False, True))
+            share_wiring.apply_setting(True, wait=True)
+            self.assertEqual((share_wiring.is_enabled(), share_wiring.is_internet_enabled()), (True, False))
+
+    def test_internet_finder_exists_only_when_the_switch_is_on(self) -> None:
+        self.assertIsNone(share_wiring.internet_finder("0.8.66"))
+        with patch.object(share_wiring, "_internet", True):
+            self.assertTrue(callable(share_wiring.internet_finder("0.8.66")))
+
+    def test_registry_is_the_wait_address_without_the_wait_word(self) -> None:
+        with patch("xray_fluent.updates.site_names.resolve", side_effect=lambda url: url):
+            self.assertEqual(share_wiring.registry_bases(), ["https://git.zapret.moe/api/zapret/kvn"])
+        with patch("xray_fluent.updates.site_names.resolve", return_value="https://x/other"):
+            self.assertEqual(share_wiring.registry_bases(), [])
 
     def test_apply_setting_sets_the_flag_and_refreshes_in_the_background(self) -> None:
         refreshed = []
