@@ -139,6 +139,8 @@ class SnapshotTests(unittest.TestCase):
             self.assertTrue(shot["available"])
             self.assertEqual((shot["events"][0].peer, shot["notes"], shot["lan_port"]), ("10.0.0.5", ["сеть не частная"], None))
             self.assertEqual(shot["summary"]["events"], 1)
+            self.assertIs(shot["internet_switch"], False)  # положение выключателя видно странице
+            self.assertIn("lan_switch", shot)
             share_wiring.clear_activity()
             self.assertEqual(share_wiring.activity_snapshot()["events"], [])
 
