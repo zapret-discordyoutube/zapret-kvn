@@ -24,6 +24,10 @@ from xray_fluent.updates import share_wiring
 from zapret_update.share_activity import ActivityLog
 
 
+#: Страницы живут до конца процесса (как в test_app_dashboard_layout): deleteLater + processEvents роняют Python на Windows.
+_KEEP_ALIVE: list = []
+
+
 def snapshot_of(events, **extra):
     log = ActivityLog()
     for item in events:
@@ -43,7 +47,7 @@ class SharingPageTests(unittest.TestCase):
             state["snapshot"] = snapshot_of([])
 
         page = SharingPage(snapshot=lambda: state["snapshot"], clear=clear)
-        self.addCleanup(page.deleteLater)
+        _KEEP_ALIVE.append(page)  # не уничтожаем: удаление виджетов посреди прогона роняет Windows-тесты
         return page, state
 
     def test_rows_show_who_connected_and_where_from(self) -> None:
@@ -90,7 +94,7 @@ class SharingPageTests(unittest.TestCase):
             raise RuntimeError("no service")
 
         page = SharingPage(snapshot=boom, clear=lambda: None)
-        self.addCleanup(page.deleteLater)
+        _KEEP_ALIVE.append(page)  # не уничтожаем: удаление виджетов посреди прогона роняет Windows-тесты
         self.assertEqual(page.table.rowCount(), 0)
 
     def test_empty_page_stays_compact_at_the_top_instead_of_spreading_over_the_window(self) -> None:
