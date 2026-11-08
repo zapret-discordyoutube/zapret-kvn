@@ -26,7 +26,7 @@ from xray_fluent.ui.main_window import MainWindow  # noqa: E402
 
 _PAGES = (
     "dashboard_page", "nodes_page", "subscriptions_page", "zapret_page", "logs_page",
-    "history_page", "about_page", "updates_page", "settings_page",
+    "history_page", "about_page", "updates_page", "sharing_page", "settings_page",
 )
 #: Окно общее на процесс и не уничтожается: удаление виджетов посреди прогона
 #: роняет Windows-тесты (см. test_app_detail_pages).
