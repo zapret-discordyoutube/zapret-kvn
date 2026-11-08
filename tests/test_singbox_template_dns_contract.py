@@ -128,6 +128,53 @@ class SingboxTemplateDnsContractTests(unittest.TestCase):
                 )
                 self.assertEqual(direct["domain_resolver"], "bootstrap-dns")
 
+    def test_dns_rules_mirror_the_domain_part_of_the_route(self) -> None:
+        """Имена, которые маршрут шлёт напрямую, не зависят от узла.
+
+        Без ``dns.rules`` единственный ``dns.final = proxy-dns`` отправлял в туннель
+        каждое имя, в том числе российские домены (login.mos.ru). Пока узел не
+        отвечал, они не резолвились, хотя сам трафик к ним шёл бы мимо VPN.
+        Правила DNS повторяют доменные условия маршрута в том же порядке:
+        direct → ``bootstrap-dns``, proxy → ``proxy-dns``.
+        """
+
+        domain_keys = ("domain", "domain_suffix", "domain_keyword", "domain_regex")
+        servers_by_outbound = {"direct": "bootstrap-dns", "proxy": "proxy-dns"}
+        template_dir = ROOT / "data" / "templates" / "sing-box"
+
+        for path in sorted(template_dir.glob("*.json")):
+            with self.subTest(template=path.name):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                expected = []
+                for rule in payload["route"]["rules"]:
+                    outbound = rule.get("outbound")
+                    if rule.get("action") != "route" or outbound not in servers_by_outbound:
+                        continue
+                    if set(rule) - set(domain_keys) - {"rule_set", "action", "outbound"}:
+                        continue  # условия по процессу, порту и IP в DNS не повторяются
+                    matcher = {key: rule[key] for key in domain_keys if key in rule}
+                    domain_sets = [tag for tag in rule.get("rule_set", []) if tag.startswith("geosite-")]
+                    if domain_sets:
+                        matcher["rule_set"] = domain_sets
+                    if matcher:
+                        expected.append(
+                            {**matcher, "action": "route", "server": servers_by_outbound[outbound]}
+                        )
+
+                self.assertEqual(payload["dns"]["rules"], expected)
+                self.assertTrue(
+                    any(rule["server"] == "bootstrap-dns" for rule in expected),
+                    msg="в шаблоне нет прямых доменных правил: проверка ничего не защищает",
+                )
+                # Порядок важен: ru-blocked (proxy) стоит раньше category-ru (direct),
+                # иначе заблокированный домен ушёл бы на локальный резолвер.
+                sets = [tuple(rule.get("rule_set", ())) for rule in payload["dns"]["rules"]]
+                self.assertLess(
+                    sets.index(("geosite-ru-blocked",)),
+                    sets.index(("geosite-category-ru",)),
+                )
+                self.assertEqual(payload["dns"]["final"], "proxy-dns")
+
     def test_discord_template_accepts_a_domain_based_proxy_node(self) -> None:
         path = ROOT / "data" / "templates" / "sing-box" / "discord-folder-example.json"
         document = parse_singbox_document(path, path.read_text(encoding="utf-8"))
