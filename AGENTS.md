@@ -19,12 +19,12 @@
 - Before building, make sure `dist/ZapretKVN/ZapretKVN.exe` is not running; if needed, stop `ZapretKVN.exe` first or the clean step can fail because the old binary is locked.
 - The builder is WSL-aware and converts paths for the Windows virtualenv automatically, so prefer it even when working from WSL.
 
-## Пользовательские гайды следуют за приложением
+## User guides follow the app
 
-- Zapret KVN для Windows пересказывают заметки хранилища wiki `~/Privacy`: `Zapret/premium.md` (гайд для новичка, https://wiki.zapret.moe/Zapret/premium), `premium/apps.md` (раздел Windows), `premium/discord.md` (локальный прокси на порту `1390`, discord-drover) и `premium/v2rayn.md` (режим прокси и TUN).
-- Изменил видимое пользователю — добавление подписки, названия страниц и кнопок, порт локального прокси, режимы прокси и TUN, шаблоны маршрутизации, установку и обновление, — в той же задаче обнови эти заметки и затронутые скриншоты. Задача не закрыта, пока гайд описывает старое приложение (решение владельца 15.10.2026).
-- Скриншоты Windows снимаются на машине `win10` (VM 100); личные данные и ссылки подписок на снимках закрашиваются.
-- Правка заметок — по навыку хранилища `~/Privacy/.claude/skills/vault-note/SKILL.md`; публикация — коммит и `git push` хранилища (сайт пересобирается сам) и `"$HOME/.local/bin/obsidian" vault="Privacy" publish:add path=<файл>` для зеркала. Подробная процедура и проверка сайта — навык `vpnbot-maintain-user-guides` в `~/vpnbot/vpnbot_codex/.claude/skills/`.
+- Zapret KVN for Windows is retold by the notes of the wiki vault `~/Privacy`: `Zapret/premium.md` (the beginner guide, https://wiki.zapret.moe/Zapret/premium), `premium/apps.md` (the Windows section), `premium/discord.md` (the local proxy on port `1390`, discord-drover) and `premium/v2rayn.md` (proxy and TUN mode).
+- If you change anything the user sees (adding a subscription, page and button names, the local proxy port, the proxy and TUN modes, routing templates, installation and update), update these notes and the affected screenshots in the same task. The task is not closed while the guide describes the old app (owner decision of 15.10.2026).
+- Windows screenshots are taken on the machine `win10` (VM 100); personal data and subscription links are painted over in the screenshots.
+- Edit the notes with the vault skill `~/Privacy/.claude/skills/vault-note/SKILL.md`; publish with a commit and `git push` of the vault (the site rebuilds itself) and `"$HOME/.local/bin/obsidian" vault="Privacy" publish:add path=<file>` for the mirror. The detailed procedure and the site check are in the skill `vpnbot-maintain-user-guides` in `~/vpnbot/vpnbot_codex/.claude/skills/`.
 
 ## Response format
 
