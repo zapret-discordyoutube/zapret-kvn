@@ -24,10 +24,10 @@
     "release_prerelease": false,
     "url": "https://github.com/amnezia-vpn/amneziawg-go/tree/b5928efb6ca19f0153958460c3d141f04abc5c2e",
     "toolchain": {
-      "version": "go1.26.8",
-      "archive": "go1.26.8.windows-amd64.zip",
-      "sha256": "b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59",
-      "url": "https://go.dev/dl/go1.26.8.windows-amd64.zip"
+      "version": "go1.27.3",
+      "archive": "go1.27.3.windows-amd64.zip",
+      "sha256": "f26081f438319757f8a1b46d7d0b2c5ec7583d4038e485e0aa725cfde7885fff",
+      "url": "https://go.dev/dl/go1.27.3.windows-amd64.zip"
     }
   },
   "sources": [
