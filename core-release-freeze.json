@@ -2,9 +2,9 @@
   "schema": 1,
   "releases": {
     "windows": "0.8.70",
-    "android": "v0.5.42"
+    "android": "v0.5.43"
   },
-  "checked_at_utc": "2026-11-09T17:59:53.438346+00:00",
+  "checked_at_utc": "2026-11-09T21:25:05.353437+00:00",
   "amnezia": {
     "id": "amnezia",
     "repository": "amnezia-vpn/amneziawg-go",
@@ -31,6 +31,10 @@
   },
   "hysteria": {
     "version": "app/v2.13.0"
+  },
+  "xray": {
+    "version": "v26.11.9",
+    "commit": "676eaf66f8f05d4d558ee7a74b4736623d3feeb9"
   },
   "inputs": {
     "windows": {
