@@ -138,6 +138,41 @@ def android_hysteria_parity(android: Path, lock: dict, regenerate=_regenerate_an
     return version
 
 
+def _xray_tag_commit(version: str) -> str:
+    """Commit of the official Xray release tag (peeled), from GitHub."""
+
+    output = subprocess.run(
+        ["git", "ls-remote", "https://github.com/XTLS/Xray-core", f"refs/tags/{version}", f"refs/tags/{version}^{{}}"],
+        capture_output=True, text=True, timeout=120, check=True,
+    ).stdout.split("\n")
+    commits = {line.split()[1]: line.split()[0] for line in output if line.strip()}
+    commit = commits.get(f"refs/tags/{version}^{{}}") or commits.get(f"refs/tags/{version}")
+    if not commit:
+        raise ValueError(f"Xray tag {version} was not found upstream")
+    return commit
+
+
+def android_xray_parity(android: Path, lock: dict, resolve_commit=_xray_tag_commit) -> dict:
+    """Both platforms ship the Windows-selected official Xray; a lagging Android pin stops the freeze.
+
+    Android builds Xray from source (core patch 0004/0014 and a Go-module pin), so it cannot be retargeted by
+    rewriting one line: the new release may need a newer Go toolchain or API fixes. The pin is therefore moved by
+    hand, and this check makes sure it never lags silently again (it did, by eight releases, until 2026-11-09).
+    """
+
+    version = next(item["version"] for item in lock["sources"] if item.get("id") == "xray-core")
+    properties = dict(
+        line.split("=", 1) for line in (android / "core.properties").read_text(encoding="utf-8").splitlines() if "=" in line
+    )
+    commit = resolve_commit(version)
+    if properties.get("XRAY_CORE_COMMIT") != commit:
+        raise ValueError(
+            f"Android Xray {properties.get('XRAY_CORE_COMMIT')} lags Windows {version} ({commit}): "
+            "update core.properties and add a core patch before the freeze"
+        )
+    return {"version": version, "commit": commit}
+
+
 def prepare(windows: Path, android: Path, windows_version: str, android_tag: str) -> dict:
     if not re.fullmatch(r"\d+\.\d+\.\d+", windows_version) or not re.fullmatch(r"v\d+\.\d+\.\d+", android_tag):
         raise ValueError("Only exact stable versions can be frozen")
@@ -160,6 +195,7 @@ def prepare(windows: Path, android: Path, windows_version: str, android_tag: str
     lock_path = windows / "scripts/core-lock.windows-x64.json"
     lock = resolve_lock(json.loads(lock_path.read_text(encoding="utf-8")))
     hysteria = {"version": android_hysteria_parity(android, lock)}
+    xray = android_xray_parity(android, lock)
     changes = android_pin_changes(android, lock["amnezia"])
     singbox = {key: lock["singbox_build"][key] for key in ("version", "commit")}
     android_core_changes(android, lock["singbox_build"], changes)
@@ -182,7 +218,7 @@ def prepare(windows: Path, android: Path, windows_version: str, android_tag: str
             "core.properties", "core-patches/series.sha256", "core-patches/0005-official-amnezia-wg-unified.patch")},
     }
     freeze = {"schema": 1, "releases": releases, "checked_at_utc": datetime.now(timezone.utc).isoformat(),
-              "amnezia": lock["amnezia"], "singbox": singbox, "hysteria": hysteria, "inputs": inputs}
+              "amnezia": lock["amnezia"], "singbox": singbox, "hysteria": hysteria, "xray": xray, "inputs": inputs}
     for root in (windows, android):
         atomic_write_lock(root / "core-release-freeze.json", freeze)
     verify(windows, "windows", windows_version)

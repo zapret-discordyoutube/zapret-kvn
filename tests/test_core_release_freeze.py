@@ -6,7 +6,8 @@ import tempfile
 import unittest
 
 from scripts.check_core_release_freeze import digest, verify
-from scripts.prepare_core_release import android_hysteria_parity, android_pin_changes
+from scripts.check_core_release_freeze import check_xray
+from scripts.prepare_core_release import android_hysteria_parity, android_pin_changes, android_xray_parity
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID = ROOT.parent / "android"
@@ -94,6 +95,23 @@ class CoreReleaseFreezeTests(unittest.TestCase):
                 android_hysteria_parity(root, {"sources": [{"id": "hysteria", "version": "app/v2.12.2"}]}),
                 "app/v2.12.2",
             )
+
+    def test_android_xray_pin_may_not_lag_the_windows_release(self):
+        lock = {"sources": [{"id": "xray-core", "version": "v26.11.9"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "core.properties").write_text("XRAY_CORE_COMMIT=" + "a" * 40 + "\n")
+            with self.assertRaisesRegex(ValueError, "Android Xray a{40} lags Windows v26.11.9"):
+                android_xray_parity(root, lock, resolve_commit=lambda _version: "b" * 40)
+            self.assertEqual(
+                android_xray_parity(root, lock, resolve_commit=lambda _version: "a" * 40),
+                {"version": "v26.11.9", "commit": "a" * 40},
+            )
+        freeze = {"xray": {"version": "v26.11.9", "commit": "a" * 40}}
+        check_xray(freeze, {"XRAY_CORE_COMMIT": "a" * 40})
+        with self.assertRaisesRegex(ValueError, "differs from the Windows-selected v26.11.9"):
+            check_xray(freeze, {"XRAY_CORE_COMMIT": "b" * 40})
+        check_xray({}, {"XRAY_CORE_COMMIT": "b" * 40})  # older receipts carry no Xray pin
 
     @unittest.skipUnless(ANDROID.is_dir(), "paired Android checkout not available")
     def test_android_retarget_preserves_upstream_patch_context(self):

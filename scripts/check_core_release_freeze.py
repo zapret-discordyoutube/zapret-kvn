@@ -43,12 +43,24 @@ def verify(root: Path, platform: str, version: str) -> dict:
             raise ValueError("Android Amnezia differs from coordinated freeze")
         if properties["GO_VERSION"] != pin["toolchain"]["version"].removeprefix("go"):
             raise ValueError("Android and Windows Go toolchains differ")
+        check_xray(freeze, properties)
         if hysteria is not None and properties.get("HYSTERIA_CORE_TAG") != hysteria["version"]:
             raise ValueError(
                 "Android Hysteria differs from coordinated freeze: regenerate core-patches/0003 "
                 "for the Windows-selected release (docs/CORE_UPDATE.md)"
             )
     return freeze
+
+
+def check_xray(freeze: dict, android_properties: dict) -> None:
+    """Android embeds Xray from source: its pinned commit must be the one Windows ships (receipts before 2026-11-09 lack it)."""
+
+    xray = freeze.get("xray")
+    if xray is not None and android_properties.get("XRAY_CORE_COMMIT") != xray["commit"]:
+        raise ValueError(
+            f"Android Xray {android_properties.get('XRAY_CORE_COMMIT')} differs from the Windows-selected {xray['version']} "
+            f"({xray['commit']}): update XRAY_CORE_MODULE/XRAY_CORE_COMMIT and add a core patch (docs/CORE_UPDATE.md)"
+        )
 
 
 if __name__ == "__main__":
