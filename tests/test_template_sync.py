@@ -188,6 +188,63 @@ class TemplateSyncTests(unittest.TestCase):
             {"dns": {"final": "b"}, "inbounds": [{"type": "tun"}], "experimental": {"cache_file": {"enabled": True}}},
         )
 
+    def test_new_stock_dns_is_not_taken_when_it_names_rule_sets_the_users_route_lacks(self):
+        # Field report 2026-11-09: the user had edited route (no rule sets), dns followed the new
+        # stock and the core refused to start: "dns rule[3]: rule-set not found: geosite-ru-blocked".
+        previous = {"dns": {"final": "proxy-dns"}, "route": {"rule_set": [{"tag": "geosite-ru-blocked"}]}}
+        current = {
+            "dns": {"final": "proxy-dns", "rules": [{"rule_set": ["geosite-ru-blocked"], "server": "proxy-dns"}]},
+            "route": {"rule_set": [{"tag": "geosite-ru-blocked"}]},
+        }
+        custom_route = {"final": "direct"}
+        merged = merge_stock_sections({**previous, "route": custom_route}, previous, current)
+
+        self.assertEqual(merged["dns"], previous["dns"])
+        self.assertEqual(merged["route"], custom_route)
+
+    def test_new_stock_dns_is_taken_when_the_users_route_declares_the_rule_sets(self):
+        previous = {"dns": {"final": "a"}, "route": {"final": "proxy"}}
+        current = {"dns": {"final": "a", "rules": [{"rule_set": "ru", "server": "b"}]}, "route": {"final": "proxy"}}
+        active = {"dns": {"final": "a"}, "route": {"final": "direct", "rule_set": [{"tag": "ru"}]}}
+
+        self.assertEqual(merge_stock_sections(active, previous, current)["dns"], current["dns"])
+
+    def test_config_broken_by_the_earlier_merge_is_repaired_on_start(self):
+        stock_dns = {
+            "final": "proxy-dns",
+            "rules": [
+                {"domain_suffix": ["gov.ru"], "server": "bootstrap-dns"},
+                {"rule_set": ["geosite-ru-blocked"], "server": "proxy-dns"},
+                {"type": "logical", "mode": "or", "rules": [{"rule_set": "geosite-category-ru"}], "server": "x"},
+            ],
+        }
+        stock = {"dns": stock_dns, "route": {"rule_set": [{"tag": "geosite-ru-blocked"}]}}
+        _write_json(self.templates / "sing-box" / "default.json", stock)
+        _write_json(self.bundle / "sing-box" / "default.json", stock)
+        active = self.configs / "sing-box" / "default.json"
+        _write_json(active, {"dns": stock_dns, "route": {"final": "direct"}})
+
+        result = self._sync()
+
+        repaired = json.loads(active.read_text(encoding="utf-8"))
+        self.assertEqual(repaired["dns"]["rules"], [{"domain_suffix": ["gov.ru"], "server": "bootstrap-dns"}])
+        self.assertEqual(repaired["dns"]["final"], "proxy-dns")
+        self.assertEqual(repaired["route"], {"final": "direct"})
+        self.assertEqual(result.configs_repaired, ("sing-box/default.json",))
+        self.assertTrue(result.changed)
+        self.assertFalse(self._sync().changed)
+
+    def test_user_written_dns_with_unknown_rule_set_is_not_repaired(self):
+        stock = {"dns": {"final": "a"}, "route": {"final": "proxy"}}
+        _write_json(self.templates / "sing-box" / "default.json", stock)
+        _write_json(self.bundle / "sing-box" / "default.json", stock)
+        mine = {"dns": {"final": "a", "rules": [{"rule_set": ["mine"], "server": "a"}]}, "route": {"final": "proxy"}}
+        active = self.configs / "sing-box" / "default.json"
+        _write_json(active, mine)
+
+        self.assertFalse(self._sync().changed)
+        self.assertEqual(json.loads(active.read_text(encoding="utf-8")), mine)
+
     def test_invalid_active_json_is_left_untouched_on_update(self):
         _write_json(self.templates / "sing-box" / "default.json", {"dns": {"final": "a"}})
         _write_json(self.bundle / "sing-box" / "default.json", {"dns": {"final": "b"}})

@@ -16,13 +16,16 @@ class TemplateSyncResult:
     templates_updated: tuple[str, ...] = ()
     configs_updated: tuple[str, ...] = ()
     configs_preserved: tuple[str, ...] = ()
+    # Конфиги, у которых правила DNS ссылались на не объявленные в route наборы
+    # правил: такие правила убраны, иначе ядро отказывается стартовать.
+    configs_repaired: tuple[str, ...] = ()
     # Разделы, которые шаблон обновил, а пользователь правил вручную: новая
     # версия раздела к его конфигу не применена. ((ключ конфига, (разделы…)), …)
     stale_sections: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @property
     def changed(self) -> bool:
-        return bool(self.templates_updated or self.configs_updated)
+        return bool(self.templates_updated or self.configs_updated or self.configs_repaired)
 
 
 def _same_json_document(left: Path, right: Path) -> bool:
@@ -94,11 +97,94 @@ def merge_stock_sections(active: dict, previous: dict, current: dict) -> dict:
     for key, value in current.items():
         if key not in merged and key not in active and key not in previous:
             merged[key] = value
+    # Sections are coupled: DNS rules point at rule sets declared in ``route``.
+    # If the new stock DNS would name a rule set the user's route does not have
+    # (the user edited route, so it did not follow the stock), the core would
+    # refuse to start. Keep the user's previous DNS section instead.
+    if "dns" in merged and merged["dns"] != active.get("dns", _MISSING) and has_dangling_dns_rule_sets(merged):
+        if "dns" in active:
+            merged["dns"] = active["dns"]
+        else:
+            del merged["dns"]
     return merged
+
+
+def _rule_set_refs(rule: object) -> set[str]:
+    """Rule-set tags a DNS/route rule refers to, including nested logical rules."""
+
+    refs: set[str] = set()
+    if not isinstance(rule, dict):
+        return refs
+    names = rule.get("rule_set")
+    if isinstance(names, str):
+        refs.add(names)
+    elif isinstance(names, list):
+        refs.update(name for name in names if isinstance(name, str))
+    nested = rule.get("rules")
+    if isinstance(nested, list):
+        for child in nested:
+            refs |= _rule_set_refs(child)
+    return refs
+
+
+def _declared_rule_sets(document: dict) -> set[str]:
+    route = document.get("route")
+    declared = route.get("rule_set") if isinstance(route, dict) else None
+    if not isinstance(declared, list):
+        return set()
+    return {item["tag"] for item in declared if isinstance(item, dict) and isinstance(item.get("tag"), str)}
+
+
+def _dns_rules(document: dict) -> list:
+    dns = document.get("dns")
+    rules = dns.get("rules") if isinstance(dns, dict) else None
+    return rules if isinstance(rules, list) else []
+
+
+def has_dangling_dns_rule_sets(document: dict) -> bool:
+    """True when a DNS rule names a rule set that ``route.rule_set`` does not declare.
+
+    sing-box refuses such a config at start ("dns rule[N]: rule-set not found").
+    """
+
+    declared = _declared_rule_sets(document)
+    return any(_rule_set_refs(rule) - declared for rule in _dns_rules(document))
+
+
+def drop_dangling_dns_rules(document: dict) -> dict:
+    """Copy of ``document`` without the DNS rules that name undeclared rule sets.
+
+    The remaining rules and ``dns.final`` keep working, so a name that lost its
+    dedicated rule is resolved by the final server, as before the rules existed.
+    """
+
+    declared = _declared_rule_sets(document)
+    kept = [rule for rule in _dns_rules(document) if not (_rule_set_refs(rule) - declared)]
+    return {**document, "dns": {**document["dns"], "rules": kept}}
 
 
 def _dump_json(payload: dict) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _repair_dangling_dns_rules(active_config: Path, bundled_path: Path) -> bool:
+    """Undo the damage of an older merge that left stock DNS rules without their rule sets.
+
+    Version 0.8.67 added ``dns.rules`` that name rule sets from ``route``. A user
+    who had edited ``route`` kept it verbatim, took the new DNS and got
+    "rule-set not found" at start. Only a DNS section equal to the shipped one
+    is touched (it is ours); a DNS the user wrote is never rewritten.
+    """
+
+    if not active_config.is_file():
+        return False
+    active = _load_json_object(active_config)
+    current = _load_json_object(bundled_path)
+    if active is None or current is None or "dns" not in active:
+        return False
+    if active["dns"] != current.get("dns") or not has_dangling_dns_rule_sets(active):
+        return False
+    return _atomic_write(_dump_json(drop_dangling_dns_rules(active)), active_config)
 
 
 def sync_packaged_templates(
@@ -121,6 +207,7 @@ def sync_packaged_templates(
     templates_updated: list[str] = []
     configs_updated: list[str] = []
     configs_preserved: list[str] = []
+    configs_repaired: list[str] = []
     stale_sections: list[tuple[str, tuple[str, ...]]] = []
 
     for engine in SUPPORTED_ENGINES:
@@ -165,6 +252,9 @@ def sync_packaged_templates(
                     elif not _same_json_document(active_config, bundled_path):
                         configs_preserved.append(key)
 
+            if _repair_dangling_dns_rules(active_config, bundled_path):
+                configs_repaired.append(key)
+
             if _atomic_copy(bundled_path, installed_template):
                 templates_updated.append(key)
 
@@ -172,5 +262,6 @@ def sync_packaged_templates(
         templates_updated=tuple(templates_updated),
         configs_updated=tuple(configs_updated),
         configs_preserved=tuple(configs_preserved),
+        configs_repaired=tuple(configs_repaired),
         stale_sections=tuple(stale_sections),
     )
