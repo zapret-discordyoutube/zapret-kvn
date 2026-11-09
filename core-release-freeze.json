@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "releases": {
-    "windows": "0.8.68",
-    "android": "v0.5.40"
+    "windows": "0.8.70",
+    "android": "v0.5.41"
   },
-  "checked_at_utc": "2026-11-08T22:59:49.567476+00:00",
+  "checked_at_utc": "2026-11-09T17:52:41.358247+00:00",
   "amnezia": {
     "id": "amnezia",
     "repository": "amnezia-vpn/amneziawg-go",
@@ -19,10 +19,10 @@
     "release_prerelease": false,
     "url": "https://github.com/amnezia-vpn/amneziawg-go/tree/b5928efb6ca19f0153958460c3d141f04abc5c2e",
     "toolchain": {
-      "version": "go1.26.8",
-      "archive": "go1.26.8.windows-amd64.zip",
-      "sha256": "b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59",
-      "url": "https://go.dev/dl/go1.26.8.windows-amd64.zip"
+      "version": "go1.27.3",
+      "archive": "go1.27.3.windows-amd64.zip",
+      "sha256": "f26081f438319757f8a1b46d7d0b2c5ec7583d4038e485e0aa725cfde7885fff",
+      "url": "https://go.dev/dl/go1.27.3.windows-amd64.zip"
     }
   },
   "singbox": {
@@ -34,13 +34,13 @@
   },
   "inputs": {
     "windows": {
-      "scripts/core-lock.windows-x64.json": "dd5a7a6630c6f3dbeac2fd1ec94d2ddf362cce03e753432e80756cdfbd9b4f39",
+      "scripts/core-lock.windows-x64.json": "870c603c13c6012d250a8ec8cad73f72d35e19c938b08484b73d06e75426589f",
       "runtime/amnezia/go.mod": "d855786545c947cee939fc3fda5fce83a5530f0341b109ccce9853447d6241f1",
       "runtime/amnezia/go.sum": "b6e8c738a3eec160d0cc58d10ea6dbbf17886b122ed140a379bd9a29eec8df82"
     },
     "android": {
-      "core.properties": "c8027f82fd6bcb96368b071e7f7f9ba7038a42098803445578d6471bec30d11a",
-      "core-patches/series.sha256": "c093e61c36b4b83b80e0410f11de7f9d09c11f52e8237bb6c7a331da29b7a57d",
+      "core.properties": "f2eefb619ca480cf49b59a1f571b6640a38b753c64f6016d8d321f2ede0e9fa0",
+      "core-patches/series.sha256": "8b9c6c0328b0d2aa588c342976c56857e6b6d95de3061ff10b892bd795974e85",
       "core-patches/0005-official-amnezia-wg-unified.patch": "da9a4af1063435010e4a203d521cf6dbf0c05687c5fe2f72a32be895f8426d5f"
     }
   }
