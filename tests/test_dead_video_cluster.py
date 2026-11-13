@@ -29,8 +29,14 @@ class ClusterNameTests(unittest.TestCase):
         self.assertEqual(cluster_of("RR5---SN-2OI5H5-5J.GoogleVideo.com."), "sn-2oi5h5")
         self.assertEqual(cluster_of("rr1---sn-gxuo03g.googlevideo.com"), "sn-gxuo03g")
 
+    def test_dotted_name_from_dns_answer_gives_the_same_cluster(self) -> None:
+        # Поток получает имя по ответу DNS (CNAME на форму с точкой): архив Android 0.5.47, 2026-11-13 23:02:51.
+        self.assertEqual(cluster_of("rr2.sn-8ph2xajvh-3a4l.googlevideo.com"), "sn-8ph2xajvh")
+        self.assertEqual(cluster_of("rr1.sn-8ph2xajvh-3a4s.googlevideo.com"), "sn-8ph2xajvh")
+        self.assertEqual(cluster_of("rr1.sn-gxuo03g.googlevideo.com."), "sn-gxuo03g")
+
     def test_names_without_a_cluster_belong_to_none(self) -> None:
-        for host in ("redirector.googlevideo.com", "googlevideo.com", "rr2---sn-x-y.example.com", "", None):
+        for host in ("redirector.googlevideo.com", "googlevideo.com", "rr2---sn-x-y.example.com", "rr2.sn-x-y.example.com", "sn-x.googlevideo.com", "", None):
             self.assertIsNone(cluster_of(host), host)
 
 
@@ -47,6 +53,17 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(events, [ClusterEvent("dead", "sn-8ph2xajvh", 3, 0.0)])
         self.assertEqual(tracker.active_dead(109.0), ["sn-8ph2xajvh"])
         self.assertEqual(self.silent_round(tracker, 120.0, ["d"]), [], "one event per episode")
+
+    def test_dotted_names_from_the_dns_answer_make_the_cluster_dead(self) -> None:
+        # Архив Android 0.5.47, 23:02:51: rr2, rr1, rr2 одного кластера, имена с точкой, вниз 948 Б.
+        tracker = DeadVideoClusterTracker()
+        rows = [
+            conn("a", host="rr2.sn-8ph2xajvh-3a4l.googlevideo.com", down=948),
+            conn("b", host="rr1.sn-8ph2xajvh-3a4s.googlevideo.com", down=948),
+            conn("c", host="rr2.sn-8ph2xajvh-3a4l.googlevideo.com", down=948),
+        ]
+        tracker.observe(100.0, rows)
+        self.assertEqual(tracker.observe(109.0, rows), [ClusterEvent("dead", "sn-8ph2xajvh", 3, 0.0)])
 
     def test_two_silent_connections_are_not_a_verdict(self) -> None:
         tracker = DeadVideoClusterTracker()

@@ -31,12 +31,14 @@ from typing import Any, Iterable
 
 from .proxy_demand import is_proxied_chain
 
-_CLUSTER = re.compile(r"---(sn-[a-z0-9]+)(?:-[a-z0-9]+)?\.googlevideo\.com$")
+_CLUSTER = re.compile(r"(?:---|\.)(sn-[a-z0-9]+)(?:-[a-z0-9]+)?\.googlevideo\.com$")
 
 
 def cluster_of(host: str | None) -> str | None:
     """Кластер из имени кеш-узла: ``rr2---sn-8ph2xajvh-3a4l.googlevideo.com`` -> ``sn-8ph2xajvh``.
 
+    Форма с точкой (``rr2.sn-8ph2xajvh-3a4l.googlevideo.com``, имя по ответу DNS через CNAME) равноправна: поле, архив
+    Android 0.5.47, детектор молчал, пока знал только форму с ``---``.
     Имена без метки ``sn-`` (``redirector.googlevideo.com`` и другие) кластеру не принадлежат: ``None``.
     """
 
