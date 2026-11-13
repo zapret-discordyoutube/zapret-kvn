@@ -211,6 +211,19 @@
         "outbound": "proxy"
       },
       {
+        "domain_suffix": [
+          "googlevideo.com",
+          "youtube.com",
+          "youtu.be",
+          "ytimg.com",
+          "ggpht.com",
+          "youtube-nocookie.com",
+          "youtubei.googleapis.com"
+        ],
+        "action": "route",
+        "outbound": "proxy"
+      },
+      {
         "rule_set": [
           "geosite-ru-blocked",
           "geoip-ru-blocked"
@@ -468,6 +481,19 @@
         "domain_suffix": [
           "4pda.to",
           "zapret.moe"
+        ],
+        "action": "route",
+        "server": "proxy-dns"
+      },
+      {
+        "domain_suffix": [
+          "googlevideo.com",
+          "youtube.com",
+          "youtu.be",
+          "ytimg.com",
+          "ggpht.com",
+          "youtube-nocookie.com",
+          "youtubei.googleapis.com"
         ],
         "action": "route",
         "server": "proxy-dns"

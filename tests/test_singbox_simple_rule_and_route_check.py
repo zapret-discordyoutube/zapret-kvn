@@ -159,7 +159,7 @@ class RouteExplainTests(unittest.TestCase):
 
     def test_process_rule_is_reported_as_maybe_not_as_hit(self) -> None:
         verdict = self.explain("2ip.ru")
-        self.assertEqual((verdict.target, verdict.rule_index), ("direct", 13))
+        self.assertEqual((verdict.target, verdict.rule_index), ("direct", 14))
         self.assertEqual([item.index for item in verdict.maybe], [4, 6])
         self.assertIn("процессы", verdict.maybe[0].reason)
 

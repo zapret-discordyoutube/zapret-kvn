@@ -201,6 +201,20 @@
       {
         "type": "field",
         "domain": [
+          "domain:googlevideo.com",
+          "domain:youtube.com",
+          "domain:youtu.be",
+          "domain:ytimg.com",
+          "domain:ggpht.com",
+          "domain:youtube-nocookie.com",
+          "domain:youtubei.googleapis.com"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "proxy"
+      },
+      {
+        "type": "field",
+        "domain": [
           "geosite:ru-blocked"
         ],
         "network": "tcp,udp",
