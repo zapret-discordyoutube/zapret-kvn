@@ -17,6 +17,8 @@ core/
 data/*
 !data/templates/
 !data/templates/**
+!data/routing/
+!data/routing/**
 
 # IDE
 .idea/

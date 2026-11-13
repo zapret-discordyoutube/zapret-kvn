@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "policy_id": "always-proxy-domains-v1",
+  "reason": "These names are blocked at any address, including addresses inside Russian networks (YouTube cache hosts inside Russian operators). They always go through the VPN, above every Russia-direct rule. Owner decision 2026-11-13.",
+  "suffixes": [
+    "googlevideo.com",
+    "youtube.com",
+    "youtu.be",
+    "ytimg.com",
+    "ggpht.com",
+    "youtube-nocookie.com",
+    "youtubei.googleapis.com"
+  ]
+}

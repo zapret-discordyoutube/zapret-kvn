@@ -47,8 +47,11 @@ sing-box (`data/configs/sing-box/*.json`). Своей модели маршру�
   обычное native-правило по именам (googlevideo.com, youtube.com, youtu.be, ytimg.com,
   ggpht.com, youtube-nocookie.com, youtubei.googleapis.com) → `proxy`, сразу после правила
   `4pda.to`/`zapret.moe` и выше наборов «РФ напрямую»; в sing-box к нему добавлено
-  DNS-правило `proxy-dns`. Тест `tests/test_always_proxy_domains_templates.py` держит список,
-  порядок и DNS. Уже сохранённый конфиг, где пользователь правил разделы, шаблон не
+  DNS-правило `proxy-dns`. Список один на обе платформы: файл
+  `data/routing/always-proxy-domains.json` (побайтовая копия `android/shared/…`, сверка —
+  `android/scripts/check-shared-routing-list.sh` при выпуске Android). Тест
+  `tests/test_always_proxy_domains_templates.py` читает файл и держит список, порядок и DNS;
+  чтобы добавить сайт, правят файл (и его копию в Android) и четыре шаблона. Уже сохранённый конфиг, где пользователь правил разделы, шаблон не
   перезаписывает: такой раздел обновляется вручную.
 - Диагностика маршрута: в `runtime_redacted.json` — `route_decisions` (по последним
   четырём сессиям: процесс, сайт из двух меток имени или IP, правило ядра

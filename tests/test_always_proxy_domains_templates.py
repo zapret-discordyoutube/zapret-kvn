@@ -15,15 +15,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "data" / "templates"
 
-ALWAYS_PROXY = [
-    "googlevideo.com",
-    "youtube.com",
-    "youtu.be",
-    "ytimg.com",
-    "ggpht.com",
-    "youtube-nocookie.com",
-    "youtubei.googleapis.com",
-]
+SHARED_LIST = ROOT / "data" / "routing" / "always-proxy-domains.json"
+# The list is shared with Android: android/shared/always-proxy-domains.json is a byte-identical copy
+# (android/scripts/check-shared-routing-list.sh compares them at release time).
+ALWAYS_PROXY = json.loads(SHARED_LIST.read_text(encoding="utf-8"))["suffixes"]
 CACHE_HOST = "rr2---sn-8ph2xajvh-3a4l.googlevideo.com"
 
 
@@ -50,6 +45,14 @@ def _is_broad_direct_xray(rule: dict) -> bool:
 
 
 class AlwaysProxyDomainsTemplateTests(unittest.TestCase):
+    def test_the_shared_list_file_is_well_formed(self) -> None:
+        doc = json.loads(SHARED_LIST.read_text(encoding="utf-8"))
+        self.assertEqual(1, doc["schema_version"])
+        self.assertEqual("always-proxy-domains-v1", doc["policy_id"])
+        self.assertEqual(len(ALWAYS_PROXY), len(set(ALWAYS_PROXY)), "no duplicates")
+        self.assertIn("googlevideo.com", ALWAYS_PROXY)
+        self.assertTrue(all(name == name.lower() and "." in name and "/" not in name for name in ALWAYS_PROXY))
+
     def test_singbox_templates_route_the_list_to_proxy_above_the_russia_direct_sets(self) -> None:
         for path in sorted((TEMPLATES / "sing-box").glob("*.json")):
             with self.subTest(template=path.name):
