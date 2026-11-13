@@ -138,6 +138,7 @@ class LiveMetricsValidityTests(unittest.TestCase):
             0.0,
             traffic_valid=False,
             demand=None,
+            dead_clusters=None,
         )
 
     def test_proxy_demand_is_forwarded_to_smart_switch(self) -> None:
@@ -159,7 +160,54 @@ class LiveMetricsValidityTests(unittest.TestCase):
             5000.0,
             traffic_valid=True,
             demand=demand,
+            dead_clusters=None,
         )
+
+    def test_dead_video_clusters_are_forwarded_and_events_are_logged(self) -> None:
+        worker = SimpleNamespace(pings_active_node=lambda: False)
+        logs: list[str] = []
+        controller = SimpleNamespace(
+            _metrics_worker=worker,
+            live_metrics_updated=SimpleNamespace(emit=lambda payload: None),
+            _check_auto_switch=Mock(),
+            _check_smart_switch=Mock(),
+            _log=logs.append,
+        )
+        dead_video = {
+            "clusters": ["sn-8ph2xajvh"],
+            "events": [("dead", "sn-8ph2xajvh", 3, 12.0), ("recovered", "sn-other", 0, 130.0), ("junk",), None],
+        }
+
+        on_live_metrics(
+            controller,
+            {"down_bps": 0.0, "traffic_valid": True, "latency_ms": None, "dead_video": dead_video},
+        )
+
+        controller._check_smart_switch.assert_called_once_with(
+            0.0,
+            traffic_valid=True,
+            demand=None,
+            dead_clusters=["sn-8ph2xajvh"],
+        )
+        self.assertEqual(len(logs), 2, logs)
+        self.assertIn("МЁРТВЫЙ КЛАСТЕР sn-8ph2xajvh: 3 соединений без единого байта ответа за 12 с", logs[0])
+        self.assertIn("кластер sn-other снова отвечает (был мёртв 130 с)", logs[1])
+
+    def test_no_dead_video_payload_means_no_verdict(self) -> None:
+        worker = SimpleNamespace(pings_active_node=lambda: False)
+        controller = SimpleNamespace(
+            _metrics_worker=worker,
+            live_metrics_updated=SimpleNamespace(emit=lambda payload: None),
+            _check_auto_switch=Mock(),
+            _check_smart_switch=Mock(),
+        )
+
+        on_live_metrics(
+            controller,
+            {"down_bps": 1.0, "traffic_valid": True, "latency_ms": None, "dead_video": None},
+        )
+
+        self.assertIsNone(controller._check_smart_switch.call_args.kwargs["dead_clusters"])
 
 
 if __name__ == "__main__":

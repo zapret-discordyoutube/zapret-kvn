@@ -536,6 +536,90 @@ class ProbeDecisionTests(SmartSwitchTestBase):
         self.assertTrue(self.probes[0].cancelled)
 
 
+class DeadClusterTests(SmartSwitchTestBase):
+    """Мёртвый кеш-кластер YouTube: сразу замер кандидатов, мимо спроса и замера текущего сервера."""
+
+    DEAD = ["sn-8ph2xajvh"]
+
+    def dead_tick(self, now: float) -> None:
+        # Спроса нет вовсе (счётчики не растут), скорость ноль: «медленно» не сработало бы никогда.
+        check_smart_switch(
+            self.controller, 0.0, demand={"active": 3, "growing": 0, "down_bps": 0.0},
+            now=now, dead_clusters=list(self.DEAD),
+        )
+
+    def test_dead_cluster_skips_the_speed_probe_and_measures_candidates_at_once(self) -> None:
+        self.dead_tick(1000.0)
+        self.assertEqual(self.probes, [], "no control download of the current server")
+        self.assertEqual(len(self.candidate_workers), 1)
+        self.assertTrue(self.candidate_workers[0].started)
+        self.assertEqual(self.state.phase, PHASE_PROBE_CANDIDATES)
+        self.assertEqual(self.state.reason, "dead_cluster")
+        self.assertTrue(any("sn-8ph2xajvh не отвечает" in line for line in self.controller.logs), self.controller.logs)
+
+    def test_dead_cluster_switches_to_a_working_candidate_with_its_own_messages(self) -> None:
+        self.dead_tick(1000.0)
+        self.run_candidates(1020.0, {"n1": 1.5})
+        self.assertEqual(self.controller.selected, [("n1", SelectionSource.SMART_SWITCH)])
+        self.assertEqual(self.state.phase, PHASE_IDLE)
+        self.assertEqual(self.state.reason, "slow", "the reason is reset after the episode")
+        level, message = self.controller.status.calls[-1]
+        self.assertEqual(level, "warning")
+        self.assertEqual(
+            message,
+            "Видео YouTube не идёт через сервер node-0 (кластер sn-8ph2xajvh не отвечает) — переключено на node-1. Перезапустите видео: плеер держит ссылки мёртвого кластера",
+        )
+        self.assertTrue(smart.is_slow_marked(self.state, "n0", 1021.0), "the abandoned server is not a candidate for 30 min")
+        self.assertTrue(any("решение: переключение node-0 (кластер YouTube sn-8ph2xajvh не отвечает)" in l for l in self.controller.logs))
+
+    def test_no_working_candidate_means_stay_with_a_cooldown(self) -> None:
+        self.dead_tick(1000.0)
+        self.run_candidates(1020.0, {"n1": None})
+        self.assertEqual(self.controller.selected, [])
+        self.assertEqual(self.state.phase, PHASE_IDLE)
+        self.assertGreater(self.state.cooldown_until, 1020.0)
+        self.assertTrue(any("остаёмся" in l and "sn-8ph2xajvh" in l for l in self.controller.logs), self.controller.logs)
+        # во время паузы повторный вердикт ничего не запускает
+        self.dead_tick(1021.0)
+        self.assertEqual(len(self.candidate_workers), 1)
+
+    def test_manual_selection_blocks_it_and_one_notice_per_five_minutes_explains_why(self) -> None:
+        smart.note_manual_selection(self.controller, now=1000.0)
+        for second in range(0, 120):
+            self.dead_tick(1000.0 + second)
+        self.assertEqual(self.candidate_workers, [])
+        notices = [l for l in self.controller.logs if "сервер не меняется: сервер выбран вручную" in l]
+        self.assertEqual(len(notices), 1, self.controller.logs)
+        self.dead_tick(1000.0 + smart.SMART_SWITCH_DEAD_NOTICE_SEC + 1)
+        notices = [l for l in self.controller.logs if "сервер не меняется" in l]
+        self.assertEqual(len(notices), 2, "a second notice only after five minutes")
+
+    def test_setting_off_blocks_it(self) -> None:
+        self.controller.state.settings.auto_switch_low_speed_enabled = False
+        self.dead_tick(1000.0)
+        self.assertEqual(self.candidate_workers, [])
+        self.assertTrue(any("переключение при низкой скорости выключено" in l for l in self.controller.logs))
+
+    def test_post_switch_hold_and_hourly_limit_apply(self) -> None:
+        self.dead_tick(1000.0)
+        self.run_candidates(1020.0, {"n1": 1.5})
+        self.dead_tick(1030.0)
+        self.assertEqual(len(self.candidate_workers), 1, "held for 10 minutes after a switch")
+        state = self.state
+        state.hold_until = 0.0
+        state.switch_times = [1000.0, 1001.0, 1002.0]
+        self.dead_tick(1040.0)
+        self.assertEqual(len(self.candidate_workers), 1, "three switches in the last hour is the limit")
+
+    def test_no_dead_cluster_keeps_the_old_flow_unchanged(self) -> None:
+        now = self.suspect()
+        self.assertEqual(self.state.reason, "slow")
+        on_current_probe_measured(self.controller, self.probes[0], 30 * 1024.0, now=now)
+        self.run_candidates(now + 20, {"n1": 1.5})
+        level, message = self.controller.status.calls[-1]
+        self.assertEqual(message, "Сервер node-0 медленный (30 KB/s) — переключено на node-1 (1536 KB/s)")
+
+
 class HysteresisTests(SmartSwitchTestBase):
     def switch_once(self, start: float, *, to: str, speed_mbps: float = 1.0) -> float:
         before = len(self.probes)

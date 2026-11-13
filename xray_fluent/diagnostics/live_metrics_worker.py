@@ -20,6 +20,7 @@ from ..network import probe_gate
 from ..platform.windows.process_traffic_collector import collect_process_stats, ProcessTrafficSnapshot
 from ..platform.windows.subprocess_utils import decode_output, run_text
 from ..platform.windows.win_proc_monitor import get_proxy_connections, ProxyProcessInfo
+from .dead_video_cluster import DeadVideoClusterTracker
 from .proxy_demand import clash_proxy_demand, local_proxy_demand
 from .route_decisions import RouteDecisionLog
 
@@ -155,6 +156,11 @@ class LiveMetricsWorker(QThread):
         self._demand_prev_bytes: dict[str, tuple[int, int]] = {}
         self._demand_prev_ts: float | None = None
         self._proxy_demand: dict[str, float | int] | None = None
+        # Мёртвые кеш-кластеры YouTube (соединения к ним не получают ни байта): повод сменить сервер, см.
+        # diagnostics/dead_video_cluster.py.  Трекер живёт столько же, сколько воркер, то есть одно подключение.
+        self._dead_clusters = DeadVideoClusterTracker()
+        self._dead_video: dict[str, Any] | None = None
+        self._dead_video_events: list[tuple[str, str, int, float]] = []
         # Сводка решений маршрута для диагностики (из того же ответа /connections).
         self._route_decisions = route_decisions
 
@@ -287,6 +293,7 @@ class LiveMetricsWorker(QThread):
                 # sing-box обновляет спрос каждую итерацию (в _query_clash_api_totals),
                 # xray — только на итерациях со сбором процессов; иначе «нет данных».
                 self._proxy_demand = None
+                self._dead_video = None
             if iteration_count % 2 == 0:
                 if self._mode == "singbox":
                     process_stats = collect_process_stats(self._clash_api_port)
@@ -310,6 +317,7 @@ class LiveMetricsWorker(QThread):
                     "link_alive": self._link_verdict if self.pings_active_node() else None,
                     "process_stats": process_stats,
                     "proxy_demand": self._proxy_demand,
+                    "dead_video": self._take_dead_video(),
                 }
             )
 
@@ -403,7 +411,23 @@ class LiveMetricsWorker(QThread):
             )
         except Exception:
             self._proxy_demand = None
+        try:
+            now = time.monotonic()
+            for event in self._dead_clusters.observe(now, data.get("connections") or ()):
+                self._dead_video_events.append((event.kind, event.cluster, event.flows, event.span_sec))
+            self._dead_video = {"clusters": self._dead_clusters.active_dead(now)}
+        except Exception:
+            self._dead_video = None
         return upload, download
+
+    def _take_dead_video(self) -> dict[str, Any] | None:
+        """Мёртвые кластеры и накопленные события журнала; события отдаются один раз."""
+
+        if self._dead_video is None:
+            self._dead_video_events = []
+            return None
+        events, self._dead_video_events = self._dead_video_events, []
+        return {"clusters": list(self._dead_video.get("clusters") or ()), "events": events}
 
     def _demand_elapsed(self) -> float:
         now = time.perf_counter()

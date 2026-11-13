@@ -36,6 +36,12 @@
 (главный переключатель) или выключенной настройке «Переключать при низкой
 скорости», а также ``SMART_SWITCH_MANUAL_HOLD_SEC`` после ручного выбора сервера.
 
+Мёртвый кеш-кластер YouTube (``diagnostics/dead_video_cluster.py``): соединения плеера к одному кластеру
+googlevideo уходят и не получают ни байта.  Спроса при этом нет (счётчики не растут), а контрольный замер к
+другим адресам прошёл бы, поэтому такой вердикт идёт мимо шагов 1–2: сразу замер кандидатов (шаг 3) с текущей
+скоростью 0, при тех же условиях допуска (включённая настройка, не ручной выбор, анти-дребезг, лимит в час).
+YouTube выбирает кластер по адресу запроса, поэтому другой сервер обычно получает другой кластер.
+
 Все сетевые замеры — в QThread-воркерах; на GUI-поток приходят только их
 сигналы (связь с методами контроллера — очередь Qt).
 """
@@ -101,6 +107,8 @@ SMART_SWITCH_MANUAL_HOLD_SEC = 30 * 60.0
 # Страховка: проверка (замер текущего + до 3 кандидатов) укладывается в ~30 с;
 # если сигнал воркера так и не пришёл, через этот срок состояние сбрасывается.
 SMART_SWITCH_CHECK_DEADLINE_SEC = 120.0
+# Мёртвый кластер при закрытых воротах (ручной выбор, настройка выключена): строка в журнал не чаще раза в это время.
+SMART_SWITCH_DEAD_NOTICE_SEC = 300.0
 
 _HOUR_SEC = 3600.0
 _MIB = 1024 * 1024
@@ -144,6 +152,10 @@ class SmartSwitchState:
     switch_times: list[float] = field(default_factory=list)
     # Ложные тревоги подряд по серверу: длина следующей паузы.
     false_alarms: dict[str, int] = field(default_factory=dict)
+    # Причина текущей проверки: "slow" (низкая скорость) или "dead_cluster" (мёртвый кластер YouTube).
+    reason: str = "slow"
+    dead_clusters: list[str] = field(default_factory=list)
+    dead_notice_at: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -346,8 +358,13 @@ def check_smart_switch(
     traffic_valid: bool = True,
     demand: dict[str, Any] | None = None,
     now: float | None = None,
+    dead_clusters: list[str] | None = None,
 ) -> None:
-    """Отсчёт метрик из GUI-потока: копить подозрение и запускать проверку."""
+    """Отсчёт метрик из GUI-потока: копить подозрение и запускать проверку.
+
+    ``dead_clusters`` — мёртвые кеш-кластеры YouTube из ``LiveMetricsWorker``: это отдельный повод, он идёт мимо
+    спроса и контрольного замера скорости (см. модуль).
+    """
 
     state = smart_state(controller)
     now = time.monotonic() if now is None else now
@@ -357,14 +374,21 @@ def check_smart_switch(
         cancel_smart_check(controller, "замер не завершился вовремя")
         state.cooldown_until = now + SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC
         return
-    if gate_reason(controller, now) is not None:
+    blocked = gate_reason(controller, now)
+    if blocked is not None:
         state.low_since = 0.0
+        if dead_clusters:
+            _note_dead_cluster_blocked(controller, state, now, dead_clusters, blocked)
         return
     if now < state.cooldown_until or now < state.hold_until:
         state.low_since = 0.0
         return
     if switches_last_hour(state, now) >= SMART_SWITCH_MAX_PER_HOUR:
         state.low_since = 0.0
+        return
+    if dead_clusters:
+        state.low_since = 0.0
+        _start_dead_cluster_check(controller, state, now, dead_clusters)
         return
     current_id = controller.state.selected_node_id
     if state.observed_node_id != current_id:
@@ -373,6 +397,47 @@ def check_smart_switch(
     if not observe(state, now, down_bps, traffic_valid, demand):
         return
     _start_current_probe(controller, state, now)
+
+
+def _note_dead_cluster_blocked(
+    controller: AppController,
+    state: SmartSwitchState,
+    now: float,
+    dead_clusters: list[str],
+    blocked: str,
+) -> None:
+    """Мёртвый кластер есть, а ворота закрыты: одна строка в журнал, чтобы по нему было видно, почему сервер не меняется."""
+
+    if now - state.dead_notice_at < SMART_SWITCH_DEAD_NOTICE_SEC:
+        return
+    state.dead_notice_at = now
+    controller._log(
+        f"[auto-switch] кластер YouTube {', '.join(dead_clusters)} не отвечает, но сервер не меняется: {blocked}"
+    )
+
+
+def _start_dead_cluster_check(
+    controller: AppController,
+    state: SmartSwitchState,
+    now: float,
+    dead_clusters: list[str],
+) -> None:
+    """Мёртвый кластер: сразу замер кандидатов, без спроса и без замера текущего сервера."""
+
+    node = controller.selected_node
+    if node is None:
+        return
+    state.reason = "dead_cluster"
+    state.dead_clusters = list(dead_clusters)
+    state.suspicion = f"кластер YouTube {', '.join(dead_clusters)} не отвечает (соединения без единого байта)"
+    state.generation += 1
+    state.phase_started_at = now
+    state.node_id = node.id
+    state.current_bps = 0.0
+    state.results = {}
+    state.candidate_ids = []
+    controller._log(f"[auto-switch] {node.name}: {state.suspicion} — проверяем другие серверы")
+    _start_candidate_probe(controller, state, now)
 
 
 def _start_current_probe(controller: AppController, state: SmartSwitchState, now: float) -> None:
@@ -427,6 +492,8 @@ def _finish(state: SmartSwitchState, now: float, *, cooldown: bool) -> None:
     state.probe_worker = None
     state.candidate_worker = None
     state.low_since = 0.0
+    state.reason = "slow"
+    state.dead_clusters = []
     if cooldown:
         state.cooldown_until = now + SMART_SWITCH_FALSE_ALARM_COOLDOWN_SEC
 
@@ -477,6 +544,12 @@ def on_current_probe_measured(
     controller._log(
         f"[auto-switch] {name}: {state.suspicion}; замер {_kbps(bps)} — сервер подтверждённо медленный"
     )
+    _start_candidate_probe(controller, state, now)
+
+
+def _start_candidate_probe(controller: AppController, state: SmartSwitchState, now: float) -> None:
+    """Выбор кандидатов и запуск их замера; общий для «медленно» и «мёртвый кластер»."""
+
     candidates = select_candidates(
         controller.state.nodes,
         state.node_id,
@@ -529,6 +602,8 @@ def on_candidates_done(controller: AppController, worker: Any, *, now: float | N
         return
     now = time.monotonic() if now is None else now
     state.candidate_worker = None
+    # _finish() сбрасывает причину проверки: запоминаем её до вызова.
+    dead_clusters = list(state.dead_clusters) if state.reason == "dead_cluster" else []
     reason = _abort_reason(controller, state, now)
     if reason is not None:
         controller._log(f"[auto-switch] проверка прервана: {reason}")
@@ -541,10 +616,16 @@ def on_candidates_done(controller: AppController, worker: Any, *, now: float | N
     )
     choice = decide(state.current_bps, state.results)
     if choice is None:
-        controller._log(
-            f"[auto-switch] решение: остаёмся — нет кандидата ≥ {_kbps(SMART_SWITCH_THRESHOLD_BPS)} "
-            f"и в {SMART_SWITCH_BETTER_FACTOR:g} раза быстрее текущего ({_kbps(state.current_bps)})"
-        )
+        if dead_clusters:
+            controller._log(
+                f"[auto-switch] решение: остаёмся — нет кандидата ≥ {_kbps(SMART_SWITCH_THRESHOLD_BPS)} "
+                f"(кластер YouTube {', '.join(dead_clusters)} не отвечает)"
+            )
+        else:
+            controller._log(
+                f"[auto-switch] решение: остаёмся — нет кандидата ≥ {_kbps(SMART_SWITCH_THRESHOLD_BPS)} "
+                f"и в {SMART_SWITCH_BETTER_FACTOR:g} раза быстрее текущего ({_kbps(state.current_bps)})"
+            )
         _finish(state, now, cooldown=True)
         return
     if switches_last_hour(state, now) >= SMART_SWITCH_MAX_PER_HOUR:
@@ -563,15 +644,26 @@ def on_candidates_done(controller: AppController, worker: Any, *, now: float | N
     # Общий анти-дребезг с детектором мёртвого сервера; счётчик цикла
     # «перебраны все серверы» относится только к отказам и не трогается.
     controller._auto_switch_last_switch = now
-    controller._log(
-        f"[auto-switch] решение: переключение {old_name} ({_kbps(state.current_bps)}) → "
-        f"{target_name} ({_kbps(target_bps)})"
-    )
-    controller.status.emit(
-        "warning",
-        f"Сервер {old_name} медленный ({_kbps(state.current_bps)}) — "
-        f"переключено на {target_name} ({_kbps(target_bps)})",
-    )
+    if dead_clusters:
+        controller._log(
+            f"[auto-switch] решение: переключение {old_name} (кластер YouTube {', '.join(dead_clusters)} не отвечает) → "
+            f"{target_name} ({_kbps(target_bps)})"
+        )
+        controller.status.emit(
+            "warning",
+            f"Видео YouTube не идёт через сервер {old_name} (кластер {', '.join(dead_clusters)} не отвечает) — "
+            f"переключено на {target_name}. Перезапустите видео: плеер держит ссылки мёртвого кластера",
+        )
+    else:
+        controller._log(
+            f"[auto-switch] решение: переключение {old_name} ({_kbps(state.current_bps)}) → "
+            f"{target_name} ({_kbps(target_bps)})"
+        )
+        controller.status.emit(
+            "warning",
+            f"Сервер {old_name} медленный ({_kbps(state.current_bps)}) — "
+            f"переключено на {target_name} ({_kbps(target_bps)})",
+        )
     # Единственный путь смены ноды (hot-switch-invariants): горячий свитч с
     # честным откатом в очередь переходов; анти-дребезг не сбрасывается.
     controller.set_selected_node(target_id, source=SelectionSource.SMART_SWITCH)

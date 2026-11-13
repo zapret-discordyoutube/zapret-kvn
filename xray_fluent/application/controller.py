@@ -4434,12 +4434,14 @@ class AppController(QObject):
         *,
         traffic_valid: bool = True,
         demand: dict[str, object] | None = None,
+        dead_clusters: list[str] | None = None,
     ) -> None:
         check_smart_switch_operation(
             self,
             down_bps,
             traffic_valid=traffic_valid,
             demand=demand,
+            dead_clusters=dead_clusters,
         )
 
     # Слоты воркеров умной проверки: связь сигнал→метод QObject идёт очередью

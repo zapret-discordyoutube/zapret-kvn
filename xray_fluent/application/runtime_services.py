@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..constants import SINGBOX_CLASH_API_PORT
 from .async_steps import TransitionSteps, run_steps_blocking
@@ -11,6 +11,23 @@ from .worker_keeper import keep_until_finished, wait_all
 if TYPE_CHECKING:
     from .controller import AppController
 
+
+
+def _log_dead_cluster_event(controller: Any, event: Any) -> None:
+    """Одна строка журнала на событие трекера мёртвых кластеров YouTube (поток воркера отдаёт кортежи)."""
+
+    try:
+        kind, cluster, flows, span_sec = event
+    except (TypeError, ValueError):
+        return
+    if kind == "dead":
+        controller._log(
+            f"[youtube] МЁРТВЫЙ КЛАСТЕР {cluster}: {int(flows)} соединений без единого байта ответа "
+            f"за {float(span_sec):.0f} с; сброс не поможет, плеер получает тот же кластер "
+            "(другой сервер получает другой)"
+        )
+    elif kind == "recovered":
+        controller._log(f"[youtube] кластер {cluster} снова отвечает (был мёртв {float(span_sec):.0f} с)")
 
 def start_metrics_worker(controller: AppController) -> None:
     # Ленивая загрузка: live_metrics_worker тянет Windows-only win_proc_monitor.
@@ -278,10 +295,19 @@ def on_live_metrics(controller: AppController, payload: dict[str, object]) -> No
     # «Умная проверка» низкой скорости: подозрение только при реальном спросе
     # (проксируемые соединения качают), решение — после контрольного замера.
     demand = payload.get("proxy_demand")
+    # Мёртвые кеш-кластеры YouTube (соединения к ним без единого байта ответа): события в журнал,
+    # вердикт — в «умную проверку», где он запускает смену сервера мимо замера скорости.
+    dead_video = payload.get("dead_video")
+    dead_clusters: list[str] | None = None
+    if isinstance(dead_video, dict):
+        dead_clusters = [str(name) for name in dead_video.get("clusters") or ()]
+        for event in dead_video.get("events") or ():
+            _log_dead_cluster_event(controller, event)
     controller._check_smart_switch(
         down_bps,
         traffic_valid=traffic_valid,
         demand=demand if isinstance(demand, dict) else None,
+        dead_clusters=dead_clusters,
     )
     process_stats = payload.get("process_stats")
     if process_stats:
