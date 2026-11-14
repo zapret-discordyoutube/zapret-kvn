@@ -229,9 +229,17 @@ function Ensure-DependenciesAndTests([string]$Root) {
     Invoke-Native $python @("-m", "pip", "install", "-r", (Join-Path $Root "requirements.txt"))
     Invoke-Native $python @("-m", "pip", "check")
     $lock = Enter-HeavyLock "tests"
+    # The GUI tests run on Qt's "offscreen" platform, which on this VM finds no
+    # fonts of its own ("Cannot find font directory ...\PyQt6\Qt6\lib\fonts"):
+    # text then measures and paints wrongly and the tour-card and JsonArt tests
+    # fail (2026-11-14, same failures for the v0.8.74 source). Point Qt at the
+    # system fonts so the result does not depend on the state of the machine.
+    $previousFontDir = $env:QT_QPA_FONTDIR
+    $env:QT_QPA_FONTDIR = Join-Path $env:WINDIR "Fonts"
     try {
         Invoke-Native $python @("-m", "unittest", "discover", "-s", "tests", "-v")
     } finally {
+        $env:QT_QPA_FONTDIR = $previousFontDir
         Exit-HeavyLock $lock
     }
 }

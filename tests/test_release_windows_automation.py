@@ -460,6 +460,20 @@ class BuildPayloadTests(unittest.TestCase):
         self.assertIn("function Assert-StableCoreLock", source)
         self.assertIn("release_prerelease", source)
 
+    def test_release_gate_gives_offscreen_qt_the_system_fonts(self) -> None:
+        source = (Path(__file__).parents[1] / "scripts" / "release_windows_gate.ps1").read_text(
+            encoding="utf-8"
+        )
+        test_step = source[source.index("function Ensure-DependenciesAndTests"):]
+        test_step = test_step[: test_step.index("function Build-Application")]
+        font_at = test_step.index('$env:QT_QPA_FONTDIR = Join-Path $env:WINDIR "Fonts"')
+        run_at = test_step.index('"unittest", "discover"')
+        restore_at = test_step.index("$env:QT_QPA_FONTDIR = $previousFontDir")
+        # Set before the tests start, put back afterwards even when they fail.
+        self.assertLess(font_at, run_at)
+        self.assertLess(run_at, restore_at)
+        self.assertIn("} finally {", test_step[run_at:restore_at])
+
     def test_release_gate_stops_every_shipped_process(self) -> None:
         source = (Path(__file__).parents[1] / "scripts" / "release_windows_gate.ps1").read_text(
             encoding="utf-8"
