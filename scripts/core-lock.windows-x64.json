@@ -96,10 +96,10 @@
     },
     {
       "id": "runetfreedom-routing-data",
-      "version": "934f38aeecf88459ab4564dfe134cb0d90460344",
-      "archive": "russia-v2ray-rules-dat-934f38aeecf88459ab4564dfe134cb0d90460344.zip",
-      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/934f38aeecf88459ab4564dfe134cb0d90460344.zip",
-      "sha256": "645bfcdff1823f2fd3423b03bdb1bed5c7f76c00826fc0b6a9ca6e3736de21ed",
+      "version": "7df0b7a1bc3f2d4127d0f70f99b721dc979ebc59",
+      "archive": "russia-v2ray-rules-dat-7df0b7a1bc3f2d4127d0f70f99b721dc979ebc59.zip",
+      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/7df0b7a1bc3f2d4127d0f70f99b721dc979ebc59.zip",
+      "sha256": "a360fae680ea16f3882c61b310bcec83407faf8e52957bd6d1bfd0de00d08b92",
       "files": [
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
         { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
@@ -111,7 +111,7 @@
       "repository": "runetfreedom/russia-v2ray-rules-dat",
       "channel": "release",
       "branch": "release",
-      "asset_size": 56931532
+      "asset_size": 56936270
     },
     {
       "id": "tun2socks",
