@@ -55,6 +55,7 @@ from .configs_page import SECTIONS as ROUTING_SECTIONS, ConfigsPage
 from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
 from .about_page import AboutPage
+from .about_us.page import AboutUsPage
 from .history_page import HistoryPage
 from .page_warmup import HiddenPageWarmup
 from .window_presence import WindowPresence, is_native_minimize_command, is_native_restore_command
@@ -193,6 +194,7 @@ class MainWindow(FluentWindow):
         self.sharing_page = DeferredPage(SharingPage, "sharing", self)
         self.history_page = DeferredPage(HistoryPage, "history", self)
         self.about_page = DeferredPage(AboutPage, "about", self)
+        self.about_us_page = DeferredPage(AboutUsPage, "about_us", self)
         # Запуск в трей: страницы, которые человек нажмёт первыми, строятся заранее, пока
         # окно скрыто и он отошёл, а не под щелчком при первом открытии окна.
         self._page_warmup = HiddenPageWarmup(
@@ -362,6 +364,8 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.updates_page, FIF.UPDATE, "Обновления", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.sharing_page, FIF.SHARE, "Кто подключается", NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.settings_page, FIF.SETTING, "Настройки", NavigationItemPosition.BOTTOM)
+        # Всегда последний пункт: бот с покупкой подписки, Telegram-каналы и главные ресурсы.
+        self.addSubInterface(self.about_us_page, FIF.PEOPLE, "О нас", NavigationItemPosition.BOTTOM)
         # Подключаемся после внутреннего toggle() панели — к моменту вызова
         # слота режим уже выбран.
         self.navigationInterface.panel.menuButton.clicked.connect(self._on_nav_menu_clicked)

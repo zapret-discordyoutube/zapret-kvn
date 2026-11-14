@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import QUrl
@@ -12,7 +11,6 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     InfoBar,
     InfoBarPosition,
-    PrimaryPushButton,
     PushButton,
     SubtitleLabel,
     TitleLabel,
@@ -23,9 +21,6 @@ from ..constants import APP_VERSION, LOG_DIR
 from ..support.service import SupportAction, SupportResult
 from .file_manager import reveal_file
 from .theme import token_pair
-
-# Рекламная метка deep-link бота: источник kvnwin + место about.
-BOT_ABOUT_URL = "https://t.me/zapretvpns_bot?start=kvnwin_about"
 
 
 def _muted_caption_qss(extra: str = "") -> tuple[str, str]:
@@ -93,24 +88,12 @@ class AboutPage(QWidget):
         sep2.setStyleSheet("background-color: rgba(128,128,128,0.3);")
         root.addWidget(sep2)
 
-        # ── Links ──
-        links_title = SubtitleLabel("Ссылки", self)
+        # ── Support ──
+        links_title = SubtitleLabel("Поддержка", self)
         root.addWidget(links_title)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(12)
-
-        tg_channel_btn = PrimaryPushButton(FIF.SEND, "Telegram канал", self)
-        tg_channel_btn.clicked.connect(
-            lambda: webbrowser.open("https://t.me/vpndiscordyooutube")
-        )
-        btn_row.addWidget(tg_channel_btn)
-
-        tg_bot_btn = PushButton(FIF.SHOPPING_CART, "Купить подписку", self)
-        tg_bot_btn.clicked.connect(
-            lambda: webbrowser.open(BOT_ABOUT_URL)
-        )
-        btn_row.addWidget(tg_bot_btn)
 
         self._support_button = PushButton(FIF.HELP, "Поддержка", self)
         self._support_button.setToolTip(

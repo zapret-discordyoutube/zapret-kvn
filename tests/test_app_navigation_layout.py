@@ -27,6 +27,7 @@ from xray_fluent.ui.main_window import MainWindow  # noqa: E402
 _PAGES = (
     "dashboard_page", "nodes_page", "subscriptions_page", "zapret_page", "logs_page",
     "history_page", "about_page", "updates_page", "sharing_page", "settings_page",
+    "about_us_page",
 )
 #: Окно общее на процесс и не уничтожается: удаление виджетов посреди прогона
 #: роняет Windows-тесты (см. test_app_detail_pages).
@@ -82,6 +83,11 @@ class NavigationLayoutTests(unittest.TestCase):
         for name in ("dashboard_page", "configs", "history_page"):
             self.assertTrue(panel.scrollWidget.isAncestorOf(panel.widget(name)), name)
         self.assertFalse(panel.scrollWidget.isAncestorOf(panel.widget("settings_page")))
+
+    def test_about_us_is_the_last_sidebar_item(self) -> None:
+        panel = _window().navigationInterface.panel
+        self.assertEqual(list(panel.items)[-1], "about_us_page")
+        self.assertFalse(panel.scrollWidget.isAncestorOf(panel.widget("about_us_page")))
 
     def test_expanded_routing_never_overlaps_on_a_short_window(self) -> None:
         window = _window()

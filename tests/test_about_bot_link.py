@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+ABOUT_US_LINKS = ROOT / "xray_fluent/ui/about_us/links.py"
 LABEL_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 BOT_URL_RE = re.compile(r"https://t\.me/zapretvpns_bot(?:\?start=([^\s)\"']*))?")
 
@@ -12,20 +13,23 @@ def _labels(path: Path) -> list[str | None]:
 
 
 class BotAdLabelTests(unittest.TestCase):
-    def test_about_button_carries_its_own_label(self) -> None:
-        source = (ROOT / "xray_fluent/ui/about_page.py").read_text(encoding="utf-8")
+    def test_about_us_button_carries_its_own_label(self) -> None:
+        source = ABOUT_US_LINKS.read_text(encoding="utf-8")
         self.assertIn(
             'BOT_ABOUT_URL = "https://t.me/zapretvpns_bot?start=kvnwin_about"', source
         )
-        self.assertIn("webbrowser.open(BOT_ABOUT_URL)", source)
-        self.assertEqual(_labels(ROOT / "xray_fluent/ui/about_page.py"), ["kvnwin_about"])
+        self.assertIn("BOT = AboutUsLink(", source)
+        self.assertEqual(_labels(ABOUT_US_LINKS), ["kvnwin_about"])
+
+    def test_old_about_page_no_longer_holds_the_bot_link(self) -> None:
+        self.assertEqual(_labels(ROOT / "xray_fluent/ui/about_page.py"), [])
 
     def test_readme_links_have_distinct_labels(self) -> None:
         labels = _labels(ROOT / "docs/README.md")
         self.assertEqual(labels, ["kvnwin_readme_keys", "kvnwin_readme_nokey"])
 
     def test_labels_follow_ad_source_rules(self) -> None:
-        for rel in ("xray_fluent/ui/about_page.py", "docs/README.md"):
+        for rel in ("xray_fluent/ui/about_us/links.py", "docs/README.md"):
             for label in _labels(ROOT / rel):
                 with self.subTest(file=rel, label=label):
                     self.assertIsNotNone(label)
