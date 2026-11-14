@@ -65,16 +65,31 @@ class TrackerTests(unittest.TestCase):
         tracker.observe(100.0, rows)
         self.assertEqual(tracker.observe(109.0, rows), [ClusterEvent("dead", "sn-8ph2xajvh", 3, 0.0)])
 
+    def test_zero_byte_connections_are_silent_after_three_seconds(self) -> None:
+        tracker = DeadVideoClusterTracker()
+        rows = [conn("a", down=0), conn("b", down=0), conn("c", down=0)]
+        tracker.observe(100.0, rows)
+        self.assertEqual(tracker.observe(102.9, rows), [])
+        self.assertEqual(tracker.observe(103.0, rows), [ClusterEvent("dead", "sn-8ph2xajvh", 3, 0.0)])
+        # соединения с несколькими байтами по-прежнему ждут 8 с
+        other = DeadVideoClusterTracker()
+        few = [conn("x", down=647), conn("y", down=647), conn("z", down=647)]
+        other.observe(200.0, few)
+        self.assertEqual(other.observe(203.0, few), [])
+        self.assertEqual(len(other.observe(208.0, few)), 1)
+
     def test_two_silent_connections_are_not_a_verdict(self) -> None:
         tracker = DeadVideoClusterTracker()
         self.assertEqual(self.silent_round(tracker, 100.0, ["a", "b"]), [])
         self.assertEqual(tracker.active_dead(109.0), [])
 
     def test_young_connections_are_not_counted(self) -> None:
+        # с несколькими байтами ответа (рукопожатие начато) молчание считается с 8 с; без байт - с 3 с (см. тест ниже)
         tracker = DeadVideoClusterTracker()
-        tracker.observe(100.0, [conn("a"), conn("b"), conn("c")])
-        self.assertEqual(tracker.observe(107.9, [conn("a"), conn("b"), conn("c")]), [])
-        self.assertEqual(len(tracker.observe(108.0, [conn("a"), conn("b"), conn("c")])), 1)
+        rows = [conn("a", down=647), conn("b", down=647), conn("c", down=647)]
+        tracker.observe(100.0, rows)
+        self.assertEqual(tracker.observe(107.9, rows), [])
+        self.assertEqual(len(tracker.observe(108.0, rows)), 1)
 
     def test_only_silent_proxied_tcp_connections_that_sent_a_request_count(self) -> None:
         tracker = DeadVideoClusterTracker()

@@ -77,6 +77,7 @@ class DeadVideoClusterTracker:
         window_sec: float = 90.0,
         max_down_bytes: int = 4096,
         min_age_sec: float = 8.0,
+        silent_min_age_sec: float = 3.0,
         healthy_down_bytes: int = 64 * 1024,
         max_clusters: int = 64,
         max_seen: int = 4096,
@@ -85,6 +86,9 @@ class DeadVideoClusterTracker:
         self._window_sec = window_sec
         self._max_down_bytes = max_down_bytes
         self._min_age_sec = min_age_sec
+        # Соединение без единого байта ответа молчит уже через 3 с: здоровое получает ServerHello за 0.1-0.3 с
+        # (замер узла и архив Android 0.5.48, 2026-11-14).
+        self._silent_min_age_sec = silent_min_age_sec
         self._healthy_down_bytes = healthy_down_bytes
         self._max_clusters = max_clusters
         self._max_seen = max_seen
@@ -130,7 +134,8 @@ class DeadVideoClusterTracker:
                 if event is not None:
                     events.append(event)
                 continue
-            if up <= 0 or down > self._max_down_bytes or now - first < self._min_age_sec:
+            required_age = self._silent_min_age_sec if down == 0 else self._min_age_sec
+            if up <= 0 or down > self._max_down_bytes or now - first < required_age:
                 continue
             state = self._clusters.setdefault(cluster, _State())
             if conn_id in state.ids:
