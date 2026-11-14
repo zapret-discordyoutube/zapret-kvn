@@ -13,6 +13,8 @@ class AboutUsLink:
     title: str
     subtitle: str
     url: str
+    #: Ключ значка из ``icons.ALL``: логотип сервиса, на который ведёт ссылка.
+    icon: str
 
 
 # Рекламная метка deep-link бота: источник kvnwin + место about.
@@ -26,28 +28,30 @@ MIRROR_URL = (
 )
 
 #: Главный VPN-бот, где покупают подписку: стоит над всем остальным.
-BOT = AboutUsLink("Zapret VPN bot", "Главный VPN-бот: здесь можно купить подписку", BOT_ABOUT_URL)
+BOT = AboutUsLink("Zapret VPN bot", "Главный VPN-бот: здесь можно купить подписку", BOT_ABOUT_URL, "telegram")
 
 CHANNELS: tuple[AboutUsLink, ...] = (
-    AboutUsLink("Zapret KVN", "Telegram-канал", "https://t.me/bypassblock"),
-    AboutUsLink("VPN Discord YouTube", "Telegram-сообщество", "https://t.me/vpndiscordyooutube"),
-    AboutUsLink("RuNet VPN YouTube Discord", "Telegram-канал", "https://t.me/runetvpnyoutubediscord"),
-    AboutUsLink("Zastogram", "Telegram-канал", "https://t.me/zastogram"),
+    AboutUsLink("Zapret KVN", "Telegram-канал", "https://t.me/bypassblock", "telegram"),
+    AboutUsLink("VPN Discord YouTube", "Telegram-сообщество", "https://t.me/vpndiscordyooutube", "telegram"),
+    AboutUsLink("RuNet VPN YouTube Discord", "Telegram-канал", "https://t.me/runetvpnyoutubediscord", "telegram"),
+    AboutUsLink("Zastogram", "Telegram-канал", "https://t.me/zastogram", "telegram"),
 )
 
 #: Главные ресурсы проекта и запасные списки адресов на случай блокировки основных.
 RESOURCES: tuple[AboutUsLink, ...] = (
-    AboutUsLink("Вики", "Инструкции и ответы на вопросы", f"{MIRROR_URL}?s=wiki"),
-    AboutUsLink("Git", "Исходный код и релизы", f"{MIRROR_URL}?s=git"),
+    AboutUsLink("Вики", "Инструкции и ответы на вопросы", f"{MIRROR_URL}?s=wiki", "book"),
+    AboutUsLink("Git", "Исходный код и релизы", f"{MIRROR_URL}?s=git", "git"),
     AboutUsLink(
         "Резервный список адресов",
         "Документ Google",
         "https://docs.google.com/document/d/1v1TeRSBpXEJpy6qxNa3tVkyhgtoM_rj_T-jwphhfvYI/",
+        "googledocs",
     ),
     AboutUsLink(
         "Ещё один резервный список",
         "GitHub Gist",
         "https://gist.github.com/fuckyourkn/ecb9b6a03f53bddcdd47023ebc12d4f9",
+        "github",
     ),
 )
 
