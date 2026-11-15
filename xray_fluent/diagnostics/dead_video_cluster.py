@@ -20,6 +20,13 @@
 между ними не было здорового (получившего от ``healthy_down_bytes``). Здоровое соединение, ``reset()`` (смена
 сервера или подключения) снимают приговор. Кластер «активен», пока от последнего молчаливого соединения прошло не
 больше ``window_sec``: если плеер перестал повторять запросы, вердикт гаснет сам.
+
+Пауза после видео (Windows 0.8.x вслед за Android 0.6.24, поле 2026-11-15 21:06 UTC): кластер только что отдал 78 МБ,
+а плеер с полным буфером открывал короткие соединения с ответом 2-3 КБ; три таких дали ложный вердикт, и сервер
+сменился при идущем видео. Кластер, который за последние ``healthy_grace_sec`` отдал здоровое соединение, тихими
+соединениями не судится (событие ``excused`` один раз на паузу). Свежим доказательством считается только соединение,
+чей входящий счётчик вырос с прошлого опроса на ``healthy_down_bytes`` (подвисшее старое паузу не продлевает).
+``healthy_grace_sec=0`` выключает правило.
 """
 
 from __future__ import annotations
@@ -50,7 +57,8 @@ def cluster_of(host: str | None) -> str | None:
 
 @dataclass(frozen=True)
 class ClusterEvent:
-    """Событие для журнала: ``dead`` (признан мёртвым) или ``recovered`` (здоровое соединение снова пошло)."""
+    """Событие для журнала: ``dead`` (признан мёртвым), ``recovered`` (здоровое соединение снова пошло) или
+    ``excused`` (тихое соединение через ``span_sec`` после здорового не засчитано: пауза плеера)."""
 
     kind: str
     cluster: str
@@ -81,6 +89,7 @@ class DeadVideoClusterTracker:
         healthy_down_bytes: int = 64 * 1024,
         max_clusters: int = 64,
         max_seen: int = 4096,
+        healthy_grace_sec: float = 90.0,
     ) -> None:
         self._min_dead_flows = min_dead_flows
         self._window_sec = window_sec
@@ -92,12 +101,19 @@ class DeadVideoClusterTracker:
         self._healthy_down_bytes = healthy_down_bytes
         self._max_clusters = max_clusters
         self._max_seen = max_seen
+        self._healthy_grace_sec = healthy_grace_sec
         self._clusters: dict[str, _State] = {}
         self._first_seen: dict[str, float] = {}
+        self._last_down: dict[str, int] = {}
+        self._last_healthy_at: dict[str, float] = {}
+        self._excused_for: dict[str, float] = {}
 
     def reset(self) -> None:
         self._clusters.clear()
         self._first_seen.clear()
+        self._last_down.clear()
+        self._last_healthy_at.clear()
+        self._excused_for.clear()
 
     def active_dead(self, now: float) -> list[str]:
         """Мёртвые кластеры, к которым плеер ещё повторяет запросы."""
@@ -129,13 +145,25 @@ class DeadVideoClusterTracker:
             first = self._first_seen.setdefault(conn_id, now)
             down = _as_int(conn.get("download"))
             up = _as_int(conn.get("upload"))
+            grew = down - self._last_down.get(conn_id, 0)
+            self._last_down[conn_id] = down
             if down >= self._healthy_down_bytes:
-                event = self._recover(now, cluster)
-                if event is not None:
-                    events.append(event)
+                # Доказательство здоровья только от растущего соединения: подвисшее старое не снимает приговор.
+                if grew >= self._healthy_down_bytes:
+                    event = self._recover(now, cluster)
+                    if event is not None:
+                        events.append(event)
+                    if self._healthy_grace_sec > 0:
+                        self._last_healthy_at[cluster] = now
                 continue
             required_age = self._silent_min_age_sec if down == 0 else self._min_age_sec
             if up <= 0 or down > self._max_down_bytes or now - first < required_age:
+                continue
+            healthy_at = self._last_healthy_at.get(cluster)
+            if healthy_at is not None and now - healthy_at <= self._healthy_grace_sec:
+                if self._excused_for.get(cluster) != healthy_at:
+                    self._excused_for[cluster] = healthy_at
+                    events.append(ClusterEvent("excused", cluster, span_sec=max(0.0, now - healthy_at)))
                 continue
             state = self._clusters.setdefault(cluster, _State())
             if conn_id in state.ids:
@@ -152,6 +180,8 @@ class DeadVideoClusterTracker:
         # Закрытые соединения из списка исчезли: память о них не нужна.
         for conn_id in [key for key in self._first_seen if key not in alive]:
             del self._first_seen[conn_id]
+        for conn_id in [key for key in self._last_down if key not in alive]:
+            del self._last_down[conn_id]
         if len(self._first_seen) > self._max_seen:
             self._first_seen.clear()
         for state in self._clusters.values():
@@ -159,6 +189,10 @@ class DeadVideoClusterTracker:
                 state.ids.clear()
         while len(self._clusters) > self._max_clusters:
             del self._clusters[next(iter(self._clusters))]
+        while len(self._last_healthy_at) > self._max_clusters:
+            oldest = next(iter(self._last_healthy_at))
+            del self._last_healthy_at[oldest]
+            self._excused_for.pop(oldest, None)
         return events
 
     def _recover(self, now: float, cluster: str) -> ClusterEvent | None:

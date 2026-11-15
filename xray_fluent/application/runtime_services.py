@@ -28,6 +28,11 @@ def _log_dead_cluster_event(controller: Any, event: Any) -> None:
         )
     elif kind == "recovered":
         controller._log(f"[youtube] кластер {cluster} снова отвечает (был мёртв {float(span_sec):.0f} с)")
+    elif kind == "excused":
+        controller._log(
+            f"[youtube] кластер {cluster}: тихое соединение через {float(span_sec):.0f} с после здорового не засчитано "
+            "(пауза плеера с полным буфером, не мёртвый кластер)"
+        )
 
 def start_metrics_worker(controller: AppController) -> None:
     # Ленивая загрузка: live_metrics_worker тянет Windows-only win_proc_monitor.

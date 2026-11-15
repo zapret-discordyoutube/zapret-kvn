@@ -139,13 +139,63 @@ class TrackerTests(unittest.TestCase):
         events = tracker.observe(130.0, [conn("ok", down=2_000_000)])
         self.assertEqual(events, [ClusterEvent("recovered", "sn-8ph2xajvh", 0, 21.0)])
         self.assertEqual(tracker.active_dead(130.0), [])
-        self.assertEqual(self.silent_round(tracker, 140.0, ["d", "e"]), [], "the count starts over")
+        # the count starts over (and the grace after the healthy connection excuses them, logged once)
+        self.assertEqual(self.silent_round(tracker, 140.0, ["d", "e"]), [ClusterEvent("excused", "sn-8ph2xajvh", 0, 19.0)])
+        self.assertEqual(tracker.active_dead(149.0), [])
 
     def test_a_healthy_connection_before_the_verdict_forgets_earlier_silent_ones(self) -> None:
         tracker = DeadVideoClusterTracker()
         self.silent_round(tracker, 100.0, ["a", "b"])
         self.assertEqual(tracker.observe(115.0, [conn("ok", down=5_000_000)]), [])
-        self.assertEqual(self.silent_round(tracker, 120.0, ["c"]), [])
+        self.assertEqual(self.silent_round(tracker, 120.0, ["c"]), [ClusterEvent("excused", "sn-8ph2xajvh", 0, 14.0)])
+        self.assertEqual(tracker.active_dead(129.0), [])
+
+    def field_pause(self, tracker: DeadVideoClusterTracker, t: float) -> list[ClusterEvent]:
+        """Поле 2026-11-15 21:06 UTC (Android 0.6.23, Rusina): два длинных соединения отдали 78 МБ и закрылись,
+        затем плеер с полным буфером открыл четыре коротких соединения с ответом 2-3 КБ."""
+
+        host = "rr3.sn-ajcvh5-53.googlevideo.com"
+        events: list[ClusterEvent] = []
+        events += tracker.observe(t - 10.0, [conn("l1", host, up=60_000, down=44_000_000), conn("l2", host, up=60_000, down=29_000_000)])
+        events += tracker.observe(t, [conn("l1", host, up=66_000, down=47_000_000), conn("l2", host, up=67_000, down=31_600_000)])
+        # длинные закрылись, короткие видны и через 9 с остаются тихими
+        for start, ids in ((t + 2.0, ["s1", "s2"]), (t + 15.0, ["s3", "s4"])):
+            events += tracker.observe(start, [conn(i, host, up=9_216, down=3_072) for i in ids])
+            events += tracker.observe(start + 9.0, [conn(i, host, up=9_216, down=3_072) for i in ids])
+        return events
+
+    def test_quiet_connections_right_after_video_are_a_player_pause(self) -> None:
+        tracker = DeadVideoClusterTracker()
+        events = self.field_pause(tracker, 1000.0)
+        self.assertEqual(events, [ClusterEvent("excused", "sn-ajcvh5", 0, 11.0)])
+        self.assertEqual(tracker.active_dead(1024.0), [])
+
+    def test_without_the_grace_the_field_pause_gave_the_false_verdict(self) -> None:
+        tracker = DeadVideoClusterTracker(healthy_grace_sec=0)
+        self.assertEqual([e.kind for e in self.field_pause(tracker, 1000.0)], ["dead"])
+
+    def test_a_cluster_that_dies_after_delivering_is_judged_after_the_grace(self) -> None:
+        tracker = DeadVideoClusterTracker()
+        self.field_pause(tracker, 1000.0)
+        host = "rr3.sn-ajcvh5-53.googlevideo.com"
+        tracker.observe(1091.0, [conn(i, host) for i in ("d1", "d2", "d3")])
+        events = tracker.observe(1100.0, [conn(i, host) for i in ("d1", "d2", "d3")])
+        self.assertEqual([e.kind for e in events], ["dead"])
+
+    def test_only_a_growing_connection_renews_the_grace(self) -> None:
+        tracker = DeadVideoClusterTracker()
+        # one big connection seen once, then stuck without new bytes for two minutes
+        for now in (100.0, 160.0, 220.0):
+            tracker.observe(now, [conn("old", down=2_000_000)])
+        tracker.observe(221.0, [conn("old", down=2_000_000)] + [conn(i) for i in ("a", "b", "c")])
+        events = tracker.observe(230.0, [conn("old", down=2_000_000)] + [conn(i) for i in ("a", "b", "c")])
+        self.assertEqual([e.kind for e in events], ["dead"], "grace ran out 130 s after the last growth")
+        growing = DeadVideoClusterTracker()
+        growing.observe(100.0, [conn("g", down=2_000_000)])
+        growing.observe(215.0, [conn("g", down=3_000_000)])
+        growing.observe(221.0, [conn("g", down=3_000_000)] + [conn(i) for i in ("a", "b", "c")])
+        events = growing.observe(230.0, [conn("g", down=3_000_000)] + [conn(i) for i in ("a", "b", "c")])
+        self.assertEqual(events, [ClusterEvent("excused", "sn-8ph2xajvh", 0, 15.0)])
 
     def test_the_verdict_fades_when_the_player_stops_retrying(self) -> None:
         tracker = DeadVideoClusterTracker(window_sec=90.0)
