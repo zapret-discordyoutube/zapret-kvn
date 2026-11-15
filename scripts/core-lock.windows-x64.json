@@ -69,37 +69,37 @@
     },
     {
       "id": "hysteria",
-      "version": "app/v2.13.0",
+      "version": "app/v2.14.0",
       "kind": "file",
       "archive": "hysteria-windows-amd64.exe",
-      "url": "https://github.com/HyNetworks/hysteria/releases/download/app/v2.13.0/hysteria-windows-amd64.exe",
-      "sha256": "162ef8fe55dc7ec810dda662908f8e65ec36bd6da39cb87c3bd66184ab68f067",
+      "url": "https://github.com/HyNetworks/hysteria/releases/download/app/v2.14.0/hysteria-windows-amd64.exe",
+      "sha256": "6ee18e99f826670a249ad20400c536900cb6fb5369237e30768df9032ac92d80",
       "files": [
         { "match": "^hysteria-windows-amd64\\.exe$", "target": "hysteria.exe" }
       ],
       "repository": "HyNetworks/hysteria",
       "channel": "stable",
-      "release_tag": "app/v2.13.0",
+      "release_tag": "app/v2.14.0",
       "release_prerelease": false,
       "asset_name": "hysteria-windows-amd64.exe",
-      "asset_size": 24407552
+      "asset_size": 25683968
     },
     {
       "id": "hysteria-license",
-      "version": "app/v2.13.0",
-      "archive": "hysteria-app-v2.13.0.zip",
-      "url": "https://github.com/HyNetworks/hysteria/archive/refs/tags/app/v2.13.0.zip",
-      "sha256": "30374f82a8e5595f6b24a8e677aa1143f5be57f4303276e53cba0abe0cf4460f",
+      "version": "app/v2.14.0",
+      "archive": "hysteria-app-v2.14.0.zip",
+      "url": "https://github.com/HyNetworks/hysteria/archive/refs/tags/app/v2.14.0.zip",
+      "sha256": "a347b3ba44f80da9b942bbe1f7590e35d5e7462c38c2b576253a97b35840e314",
       "files": [
         { "match": "(^|/)app/LICENSE\\.md$", "target": "LICENSE-Hysteria.md" }
       ]
     },
     {
       "id": "runetfreedom-routing-data",
-      "version": "0e8093e7d8461d872b5a3b9e0b2d7dd350c37f69",
-      "archive": "russia-v2ray-rules-dat-0e8093e7d8461d872b5a3b9e0b2d7dd350c37f69.zip",
-      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/0e8093e7d8461d872b5a3b9e0b2d7dd350c37f69.zip",
-      "sha256": "427a4523832b9efe2ebdc0a083b4de056401adb2ec0d16d5378f94cc936d5dd8",
+      "version": "dd3b07c9f2ef4a380b699538a37ba5ddedfa3105",
+      "archive": "russia-v2ray-rules-dat-dd3b07c9f2ef4a380b699538a37ba5ddedfa3105.zip",
+      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/dd3b07c9f2ef4a380b699538a37ba5ddedfa3105.zip",
+      "sha256": "da1749eed6b8d25961911cfe691314b4105b7677453f6a5618d4ce456cf8d451",
       "files": [
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
         { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
@@ -111,7 +111,7 @@
       "repository": "runetfreedom/russia-v2ray-rules-dat",
       "channel": "release",
       "branch": "release",
-      "asset_size": 56983478
+      "asset_size": 56982448
     },
     {
       "id": "tun2socks",
