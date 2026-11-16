@@ -74,6 +74,14 @@ class TransitionStep:
     def cancel(self) -> None:
         """Best-effort cancellation; late ``report`` calls are ignored by the runner."""
 
+    def release(self) -> None:
+        """Drop the step's Qt objects on the runner's (GUI) thread once the runner is past the step.
+
+        A step must not leave an active QTimer for the cyclic garbage collector: the collector runs on whatever
+        thread allocates, and an active QTimer deleted off its own thread stays registered with the GUI event
+        dispatcher, which then fires a dangling timer (access violation, Windows e2e 2026-11-16).
+        """
+
     def run_blocking(self) -> Any:
         """Execute synchronously (legacy pumped path for cold call sites)."""
         raise NotImplementedError
@@ -144,6 +152,18 @@ class RunInWorkerStep(TransitionStep):
             self._timer.stop()
         if self._future is not None:
             self._future.cancel()
+
+    def release(self) -> None:
+        # The worker finished on its own thread and could not stop the deadline timer; stop and drop it here, on
+        # the GUI thread, and break the step <-> future <-> callback cycle so nothing Qt is left for the collector.
+        timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.stop()
+            try:
+                timer.timeout.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+        self._future = None
 
     def run_blocking(self) -> Any:
         # Cold-path compatibility only (shutdown, tests): preserves the
@@ -451,6 +471,9 @@ class TransitionRunner(QObject):
     def _handle_step_completed(self, seq: int, value: Any, error: BaseException | None) -> None:
         if self._done or seq != self._seq:
             return  # stale report from a cancelled/superseded step
+        step = self._current_step
+        if step is not None:
+            step.release()
         self._advance(value, error)
 
     def _advance(self, value: Any, error: BaseException | None) -> None:
@@ -512,6 +535,7 @@ class TransitionRunner(QObject):
         if step is not None:
             try:
                 step.cancel()
+                step.release()
             except Exception:
                 pass
         try:

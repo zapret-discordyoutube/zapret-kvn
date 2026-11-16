@@ -256,5 +256,50 @@ class RunStepsBlockingTests(unittest.TestCase):
         self.assertEqual(run_steps_blocking(gen()), "handled")
 
 
+class WorkerDeadlineTimerTests(unittest.TestCase):
+    """Windows e2e 2026-11-16: python.exe died with an access violation in ``_on_deadline``. A finished worker step
+    left its 60 s deadline QTimer active inside a step <-> timer <-> closure cycle; the cyclic collector ran on a
+    worker thread, deleted the active timer off its thread, and the GUI loop fired the dangling timer."""
+
+    def test_a_finished_worker_step_leaves_no_active_timer(self) -> None:
+        step = run_in_worker(lambda: 1, deadline_ms=60_000)
+
+        def gen():
+            value = yield step
+            return value
+
+        runner = TransitionRunner(gen())
+        runner.start()
+        self.assertTrue(_drive_until(lambda: runner.done))
+        self.assertEqual(runner.result, 1)
+        self.assertIsNone(step._timer)  # noqa: SLF001
+        self.assertIsNone(step._future)  # noqa: SLF001
+
+    def test_collector_on_a_worker_thread_does_not_crash_the_gui_loop(self) -> None:
+        import gc
+        import threading
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for _ in range(30):
+                runners = []
+                for _ in range(10):
+                    def gen():
+                        return (yield run_in_worker(lambda: 1, deadline_ms=40))
+
+                    runner = TransitionRunner(gen())
+                    runner.start()
+                    runners.append(runner)
+                self.assertTrue(_drive_until(lambda: all(r.done for r in runners)))
+                del runners
+                collector = threading.Thread(target=gc.collect)
+                collector.start()
+                collector.join()
+                _drive_until(lambda: False, timeout_ms=60)  # past every deadline: a dangling timer would fire now
+        finally:
+            if enabled:
+                gc.enable()
+
 if __name__ == "__main__":
     unittest.main()
