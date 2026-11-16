@@ -1,6 +1,7 @@
 # Service slots on Windows (design draft, 2026-11-16)
 
-Status: DESIGN, nothing built. Android has had slots since 0.5.52 / 0.6.x (`android/docs/SERVICE_SLOTS.md`, read its
+Status: phases 1-2 in code (`xray_fluent/slots/catalog.py`, `config_writer.py`, tests
+`tests/test_service_slots_config.py`), not wired to the UI or runtime yet. Android has had slots since 0.5.52 / 0.6.x (`android/docs/SERVICE_SLOTS.md`, read its
 "Owner decisions" and the field sections first). Read the workspace `AGENTS.md` section "Architecture basis: native
 cores, sing-box is the gasket" and the skill `zapret-kvn-json-routing` before changing this design.
 
@@ -53,8 +54,8 @@ gemini.google.com, ...). A browser tab on YouTube is caught by domain, which is 
 ## What the app writes into the active sing-box JSON when a slot is ticked
 
 ```json
-{"type": "selector", "tag": "zapret-slot-youtube", "outbounds": ["proxy"], "providers": ["__app_nodes"],
- "default": "proxy", "interrupt_exist_connections": true}
+{"type": "selector", "tag": "zapret-slot-youtube", "outbounds": ["proxy"], "default": "proxy",
+ "interrupt_exist_connections": true}
 ```
 
 and one route rule, placed right after the always-proxy names and before the RU-direct rules:
@@ -64,6 +65,10 @@ and one route rule, placed right after the always-proxy names and before the RU-
   "youtube-nocookie.com", "youtubei.googleapis.com"], "action": "route", "outbound": "zapret-slot-youtube"}
 ```
 
+- At rest the selector has only `proxy`, so the file is valid on its own; the runtime adds the server pool
+  (`providers: ["__app_nodes"]`) at launch, the same app-owned contract as the `proxy` replacement.
+- Apps, names and IP ranges are separate rules (sing-box ANDs different fields inside one rule), in the order AI,
+  YouTube, Telegram, as on Android.
 - Tags starting with `zapret-slot-` are app-written; untick removes exactly those blocks (and nothing the user wrote).
 - `default: proxy` keeps the slot working when the app is not running its slot logic (the slot simply follows the
   main server): the JSON is valid and safe on its own.
