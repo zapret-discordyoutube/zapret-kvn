@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 
 from PyQt6.QtCore import QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
@@ -28,6 +29,9 @@ from ..profiles.models import AppSettings, SecuritySettings, clamp_subscriptions
 from .base_page import ScrollablePage
 from .theme import ACCENT_PRESETS, DEFAULT_ACCENT, normalize_accent, text_color
 from ..profiles.path_utils import normalize_configured_path, resolve_configured_path
+from ..masking import choices as masking_choices
+from ..masking import codec as masking_codec
+from .masking_dialog import MaskingCustomDialog
 
 
 def _expand_horizontally(widget) -> None:
@@ -259,6 +263,52 @@ class SettingsPage(ScrollablePage):
         network_group.addSettingCard(self.reconnect_card)
         network_group.addSettingCard(self.lan_proxy_card)
         root.addWidget(network_group)
+
+        # ============================================================
+        # Masking («Маскировка», xray_fluent/masking)
+        # ============================================================
+        masking_group = SettingCardGroup("Маскировка", container)
+        self.masking_card = SwitchSettingCard(
+            FIF.FINGERPRINT, "Маскировка",
+            "Меняет вид соединения с VPN-сервером для систем фильтрации. Пока выключена, всё как раньше",
+            parent=masking_group,
+        )
+        self.masking_wg_card = _ComboCard(
+            FIF.VPN, "WireGuard-маскировка",
+            "Мусорные и сигнатурные пакеты перед рукопожатием; работает и с обычным WireGuard",
+            [(title, choice) for choice, title in masking_choices.WIREGUARD_CHOICES], parent=masking_group,
+        )
+        self.masking_mux_card = SwitchSettingCard(
+            FIF.CONNECT, "Xray mux (VLESS по TCP)",
+            "Меньше рукопожатий подряд. QUIC в mux отклоняется: приложения перейдут на TCP",
+            parent=masking_group,
+        )
+        self.masking_xmux_card = _ComboCard(
+            FIF.SYNC, "XHTTP: смена соединений",
+            "Короткие соединения против заморозки после ~16-30 КБ, долгие — против частых рукопожатий",
+            [(title, choice) for choice, title in masking_choices.XMUX_CHOICES], parent=masking_group,
+        )
+        self.masking_xray_fragment_card = SwitchSettingCard(
+            FIF.CUT, "Фрагментация TLS (Xray) — эксперимент",
+            "Против блокировки по имени сайта, не против заморозки соединения",
+            parent=masking_group,
+        )
+        self.masking_singbox_fragment_card = SwitchSettingCard(
+            FIF.CUT, "Фрагментация TLS (Trojan, VMess) — эксперимент",
+            "То же для протоколов sing-box; на REALITY не действует",
+            parent=masking_group,
+        )
+        self.masking_custom_card = PushSettingCard(
+            "Изменить", FIF.EDIT, masking_choices.CUSTOM_TITLE,
+            "Все числа набора; формат общий с Android. Для отдельного сервера — меню «Ещё» в списке серверов",
+            parent=masking_group,
+        )
+        for card in (
+            self.masking_card, self.masking_wg_card, self.masking_mux_card, self.masking_xmux_card,
+            self.masking_xray_fragment_card, self.masking_singbox_fragment_card, self.masking_custom_card,
+        ):
+            masking_group.addSettingCard(card)
+        root.addWidget(masking_group)
 
         # ============================================================
         # Auto-switch
@@ -549,6 +599,11 @@ class SettingsPage(ScrollablePage):
         self.accent_card.picker.colorChanged.connect(self._auto_save)
         self.proxy_bypass_lan_card.checkedChanged.connect(self._auto_save)
         self.lan_proxy_card.checkedChanged.connect(self._auto_save)
+        for card in (self.masking_card, self.masking_mux_card, self.masking_xray_fragment_card, self.masking_singbox_fragment_card):
+            card.checkedChanged.connect(self._auto_save)
+        self.masking_wg_card.combo.currentIndexChanged.connect(self._auto_save)
+        self.masking_xmux_card.combo.currentIndexChanged.connect(self._auto_save)
+        self.masking_custom_card.clicked.connect(self._edit_custom_masking)
         self.lan_proxy_card.checkedChanged.connect(self._sync_lan_proxy_hint)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)
@@ -605,6 +660,7 @@ class SettingsPage(ScrollablePage):
         self.proxy_bypass_lan_card.setChecked(settings.system_proxy_bypass_lan)
         self.lan_proxy_card.setChecked(settings.lan_proxy_enabled)
         self._sync_lan_proxy_hint()
+        self._load_masking(settings)
         self.xray_path_card.edit.setText(
             normalize_configured_path(
                 settings.xray_path,
@@ -707,6 +763,58 @@ class SettingsPage(ScrollablePage):
             )
             self._auto_save()
 
+    # ── Маскировка: страница только показывает выбор, решения — в xray_fluent.masking ──
+
+    @staticmethod
+    def _set_masking_combo(card: _ComboCard, choice: str) -> None:
+        combo = card.combo
+        custom_index = combo.findData(masking_choices.CUSTOM_ID)
+        if choice == masking_choices.CUSTOM_ID and custom_index < 0:
+            combo.addItem(masking_choices.CUSTOM_TITLE, userData=masking_choices.CUSTOM_ID)
+        elif choice != masking_choices.CUSTOM_ID and custom_index >= 0:
+            combo.removeItem(custom_index)
+        index = combo.findData(choice)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _load_masking(self, settings: AppSettings) -> None:
+        masking = masking_codec.decode(settings.masking) if settings.masking else masking_codec.decode({})
+        current = masking.global_masking
+        self.masking_card.setChecked(masking.enabled)
+        self._set_masking_combo(self.masking_wg_card, masking_choices.wireguard_choice(current))
+        self._set_masking_combo(self.masking_xmux_card, masking_choices.xmux_choice(current))
+        self.masking_mux_card.setChecked(masking_choices.mux_on(current))
+        self.masking_xray_fragment_card.setChecked(masking_choices.xray_fragment_on(current))
+        self.masking_singbox_fragment_card.setChecked(masking_choices.singbox_fragment_on(current))
+
+    def _collect_masking(self, previous: dict) -> dict:
+        settings = masking_codec.decode(previous) if previous else masking_codec.decode({})
+        global_masking = masking_choices.compose_global(
+            settings.global_masking,
+            wireguard=str(self.masking_wg_card.combo.currentData() or masking_choices.NONE_ID),
+            mux=self.masking_mux_card.isChecked(),
+            xmux=str(self.masking_xmux_card.combo.currentData() or masking_choices.NONE_ID),
+            xray_fragment=self.masking_xray_fragment_card.isChecked(),
+            singbox_fragment=self.masking_singbox_fragment_card.isChecked(),
+        )
+        updated = replace(settings, enabled=self.masking_card.isChecked(), global_masking=global_masking)
+        if updated == settings and previous:
+            return previous
+        return masking_codec.encode(updated, previous or None)
+
+    def _edit_custom_masking(self) -> None:
+        settings = masking_codec.decode(self._settings.masking) if self._settings.masking else masking_codec.decode({})
+        dialog = MaskingCustomDialog(settings.global_masking, self.window())
+        if not dialog.exec() or dialog.result_masking is None:
+            return
+        updated = replace(settings, global_masking=dialog.result_masking)
+        self._settings.masking = masking_codec.encode(updated, self._settings.masking or None)
+        self._loading = True
+        try:
+            self._load_masking(self._settings)
+        finally:
+            self._loading = False
+        self._auto_save()
+
     def _auto_save(self) -> None:
         if self._loading:
             return
@@ -715,6 +823,7 @@ class SettingsPage(ScrollablePage):
         data.accent_color = self.accent_card.current_hex()
         data.system_proxy_bypass_lan = self.proxy_bypass_lan_card.isChecked()
         data.lan_proxy_enabled = self.lan_proxy_card.isChecked()
+        data.masking = self._collect_masking(data.masking)
         data.xray_path = normalize_configured_path(
             self.xray_path_card.edit.text(),
             default_path=XRAY_PATH_DEFAULT,

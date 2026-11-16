@@ -25,6 +25,7 @@ from qfluentwidgets import (
 from qfluentwidgets import RoundMenu, Action
 
 from ..application.selection_source import SelectionSource
+from ..masking import choices as masking_choices
 from ..profiles.models import Node, Subscription
 from .bulk_edit_page import BulkEditPage
 from .detail_page import StackedSection
@@ -88,6 +89,12 @@ _ALL_SOURCES_LABEL = "Все источники"
 _PING_BATCH_INTERVAL_MS = 150
 
 
+def _node_protocol(node: Node) -> str:
+    """Protocol as protocol_core() reads it: Xray "protocol", sing-box "type", else the link scheme."""
+    outbound = node.outbound or {}
+    return str(outbound.get("protocol", outbound.get("type", node.scheme)) or "").lower()
+
+
 class NodesPage(StackedSection):
     import_clipboard_requested = pyqtSignal()
     delete_requested = pyqtSignal(object)          # emits set[str] of node IDs
@@ -110,6 +117,8 @@ class NodesPage(StackedSection):
     reorder_requested = pyqtSignal(str, str)        # node_id, direction
     hide_subscription_nodes_requested = pyqtSignal(object)  # set[str]
     favorite_requested = pyqtSignal(object, bool)
+    # Маскировка для выбранных серверов: (ids, id выбора из xray_fluent.masking.choices).
+    masking_override_requested = pyqtSignal(object, str)
     view_prefs_changed = pyqtSignal(object)         # dict of AppSettings nodes_* fields
 
     def __init__(self, parent: QWidget | None = None):
@@ -1039,6 +1048,8 @@ class NodesPage(StackedSection):
         action.setEnabled(bool(ids))
         action.triggered.connect(lambda: self.favorite_requested.emit(ids, favorite))
         menu.addAction(action)
+        if ids:
+            menu.addMenu(self._masking_menu(ids))
         for button in (self.ping_all_btn, self.speed_test_all_btn, self.export_outbound_btn,
                        self.export_runtime_btn, self.delete_btn, self.move_up_btn, self.move_down_btn):
             action = Action(button.toolTip(), self)
@@ -1046,6 +1057,18 @@ class NodesPage(StackedSection):
             action.triggered.connect(button.click)
             menu.addAction(action)
         menu.exec(self.more_btn.mapToGlobal(self.more_btn.rect().bottomLeft()))
+
+    def _masking_menu(self, ids: set[str]) -> RoundMenu:
+        """Выбор маскировки для выбранных серверов; варианты зависят от их протокола."""
+        protocols = {_node_protocol(self._id_to_node[node_id]) for node_id in ids if node_id in self._id_to_node}
+        protocol = protocols.pop() if len(protocols) == 1 else ""
+        choices = masking_choices.server_choices(protocol) if protocol else masking_choices.server_choices("")[:2]
+        submenu = RoundMenu("Маскировка", self)
+        for choice_id, title in choices:
+            action = Action(title, submenu)
+            action.triggered.connect(lambda _=False, c=choice_id: self.masking_override_requested.emit(ids, c))
+            submenu.addAction(action)
+        return submenu
 
     # ── Selection helpers ──
 

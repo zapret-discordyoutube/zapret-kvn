@@ -1,0 +1,291 @@
+"""Masking package: same vectors as the Android `:masking` tests, so both platforms agree."""
+
+import json
+import random
+import unittest
+
+from xray_fluent.masking import apply, codec, presets, singbox, tester, wireguard, xray
+from xray_fluent.masking.merge import effective
+from xray_fluent.masking.model import (
+    OFF,
+    SETTINGS_OFF,
+    Core,
+    Masking,
+    MaskingOverride,
+    MaskingSettings,
+    MuxCool,
+    OverrideKind,
+    ServerShape,
+    SingboxFragment,
+    Span,
+    WireGuardMasking,
+    XrayFragment,
+    XrayShaping,
+    Xmux,
+    errors,
+)
+
+REALITY_TCP = ServerShape(Core.XRAY, "vless", network="tcp", security="reality")
+VISION = ServerShape(Core.XRAY, "vless", network="tcp", security="reality", flow="xtls-rprx-vision")
+XHTTP = ServerShape(Core.XRAY, "vless", network="xhttp", security="reality")
+KCP = ServerShape(Core.XRAY, "vless", network="kcp", security="none")
+WG = ServerShape(Core.AMNEZIA, "wireguard")
+TROJAN = ServerShape(Core.SINGBOX, "trojan", security="tls")
+
+
+class WireGuardTests(unittest.TestCase):
+    def test_chain_accepts_the_core_tags(self) -> None:
+        self.assertEqual((2 + 2 + 4 + 16 + 8 + 3, None), wireguard.validate_chain("<b 0x0100><r 2><t><rc 16><rd 8><r 3>"))
+
+    def test_counter_tag_and_uppercase_prefix_are_refused(self) -> None:
+        self.assertIn("не поддерживается ядром", wireguard.validate_chain("<b 0x01><c>")[1])
+        self.assertIsNotNone(wireguard.validate_chain("<b 0X0100>")[1])
+        self.assertIsNone(wireguard.validate_chain("<b 0100>")[1])
+
+    def test_mtu_cap_and_malformed_chains(self) -> None:
+        self.assertIsNotNone(wireguard.validate_chain("<r 1000><r 401>")[1])
+        self.assertIsNone(wireguard.validate_chain("<r 1000><r 400>")[1])
+        for chain in ("hello<b 0x01>", "   ", "<b 0x01", "<r ３>"):
+            self.assertIsNotNone(wireguard.validate_chain(chain)[1], chain)
+
+    def test_dns_chain_is_the_android_vector(self) -> None:
+        expected = "<r 2><b 0x" "01000001000000000000" "0679616e646578" "027275" "00" "00010001" ">"
+        self.assertEqual(expected, wireguard.dns_chain("yandex.ru"))
+        self.assertEqual(expected, wireguard.dns_chain("YANDEX.RU."))
+        for bad in ("localhost", "bad_label.ru", "-x.ru", ""):
+            self.assertIsNone(wireguard.dns_chain(bad))
+
+    def test_junk_rules(self) -> None:
+        self.assertTrue(any(p.field == "jc" for p in errors(wireguard.validate(WireGuardMasking(jmax=30)))))
+        self.assertTrue(any(p.field == "jmin" for p in errors(wireguard.validate(WireGuardMasking(jc=3, jmin=50, jmax=10)))))
+        self.assertTrue(any(p.field == "jmax" for p in errors(wireguard.validate(WireGuardMasking(jc=3, jmin=0, jmax=0)))))
+        self.assertEqual([], wireguard.validate(WireGuardMasking(jc=3, jmin=10, jmax=30)))
+
+    def test_apply_keeps_server_header_fields(self) -> None:
+        masked = wireguard.apply_to(
+            {"h1": "1-5", "s1": 20, "jc": 9, "i2": "<r 4>"},
+            WireGuardMasking(jc=3, jmin=10, jmax=30, signatures={"i1": "<r 2>", "i3": " "}),
+        )
+        self.assertEqual({"h1": "1-5", "s1": 20, "jc": 3, "jmin": 10, "jmax": 30, "i1": "<r 2>", "i2": "<r 4>"}, masked)
+
+    def test_presets_are_valid(self) -> None:
+        for preset in presets.all_presets():
+            if preset.masking.wireguard:
+                self.assertEqual([], wireguard.validate(preset.masking.wireguard), preset.id)
+            if preset.masking.xray:
+                self.assertEqual([], errors(xray.validate(preset.masking.xray)), preset.id)
+
+
+class XrayTests(unittest.TestCase):
+    def test_mux_block_and_zero_is_refused(self) -> None:
+        block, notes = xray.emit(XrayShaping(mux=MuxCool(concurrency=8)), REALITY_TCP)
+        self.assertEqual({"mux": {"enabled": True, "concurrency": 8, "xudpConcurrency": 16, "xudpProxyUDP443": "reject"}}, block)
+        self.assertTrue(any("QUIC" in note for note in notes))
+        self.assertTrue(errors(xray.validate(XrayShaping(mux=MuxCool(concurrency=0)))))
+        self.assertEqual([False], [p.error for p in xray.validate(XrayShaping(mux=MuxCool(concurrency=8)))])
+
+    def test_vision_and_multiplexed_transports(self) -> None:
+        block, _ = xray.emit(XrayShaping(mux=MuxCool()), VISION)
+        self.assertEqual(-1, block["mux"]["concurrency"])
+        self.assertEqual((None, ["Mux не включён: xhttp уже мультиплексирует потоки, для XHTTP есть xmux."]),
+                         xray.emit(XrayShaping(mux=MuxCool()), XHTTP))
+
+    def test_xmux_vector(self) -> None:
+        block, _ = xray.emit(presets.XMUX_ROTATE.masking.xray, XHTTP)
+        self.assertEqual({"xmux": {"maxConcurrency": "16-32", "cMaxReuseTimes": "8-16",
+                                   "hMaxRequestTimes": "60-120", "hMaxReusableSecs": "60-120"}}, block)
+        self.assertIsNone(xray.emit(XrayShaping(xmux=Xmux(max_connections=Span.of(2))), REALITY_TCP)[0])
+        self.assertTrue(errors(xray.validate(XrayShaping(xmux=Xmux(max_connections=Span.of(2), max_concurrency=Span(8, 16))))))
+
+    def test_fragment_vector(self) -> None:
+        block, _ = xray.emit(XrayShaping(fragment=XrayFragment()), REALITY_TCP)
+        self.assertEqual({"finalmask": {"tcp": [{"type": "fragment", "settings": {
+            "packets": "tlshello", "length": "100-200", "delay": "10-20"}}]}}, block)
+        self.assertIsNone(xray.emit(XrayShaping(fragment=XrayFragment()), KCP)[0])
+        self.assertTrue(errors(xray.validate(XrayShaping(fragment=XrayFragment(packets="0-3")))))
+        self.assertTrue(errors(xray.validate(XrayShaping(fragment=XrayFragment(length=Span(0, 10))))))
+
+    def test_xmux_goes_into_extra_when_present(self) -> None:
+        outbound = {"protocol": "vless", "streamSettings": {"network": "xhttp", "xhttpSettings": {"path": "/x", "extra": {"xPaddingBytes": "1-2"}}}}
+        xray.apply_to_outbound(outbound, {"xmux": {"maxConnections": "2"}})
+        self.assertEqual({"maxConnections": "2"}, outbound["streamSettings"]["xhttpSettings"]["extra"]["xmux"])
+        plain = {"protocol": "vless", "streamSettings": {"network": "xhttp", "xhttpSettings": {"path": "/x"}}}
+        xray.apply_to_outbound(plain, {"xmux": {"maxConnections": "2"}})
+        self.assertEqual({"maxConnections": "2"}, plain["streamSettings"]["xhttpSettings"]["xmux"])
+        with self.assertRaises(ValueError):
+            xray.apply_to_outbound(plain, {"sockopt": {}})
+
+    def test_span(self) -> None:
+        self.assertEqual(Span(8, 16), Span.parse(" 8 - 16 "))
+        self.assertEqual(Span.of(3), Span.parse("3"))
+        for bad in ("16-8", "-1", "a-b", "1-2-3"):
+            self.assertIsNone(Span.parse(bad), bad)
+        self.assertEqual(("8-16", "3"), (str(Span(8, 16)), str(Span.of(3))))
+
+
+GLOBAL = Masking(wireguard=presets.WIREGUARD_JUNK_ONLY.masking.wireguard, xray=XrayShaping(mux=MuxCool()))
+
+
+class MergeAndApplyTests(unittest.TestCase):
+    def test_merge_rules(self) -> None:
+        self.assertTrue(effective(MaskingSettings(False, GLOBAL), "a", WG).is_empty)
+        on = MaskingSettings(True, GLOBAL)
+        self.assertEqual(GLOBAL.wireguard, effective(on, "a", WG).masking.wireguard)
+        self.assertIsNone(effective(on, "a", WG).masking.xray)
+        off_a = MaskingSettings(True, GLOBAL, {"a": OFF})
+        self.assertTrue(effective(off_a, "a", WG).is_empty)
+        self.assertFalse(effective(off_a, "b", WG).is_empty)
+        custom = MaskingSettings(True, GLOBAL, {"a": MaskingOverride(OverrideKind.CUSTOM, Masking(wireguard=WireGuardMasking(enabled=False)))})
+        self.assertIsNone(effective(custom, "a", WG).masking.wireguard)
+        self.assertEqual(GLOBAL.xray, effective(custom, "a", REALITY_TCP).masking.xray)
+        broken = effective(MaskingSettings(True, Masking(wireguard=WireGuardMasking(jc=3, jmin=40, jmax=10))), None, WG)
+        self.assertIsNone(broken.masking.wireguard)
+        self.assertEqual(1, len(broken.notes))
+
+    def test_shape_of_native_xray_outbound(self) -> None:
+        outbound = {"protocol": "vless", "settings": {"vnext": [{"users": [{"flow": "xtls-rprx-vision"}]}]},
+                    "streamSettings": {"network": "xhttp", "security": "reality"}}
+        shape = apply.shape_of(outbound)
+        self.assertEqual((Core.XRAY, "xhttp", "reality", True), (shape.core, shape.network, shape.security, shape.is_vision))
+        self.assertIsNone(apply.shape_of({"protocol": "freedom"}))
+        self.assertEqual(Core.AMNEZIA, apply.shape_of({"type": "wireguard"}).core)
+
+    def test_apply_server_copies_and_never_touches_the_node(self) -> None:
+        outbound = {"protocol": "vless", "streamSettings": {"network": "tcp", "security": "reality"}}
+        masked, _ = apply.apply_server(outbound, MaskingSettings(True, GLOBAL), "a")
+        self.assertIn("mux", masked)
+        self.assertNotIn("mux", outbound)
+        endpoint = {"type": "wireguard", "tag": "wg"}
+        self.assertEqual({"jc": 3, "jmin": 10, "jmax": 30}, apply.apply_server(endpoint, MaskingSettings(True, GLOBAL), None)[0]["amnezia"])
+        self.assertIs(outbound, apply.apply_server(outbound, SETTINGS_OFF, "a")[0])
+
+    def test_singbox_fragment(self) -> None:
+        settings = MaskingSettings(True, Masking(singbox=SingboxFragment(record_fragment=True, fallback_delay_ms=500)))
+        masked, _ = apply.apply_server({"type": "trojan", "tls": {"enabled": True, "server_name": "x"}}, settings, None)
+        self.assertEqual({"enabled": True, "server_name": "x", "fragment": True, "record_fragment": True,
+                          "fragment_fallback_delay": "500ms"}, masked["tls"])
+        self.assertIsNone(effective(settings, None, ServerShape(Core.SINGBOX, "trojan", security="reality")).masking.singbox)
+        self.assertTrue(singbox.applies(TROJAN))
+
+    def test_log_line(self) -> None:
+        self.assertIsNone(apply.log_line(False, 0, []))
+        self.assertEqual("маскировка: включена, изменено серверов: 2; a (×2); b", apply.log_line(True, 2, ["a", "a", "b"]))
+
+
+class CodecTests(unittest.TestCase):
+    def test_round_trip_and_unknown_keys(self) -> None:
+        settings = MaskingSettings(
+            True,
+            Masking(
+                wireguard=presets.wireguard_dns().masking.wireguard,
+                xray=XrayShaping(mux=MuxCool(enabled=False), xmux=presets.XMUX_ROTATE.masking.xray.xmux),
+                singbox=SingboxFragment(fallback_delay_ms=300),
+            ),
+            {"a": OFF, "b": MaskingOverride(OverrideKind.CUSTOM, presets.XRAY_FRAGMENT.masking)},
+        )
+        text = codec.encode_text(settings, '{"schema":2,"futureFeature":{"x":1}}')
+        self.assertEqual(settings, codec.decode_text(text))
+        root = json.loads(text)
+        self.assertEqual(1, root["schema"])
+        self.assertEqual({"x": 1}, root["futureFeature"])
+
+    def test_android_document_reads_the_same(self) -> None:
+        # The exact document Android writes for the same settings (MaskingCodec, key order included).
+        android = ('{"schema":1,"enabled":true,"global":{"wireguard":{"enabled":true,"jc":3,"jmin":10,"jmax":30}},'
+                   '"overrides":{"p|wg":"off"}}')
+        settings = codec.decode_text(android)
+        self.assertEqual(MaskingSettings(True, Masking(wireguard=WireGuardMasking(jc=3, jmin=10, jmax=30)), {"p|wg": OFF}), settings)
+        self.assertEqual(android, codec.encode_text(settings))
+
+    def test_garbage_reads_as_off(self) -> None:
+        self.assertEqual(SETTINGS_OFF, codec.decode_text("not json"))
+        self.assertEqual(SETTINGS_OFF, codec.decode_text(None))
+        odd = codec.decode_text('{"enabled":"yes","global":{"wireguard":{"jc":"3"}},"overrides":{"x":7}}')
+        self.assertFalse(odd.enabled)
+        self.assertIsNone(odd.global_masking.wireguard.jc)
+        self.assertEqual({}, odd.overrides)
+
+
+class TesterTests(unittest.TestCase):
+    KB = 1024
+
+    def stalled(self, stop_at: int, stall_ms: int, step: int = 4 * 1024) -> tester.Transfer:
+        samples, t, value = [], 0, 0
+        while value < stop_at:
+            samples.append((t, value))
+            t += 1000
+            value = min(stop_at, value + step)
+        samples += [(t, stop_at), (t + stall_ms, stop_at)]
+        return tester.Transfer(tuple(samples), tester.End.TIMEOUT, 128 * self.KB)
+
+    def steady(self, total: int = 128 * 1024, seconds: int = 4) -> tester.Transfer:
+        return tester.Transfer(tuple((i * 1000, total * i // seconds) for i in range(seconds + 1)), tester.End.COMPLETED, total)
+
+    def test_freeze_rules(self) -> None:
+        kb = self.KB
+        frozen = tester.verdict([self.stalled(18 * kb, 9000), self.stalled(20 * kb, 8500)], 128 * kb)
+        self.assertEqual(("frozen", 19 * kb), (frozen.kind, frozen.offset_bytes))
+        self.assertEqual("inconclusive", tester.verdict([self.stalled(18 * kb, 9000)] * 2, 10 * kb).kind)
+        self.assertEqual("pass", tester.verdict([self.stalled(18 * kb, 3000), self.steady()], 128 * kb).kind)
+        self.assertEqual("inconclusive", tester.verdict([self.stalled(18 * kb, 9000), self.stalled(90 * kb, 9000)], 128 * kb).kind)
+        reset = tester.Transfer(self.steady().samples[:2], tester.End.RESET, 128 * kb)
+        self.assertEqual("inconclusive", tester.verdict([reset], 128 * kb).kind)
+        self.assertEqual("not_applicable", tester.verdict([self.steady(total=32 * kb)], 128 * kb).kind)
+        self.assertEqual(tester.Verdict("pass", bytes_per_second=32 * kb), tester.verdict([self.steady()], 128 * kb))
+
+    def test_rank_and_candidates(self) -> None:
+        ranked = tester.rank([
+            (presets.XMUX_FEW, tester.Verdict("frozen", offset_bytes=18 * self.KB)),
+            (presets.WIREGUARD_JUNK_ONLY, tester.Verdict("pass", bytes_per_second=100 * self.KB)),
+        ])
+        self.assertEqual(presets.WIREGUARD_JUNK_ONLY, ranked[0][0])
+        self.assertEqual("заморозка на 18 КБ", ranked[-1][2])
+        self.assertTrue(all(p.masking.wireguard for p in tester.candidates(WG)))
+        ids = [p.id for p in tester.candidates(XHTTP)]
+        self.assertNotIn("xray-mux", ids)
+        self.assertIn("xmux-rotate", ids)
+        self.assertEqual([], tester.candidates(ServerShape(Core.HYSTERIA, "hysteria2")))
+
+    def test_plan_is_sequential_and_jittered(self) -> None:
+        chosen = tester.candidates(REALITY_TCP)
+        steps = tester.plan(chosen, random.Random(7))
+        self.assertEqual(len(chosen) * tester.TRANSFERS_PER_CANDIDATE, len(steps))
+        self.assertTrue(all(tester.PAUSE_MS[0] <= s.pause_before_ms <= tester.PAUSE_MS[1] for s in steps))
+        self.assertGreater(len({s.pause_before_ms for s in steps}), 1)
+
+
+class ChoicesTests(unittest.TestCase):
+    def test_presets_read_back_and_custom_is_kept(self) -> None:
+        from xray_fluent.masking import choices
+        composed = choices.compose_global(
+            Masking(), wireguard="wg-dns", mux=True, xmux="xmux-rotate", xray_fragment=False, singbox_fragment=True,
+        )
+        self.assertEqual("wg-dns", choices.wireguard_choice(composed))
+        self.assertEqual("xmux-rotate", choices.xmux_choice(composed))
+        self.assertTrue(choices.mux_on(composed) and choices.singbox_fragment_on(composed))
+        self.assertFalse(choices.xray_fragment_on(composed))
+        tuned = Masking(wireguard=WireGuardMasking(jc=5, jmin=20, jmax=40))
+        self.assertEqual("custom", choices.wireguard_choice(tuned))
+        kept = choices.compose_global(tuned, wireguard="custom", mux=False, xmux="off", xray_fragment=False, singbox_fragment=False)
+        self.assertEqual(tuned, kept)
+        self.assertEqual(Masking(), choices.compose_global(tuned, wireguard="off", mux=False, xmux="off",
+                                                           xray_fragment=False, singbox_fragment=False))
+
+    def test_server_choices_and_overrides(self) -> None:
+        from xray_fluent.masking import choices
+        self.assertEqual(["inherit", "off", "wg-dns", "wg-more-junk", "wg-junk-only"], [c for c, _ in choices.server_choices("wireguard")])
+        vless = [c for c, _ in choices.server_choices("vless")]
+        self.assertIn("xmux-rotate", vless)
+        self.assertNotIn("singbox-fragment", vless)
+        self.assertEqual(["inherit", "off"], [c for c, _ in choices.server_choices("hysteria2")])
+        settings = choices.with_override(MaskingSettings(True), {"a", "b"}, "xmux-few")
+        self.assertEqual("XHTTP: мало соединений", choices.override_label(settings.override_for("a")))
+        settings = choices.with_override(settings, {"a"}, "inherit")
+        self.assertEqual({"b"}, set(settings.overrides))
+        self.assertEqual("Выключена", choices.override_label(choices.with_override(settings, {"b"}, "off").override_for("b")))
+        with self.assertRaises(ValueError):
+            choices.with_override(settings, {"a"}, "nope")
+
+
+if __name__ == "__main__":
+    unittest.main()

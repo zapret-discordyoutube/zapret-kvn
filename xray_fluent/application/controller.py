@@ -16,6 +16,9 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from . import masking_runtime
+from ..masking import choices as masking_choices
+from ..masking import codec as masking_codec
 from .config import (
     SingboxDocumentCache,
     apply_singbox_config_text as apply_singbox_config_text_operation,
@@ -1165,14 +1168,15 @@ class AppController(QObject):
             elif session.sidecar_kind == "hysteria":
                 preferred_relay_port = session.sidecar_relay_port
         self._refresh_server_bootstrap(node)
+        masking = masking_runtime.settings_of(self.state.settings)
         return self._attach_slot_plans(plan_singbox_runtime(
             document,
-            node,
+            masking_runtime.masked_node(node, masking),
             allowed_proxy_ports=allowed_proxy_ports,
             preferred_relay_port=preferred_relay_port,
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
-            pool_nodes=self._pool_candidate_nodes(node),
+            pool_nodes=masking_runtime.masked_nodes(self._pool_candidate_nodes(node), masking),
             share_lan=bool(self.state.settings.lan_proxy_enabled),
         ), node)
 
@@ -1316,6 +1320,15 @@ class AppController(QObject):
         )
         return plan
 
+    def _log_masking(self, node: Node | None) -> None:
+        """Одна строка за подключение: что маскировка сделала с выбранным сервером."""
+        masking = masking_runtime.settings_of(self.state.settings)
+        notes: list[str] = []
+        masked = masking_runtime.masked_node(node, masking, notes)
+        line = masking_runtime.describe(masking, int(masked is not node), notes)
+        if line:
+            self._log(f"[masking] {line}")
+
     def _refresh_server_bootstrap(self, node: Node | None) -> None:
         """Обновить в фоне запомненный адрес сервера, не задерживая подключение."""
 
@@ -1349,14 +1362,15 @@ class AppController(QObject):
             elif session.sidecar_kind == "hysteria" and not replacement:
                 preferred_relay_port = session.sidecar_relay_port
         self._refresh_server_bootstrap(node)
+        masking = masking_runtime.settings_of(self.state.settings)
         return self._attach_slot_plans(plan_singbox_proxy_runtime(
             document,
-            node,
+            masking_runtime.masked_node(node, masking),
             allowed_proxy_ports=allowed_proxy_ports,
             preferred_relay_port=preferred_relay_port,
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
-            pool_nodes=self._pool_candidate_nodes(node),
+            pool_nodes=masking_runtime.masked_nodes(self._pool_candidate_nodes(node), masking),
         ), node)
 
     def _singbox_plan_facts(self, node: Node | None, *, tun: bool) -> SingboxPlanFacts | None:
@@ -4270,6 +4284,14 @@ class AppController(QObject):
                 self._request_transition("proxy engine changed")
                 return
             self._request_transition("settings changed")
+
+    def set_masking_override(self, node_ids: set[str], choice_id: str) -> None:
+        """Маскировка для отдельных серверов (меню «Ещё» → «Маскировка»); пересобирает сессию при надобности."""
+        current = masking_runtime.settings_of(self.state.settings)
+        updated = masking_choices.with_override(current, set(node_ids), choice_id)
+        settings = deepcopy(self.state.settings)
+        settings.masking = masking_codec.encode(updated, self.state.settings.masking or None)
+        self.update_settings(settings)
 
     def ping_nodes(self, node_ids: set[str] | None = None) -> None:
         ping_nodes_operation(self, node_ids)

@@ -548,6 +548,9 @@ class AppSettings:
     # Прокси для других устройств сети (PS5, ТВ): в режиме VPN локальный
     # SOCKS/HTTP слушает все адреса, брандмауэр пускает только локальную подсеть.
     lan_proxy_enabled: bool = False
+    # «Маскировка» (xray_fluent/masking): документ в общем с Android формате codec;
+    # пустой = выключено. Ключи более новой сборки сохраняются при записи.
+    masking: dict[str, Any] = field(default_factory=dict)
     launch_on_startup: bool = False
     reconnect_on_network_change: bool = True
     xray_path: str = ""
@@ -641,6 +644,7 @@ class AppSettings:
             "system_proxy_before_tun": self.system_proxy_before_tun,
             "system_proxy_bypass_lan": self.system_proxy_bypass_lan,
             "lan_proxy_enabled": self.lan_proxy_enabled,
+            "masking": dict(self.masking),
             "launch_on_startup": self.launch_on_startup,
             "reconnect_on_network_change": self.reconnect_on_network_change,
             "xray_path": self.xray_path,
@@ -720,6 +724,7 @@ class AppSettings:
             system_proxy_before_tun=bool(data.get("system_proxy_before_tun", True)),
             system_proxy_bypass_lan=bool(data.get("system_proxy_bypass_lan", True)),
             lan_proxy_enabled=bool(data.get("lan_proxy_enabled", False)),
+            masking=dict(data["masking"]) if isinstance(data.get("masking"), dict) else {},
             launch_on_startup=bool(data.get("launch_on_startup", False)),
             reconnect_on_network_change=bool(data.get("reconnect_on_network_change", True)),
             xray_path=str(data.get("xray_path") or ""),

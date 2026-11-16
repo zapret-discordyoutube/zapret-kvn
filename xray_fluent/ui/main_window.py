@@ -562,6 +562,7 @@ class MainWindow(FluentWindow):
         self.nodes_page.bulk_edit_requested.connect(self._on_bulk_edit_nodes)
         self.nodes_page.bulk_edit_applied.connect(self._on_bulk_edit_applied)
         self.nodes_page.favorite_requested.connect(self._set_favorites)
+        self.nodes_page.masking_override_requested.connect(self.controller.set_masking_override)
         self.nodes_page.view_prefs_changed.connect(self._on_nodes_view_prefs_changed)
 
         self.subscriptions_page.add_requested.connect(self._add_subscription)

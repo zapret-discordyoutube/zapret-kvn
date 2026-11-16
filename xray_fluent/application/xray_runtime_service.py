@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ..constants import PROXY_HOST, XRAY_TUN_DEFAULT_INTERFACE_NAME
 from ..engines.xray import get_windows_default_route_context
 from ..importer.link_parser import xray_core_tls_problem
+from . import masking_runtime
 from .connection_service import find_free_api_port
 from .outbound_pool_service import ensure_xray_pool_control_plane
 from .port_allocator import apply_proxy_port_auto_selection
@@ -262,12 +263,15 @@ def build_runtime_xray_config(controller: AppController, node: Node | None = Non
                 raise ValueError(problem)
             # Единый источник пула (П1/П3): кэшированный пул контроллера.
             pool = controller.xray_outbound_pool()
+            masking = masking_runtime.settings_of(controller.state.settings)
             if pool.contains(node.id):
-                outbounds[index:index + 1] = pool.outbounds()
+                # Маскировка: копии outbound'ов пула по id узла; кэш пула и узлы не меняются.
+                outbounds[index:index + 1] = masking_runtime.mask_pool_outbounds(pool.outbounds(), pool.tags, masking)[0]
                 ensure_xray_pool_control_plane(payload, pool)
                 outbound_pool_tags = dict(pool.tags)
             else:
-                proxy_outbound = apply_browser_fingerprint(normalize_xray_outbound(deepcopy(node.outbound)))
+                masked = masking_runtime.masked_node(node, masking) or node
+                proxy_outbound = apply_browser_fingerprint(normalize_xray_outbound(deepcopy(masked.outbound)))
                 proxy_outbound["tag"] = "proxy"
                 outbounds[index] = proxy_outbound
             used_selected_node = True

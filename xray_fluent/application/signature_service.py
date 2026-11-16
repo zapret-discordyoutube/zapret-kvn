@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from ..constants import DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT, HYSTERIA_PATH_DEFAULT
 from ..engines.singbox import classify_node_for_singbox
 from ..importer.link_parser import hysteria2_uri_fingerprint
+from . import masking_runtime
 
 if TYPE_CHECKING:
     from .controller import AppController
@@ -129,6 +130,10 @@ def _singbox_runtime_signature_payload(
         "node_outbound": node.outbound if has_proxy_outbound and node and selector_pool is None else None,
         "selector_pool": selector_pool,
     }
+    # Маскировка меняет runtime-копии серверов, поэтому её смена пересобирает сессию.
+    # Пока она выключена, подпись прежняя: обновление не вызывает лишнего переподключения.
+    if masking_runtime.settings_of(settings).enabled:
+        payload["masking"] = settings.masking
     if planner_outcome == "hysteria_sidecar" and node is not None:
         payload["hysteria_path"] = str(HYSTERIA_PATH_DEFAULT)
         payload["sidecar_uri_fingerprint"] = hysteria2_uri_fingerprint(node.link)

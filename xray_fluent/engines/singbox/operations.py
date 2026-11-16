@@ -89,6 +89,7 @@ def start_proxy_steps(
         controller._active_core = prev_active_core
         controller._fail_transition(str(exc))
         return None
+    controller._log_masking(node)
 
     session_label = _proxy_session_label(plan, node)
     suffix = _runtime_suffix(plan)
@@ -151,6 +152,7 @@ def start_tun_steps(
         controller._active_core = prev_active_core
         controller._fail_transition(str(exc))
         return None
+    controller._log_masking(node)
 
     session_label = plan.source_path.name
     if plan.used_selected_node and node is not None:
@@ -282,6 +284,7 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
         except ValueError as exc:
             controller._fail_transition(str(exc))
             return False
+        controller._log_masking(node)
         session_label = _proxy_session_label(plan, node)
         controller._set_connection_status("starting", f"Переключение на {session_label}...", level="info")
         if not tun:
