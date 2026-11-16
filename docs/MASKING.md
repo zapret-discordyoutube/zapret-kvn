@@ -29,6 +29,26 @@ initiator only, so they work with a plain WireGuard server.
 - UI: Settings -> group «Маскировка» (presets per section, «Свои значения» = the whole set as JSON
   with core validation); node list -> «Ещё» -> «Маскировка» for the selected servers.
 
+## «Подобрать» (the tester)
+
+- Decisions in `xray_fluent/masking/tester.py` (same as Android): candidates (baseline «Без
+  маскировки», the server's own set, fitting presets), the plan (2 transfers per candidate, jittered
+  pauses, one target), `judge` (control = the run itself) and the freeze verdict.
+- `application/masking_runtime.py`: `begin_trial`/`end_trial`, the in-memory candidate; `settings_of`
+  (what a connect runs with) applies it, `stored_settings_of` (what the UI and writes use) never does.
+  While a trial runs the transition signature carries `masking_trial`, so every candidate really
+  rebuilds the session; without a trial the signature is unchanged.
+- `application/masking_tune_service.py` `MaskingTuneRunner` (GUI thread, QTimer + worker only): per
+  candidate sets the trial, `_request_transition("masking tune")`, waits until the coordinator is idle
+  and connected (45 s), checks the selected node, runs the transfers (`TransferWorker`: the session's
+  HTTP inbound, or plain in TUN), then drops the trial and requests `masking tune end`. Counts
+  `controller.user_disconnects` so a VPN the user switched off is never switched back on.
+  «Оставить» = `controller.keep_masking_override`.
+- `network/masking_transfer.py`: 256 KB (`Range`) of `SPEED_TEST_DEFAULT_URL`, browser User-Agent, read
+  timeout 12 s, cap 40 s, sampler thread every 0.5 s.
+- UI: Settings -> «Маскировка» -> «Подобрать для текущего сервера» -> `ui/masking_tune_dialog.py`.
+- Log: `[masking] маскировка: подбор, вариант «…»` at every trial connect.
+
 Note: the Xray sidecar dials through `sockopt.dialerProxy` (the local protect relay), so finalmask
 fragment pauses reach sing-box's direct connection, but segment boundaries are not guaranteed;
 fragment stays an experiment behind the tester.

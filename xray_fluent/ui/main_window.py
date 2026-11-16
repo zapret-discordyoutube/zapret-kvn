@@ -388,6 +388,15 @@ class MainWindow(FluentWindow):
         elif bottom > bar.value() + visible:
             bar.setValue(min(top, bottom - visible))
 
+    def _open_masking_tune(self) -> None:
+        """«Подобрать» маскировки: запуск на выбранном сервере и окно с ходом и итогом."""
+        from .masking_tune_dialog import MaskingTuneDialog
+
+        runner = self.controller.masking_tune
+        if not runner.running:
+            runner.start()
+        MaskingTuneDialog(runner, self).exec()
+
     def _open_routing_section(self, key: str) -> None:
         """Подпункт «Маршрутизации»: одна страница-контейнер, свой раздел внутри."""
         self.switchTo(self.configs_page)
@@ -621,6 +630,7 @@ class MainWindow(FluentWindow):
         self.logs_page.export_diag_requested.connect(self._export_diagnostics)
 
         self.settings_page.save_requested.connect(self._on_settings_page_saved)
+        self.settings_page.masking_tune_requested.connect(self._open_masking_tune)
         self.settings_page.auto_lock_minutes_changed.connect(self._update_auto_lock_minutes)
         self.settings_page.set_password_requested.connect(self._set_password)
         self.settings_page.disable_password_requested.connect(self.controller.disable_master_password)

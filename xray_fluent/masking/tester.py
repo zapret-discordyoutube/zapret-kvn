@@ -14,7 +14,7 @@ import random
 from dataclasses import dataclass
 from enum import Enum
 
-from .model import Core, ServerShape
+from .model import OFF, Core, Masking, MaskingOverride, OverrideKind, ServerShape
 from .presets import Preset, all_presets
 
 STALL_MS = 8_000
@@ -100,39 +100,87 @@ def verdict(transfers: list[Transfer], control_bytes: int) -> Verdict:
     return Verdict("inconclusive", reason="загрузка не завершилась")
 
 
-def candidates(shape: ServerShape, presets: list[Preset] | None = None) -> list[Preset]:
-    def fits(preset: Preset) -> bool:
-        masking = preset.masking
-        if shape.core is Core.AMNEZIA:
-            return masking.wireguard is not None
-        if shape.core is Core.XRAY and masking.xray is not None:
-            if masking.xray.xmux is not None:
-                return shape.is_xhttp
-            if masking.xray.mux is not None:
-                return not shape.is_multiplexed_transport
-            return masking.xray.fragment is not None and shape.is_tcp_stream
-        if shape.core is Core.SINGBOX:
-            return masking.singbox is not None and shape.security == "tls"
-        return False
+TRANSFER_BYTES = 256 * 1024  # twice the 64 KB the freeze needs to show
 
-    chosen = [preset for preset in (presets if presets is not None else all_presets()) if fits(preset)]
-    return sorted(chosen, key=lambda preset: preset.group)
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
+    """What one candidate sets as the server's own choice while measured (and when kept)."""
+
+    id: str
+    title: str
+    override: MaskingOverride
+
+    @classmethod
+    def of(cls, preset: Preset) -> Candidate:
+        return cls(preset.id, preset.title, MaskingOverride(OverrideKind.CUSTOM, preset.masking))
+
+
+# Measured first: the comparison point; a working run proves the network itself is fine.
+BASELINE = Candidate("baseline", "Без маскировки", OFF)
+
+
+def _fits(masking: Masking, shape: ServerShape) -> bool:
+    if shape.core is Core.AMNEZIA:
+        return masking.wireguard is not None
+    if shape.core is Core.XRAY and masking.xray is not None:
+        if masking.xray.xmux is not None:
+            return shape.is_xhttp
+        if masking.xray.mux is not None:
+            return not shape.is_multiplexed_transport
+        return masking.xray.fragment is not None and shape.is_tcp_stream
+    if shape.core is Core.SINGBOX:
+        return masking.singbox is not None and shape.security == "tls"
+    return False
+
+
+def candidates(shape: ServerShape, current: Masking | None = None, presets: list[Preset] | None = None) -> list[Candidate]:
+    """The baseline, the server's ``current`` set when it is no preset, then the fitting presets,
+    strongest group first. Empty when nothing can act (Hysteria2: obfs is part of the link)."""
+    fitting = sorted(
+        (preset for preset in (presets if presets is not None else all_presets()) if _fits(preset.masking, shape)),
+        key=lambda preset: preset.group,
+    )
+    if not fitting:
+        return []
+    chosen = [BASELINE]
+    if current is not None and not current.is_empty and all(preset.masking != current for preset in fitting):
+        chosen.append(Candidate("current", "Сейчас", MaskingOverride(OverrideKind.CUSTOM, current)))
+    return chosen + [Candidate.of(preset) for preset in fitting]
 
 
 @dataclass(frozen=True, slots=True)
 class Step:
-    preset: Preset
+    candidate: Candidate
     transfer: int
     pause_before_ms: int
 
 
-def plan(chosen: list[Preset], rng: random.Random | None = None) -> list[Step]:
+def plan(chosen: list[Candidate], rng: random.Random | None = None) -> list[Step]:
     rng = rng or random.Random()
     return [
-        Step(preset, transfer, rng.randint(*PAUSE_MS))
-        for preset in chosen
+        Step(candidate, transfer, rng.randint(*PAUSE_MS))
+        for candidate in chosen
         for transfer in range(1, TRANSFERS_PER_CANDIDATE + 1)
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class Measurement:
+    """What the runner hands back for one candidate; ``connected`` False: the tunnel did not come up."""
+
+    candidate: Candidate
+    transfers: tuple[Transfer, ...]
+    first_byte_ms: int | None = None
+    connected: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class Ranked:
+    candidate: Candidate
+    verdict: Verdict
+    reason: str
+    first_byte_ms: int | None = None
 
 
 _ORDER = {"pass": 0, "inconclusive": 1, "not_applicable": 2, "frozen": 3}
@@ -148,6 +196,21 @@ def reason(result: Verdict) -> str:
     return "проверка слишком мала, чтобы увидеть заморозку"
 
 
-def rank(results: list[tuple[Preset, Verdict]]) -> list[tuple[Preset, Verdict, str]]:
+def rank(results: list[tuple[Candidate, Verdict, int | None]]) -> list[Ranked]:
+    """Best first: passed (fastest first), then inconclusive, then frozen (later freeze first)."""
     ordered = sorted(results, key=lambda item: (_ORDER[item[1].kind], -item[1].bytes_per_second, -item[1].offset_bytes))
-    return [(preset, result, reason(result)) for preset, result in ordered]
+    return [Ranked(candidate, result, reason(result), first_byte) for candidate, result, first_byte in ordered]
+
+
+def judge(measurements: list[Measurement]) -> list[Ranked]:
+    """Verdicts of a whole run, best first. The control is the run itself: the most bytes any
+    transfer carried through the same tunnel to the same target."""
+    control = max((t.total_bytes for m in measurements for t in m.transfers), default=0)
+    results = []
+    for measurement in measurements:
+        if not measurement.connected:
+            result = Verdict("inconclusive", reason="туннель не поднялся с этими настройками")
+        else:
+            result = verdict(list(measurement.transfers), control)
+        results.append((measurement.candidate, result, measurement.first_byte_ms))
+    return rank(results)

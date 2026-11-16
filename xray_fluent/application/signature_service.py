@@ -132,8 +132,11 @@ def _singbox_runtime_signature_payload(
     }
     # Маскировка меняет runtime-копии серверов, поэтому её смена пересобирает сессию.
     # Пока она выключена, подпись прежняя: обновление не вызывает лишнего переподключения.
-    if masking_runtime.settings_of(settings).enabled:
+    if masking_runtime.stored_settings_of(settings).enabled:
         payload["masking"] = settings.masking
+    trial = masking_runtime.trial_signature()
+    if trial is not None:
+        payload["masking_trial"] = trial
     if planner_outcome == "hysteria_sidecar" and node is not None:
         payload["hysteria_path"] = str(HYSTERIA_PATH_DEFAULT)
         payload["sidecar_uri_fingerprint"] = hysteria2_uri_fingerprint(node.link)

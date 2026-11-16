@@ -234,17 +234,46 @@ class TesterTests(unittest.TestCase):
         self.assertEqual(tester.Verdict("pass", bytes_per_second=32 * kb), tester.verdict([self.steady()], 128 * kb))
 
     def test_rank_and_candidates(self) -> None:
+        wg = tester.Candidate.of(presets.WIREGUARD_JUNK_ONLY)
         ranked = tester.rank([
-            (presets.XMUX_FEW, tester.Verdict("frozen", offset_bytes=18 * self.KB)),
-            (presets.WIREGUARD_JUNK_ONLY, tester.Verdict("pass", bytes_per_second=100 * self.KB)),
+            (tester.Candidate.of(presets.XMUX_FEW), tester.Verdict("frozen", offset_bytes=18 * self.KB), 300),
+            (wg, tester.Verdict("pass", bytes_per_second=100 * self.KB), 200),
         ])
-        self.assertEqual(presets.WIREGUARD_JUNK_ONLY, ranked[0][0])
-        self.assertEqual("заморозка на 18 КБ", ranked[-1][2])
-        self.assertTrue(all(p.masking.wireguard for p in tester.candidates(WG)))
-        ids = [p.id for p in tester.candidates(XHTTP)]
+        self.assertEqual(wg, ranked[0].candidate)
+        self.assertEqual("заморозка на 18 КБ", ranked[-1].reason)
+        wg_candidates = tester.candidates(WG)
+        self.assertEqual(tester.BASELINE, wg_candidates[0])
+        self.assertTrue(all(c.override.masking.wireguard for c in wg_candidates[1:]))
+        ids = [c.id for c in tester.candidates(XHTTP)]
         self.assertNotIn("xray-mux", ids)
         self.assertIn("xmux-rotate", ids)
         self.assertEqual([], tester.candidates(ServerShape(Core.HYSTERIA, "hysteria2")))
+
+    def test_own_set_is_a_candidate_unless_it_is_a_preset(self) -> None:
+        own = Masking(wireguard=WireGuardMasking(jc=5, jmin=20, jmax=40))
+        self.assertEqual("current", tester.candidates(WG, own)[1].id)
+        self.assertNotIn("current", [c.id for c in tester.candidates(WG, presets.WIREGUARD_JUNK_ONLY.masking)])
+
+    def test_judge_takes_the_control_from_the_run(self) -> None:
+        kb = self.KB
+        baseline = tester.Measurement(tester.BASELINE, (self.stalled(18 * kb, 9000), self.stalled(17 * kb, 9000)))
+        wg = tester.Candidate.of(presets.WIREGUARD_JUNK_ONLY)
+        ranked = tester.judge([baseline, tester.Measurement(wg, (self.steady(), self.steady()), 250)])
+        self.assertEqual(wg, ranked[0].candidate)
+        self.assertEqual(250, ranked[0].first_byte_ms)
+        self.assertEqual("frozen", ranked[-1].verdict.kind)
+        everything = [tester.Measurement(c, (self.stalled(18 * kb, 9000),) * 2) for c in (tester.BASELINE, wg)]
+        self.assertTrue(all(r.verdict.kind == "inconclusive" for r in tester.judge(everything)))
+        down = tester.judge([tester.Measurement(tester.BASELINE, (), connected=False)])
+        self.assertEqual("не ясно: туннель не поднялся с этими настройками", down[0].reason)
+
+    def test_trial_changes_one_server_and_nothing_else(self) -> None:
+        custom = MaskingOverride(OverrideKind.CUSTOM, presets.WIREGUARD_JUNK_ONLY.masking)
+        off = MaskingSettings().with_trial("k", custom)
+        self.assertEqual((True, Masking(), {"k": custom}), (off.enabled, off.global_masking, off.overrides))
+        on = MaskingSettings(True, presets.XMUX_ROTATE.masking, {"other": OFF}).with_trial("k", OFF)
+        self.assertEqual(presets.XMUX_ROTATE.masking, on.global_masking)
+        self.assertEqual({"other": OFF, "k": OFF}, on.overrides)
 
     def test_plan_is_sequential_and_jittered(self) -> None:
         chosen = tester.candidates(REALITY_TCP)

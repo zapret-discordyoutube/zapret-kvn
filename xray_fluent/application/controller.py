@@ -19,6 +19,9 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from . import masking_runtime
 from ..masking import choices as masking_choices
 from ..masking import codec as masking_codec
+from ..masking.model import INHERIT as MASKING_INHERIT
+from ..masking.model import MaskingOverride, MaskingSettings
+from .masking_tune_service import MaskingTuneRunner
 from .config import (
     SingboxDocumentCache,
     apply_singbox_config_text as apply_singbox_config_text_operation,
@@ -532,6 +535,7 @@ class AppController(QObject):
         self._transition_active = False
         self._transition_scheduled = False
         self._transition_pending = False
+        self.user_disconnects = 0
         self._transition_reason = ""
         self._transition_generation = 0
         self._blocked_transition_signature = ""
@@ -1328,6 +1332,9 @@ class AppController(QObject):
         line = masking_runtime.describe(masking, int(masked is not node), notes)
         if line:
             self._log(f"[masking] {line}")
+        trial = masking_runtime.trial_log_line()
+        if trial:
+            self._log(f"[masking] {trial}")
 
     def _refresh_server_bootstrap(self, node: Node | None) -> None:
         """Обновить в фоне запомненный адрес сервера, не задерживая подключение."""
@@ -4182,12 +4189,18 @@ class AppController(QObject):
         self._retry_connect_on_network = False
         current_target = self._desired_connected if (self._transition_active or self._transition_pending) else self.connected
         self._desired_connected = not current_target
+        if not self._desired_connected:
+            self._note_user_disconnect()
         # Ручное действие отменяет отложенный возврат после неудачной замены.
         self._hysteria_return_episode = 0
         if not self._desired_connected:
             self._clear_pending_transport_selection()
             self._hysteria_recovery_active = False
         self._request_transition("toggle connection")
+
+    def _note_user_disconnect(self) -> None:
+        """«Подбор» маскировки видит, что VPN выключил человек, и не включает его снова."""
+        self.user_disconnects += 1
 
     def switch_next_node(self, *, source: SelectionSource) -> None:
         if not self.state.nodes:
@@ -4287,11 +4300,30 @@ class AppController(QObject):
 
     def set_masking_override(self, node_ids: set[str], choice_id: str) -> None:
         """Маскировка для отдельных серверов (меню «Ещё» → «Маскировка»); пересобирает сессию при надобности."""
-        current = masking_runtime.settings_of(self.state.settings)
+        current = masking_runtime.stored_settings_of(self.state.settings)
         updated = masking_choices.with_override(current, set(node_ids), choice_id)
         settings = deepcopy(self.state.settings)
         settings.masking = masking_codec.encode(updated, self.state.settings.masking or None)
         self.update_settings(settings)
+
+    def keep_masking_override(self, node_id: str, override: MaskingOverride) -> None:
+        """«Оставить» в «Подборе»: вариант становится выбором этого сервера (сохраняется, сессия пересобирается)."""
+        current = masking_runtime.stored_settings_of(self.state.settings)
+        overrides = {key: value for key, value in current.overrides.items() if key != node_id}
+        if override != MASKING_INHERIT:
+            overrides[node_id] = override
+        updated = MaskingSettings(current.enabled, current.global_masking, overrides)
+        settings = deepcopy(self.state.settings)
+        settings.masking = masking_codec.encode(updated, self.state.settings.masking or None)
+        self.update_settings(settings)
+
+    @property
+    def masking_tune(self) -> MaskingTuneRunner:
+        runner = getattr(self, "_masking_tune", None)
+        if runner is None:
+            runner = MaskingTuneRunner(self, parent=self)
+            self._masking_tune = runner
+        return runner
 
     def ping_nodes(self, node_ids: set[str] | None = None) -> None:
         ping_nodes_operation(self, node_ids)

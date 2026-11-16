@@ -193,6 +193,7 @@ class _PasswordActionCard(SettingCard):
 
 class SettingsPage(ScrollablePage):
     save_requested = pyqtSignal(object)
+    masking_tune_requested = pyqtSignal()
     auto_lock_minutes_changed = pyqtSignal(int)
     set_password_requested = pyqtSignal(str)
     disable_password_requested = pyqtSignal()
@@ -303,9 +304,15 @@ class SettingsPage(ScrollablePage):
             "Все числа набора; формат общий с Android. Для отдельного сервера — меню «Ещё» в списке серверов",
             parent=masking_group,
         )
+        self.masking_tune_card = PushSettingCard(
+            "Подобрать", FIF.SPEED_HIGH, "Подобрать для текущего сервера",
+            "VPN переподключается с каждым вариантом и дважды загружает 256 КБ через туннель: видно, где соединение замирает",
+            parent=masking_group,
+        )
         for card in (
             self.masking_card, self.masking_wg_card, self.masking_mux_card, self.masking_xmux_card,
             self.masking_xray_fragment_card, self.masking_singbox_fragment_card, self.masking_custom_card,
+            self.masking_tune_card,
         ):
             masking_group.addSettingCard(card)
         root.addWidget(masking_group)
@@ -604,6 +611,7 @@ class SettingsPage(ScrollablePage):
         self.masking_wg_card.combo.currentIndexChanged.connect(self._auto_save)
         self.masking_xmux_card.combo.currentIndexChanged.connect(self._auto_save)
         self.masking_custom_card.clicked.connect(self._edit_custom_masking)
+        self.masking_tune_card.clicked.connect(self.masking_tune_requested.emit)
         self.lan_proxy_card.checkedChanged.connect(self._sync_lan_proxy_hint)
         self.xray_path_card.edit.editingFinished.connect(self._auto_save)
         self.singbox_path_card.edit.editingFinished.connect(self._auto_save)

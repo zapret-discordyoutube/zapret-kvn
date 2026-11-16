@@ -7,18 +7,58 @@ current settings. Turning masking off therefore needs no re-import.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..masking import codec
 from ..masking.apply import apply_server, log_line
-from ..masking.model import MaskingSettings
+from ..masking.model import NONE, MaskingOverride, MaskingSettings
 from ..profiles.models import Node
 
 
-def settings_of(app_settings: Any) -> MaskingSettings:
+@dataclass(frozen=True, slots=True)
+class _Trial:
+    node_id: str
+    override: MaskingOverride
+    title: str
+
+
+# "Подбор" (MaskingTuneRunner): the one candidate the next connect runs with. In memory only, like
+# Android `MaskingTrial`: a crash in the middle of a run leaves the stored masking as it was.
+_trial: _Trial | None = None
+
+
+def begin_trial(node_id: str, override: MaskingOverride, title: str) -> None:
+    global _trial
+    _trial = _Trial(node_id, override, title)
+
+
+def end_trial() -> None:
+    global _trial
+    _trial = None
+
+
+def trial_signature() -> dict[str, Any] | None:
+    """Part of the transition signature while a trial runs, so each candidate really reconnects."""
+    if _trial is None:
+        return None
+    return codec.encode(MaskingSettings(True, NONE, {_trial.node_id: _trial.override}))["overrides"]
+
+
+def trial_log_line() -> str | None:
+    return None if _trial is None else f"маскировка: подбор, вариант «{_trial.title}»"
+
+
+def stored_settings_of(app_settings: Any) -> MaskingSettings:
     document = getattr(app_settings, "masking", None)
     return codec.decode(document) if isinstance(document, dict) and document else MaskingSettings()
+
+
+def settings_of(app_settings: Any) -> MaskingSettings:
+    """What a connect runs with: the stored settings, with the trial's server replaced."""
+    stored = stored_settings_of(app_settings)
+    trial = _trial
+    return stored if trial is None else stored.with_trial(trial.node_id, trial.override)
 
 
 def masked_node(node: Node | None, settings: MaskingSettings, notes: list[str] | None = None) -> Node | None:

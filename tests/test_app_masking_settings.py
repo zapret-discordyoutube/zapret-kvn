@@ -10,12 +10,15 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 _existing = QApplication.instance()
 if _existing is not None and not isinstance(_existing, QApplication):
     raise RuntimeError("widget tests need a QApplication")
 app = _existing or QApplication([])
+
+from qfluentwidgets import PushButton
 
 from xray_fluent.masking import codec, presets
 from xray_fluent.masking.model import OFF, Masking, MaskingSettings, WireGuardMasking
@@ -83,6 +86,64 @@ class MaskingSettingsGroupTests(unittest.TestCase):
         ok, problems = parse_custom('{"xray": {"xmux": {"maxConnections": "2"}}}')
         self.assertEqual([], problems)
         self.assertEqual("2", str(ok.xray.xmux.max_connections))
+
+    def test_tune_card_asks_for_a_run(self) -> None:
+        asked: list[bool] = []
+        self.page.masking_tune_requested.connect(lambda: asked.append(True))
+        self.page.masking_tune_card.clicked.emit()
+        self.assertEqual([True], asked)
+
+
+class _FakeRunner(QObject):
+    state_changed = pyqtSignal(object)
+
+    def __init__(self, state) -> None:
+        super().__init__()
+        self.state = state
+        self.running = False
+        self.kept: list = []
+        self.cancelled = 0
+
+    def keep(self, candidate) -> None:
+        self.kept.append(candidate)
+
+    def cancel(self) -> None:
+        self.cancelled += 1
+
+
+_dialogs: list = []
+
+
+class MaskingTuneDialogTests(unittest.TestCase):
+    def test_done_lists_the_ranking_and_keeps_a_row(self) -> None:
+        from xray_fluent.application.masking_tune_service import TuneDone, TuneRunning
+        from xray_fluent.masking import tester
+        from xray_fluent.ui.masking_tune_dialog import MaskingTuneDialog
+
+        wg = tester.Candidate.of(presets.WIREGUARD_JUNK_ONLY)
+        ranked = (
+            tester.Ranked(wg, tester.Verdict("pass", bytes_per_second=200 * 1024), "прошло без заморозки, 200 КБ/с"),
+            tester.Ranked(tester.BASELINE, tester.Verdict("frozen", offset_bytes=18 * 1024), "заморозка на 18 КБ"),
+        )
+        runner = _FakeRunner(TuneRunning("Финляндия", 2, 4, "Только junk"))
+        dialog = MaskingTuneDialog(runner, _page())
+        _dialogs.append(dialog)
+        self.assertIn("вариант 2 из 4", dialog.status_label.text())
+        self.assertEqual("Остановить", dialog.yesButton.text())
+        runner.running = True
+        dialog.validate()
+        self.assertEqual(1, runner.cancelled)
+
+        runner.running = False
+        runner.state_changed.emit(TuneDone("Финляндия", "node-1", ranked))
+        self.assertEqual("Закрыть", dialog.yesButton.text())
+        button = dialog.findChild(PushButton, f"masking-tune-keep-{wg.id}")
+        button.click()
+        self.assertEqual([wg], runner.kept)
+        runner.state_changed.emit(TuneDone("Финляндия", "node-1", ranked, kept=wg.id))
+        app.processEvents()
+        kept = [b for b in dialog.findChildren(PushButton, f"masking-tune-keep-{wg.id}") if b.isEnabled() is False]
+        self.assertTrue(kept and kept[-1].text() == "Оставлен")
 
 
 if __name__ == "__main__":

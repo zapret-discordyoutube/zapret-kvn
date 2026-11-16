@@ -142,6 +142,13 @@ class MaskingSettings:
     def override_for(self, server_key: str | None) -> MaskingOverride:
         return self.overrides.get(server_key, INHERIT) if server_key else INHERIT
 
+    def with_trial(self, server_key: str, override: MaskingOverride) -> MaskingSettings:
+        """The settings one "Подбор" step runs with: ``override`` for ``server_key`` only, never
+        stored. With the master switch off every other server stays unmasked."""
+        if self.enabled:
+            return MaskingSettings(True, self.global_masking, {**self.overrides, server_key: override})
+        return MaskingSettings(True, NONE, {server_key: override})
+
 
 SETTINGS_OFF = MaskingSettings()
 

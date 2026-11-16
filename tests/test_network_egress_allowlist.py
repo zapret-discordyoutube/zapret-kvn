@@ -68,6 +68,9 @@ ALLOWED: dict[str, set[str]] = {
     # CONNECT к локальному прокси) — внутри туннеля, по кнопке, по одному.
     "network/latency_probe.py": {"HTTPSConnection"},
     "network/speed_test_worker.py": {"build_opener", "create_connection", "socket"},
+    # «Подобрать» маскировки: только по кнопке, через локальный прокси ядра (внутри туннеля) или TUN,
+    # одна цель (файл замера скорости), по одному, с паузами 1,5-4 с; к серверам VPN не обращается.
+    "application/masking_tune_service.py": {"build_opener"},
     # Карточка сервисов в тесте скорости: HTTP CONNECT к известным сервисам через
     # временный локальный прокси проверяемого узла — внутри туннеля, по кнопке.
     "network/service_check.py": {"HTTPSConnection"},
