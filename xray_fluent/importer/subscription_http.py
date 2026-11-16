@@ -63,6 +63,10 @@ _LAUNCHER_PAGE_PATH = re.compile(
 
 
 _HWID_REFUSAL_HEADERS = frozenset({"x-hwid-not-supported", "x-hwid-max-devices-reached"})
+# Ответ подписки самого сервиса Zapret VPN (vpnbot, решение владельца 2026-11-16): серверы
+# такой подписки показываются без адреса и без страны по GeoIP (страна — только флаг имени).
+# Достаточно наличия заголовка; имя хоста подписки в приложение не зашивается.
+SERVICE_HEADER = "zapret-vpn-service"
 
 
 class SubscriptionFetchError(RuntimeError):

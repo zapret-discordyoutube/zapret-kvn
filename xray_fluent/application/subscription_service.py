@@ -15,7 +15,7 @@ from ..profiles.models import (
     normalize_subscription_warnings,
     utc_now_iso,
 )
-from ..importer.subscription_http import SubscriptionFetchResult, sanitize_fetch_error
+from ..importer.subscription_http import SERVICE_HEADER, SubscriptionFetchResult, sanitize_fetch_error
 from ..importer.subscription_parser import (
     ParsedSubscription,
     hidden_source_key_for_node,
@@ -273,6 +273,7 @@ def _apply_success_metadata(
     subscription.backoff_until = None
     subscription.retry_via_tunnel = False
     subscription.last_error = ""
+    subscription.service = SERVICE_HEADER in fetch.headers
     metadata = parsed.metadata
     if not subscription.name:
         subscription.name = metadata.title

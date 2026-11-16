@@ -22,7 +22,7 @@ from qfluentwidgets import qconfig
 from ..profiles.country_flags import get_flag_icon
 from ..profiles.models import Node
 from ..profiles.node_presentation import display_name, node_country
-from .privacy import endpoint_text
+from .privacy import node_endpoint_text
 from .theme import error_color, positive_color, text_muted_color, warning_color
 
 NODE_ROW_HEIGHT = 28
@@ -604,7 +604,7 @@ class NodesTableModel(QAbstractTableModel):
         return None
 
     def tooltip(self, node: Node, col: int) -> str | None:
-        endpoint = endpoint_text(node.server, node.port, self._endpoints_revealed)
+        endpoint = node_endpoint_text(node, self._endpoints_revealed)
         if col == COL_NAME:
             lines = [node.name or "Без имени", f"Тип: {node_type_text(node)}", f"Адрес: {endpoint}"]
             if node.group:
@@ -640,7 +640,7 @@ class NodesTableModel(QAbstractTableModel):
         return (
             ("★ " if node.is_favorite else "") + display_name(node.name),
             node_type_text(node),
-            endpoint_text(node.server, node.port, self._endpoints_revealed),
+            node_endpoint_text(node, self._endpoints_revealed),
             node.group,
             ", ".join(node.tags),
             "--" if node.ping_ms is None else f"{node.ping_ms} ms",

@@ -20,7 +20,7 @@ from qfluentwidgets import (
 from ..profiles.models import Node
 from .detail_page import DetailPage
 from .nodes_table_model import node_type_text
-from .privacy import HoldToRevealButton, endpoint_text
+from .privacy import HoldToRevealButton, masked_endpoint, node_endpoint_text
 
 
 class NodeEditPage(DetailPage):
@@ -37,8 +37,7 @@ class NodeEditPage(DetailPage):
             page_key="node-edit",
         )
         self._node_id = ""
-        self._endpoint_server = ""
-        self._endpoint_port = 0
+        self._endpoint_node: Node | None = None
         self._endpoint_scheme = "?"
         self._endpoint_revealed = False
         self._original: dict = {}
@@ -90,8 +89,7 @@ class NodeEditPage(DetailPage):
         self.reveal_address_btn.reset_reveal()
         self._endpoint_revealed = False
         self._node_id = node.id
-        self._endpoint_server = node.server
-        self._endpoint_port = node.port
+        self._endpoint_node = node
         self._endpoint_scheme = node_type_text(node)
         self._refresh_endpoint()
 
@@ -140,7 +138,6 @@ class NodeEditPage(DetailPage):
         self._refresh_endpoint()
 
     def _refresh_endpoint(self) -> None:
-        self.endpoint_label.setText(
-            f"{endpoint_text(self._endpoint_server, self._endpoint_port, self._endpoint_revealed)}  "
-            f"({self._endpoint_scheme})"
-        )
+        node = self._endpoint_node
+        endpoint = node_endpoint_text(node, self._endpoint_revealed) if node else masked_endpoint()
+        self.endpoint_label.setText(f"{endpoint}  ({self._endpoint_scheme})")

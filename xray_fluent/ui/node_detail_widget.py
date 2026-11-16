@@ -25,7 +25,7 @@ from ..profiles.models import Node
 from ..profiles.node_presentation import node_country, name_country
 from .detail_page import DetailPage
 from .nodes_table_model import node_type_text
-from .privacy import HoldToRevealButton, endpoint_text
+from .privacy import HoldToRevealButton, node_endpoint_text
 
 
 class NodeDetailWidget(DetailPage):
@@ -149,7 +149,7 @@ class NodeDetailWidget(DetailPage):
 
         scheme = node_type_text(node)
         self.endpoint_label.setText(
-            f"{endpoint_text(node.server, node.port, self._endpoint_revealed)}  ({scheme})"
+            f"{node_endpoint_text(node, self._endpoint_revealed)}  ({scheme})"
         )
         self.details_label.setText(
             f"Группа: {node.group or 'Default'}  |  "
@@ -214,7 +214,7 @@ class NodeDetailWidget(DetailPage):
         if self._node:
             scheme = node_type_text(self._node)
             self.endpoint_label.setText(
-                f"{endpoint_text(self._node.server, self._node.port, revealed)}  ({scheme})"
+                f"{node_endpoint_text(self._node, revealed)}  ({scheme})"
             )
 
     @staticmethod

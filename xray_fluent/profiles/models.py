@@ -236,6 +236,9 @@ class Subscription:
     hidden_source_keys: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=utc_now_iso)
     sort_order: int = 0
+    # Последний ответ пришёл с заголовком сервиса Zapret VPN (SERVICE_HEADER):
+    # адреса её серверов не раскрываются и страна не берётся из GeoIP.
+    service: bool = False
 
     @property
     def effective_interval_hours(self) -> int:
@@ -272,6 +275,7 @@ class Subscription:
             "hidden_source_keys": list(self.hidden_source_keys),
             "created_at": self.created_at,
             "sort_order": self.sort_order,
+            "service": self.service,
         }
 
     @staticmethod
@@ -318,6 +322,7 @@ class Subscription:
             hidden_source_keys=[str(item) for item in (data.get("hidden_source_keys") or [])],
             created_at=str(data.get("created_at") or utc_now_iso()),
             sort_order=_non_negative_int("sort_order"),
+            service=data.get("service") is True,
         )
 
 

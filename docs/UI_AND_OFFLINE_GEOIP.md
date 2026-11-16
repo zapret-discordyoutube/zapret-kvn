@@ -45,6 +45,18 @@
 страны. Результаты штатного разрешения endpoint передаются пассивно;
 геолокация не инициирует разрешение и не меняет routing/DNS конфигурацию ядра.
 
+### Subscriptions of the Zapret VPN service (owner decision 2026-11-16)
+
+A subscription whose last successful reply carried the response header
+`zapret-vpn-service` (`Subscription.service`, saved with the profile) belongs to our own
+service: its servers may enter through a relay node in Russia and leave in the country of
+the leading flag in the name. For its nodes the local GeoIP is never consulted (no flag
+means no country, never 🇷🇺 from the entry address), and the press-and-hold reveal never
+shows the address in the table, the tooltip, the card or the editor. The check uses only the
+header's presence; the subscription hostname is not built into the app. The log line
+`[subscription] …: подписка сервиса Zapret VPN` shows that it acted. Windows has no
+external-IP field, so nothing else changes.
+
 Для AWG/WireGuard используются peer endpoint, а не адрес интерфейса или
 AllowedIPs. Разные страны у неоднозначных endpoint означают отсутствие
 автоматического результата. Ручная страна имеет приоритет. Флаги загружаются

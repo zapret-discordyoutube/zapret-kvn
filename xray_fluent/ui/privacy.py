@@ -36,6 +36,25 @@ def endpoint_text(server: str, port: int, revealed: bool) -> str:
     return format_endpoint(server, port) if revealed else masked_endpoint()
 
 
+# Подписки сервиса Zapret VPN: адрес их серверов не раскрывается и жестом
+# (решение владельца 2026-11-16). Заполняется страницей серверов из состояния.
+_service_subscription_ids: frozenset[str] = frozenset()
+
+
+def set_service_subscriptions(ids) -> None:
+    global _service_subscription_ids
+    _service_subscription_ids = frozenset(ids)
+
+
+def is_service_node(node) -> bool:
+    return bool(getattr(node, "subscription_id", None)) and node.subscription_id in _service_subscription_ids
+
+
+def node_endpoint_text(node, revealed: bool) -> str:
+    """Адрес узла для показа: маска, если жеста нет или узел из подписки сервиса."""
+    return endpoint_text(node.server, node.port, revealed and not is_service_node(node))
+
+
 def node_name_text(node, *, revealed: bool = False) -> str:
     """Generated WG/AWG names can contain the endpoint itself."""
     name = node.name or "Без имени"

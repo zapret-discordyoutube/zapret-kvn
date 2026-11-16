@@ -14,8 +14,9 @@ if TYPE_CHECKING:
 
 def detect_countries_sync(controller: AppController) -> None:
     # Old persisted guesses are discarded by Node.from_dict. No I/O here.
+    service_ids = service_subscription_ids(controller.state)
     for node in controller.state.nodes:
-        if node.country_override or name_country(node.name):
+        if node.country_override or name_country(node.name) or node.subscription_id in service_ids:
             node.country_code = normalize_country(node.country_override)
 
 
@@ -40,8 +41,10 @@ def start_country_ip_resolution(controller: AppController) -> None:
         return
     known = getattr(controller, "_country_known_addresses", {})
     needs = []
+    service_ids = service_subscription_ids(controller.state)
     for node in controller.state.nodes:
-        if node.country_override or name_country(node.name):
+        # Подписка сервиса Zapret VPN: страна только по флагу имени, GeoIP адреса не спрашивается.
+        if node.country_override or name_country(node.name) or node.subscription_id in service_ids:
             node.country_code = normalize_country(node.country_override)
             continue
         fingerprint = endpoint_hosts(node)
@@ -69,9 +72,13 @@ def on_countries_resolved(controller: AppController, results: dict) -> None:
     if getattr(controller, "_country_shutdown", False):
         return
     changed = set()
+    service_ids = service_subscription_ids(controller.state)
     for node in controller.state.nodes:
         result = results.get(node.id)
-        if result is None or node.country_override or name_country(node.name) or result[0] != endpoint_hosts(node):
+        if (
+            result is None or node.country_override or name_country(node.name)
+            or node.subscription_id in service_ids or result[0] != endpoint_hosts(node)
+        ):
             continue
         code = result[1]
         if node.country_code != code:
@@ -121,3 +128,8 @@ def get_fastest_alive_node(controller: AppController) -> Node | None:
     if with_speed:
         return max(with_speed, key=lambda node: node.speed_mbps)
     return min(alive_nodes, key=lambda node: node.ping_ms if node.ping_ms is not None else float("inf"))
+
+
+def service_subscription_ids(state) -> set[str]:
+    """Подписки сервиса Zapret VPN (последний ответ с заголовком SERVICE_HEADER)."""
+    return {item.id for item in getattr(state, "subscriptions", ()) if getattr(item, "service", False)}

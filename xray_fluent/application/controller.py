@@ -3439,6 +3439,11 @@ class AppController(QObject):
             first_load = pending_add or not any(node.subscription_id == subscription.id for node in self.state.nodes)
             outcome = reconcile_subscription(self.state, subscription, parsed, fetched)
             result = outcome.result
+            if subscription.service:
+                self._log(
+                    f"[subscription] {subscription.name or 'новая'}: подписка сервиса Zapret VPN — "
+                    "адреса серверов не показываются, страна только по флагу в имени"
+                )
             if pending_add:
                 self.state.subscriptions.append(subscription)
             elif first_load and subscription.name == AWAITING_NAME and parsed is not None:

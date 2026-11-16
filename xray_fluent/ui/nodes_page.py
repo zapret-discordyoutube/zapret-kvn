@@ -53,7 +53,7 @@ from .nodes_table_model import (
     NodesTableModel,
     fastest_node_id,
 )
-from .privacy import HoldToRevealButton
+from .privacy import HoldToRevealButton, set_service_subscriptions
 from .theme import on_accent_changed
 
 _ROW_HEIGHT = NODE_ROW_HEIGHT
@@ -466,6 +466,7 @@ class NodesPage(StackedSection):
 
 
     def set_subscriptions(self, subscriptions: list[Subscription]) -> None:
+        set_service_subscriptions(item.id for item in subscriptions if item.service)
         self._source_names = {item.id: item.name or "Подписка" for item in subscriptions}
         self._table_model.set_source_names(self._source_names)
         sources = ("Локальные",) + tuple(
