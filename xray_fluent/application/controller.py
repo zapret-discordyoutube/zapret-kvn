@@ -441,6 +441,7 @@ class AppController(QObject):
                 migrate_default_location=True,
             ) or _SLOT_XRAY_DEFAULT,
             on_helper_failed=self._on_slot_helper_failed,
+            masking=lambda: masking_runtime.settings_of(self.state.settings),
         )
         # slot id -> servers whose helper did not start this app run: the next launch picks another one.
         self._slot_failed: dict[str, set[str]] = {}

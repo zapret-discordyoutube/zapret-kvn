@@ -78,6 +78,9 @@ its known addresses):
   split 5 ms; `tls_spoof` capture (pktmon): a `vk.com` decoy ClientHello 304 bytes before the real
   sequence goes out first, the handshake succeeds.
 
+- Service slots: a slot's own Xray helper is masked like the main path, but without packet tricks
+  (the plan is dropped, see `docs/SERVICE_SLOTS.md`).
+
 ### Zapret and WinDivert while the tricks run (owner 2026-11-16)
 
 - One desync per flow: for a server with its own tricks, `ServerBypass` makes the winws2 rule

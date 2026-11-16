@@ -23,14 +23,28 @@ from ..engines.xray.manager import XrayManager
 from ..network.speed_test_worker import prepare_speed_test_xray
 from ..slots.config_writer import PROXY_TAG, SELECTOR_PREFIX
 from ..slots.runtime_plan import SlotHelper, SlotRuntimePlan, xray_helper_config
+from . import masking_runtime
 from .async_steps import TransitionRunner, TransitionSteps, run_in_worker
 from .outbound_pool_service import build_xray_outbound_pool
 from .protocol_core import ProtocolCore, protocol_core
+from ..masking.model import MaskingSettings
 from ..profiles.models import Node
 
+#: Connect-log note: a slot's own Xray gets mux, XHTTP connection rotation and fragmentation, not packet tricks.
+SLOT_DESYNC_NOTE = "пакеты-обманки маскировки у сервера слота не применяются"
 
-def helper_config(helper: SlotHelper) -> dict[str, Any]:
-    """The native core's own config for a slot helper (pure)."""
+
+def helper_config(
+    helper: SlotHelper,
+    masking: MaskingSettings | None = None,
+    notes: list[str] | None = None,
+) -> dict[str, Any]:
+    """The native core's own config for a slot helper (pure).
+
+    «Маскировка» shapes a slot's Xray server like the main one (mux, XHTTP connection rotation, fragmentation: all
+    native Xray settings of the outbound). Packet tricks are a sing-box route option of the main path's server
+    socket, so a slot helper drops the carried plan; `notes` gets what masking said.
+    """
     node = helper.node
     if helper.core is ProtocolCore.HYSTERIA:
         return build_uri_client_config(
@@ -46,7 +60,15 @@ def helper_config(helper: SlotHelper) -> dict[str, Any]:
         if not pool.contains(node.id):
             reason = pool.excluded.get(node.id) or "сервер не подходит для Xray"
             raise ValueError(reason)
-        return xray_helper_config(helper, pool.outbounds()[0])
+        outbounds = pool.outbounds()
+        if masking is not None:
+            outbounds, _changed, masking_notes = masking_runtime.mask_pool_outbounds(outbounds, pool.tags, masking)
+            if notes is not None:
+                notes.extend(masking_notes)
+        outbound = dict(outbounds[0])
+        if masking_runtime.strip_desync([outbound]) and notes is not None:
+            notes.append(SLOT_DESYNC_NOTE)
+        return xray_helper_config(helper, outbound)
     raise ValueError(f"no slot helper for {helper.core.value}")
 
 
@@ -62,12 +84,14 @@ class SlotRuntimeService(QObject):
         hysteria_source: Callable[[], Path],
         xray_source: Callable[[], Path],
         on_helper_failed: Callable[[str, str], None] | None = None,
+        masking: Callable[[], MaskingSettings] | None = None,
     ):
         super().__init__(parent)
         self._log = log
         self._hysteria_source = hysteria_source
         self._xray_source = xray_source
         self._on_helper_failed = on_helper_failed
+        self._masking = masking
         self._helpers: dict[str, HysteriaManager | XrayManager] = {}
         self._runner: TransitionRunner | None = None
         self._generation = 0
@@ -232,11 +256,14 @@ class SlotRuntimeService(QObject):
 
     def _start_helper_steps(self, slot_id: str, helper: SlotHelper, current: Callable[[], bool]) -> TransitionSteps:
         core = helper.core.value
+        notes: list[str] = []
         try:
-            config = helper_config(helper)
+            config = helper_config(helper, self._masking() if self._masking is not None else None, notes)
         except ValueError as error:
             self._log(f"[slots] {slot_id}: no {core} config ({error})")
             return False
+        if notes:
+            self._log(f"[slots] {slot_id}: маскировка: {'; '.join(dict.fromkeys(notes))}")
         source = self._hysteria_source() if helper.core is ProtocolCore.HYSTERIA else self._xray_source()
         target = slot_helper_exe(core, slot_id)
         exe = yield run_in_worker(lambda: prepare_speed_test_xray(source, target))

@@ -11,7 +11,9 @@ from PyQt6.QtCore import QCoreApplication
 from tests.step_fakes import drive
 from xray_fluent.application import slot_runtime_service as service_module
 from xray_fluent.application.protocol_core import ProtocolCore
-from xray_fluent.application.slot_runtime_service import SlotRuntimeService, helper_config
+from xray_fluent.application.slot_runtime_service import SLOT_DESYNC_NOTE, SlotRuntimeService, helper_config
+from xray_fluent.masking import presets
+from xray_fluent.masking.model import OFF, Masking, MaskingSettings, MuxCool, XrayFragment, XrayShaping
 from xray_fluent.profiles.models import Node
 from xray_fluent.slots.runtime_plan import SlotHelper, SlotRuntimePlan
 
@@ -117,6 +119,25 @@ class SlotRuntimeServiceTests(unittest.TestCase):
         xray = helper_config(SlotHelper(ProtocolCore.XRAY, VLESS, 11822, "u", "p"))
         self.assertEqual(11822, xray["inbounds"][0]["port"])
         self.assertEqual("vless", xray["outbounds"][0]["protocol"])
+
+    def test_a_slot_xray_server_is_masked_like_the_main_one(self):
+        settings = MaskingSettings(True, Masking(xray=XrayShaping(mux=MuxCool(), fragment=XrayFragment())))
+        helper = SlotHelper(ProtocolCore.XRAY, VLESS, 11822, "u", "p")
+        notes: list[str] = []
+        server = helper_config(helper, settings, notes)["outbounds"][0]
+        self.assertTrue(server["mux"]["enabled"])
+        self.assertIn("finalmask", server["streamSettings"])
+        self.assertNotIn("mux", VLESS.outbound)  # the stored node is untouched
+        plain = helper_config(helper, MaskingSettings(True, settings.global_masking, {VLESS.id: OFF}))
+        self.assertNotIn("mux", plain["outbounds"][0])
+        self.assertNotIn("mux", helper_config(helper)["outbounds"][0])
+
+    def test_a_slot_xray_never_sees_the_packet_trick_plan(self):
+        helper = SlotHelper(ProtocolCore.XRAY, VLESS, 11822, "u", "p")
+        notes: list[str] = []
+        config = helper_config(helper, MaskingSettings(True, presets.DESYNC_DISORDER.masking), notes)
+        self.assertNotIn("__kvn_desync", config["outbounds"][0])
+        self.assertIn(SLOT_DESYNC_NOTE, notes)
 
 
 if __name__ == "__main__":

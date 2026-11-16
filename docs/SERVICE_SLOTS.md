@@ -146,6 +146,11 @@ Plan:
   cleanup globs by name, so with the shared defaults a slot helper would kill or delete the main one's. A helper that
   does not start leaves its slot on `proxy`, is logged, and that server is skipped for the slot until the app restarts
   or the user pins it again.
+- **Masking:** a slot's Xray helper gets «Маскировка» of its server like the main path (mux, XHTTP connection
+  rotation, fragmentation: `helper_config(helper, masking)` masks the pool outbound); packet tricks are a sing-box
+  route option of the main path's server socket, so the carried plan is dropped and the log says
+  `[slots] <id>: маскировка: пакеты-обманки маскировки у сервера слота не применяются`. Hysteria2 and sing-box-core
+  slot servers are not masked (masking has nothing for them).
 - **Hot moves:** every slot has a stable loopback relay, so moving a slot to a Hysteria2 or VLESS server only starts a
   helper behind the same port, and moving to a provider server is one Clash API `select`; sing-box is not restarted
   and other apps are not touched. A pin that needs a restart (a sing-box-core server outside the provider) reconnects.
