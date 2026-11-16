@@ -49,6 +49,10 @@ initiator only, so they work with a plain WireGuard server.
 - UI: Settings -> «Маскировка» -> «Подобрать для текущего сервера» -> `ui/masking_tune_dialog.py`.
 - Log: `[masking] маскировка: подбор, вариант «…»` at every trial connect.
 
+Desync (packet tricks): the model, codec and validation are shared with Android (core patch
+0017); the Windows engine is not built yet (`presets.DESYNC_ENGINE_AVAILABLE = False`), so the
+section never reaches the Xray sidecar and its presets are not offered.
+
 Note: the Xray sidecar dials through `sockopt.dialerProxy` (the local protect relay), so finalmask
 fragment pauses reach sing-box's direct connection, but segment boundaries are not guaranteed;
 fragment stays an experiment behind the tester.
