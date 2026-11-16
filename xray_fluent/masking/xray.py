@@ -10,9 +10,25 @@ xmux goes inside it when present; Vision breaks mux connections that carry TCP
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from .model import UDP443_MODES, Core, MuxCool, Problem, ServerShape, Span, XrayFragment, XrayShaping, Xmux
+from .model import (
+    DESYNC_MAX_OFFSET,
+    DESYNC_MAX_TTL,
+    DESYNC_METHODS,
+    DESYNC_SAFE_TTL,
+    UDP443_MODES,
+    Core,
+    Desync,
+    MuxCool,
+    Problem,
+    ServerShape,
+    Span,
+    XrayFragment,
+    XrayShaping,
+    Xmux,
+)
 
 MAX_CONCURRENCY = 1024
 CORE_MIN_EFFECTIVE_CONCURRENCY = 128
@@ -50,6 +66,8 @@ def validate(shaping: XrayShaping) -> list[Problem]:
                 problems.append(Problem("fragment.packets", "Пакеты: tlshello или номера записей от 1, например 1-3."))
         if fragment.length.start == 0:
             problems.append(Problem("fragment.length", "Длина куска должна быть больше 0."))
+    if shaping.desync is not None and shaping.desync.enabled:
+        problems += validate_desync(shaping.desync)
     return problems
 
 
@@ -76,6 +94,10 @@ def emit(shaping: XrayShaping, shape: ServerShape) -> tuple[dict[str, Any] | Non
                 notes.append("Фрагментация с REALITY: куски режет ядро ниже REALITY, проверьте подбором.")
         else:
             notes.append(f"Фрагментация не применена: {shape.network} идёт не по TCP.")
+    if shaping.desync is not None and shaping.desync.enabled:
+        # Never an Xray field: the app's own dialer runs it (Android core patch 0017). The
+        # Windows engine is not built yet, so nothing is sent and the log says so.
+        notes.append("Пакеты-обманки пока работают только в приложении для Android.")
     return (block or None), notes
 
 
@@ -137,3 +159,28 @@ def apply_to_outbound(outbound: dict[str, Any], block: dict[str, Any]) -> None:
             (extra if isinstance(extra, dict) else xhttp)["xmux"] = value
         else:
             raise ValueError(f"unknown xray masking key: {key}")
+
+
+_HOSTNAME = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+
+def validate_desync(desync: Desync) -> list[Problem]:
+    """The limits of Android core patch 0017 `kvndesync.Parse` (same as Android XrayShapingRules)."""
+    problems: list[Problem] = []
+    if desync.method not in DESYNC_METHODS:
+        problems.append(Problem("desync.method", "Способ: fake, disorder, split или oob."))
+    split_at = desync.split_at.strip().lower()
+    if split_at != "sni" and not (split_at.isdigit() and 1 <= int(split_at) <= DESYNC_MAX_OFFSET):
+        problems.append(Problem("desync.splitAt", f"Место разреза: sni или номер байта от 1 до {DESYNC_MAX_OFFSET}."))
+    if desync.method == "fake":
+        if not 1 <= desync.fake_ttl <= DESYNC_MAX_TTL:
+            problems.append(Problem("desync.fakeTtl", f"TTL обманки: от 1 до {DESYNC_MAX_TTL}."))
+        elif desync.fake_ttl > DESYNC_SAFE_TTL:
+            problems.append(Problem(
+                "desync.fakeTtl", f"TTL больше {DESYNC_SAFE_TTL}: обманка может дойти до сервера и сломать подключение.", error=False,
+            ))
+        if not _HOSTNAME.match(desync.fake_sni.strip().lower()):
+            problems.append(Problem("desync.fakeSni", "Имя в обманке: домен, например vk.com."))
+    if desync.method == "oob":
+        problems.append(Problem("desync.method", "OOB ломает подключение там, где сеть срезает флаг URG: проверьте подбором.", error=False))
+    return problems

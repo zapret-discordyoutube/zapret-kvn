@@ -128,6 +128,8 @@ def _fits(masking: Masking, shape: ServerShape) -> bool:
             return shape.is_xhttp
         if masking.xray.mux is not None:
             return not shape.is_multiplexed_transport
+        if masking.xray.desync is not None:
+            return shape.is_tcp_stream
         return masking.xray.fragment is not None and shape.is_tcp_stream
     if shape.core is Core.SINGBOX:
         return masking.singbox is not None and shape.security == "tls"

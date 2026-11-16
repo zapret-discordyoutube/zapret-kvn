@@ -88,11 +88,30 @@ class XrayFragment:
 
 
 @dataclass(frozen=True, slots=True)
+class Desync:
+    """Packet tricks on the TCP socket to the VPN server (same as Android `Desync`, executed by the
+    app's own dialer: Android core patch 0017 `kvndesync`). fake | disorder | split | oob."""
+
+    enabled: bool = True
+    method: str = "fake"
+    split_at: str = "sni"
+    fake_ttl: int = 3
+    fake_sni: str = "vk.com"
+
+
+DESYNC_METHODS = ("fake", "disorder", "split", "oob")
+DESYNC_MAX_OFFSET = 1400
+DESYNC_MAX_TTL = 32
+DESYNC_SAFE_TTL = 8
+
+
+@dataclass(frozen=True, slots=True)
 class XrayShaping:
     enabled: bool = True
     mux: MuxCool | None = None
     xmux: Xmux | None = None
     fragment: XrayFragment | None = None
+    desync: Desync | None = None
 
 
 @dataclass(frozen=True, slots=True)

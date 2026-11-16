@@ -20,6 +20,7 @@ from .model import (
     SCHEMA,
     SETTINGS_OFF,
     SIGNATURE_KEYS,
+    Desync,
     Masking,
     MaskingOverride,
     MaskingSettings,
@@ -172,6 +173,15 @@ def encode_masking(masking: Masking) -> dict[str, Any]:
             if fragment.max_split is not None:
                 encoded["maxSplit"] = str(fragment.max_split)
             xray["fragment"] = encoded
+        if section.desync is not None:
+            desync = section.desync
+            xray["desync"] = {
+                "enabled": desync.enabled,
+                "method": desync.method,
+                "splitAt": desync.split_at,
+                "fakeTtl": desync.fake_ttl,
+                "fakeSni": desync.fake_sni,
+            }
         result["xray"] = xray
     if masking.singbox is not None:
         section = masking.singbox
@@ -226,6 +236,7 @@ def decode_masking(root: dict[str, Any]) -> Masking:
                 delay=_span(fragment_root, "delay") or fragment_defaults.delay,
                 max_split=_span(fragment_root, "maxSplit"),
             ),
+            desync=None if _obj(xray_root, "desync") is None else _decode_desync(_obj(xray_root, "desync")),
         )
     singbox = None
     if singbox_root is not None:
@@ -241,3 +252,14 @@ def decode_masking(root: dict[str, Any]) -> Masking:
 def _flag(data: dict[str, Any]) -> bool:
     value = _bool(data, "enabled")
     return True if value is None else value
+
+
+def _decode_desync(root: dict[str, Any]) -> Desync:
+    defaults = Desync()
+    return Desync(
+        enabled=_flag(root),
+        method=_str(root, "method") or defaults.method,
+        split_at=_str(root, "splitAt") or defaults.split_at,
+        fake_ttl=_int(root, "fakeTtl") if _int(root, "fakeTtl") is not None else defaults.fake_ttl,
+        fake_sni=_str(root, "fakeSni") or defaults.fake_sni,
+    )

@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum
 
-from .model import Masking, MuxCool, SingboxFragment, Span, WireGuardMasking, XrayFragment, XrayShaping, Xmux
+from .model import Desync, Masking, MuxCool, SingboxFragment, Span, WireGuardMasking, XrayFragment, XrayShaping, Xmux
 from .wireguard import DNS_DOMAINS, dns_chain
 
 
@@ -84,9 +84,34 @@ SINGBOX_FRAGMENT = Preset(
 )
 
 
+def desync_fake(ttl: int) -> Preset:
+    return Preset(
+        f"desync-fake-{ttl}", Group.EXPERIMENT, f"Обманка, TTL {ttl}",
+        "Эксперимент. Перед настоящим первым пакетом уходит пакет-обманка с другим именем сайта и "
+        "коротким TTL: его видит фильтр, но не сервер. TTL зависит от сети: подбор пробует несколько.",
+        Masking(xray=XrayShaping(desync=Desync(method="fake", fake_ttl=ttl))),
+    )
+
+
+DESYNC_DISORDER = Preset(
+    "desync-disorder", Group.EXPERIMENT, "Беспорядок пакетов",
+    "Эксперимент. Начало первого пакета, с частью имени сайта, отправляется так, что теряется по пути, "
+    "и уходит повторно после остального: фильтр видит куски не по порядку.",
+    Masking(xray=XrayShaping(desync=Desync(method="disorder"))),
+)
+
+# The Windows engine for packet tricks is not built yet: its presets stay out of the lists and
+# the tester until it is, so nothing is offered that would silently do nothing.
+DESYNC_ENGINE_AVAILABLE = False
+
+
+def desync_presets() -> list[Preset]:
+    return [desync_fake(3), desync_fake(5), DESYNC_DISORDER]
+
+
 def all_presets() -> list[Preset]:
     return [
         wireguard_dns(), WIREGUARD_MORE_JUNK, WIREGUARD_JUNK_ONLY,
         XRAY_MUX, XMUX_CORE_DEFAULT, XMUX_ROTATE, XMUX_FEW,
-        XRAY_FRAGMENT, SINGBOX_FRAGMENT,
+        XRAY_FRAGMENT, *(desync_presets() if DESYNC_ENGINE_AVAILABLE else []), SINGBOX_FRAGMENT,
     ]

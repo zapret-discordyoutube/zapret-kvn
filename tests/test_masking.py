@@ -283,6 +283,40 @@ class TesterTests(unittest.TestCase):
         self.assertGreater(len({s.pause_before_ms for s in steps}), 1)
 
 
+class DesyncTests(unittest.TestCase):
+    def test_android_desync_document_reads_the_same(self) -> None:
+        # Same vector as Android MaskingMergeTest "codec writes the desync section Windows reads".
+        document = ('{"schema":1,"enabled":true,"global":{"xray":{"enabled":true,"desync":'
+                    '{"enabled":true,"method":"fake","splitAt":"sni","fakeTtl":5,"fakeSni":"vk.com"}}},"overrides":{}}')
+        settings = MaskingSettings(True, presets.desync_fake(5).masking)
+        self.assertEqual(document, codec.encode_text(settings))
+        self.assertEqual(settings, codec.decode_text(document))
+
+    def test_validation_matches_kvndesync_parse(self) -> None:
+        from xray_fluent.masking.model import Desync
+
+        def fields(desync):
+            return [p.field for p in errors(xray.validate(XrayShaping(desync=desync)))]
+
+        self.assertEqual([], xray.validate(XrayShaping(desync=Desync())))
+        self.assertEqual(["desync.method"], fields(Desync(method="spoof")))
+        self.assertEqual(["desync.splitAt"], fields(Desync(split_at="1401")))
+        self.assertEqual(["desync.fakeTtl"], fields(Desync(fake_ttl=33)))
+        self.assertEqual(["desync.fakeSni"], fields(Desync(fake_sni="not a host")))
+        self.assertFalse(xray.validate(XrayShaping(desync=Desync(fake_ttl=12)))[0].error)
+
+    def test_desync_never_reaches_the_xray_sidecar_and_says_so(self) -> None:
+        block, notes = xray.emit(presets.desync_fake(3).masking.xray, REALITY_TCP)
+        self.assertIsNone(block)
+        self.assertEqual(["Пакеты-обманки пока работают только в приложении для Android."], notes)
+
+    def test_desync_is_not_offered_while_the_windows_engine_is_missing(self) -> None:
+        from xray_fluent.masking import choices
+        self.assertFalse(presets.DESYNC_ENGINE_AVAILABLE)
+        self.assertNotIn("desync-fake-3", [c.id for c in tester.candidates(REALITY_TCP)])
+        self.assertNotIn("desync-fake-3", [choice for choice, _ in choices.server_choices("vless")])
+
+
 class ChoicesTests(unittest.TestCase):
     def test_presets_read_back_and_custom_is_kept(self) -> None:
         from xray_fluent.masking import choices
