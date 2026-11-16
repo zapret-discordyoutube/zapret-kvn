@@ -543,6 +543,10 @@ class MainWindow(FluentWindow):
             lambda: self.controller.switch_next_node(source=SelectionSource.DASHBOARD_NEXT)
         )
         self.dashboard_page.configs_requested.connect(lambda: self.switchTo(self.configs_page))
+        # «Серверы по сервисам» (docs/SERVICE_SLOTS.md).
+        self.dashboard_page.service_slots_card.slots_changed.connect(self._on_service_slots_changed)
+        self.dashboard_page.service_slots_card.pin_changed.connect(self._on_service_slot_pin_changed)
+        self.controller.slot_runtime.changed.connect(self._refresh_service_slots_card)
         self.nodes_page.import_clipboard_requested.connect(self._import_nodes_from_clipboard)
         self.nodes_page.delete_requested.connect(self.controller.remove_nodes)
         self.nodes_page.hide_subscription_nodes_requested.connect(self.controller.hide_subscription_nodes)
@@ -778,6 +782,7 @@ class MainWindow(FluentWindow):
         selected_id = self.controller.state.selected_node_id
         self.nodes_page.set_nodes(nodes, selected_id)
         self.dashboard_page.set_nodes(nodes, selected_id)
+        self._refresh_service_slots_card()
         self._refresh_tray_tooltip()
         self.subscriptions_page.set_data(self.controller.state.subscriptions, nodes)
 
@@ -1516,6 +1521,32 @@ class MainWindow(FluentWindow):
             return
         self.configs_page.set_status("singbox", level, message)
         self._show_status("success" if level == "success" else "warning-long" if level == "warning" else "error", message.splitlines()[0])
+
+    def _refresh_service_slots_card(self) -> None:
+        view = self.controller.service_slots_view()
+        self.dashboard_page.service_slots_card.set_state(
+            available=bool(view.get("available")),
+            enabled=view.get("enabled") or set(),
+            pins=view.get("pins") or {},
+            nodes=list(self.controller.state.nodes),
+            live=view.get("live") or {},
+            connected=bool(view.get("connected")),
+            note=str(view.get("note") or ""),
+        )
+
+    def _on_service_slots_changed(self, wanted: object) -> None:
+        ok, message = self.controller.set_service_slots(set(wanted or ()))
+        if message:
+            self._show_status("info" if ok else "error", message.splitlines()[0])
+        if ok:
+            # The routing editor shows the same JSON: reload it so it does not save the old text over the slots.
+            loaded_path, saved_text = self.controller.load_active_singbox_config_text()
+            self.configs_page.set_document("singbox", loaded_path, saved_text)
+        self._refresh_service_slots_card()
+
+    def _on_service_slot_pin_changed(self, slot_id: str, node_id: str) -> None:
+        self.controller.set_service_slot_pin(slot_id, node_id)
+        self._refresh_service_slots_card()
 
     def _apply_core_config(self, core: str, text: str) -> None:
         if core == "singbox":

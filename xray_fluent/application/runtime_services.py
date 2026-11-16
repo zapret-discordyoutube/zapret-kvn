@@ -309,6 +309,10 @@ def on_live_metrics(controller: AppController, payload: dict[str, object]) -> No
         dead_clusters = [str(name) for name in dead_video.get("clusters") or ()]
         for event in dead_video.get("events") or ():
             _log_dead_cluster_event(controller, event)
+    # With the YouTube slot ticked the slot is moved instead of the main server (docs/SERVICE_SLOTS.md, phase 4).
+    rescue = getattr(controller, "_youtube_slot_rescue", None)
+    if dead_clusters and callable(rescue) and rescue(dead_clusters):
+        dead_clusters = None
     controller._check_smart_switch(
         down_bps,
         traffic_valid=traffic_valid,

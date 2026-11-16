@@ -61,8 +61,10 @@ class SlotRuntimePlanTests(unittest.TestCase):
         [only] = plan(config, {"youtube": MAIN})
         self.assertEqual("proxy", only.member_tag)
         self.assertIsNone(only.helper)
-        self.assertEqual({"type": "selector", "tag": "zapret-slot-youtube", "outbounds": ["proxy"], "default": "proxy",
-                          "interrupt_exist_connections": True}, outbound(config, "zapret-slot-youtube"))
+        # The relay is always a member: a later move to a Hysteria2 or VLESS server is hot.
+        self.assertEqual({"type": "selector", "tag": "zapret-slot-youtube", "outbounds": ["proxy", "zapret-slot-relay-youtube"],
+                          "default": "proxy", "interrupt_exist_connections": True}, outbound(config, "zapret-slot-youtube"))
+        self.assertEqual("zapret-slot-relay-youtube", only.relay.tag)
         [none] = plan(runtime({catalog.YOUTUBE}), {})
         self.assertEqual("proxy", none.member_tag)
 
@@ -72,7 +74,7 @@ class SlotRuntimePlanTests(unittest.TestCase):
         self.assertEqual("__app_nodes/node_t", only.member_tag)
         selector = outbound(config, "zapret-slot-youtube")
         self.assertEqual(["__app_nodes"], selector["providers"])
-        self.assertEqual(["proxy"], selector["outbounds"])
+        self.assertEqual(["proxy", "zapret-slot-relay-youtube"], selector["outbounds"])
         self.assertEqual("proxy", selector["default"], "a provider member is pinned through the Clash API")
 
     def test_singbox_server_without_provider_gets_its_native_outbound(self):
@@ -82,7 +84,7 @@ class SlotRuntimePlanTests(unittest.TestCase):
         self.assertEqual({"type": "trojan", "tag": "zapret-slot-out-youtube", "server": "tro"},
                          outbound(config, "zapret-slot-out-youtube"))
         selector = outbound(config, "zapret-slot-youtube")
-        self.assertEqual(["proxy", "zapret-slot-out-youtube"], selector["outbounds"])
+        self.assertEqual(["proxy", "zapret-slot-relay-youtube", "zapret-slot-out-youtube"], selector["outbounds"])
         self.assertEqual("zapret-slot-out-youtube", selector["default"])
         self.assertNotIn("providers", selector)
 
@@ -120,17 +122,17 @@ class SlotRuntimePlanTests(unittest.TestCase):
     def test_helper_executables_leave_the_tunnel_directly_once(self):
         config = runtime({catalog.YOUTUBE, catalog.TELEGRAM, catalog.AI})
         plans = plan(config, {"youtube": HY2, "telegram": VLESS, "ai": TROJAN})
-        paths = {ProtocolCore.HYSTERIA: "C:/app/core/hysteria.exe", ProtocolCore.XRAY: "C:/app/core/xray.exe"}
+        paths = lambda core, slot: f"C:/app/slots/{core.value}-slot-{slot}.exe"  # noqa: E731
         ensure_helper_direct_routes(config, plans, paths)
         ensure_helper_direct_routes(config, plans, paths)
-        self.assertEqual({"process_path": ["C:/app/core/hysteria.exe", "C:/app/core/xray.exe"], "action": "route",
-                          "outbound": "direct"}, config["route"]["rules"][0])
+        self.assertEqual({"process_path": ["C:/app/slots/hysteria-slot-youtube.exe", "C:/app/slots/xray-slot-telegram.exe"],
+                          "action": "route", "outbound": "direct"}, config["route"]["rules"][0])
         self.assertEqual(1, sum("process_path" in r for r in config["route"]["rules"]))
 
     def test_no_helper_no_rule(self):
         config = runtime({catalog.YOUTUBE})
         before = json.dumps(config["route"])
-        ensure_helper_direct_routes(config, plan(config, {"youtube": MAIN}), {ProtocolCore.HYSTERIA: "h.exe"})
+        ensure_helper_direct_routes(config, plan(config, {"youtube": MAIN}), lambda core, slot: "h.exe")
         self.assertEqual(before, json.dumps(config["route"]))
 
 

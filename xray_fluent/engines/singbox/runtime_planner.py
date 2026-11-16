@@ -135,6 +135,8 @@ class SingboxRuntimePlan:
     selected_outbound_tag: str = ""
     hybrid_relay_selector_tags: tuple[str, ...] = ()
     hybrid_relay_selected_tag: str = ""
+    # Service slots (docs/SERVICE_SLOTS.md): how each ticked slot reaches its server; the controller starts the helpers.
+    slot_plans: tuple[Any, ...] = ()
 
     @property
     def is_hybrid(self) -> bool:
@@ -1431,3 +1433,53 @@ def _format_json_error_message(text: str, exc: json.JSONDecodeError) -> str:
     if line:
         caret = "\n" + (" " * max(0, exc.colno - 1)) + "^"
     return f"Ошибка синтаксиса JSON: {exc.msg} (строка {exc.lineno}, столбец {exc.colno})\n{line}{caret}".rstrip()
+
+
+def attach_service_slots(
+    plan: SingboxRuntimePlan,
+    assignments: dict[str, Node | None],
+    *,
+    main_node_id: str | None,
+) -> SingboxRuntimePlan:
+    """Service slots on the runtime copy (docs/SERVICE_SLOTS.md, "Phase 3 plan"); nothing when no slot is ticked.
+
+    App-owned launch contract of the slot selectors the user's JSON already has (the user ticked them): their servers,
+    the helpers' relays, the helpers' direct route and the server-name bootstrap of a slot's own sing-box outbound.
+    """
+    from ...constants import SLOT_RELAY_PORT_START, slot_helper_exe
+    from ...slots.runtime_plan import ensure_helper_direct_routes, plan_slots, slot_selector_ids
+
+    config = plan.singbox_config
+    if not slot_selector_ids(config):
+        return plan
+    provider_tags = dict(plan.selector_tags or {}) if plan.provider_payload is not None else {}
+    taken: set[int] = set()
+
+    def allocate() -> int:
+        port = _find_free_port(
+            preferred=SLOT_RELAY_PORT_START,
+            port_range=range(SLOT_RELAY_PORT_START, SLOT_RELAY_PORT_START + 40),
+            excluded=taken,
+            allow_ephemeral_fallback=True,
+        )
+        taken.add(port)
+        return port
+
+    def native(node: Node, tag: str) -> dict[str, Any]:
+        outbound = build_singbox_outbound(node, tag=tag)
+        _ensure_proxy_server_bootstrap_contract(config, outbound, node.server)
+        return outbound
+
+    plans = plan_slots(
+        config,
+        assignments,
+        main_node_id=main_node_id,
+        provider_tags=provider_tags,
+        provider_tag=SINGBOX_PROVIDER_TAG,
+        allocate_port=allocate,
+        credentials=lambda prefix: generate_local_proxy_credentials(prefix=prefix),
+        build_native_outbound=native,
+    )
+    ensure_helper_direct_routes(config, plans, lambda core, slot_id: str(slot_helper_exe(core.value, slot_id).resolve()))
+    plan.slot_plans = tuple(plans)
+    return plan

@@ -54,6 +54,12 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _str_mapping(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): str(v) for k, v in value.items() if isinstance(k, str) and isinstance(v, str) and k and v}
+
+
 def _int_mapping(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
@@ -596,6 +602,8 @@ class AppSettings:
     nodes_source_filter: str = ""
     nodes_visible_columns: list[str] = field(default_factory=list)  # empty = default set
     nodes_column_widths: dict[str, int] = field(default_factory=dict)
+    # Service slots (docs/SERVICE_SLOTS.md): slot id -> pinned server id; no entry = «Авто».
+    service_slot_pins: dict[str, str] = field(default_factory=dict)
     nodes_column_order: list[str] = field(default_factory=list)
     nodes_column_layout_version: int = 2
     nodes_group_by: str = "source"
@@ -683,6 +691,7 @@ class AppSettings:
             "nodes_source_filter": self.nodes_source_filter,
             "nodes_visible_columns": list(self.nodes_visible_columns),
             "nodes_column_widths": dict(self.nodes_column_widths),
+            "service_slot_pins": dict(self.service_slot_pins),
             "nodes_column_order": list(self.nodes_column_order),
             "nodes_column_layout_version": self.nodes_column_layout_version,
             "nodes_group_by": self.nodes_group_by,
@@ -763,6 +772,7 @@ class AppSettings:
             nodes_source_filter=str(data.get("nodes_source_filter") or ""),
             nodes_visible_columns=[str(item) for item in (data.get("nodes_visible_columns") or [])],
             nodes_column_widths=_int_mapping(data.get("nodes_column_widths")),
+            service_slot_pins=_str_mapping(data.get("service_slot_pins")),
             nodes_column_order=[str(item) for item in (data.get("nodes_column_order") or [])],
             nodes_column_layout_version=int(data.get("nodes_column_layout_version", 0) or 0),
             nodes_group_by=str(data.get("nodes_group_by", "source")),

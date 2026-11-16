@@ -15,7 +15,7 @@ which helper process each slot needs. The controller starts the helpers and pins
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..application.protocol_core import ProtocolCore, protocol_core
@@ -39,6 +39,20 @@ class SlotHelper:
 
 
 @dataclass(frozen=True, slots=True)
+class SlotRelay:
+    """The slot's stable loopback SOCKS relay: present for every slot, so a later move to a Hysteria2 or VLESS server
+    only starts a helper behind it (no sing-box restart)."""
+
+    tag: str
+    port: int
+    username: str
+    password: str
+
+    def helper(self, core: ProtocolCore, node: Node) -> SlotHelper:
+        return SlotHelper(core, node, self.port, self.username, self.password)
+
+
+@dataclass(frozen=True, slots=True)
 class SlotRuntimePlan:
     slot_id: str
     member_tag: str
@@ -47,6 +61,7 @@ class SlotRuntimePlan:
     note: str = ""
     """Why the slot follows the main server although it has a server (shown in the log)."""
     server_id: str | None = field(default=None)
+    relay: SlotRelay | None = None
 
 
 def slot_selector_ids(config: Mapping[str, Any]) -> list[str]:
@@ -79,11 +94,20 @@ def plan_slots(
     for slot_id in slot_selector_ids(runtime_config):
         selector = by_tag[f"{SELECTOR_PREFIX}{slot_id}"]
         node = assignments.get(slot_id)
-        plan = _plan_one(
-            slot_id, node, main_node_id, provider_tags, allocate_port, credentials, build_native_outbound, outbounds,
-        )
-        members = [PROXY_TAG]
-        if plan.member_tag not in (PROXY_TAG,) and not plan.member_tag.startswith(f"{provider_tag}/"):
+        username, password = credentials(f"slot-{slot_id}")
+        relay = SlotRelay(f"{RELAY_PREFIX}{slot_id}", allocate_port(), username, password)
+        _replace_or_append(outbounds, {
+            "type": "socks",
+            "tag": relay.tag,
+            "server": LOOPBACK,
+            "server_port": relay.port,
+            "username": relay.username,
+            "password": relay.password,
+            "inet4_bind_address": LOOPBACK,
+        })
+        plan = replace(_plan_one(slot_id, node, main_node_id, provider_tags, relay, build_native_outbound, outbounds), relay=relay)
+        members = [PROXY_TAG, relay.tag]
+        if plan.member_tag not in members and not plan.member_tag.startswith(f"{provider_tag}/"):
             members.append(plan.member_tag)
         selector["type"] = "selector"
         selector["outbounds"] = members
@@ -104,8 +128,7 @@ def _plan_one(
     node: Node | None,
     main_node_id: str | None,
     provider_tags: Mapping[str, str],
-    allocate_port: Callable[[], int],
-    credentials: Callable[[str], tuple[str, str]],
+    relay: SlotRelay,
     build_native_outbound: Callable[[Node, str], dict[str, Any]],
     outbounds: list[Any],
 ) -> SlotRuntimePlan:
@@ -124,19 +147,7 @@ def _plan_one(
         _replace_or_append(outbounds, native)
         return SlotRuntimePlan(slot_id, tag, server_id=node.id)
     if core in (ProtocolCore.HYSTERIA, ProtocolCore.XRAY):
-        tag = f"{RELAY_PREFIX}{slot_id}"
-        port = allocate_port()
-        username, password = credentials(f"slot-{slot_id}")
-        _replace_or_append(outbounds, {
-            "type": "socks",
-            "tag": tag,
-            "server": LOOPBACK,
-            "server_port": port,
-            "username": username,
-            "password": password,
-            "inet4_bind_address": LOOPBACK,
-        })
-        return SlotRuntimePlan(slot_id, tag, SlotHelper(core, node, port, username, password), server_id=node.id)
+        return SlotRuntimePlan(slot_id, relay.tag, relay.helper(core, node), server_id=node.id)
     return SlotRuntimePlan(slot_id, PROXY_TAG, note="серверы AWG для отдельных сервисов пока не поддерживаются", server_id=node.id)
 
 
@@ -171,11 +182,15 @@ def xray_helper_config(helper: SlotHelper, outbound: dict[str, Any]) -> dict[str
     }
 
 
-def ensure_helper_direct_routes(runtime_config: dict[str, Any], plans: list[SlotRuntimePlan], paths: Mapping[ProtocolCore, str]) -> None:
+def ensure_helper_direct_routes(
+    runtime_config: dict[str, Any],
+    plans: list[SlotRuntimePlan],
+    executable: Callable[[ProtocolCore, str], str],
+) -> None:
     """A slot helper's own connection to its server must not re-enter the TUN (the same app-owned safety contract as
     the main Hysteria sidecar's `process_path -> direct`): one rule ahead of the user's routing, for the executables of
-    the helpers this launch runs."""
-    executables = sorted({paths[p.helper.core] for p in plans if p.helper is not None and p.helper.core in paths})
+    the helpers this launch runs (each slot helper runs from its own copy, `executable(core, slot_id)`)."""
+    executables = sorted({executable(p.helper.core, p.slot_id) for p in plans if p.helper is not None})
     if not executables:
         return
     route = runtime_config.setdefault("route", {})

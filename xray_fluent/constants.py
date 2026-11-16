@@ -59,6 +59,7 @@ SINGBOX_PATH_DEFAULT = BASE_DIR / "core" / "sing-box.exe"
 SINGBOX_CLASH_API_PORT = 19090
 SINGBOX_XRAY_RELAY_PORT = 11808
 HYSTERIA_SIDECAR_RELAY_PORT = 11809
+SLOT_RELAY_PORT_START = 11820  # one loopback relay per service slot (docs/SERVICE_SLOTS.md)
 HYSTERIA_PATH_DEFAULT = BASE_DIR / "core" / "hysteria.exe"
 AMNEZIA_PATH_DEFAULT = BASE_DIR / "core" / "zapret-amnezia.exe"
 HYSTERIA_CONFIG_FILE = RUNTIME_DIR / "hysteria_config.json"
@@ -104,6 +105,17 @@ SPEED_TEST_TEMP_HTTP_PORT = 19101
 # отличается от xray.exe гибридного сайдкара, поэтому правило его не задевает.
 SPEED_TEST_XRAY_PATH = RUNTIME_DIR / "speedtest" / "xray-speedtest.exe"
 SPEED_TEST_HYSTERIA_PATH = RUNTIME_DIR / "speedtest" / "hysteria-speedtest.exe"
+# Service slots (docs/SERVICE_SLOTS.md): each slot helper runs from its own copy and writes its own config, so the
+# main sidecars' orphan cleanup (by executable path) and config cleanup (by name) never touch it.
+SLOT_HELPER_DIR = RUNTIME_DIR / "slots"
+
+
+def slot_helper_exe(core: str, slot_id: str) -> Path:
+    return SLOT_HELPER_DIR / f"{core}-slot-{slot_id}.exe"
+
+
+def slot_helper_config(core: str, slot_id: str) -> Path:
+    return SLOT_HELPER_DIR / f"{core}-slot-{slot_id}.json"
 SPEED_TEST_SINGBOX_PATH = RUNTIME_DIR / "speedtest" / "sing-box-speedtest.exe"
 
 SS_PROTECT_PORT_START = 19200

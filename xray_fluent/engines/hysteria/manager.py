@@ -74,8 +74,19 @@ class HysteriaManager(QObject):
     failure = pyqtSignal(str, str, int)
     state_changed = pyqtSignal(bool)
 
-    def __init__(self, parent: QObject | None = None):
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        exe_path: Path | None = None,
+        config_file: Path | None = None,
+    ):
+        """[exe_path] and [config_file] give a service-slot helper its own executable copy and its own config
+        files (docs/SERVICE_SLOTS.md): the orphan cleanup kills by executable path and the stale-config cleanup globs
+        by config name, so with the shared defaults a second manager would kill or delete the main sidecar's."""
         super().__init__(parent)
+        self._exe_path = exe_path
+        self._config_file = config_file or HYSTERIA_CONFIG_FILE
         self._process = QProcess(self)
         self._process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self._process.readyReadStandardOutput.connect(self._on_ready_read)
@@ -100,7 +111,7 @@ class HysteriaManager(QObject):
         self._chrome_fallback_in_progress = False
         self._suppress_state_change = False
         self._process_generation = 0
-        self._config_path = HYSTERIA_CONFIG_FILE
+        self._config_path = self._config_file
         self._last_failure_code: HysteriaFailureCode | None = None
         self.diagnostic_config: dict[str, Any] | None = None
         self._compatibility_allow_parallel = False
@@ -282,11 +293,11 @@ class HysteriaManager(QObject):
             self._chrome_fallback_in_progress = False
             self._process_generation = max(0, int(process_generation))
             self._config_path = (
-                HYSTERIA_CONFIG_FILE.with_name(
-                    f"{HYSTERIA_CONFIG_FILE.stem}-{self._process_generation}.json"
+                self._config_file.with_name(
+                    f"{self._config_file.stem}-{self._process_generation}.json"
                 )
                 if allow_parallel and self._process_generation > 0
-                else HYSTERIA_CONFIG_FILE
+                else self._config_file
             )
             self._compatibility_allow_parallel = bool(allow_parallel)
             self._compatibility_verify_remote = bool(verify_remote)
@@ -301,7 +312,7 @@ class HysteriaManager(QObject):
             str(socks.get("password") or ""),
         )
         self._compatibility_context = context
-        exe = HYSTERIA_PATH_DEFAULT.resolve()
+        exe = (self._exe_path or HYSTERIA_PATH_DEFAULT).resolve()
         if not exe.is_file():
             self._begin_attempt(context, config)
             self._emit_error(
@@ -813,11 +824,10 @@ class HysteriaManager(QObject):
         except OSError:
             pass
 
-    @staticmethod
-    def _cleanup_stale_generation_configs() -> None:
+    def _cleanup_stale_generation_configs(self) -> None:
         try:
-            for path in HYSTERIA_CONFIG_FILE.parent.glob(
-                f"{HYSTERIA_CONFIG_FILE.stem}-*.json*"
+            for path in self._config_file.parent.glob(
+                f"{self._config_file.stem}-*.json*"
             ):
                 if path.is_file():
                     path.unlink(missing_ok=True)

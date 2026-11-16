@@ -50,8 +50,10 @@ class XrayManager(QObject):
     error = pyqtSignal(str)
     state_changed = pyqtSignal(bool)
 
-    def __init__(self, parent: QObject | None = None):
+    def __init__(self, parent: QObject | None = None, *, config_file: Path | None = None):
+        """[config_file]: a service-slot helper writes its own config, not the main Xray's (docs/SERVICE_SLOTS.md)."""
         super().__init__(parent)
+        self._config_file = config_file or XRAY_CONFIG_FILE
         self._process = QProcess(self)
         self._process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self._process.readyReadStandardOutput.connect(self._on_ready_read)
@@ -146,8 +148,8 @@ class XrayManager(QObject):
         try:
             attempt = 0
             while True:
-                RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-                XRAY_CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
+                self._config_file.parent.mkdir(parents=True, exist_ok=True)
+                self._config_file.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
                 self.diagnostic_config = capture_runtime_config(exe, config)
 
                 self._starting = True
@@ -156,7 +158,7 @@ class XrayManager(QObject):
                 self._last_output_lines.clear()
                 self._process.setWorkingDirectory(str(exe.parent))
                 self._process.setProgram(str(exe))
-                self._process.setArguments(["run", "-c", str(XRAY_CONFIG_FILE)])
+                self._process.setArguments(["run", "-c", str(self._config_file)])
                 spawn_began = time.monotonic()
                 self._process.start()
 

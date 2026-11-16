@@ -1,9 +1,8 @@
 # Service slots on Windows (design draft, 2026-11-16)
 
-Status: phases 1-2 in code (`xray_fluent/slots/catalog.py`, `config_writer.py`, tests
-`tests/test_service_slots_config.py`), not wired to the UI or runtime yet. Android has had slots since 0.5.52 / 0.6.x (`android/docs/SERVICE_SLOTS.md`, read its
-"Owner decisions" and the field sections first). Read the workspace `AGENTS.md` section "Architecture basis: native
-cores, sing-box is the gasket" and the skill `zapret-kvn-json-routing` before changing this design.
+Status (2026-11-16): phases 1-5 in code, not yet released or tried on win10. Modules: `xray_fluent/slots/`
+(`catalog.py`, `config_writer.py`, `runtime_plan.py`, `assigner.py`, `rescue.py`),
+`application/slot_runtime_service.py`, `ui/service_slots_card.py`; tests `tests/test_service_slots_*.py` (51).
 
 ## Owner decisions (2026-11-16)
 
@@ -130,3 +129,31 @@ Plan:
    YouTube slot instead of the main server.
 5. UI: one card «Серверы по сервисам» with an option per service, «Авто» or a pinned server.
 6. Release, wiki guide (Zapret/premium.md, premium/apps.md), screenshots on win10.
+
+## What is built (2026-11-16)
+
+- **Card** «Серверы по сервисам» on the main page (`ServiceSlotsCard`): a switch per service, «Авто» or a pinned
+  server, «сейчас: …» while connected. A switch calls `AppController.set_service_slots`, which writes the slot blocks
+  with `apply_slots` and saves through `apply_singbox_config_text` (the routing editor's own path: validation, save,
+  reconnect when connected); the editor page reloads the saved JSON. Pins live in `AppSettings.service_slot_pins`.
+- **Launch:** `_plan_runtime_singbox` / `_plan_proxy_runtime_singbox` call `_attach_slot_plans`: `assign_slots` (pin
+  first, then the best free server: alive, faster, lower ping; never the main server or another slot's while the pool
+  allows; AWG skipped) and `attach_service_slots` (relay per slot, provider members when the main server is a
+  sing-box-core one, a native out otherwise, the helpers' `process_path -> direct`).
+- **Helpers:** `SlotRuntimeService` starts after sing-box is up and stops on `singbox.stopped`. Each helper runs from
+  its own executable copy `data/runtime/slots/<core>-slot-<id>.exe` with its own config (the Hysteria and Xray managers
+  got `exe_path` / `config_file`): the main sidecars' orphan cleanup kills by executable path and their stale-config
+  cleanup globs by name, so with the shared defaults a slot helper would kill or delete the main one's. A helper that
+  does not start leaves its slot on `proxy`, is logged, and that server is skipped for the slot until the app restarts
+  or the user pins it again.
+- **Hot moves:** every slot has a stable loopback relay, so moving a slot to a Hysteria2 or VLESS server only starts a
+  helper behind the same port, and moving to a provider server is one Clash API `select`; sing-box is not restarted
+  and other apps are not touched. A pin that needs a restart (a sing-box-core server outside the provider) reconnects.
+- **YouTube rescue:** with the YouTube slot on, a dead YouTube cache cluster (`dead_video_cluster.py`) moves the
+  YouTube slot (`slots/rescue.py`: best free hot-reachable server, the dead one remembered, 90 s cooldown, back to the
+  main server when nothing is free) instead of switching the main server; honours «авто-переключение» and «переключение
+  при низкой скорости», not «сервер выбран вручную» (that is the main server's pick). Log `[slots] youtube: кластер …
+  не отвечает на A, слот YouTube -> B`; status «… YouTube переведён на B, остальные программы не тронуты.
+  Перезапустите видео …».
+- **Not yet:** slow-video rescue (Windows has no slow-video detector, only dead clusters), AWG slot servers, a speed
+  history per service, per-slot traffic on the card, e2e on win10.

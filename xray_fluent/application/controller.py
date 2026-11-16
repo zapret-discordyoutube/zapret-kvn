@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import logging
 import random
@@ -285,6 +285,14 @@ from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistory
 from .server_bypass import ServerBypass
 from .zapret_conflict import ZapretConflictCheck, foreign_crash_hint
 from ..engines.zapret.manager import ZapretManager
+from ..engines.singbox.runtime_planner import attach_service_slots
+from ..constants import HYSTERIA_PATH_DEFAULT as _SLOT_HYSTERIA_SOURCE, XRAY_PATH_DEFAULT as _SLOT_XRAY_DEFAULT
+from ..profiles.path_utils import resolve_configured_path as _resolve_core_path
+from ..slots.assigner import assign_slots
+from ..slots.runtime_plan import slot_selector_ids
+from ..slots.rescue import youtube_rescue
+from ..slots.config_writer import apply_slots as apply_service_slots, enabled_slots as enabled_service_slots
+from .slot_runtime_service import SlotRuntimeService
 
 if TYPE_CHECKING:
     from ..profiles.country_flags import CountryResolver as CountryResolverType
@@ -415,6 +423,21 @@ class AppController(QObject):
         self.xray = XrayManager(self)
         self.singbox = SingBoxManager(self)
         self.hysteria = HysteriaManager(self)
+        # Service slots (docs/SERVICE_SLOTS.md): helpers of the ticked slots, isolated from the main sidecars.
+        self.slot_runtime = SlotRuntimeService(
+            self,
+            log=lambda line: self._log(line),
+            hysteria_source=lambda: _SLOT_HYSTERIA_SOURCE,
+            xray_source=lambda: _resolve_core_path(
+                self.state.settings.xray_path,
+                default_path=_SLOT_XRAY_DEFAULT,
+                use_default_if_empty=True,
+                migrate_default_location=True,
+            ) or _SLOT_XRAY_DEFAULT,
+            on_helper_failed=self._on_slot_helper_failed,
+        )
+        # slot id -> servers whose helper did not start this app run: the next launch picks another one.
+        self._slot_failed: dict[str, set[str]] = {}
         self.amnezia = self._new_amnezia_manager()
         self._amnezia_target_generation = 0
         self._xray_tun_routes = XrayTunRouteManager(self)
@@ -578,6 +601,8 @@ class AppController(QObject):
         self.singbox.error.connect(lambda message: self._on_core_error("sing-box", message))
         self.singbox.state_changed.connect(self._on_core_state_changed)
         self.singbox.stopped.connect(lambda code: self._on_core_stopped("singbox", code))
+        # The slot helpers serve only through sing-box: they stop with it.
+        self.singbox.stopped.connect(lambda _code: self.slot_runtime.stop())
 
         self._bind_hysteria_manager(self.hysteria)
 
@@ -1140,7 +1165,7 @@ class AppController(QObject):
             elif session.sidecar_kind == "hysteria":
                 preferred_relay_port = session.sidecar_relay_port
         self._refresh_server_bootstrap(node)
-        return plan_singbox_runtime(
+        return self._attach_slot_plans(plan_singbox_runtime(
             document,
             node,
             allowed_proxy_ports=allowed_proxy_ports,
@@ -1149,7 +1174,147 @@ class AppController(QObject):
             preferred_protect_password=preferred_protect_password,
             pool_nodes=self._pool_candidate_nodes(node),
             share_lan=bool(self.state.settings.lan_proxy_enabled),
+        ), node)
+
+    # ── Service slots: the main-page card (docs/SERVICE_SLOTS.md, phase 5) ──
+
+    def service_slots_view(self) -> dict[str, object]:
+        """What the «Серверы по сервисам» card shows: ticked slots, pins, where each slot is now."""
+        try:
+            _path, text = load_active_config_text_operation(self, "singbox")
+            config = json.loads(text)
+        except (OSError, ValueError) as exc:
+            return {"available": False, "enabled": set(), "pins": {}, "live": {},
+                    "note": f"Конфиг sing-box не читается, сервисы недоступны: {exc}"}
+        has_proxy = any(isinstance(o, dict) and o.get("tag") == "proxy" for o in config.get("outbounds") or [])
+        nodes = {n.id: n for n in self.state.nodes}
+        live: dict[str, Node | None] = {}
+        for slot_id in self.slot_runtime.active_slots:
+            server = self.slot_runtime.server_of(slot_id)
+            live[slot_id] = nodes.get(server) if server else None
+        return {
+            "available": has_proxy,
+            "enabled": enabled_service_slots(config),
+            "pins": dict(self.state.settings.service_slot_pins),
+            "live": live,
+            "connected": bool(self.slot_runtime.active_slots),
+            "note": "" if has_proxy else "В конфиге sing-box нет outbound «proxy»: сервисам не на что опереться.",
+        }
+
+    def set_service_slots(self, enabled: set[str]) -> tuple[bool, str]:
+        """Tick/untick services: the app writes (or removes) the slot blocks in the active sing-box config itself
+        (owner 2026-11-16: «the program put everything into the config itself») and reconnects when connected."""
+        try:
+            _path, text = load_active_config_text_operation(self, "singbox")
+            config = json.loads(text)
+        except (OSError, ValueError) as exc:
+            return False, f"Конфиг sing-box не читается: {exc}"
+        updated = apply_service_slots(config, enabled)
+        if updated == config:
+            return True, ""
+        self._log(f"[slots] services ticked: {', '.join(sorted(enabled)) or 'none'}")
+        ok, _saved, message = self.apply_singbox_config_text(json.dumps(updated, ensure_ascii=False, indent=2))
+        return ok, message
+
+    def set_service_slot_pin(self, slot_id: str, node_id: str) -> None:
+        """Pin a server for a slot ("" = «Авто»); a running slot moves at once when it can without a restart."""
+        pins = dict(self.state.settings.service_slot_pins)
+        if node_id:
+            pins[slot_id] = node_id
+            # The user insists on this server: forget that it failed for the slot.
+            self._slot_failed.get(slot_id, set()).discard(node_id)
+        else:
+            pins.pop(slot_id, None)
+        if pins == self.state.settings.service_slot_pins:
+            return
+        self.state.settings.service_slot_pins = pins
+        self.save()
+        if slot_id not in self.slot_runtime.active_slots:
+            return
+        others = {v for k, v in self.slot_runtime.servers_in_use().items() if k != slot_id}
+        candidates = [n for n in self.state.nodes if n.id not in others and self.slot_runtime.can_move_hot(n)]
+        [assignment] = assign_slots(
+            [slot_id], candidates, main_node_id=self.slot_runtime.main_node_id, pins=pins, failed=self._slot_failed,
         )
+        target = assignment.node
+        if node_id and (target is None or target.id != node_id) and node_id != self.slot_runtime.main_node_id:
+            # The pinned server cannot be reached without a restart (or another slot holds it): reconnect.
+            self._log(f"[slots] {slot_id}: pinned server needs a restart of sing-box")
+            if self.connected:
+                self._request_transition("service slot pin")
+            return
+        if node_id == self.slot_runtime.main_node_id:
+            target = None
+        if (target.id if target is not None else None) == self.slot_runtime.server_of(slot_id):
+            return  # already there: no helper restart
+        self.slot_runtime.move(slot_id, target)
+
+    def _youtube_slot_rescue(self, dead_clusters: list[str]) -> bool:
+        """A dead YouTube cache cluster with the YouTube slot ticked moves the slot, not the main server
+        (docs/SERVICE_SLOTS.md, phase 4). True when the slot took the event (the main smart switch then ignores it)."""
+        if "youtube" not in self.slot_runtime.active_slots:
+            return False
+        settings = self.state.settings
+        if not settings.auto_switch_enabled or not getattr(settings, "auto_switch_low_speed_enabled", True):
+            return True
+        now = time.monotonic()
+        current = self.slot_runtime.server_of("youtube")
+        decision = youtube_rescue(
+            current_id=current,
+            nodes=self.state.nodes,
+            main_node_id=self.slot_runtime.main_node_id,
+            other_slots={k: v for k, v in self.slot_runtime.servers_in_use().items() if k != "youtube"},
+            failed=self._slot_failed,
+            reachable=self.slot_runtime.can_move_hot,
+            now=now,
+            last_move_at=getattr(self, "_youtube_slot_moved_at", None),
+        )
+        if not decision.move:
+            if decision.reason:
+                self._log(f"[slots] youtube: кластер {', '.join(dead_clusters)} не отвечает, {decision.reason}")
+            return True
+        if current:
+            self._slot_failed.setdefault("youtube", set()).add(current)
+        if not self.slot_runtime.move("youtube", decision.node):
+            return False
+        self._youtube_slot_moved_at = now
+        names = {n.id: n.name for n in self.state.nodes}
+        old_name = names.get(current or "", "основной сервер") if current else "основной сервер"
+        new_name = decision.node.name if decision.node is not None else "основной сервер"
+        self._log(f"[slots] youtube: кластер {', '.join(dead_clusters)} не отвечает на {old_name}, слот YouTube -> {new_name}")
+        self.status.emit(
+            "warning",
+            f"Видео YouTube не идёт через {old_name} (кластер {', '.join(dead_clusters)} не отвечает) — YouTube "
+            f"переведён на {new_name}, остальные программы не тронуты. Перезапустите видео: плеер держит ссылки "
+            "мёртвого кластера",
+        )
+        return True
+
+    def _on_slot_helper_failed(self, slot_id: str, node_id: str) -> None:
+        self._slot_failed.setdefault(slot_id, set()).add(node_id)
+
+    def _attach_slot_plans(self, plan: SingboxRuntimePlan, node: Node | None) -> SingboxRuntimePlan:
+        """Service slots the user ticked (their selectors are in the active JSON): pick each slot's server and plan
+        how it is reached. Nothing when no slot is ticked."""
+        slot_ids = slot_selector_ids(plan.singbox_config)
+        if not slot_ids:
+            return plan
+        main_id = node.id if node is not None else None
+        assignments = assign_slots(
+            slot_ids,
+            self.state.nodes,
+            main_node_id=main_id,
+            pins=dict(self.state.settings.service_slot_pins),
+            failed=getattr(self, "_slot_failed", None),
+        )
+        plan = attach_service_slots(plan, {a.slot_id: a.node for a in assignments}, main_node_id=main_id)
+        # The reason is logged once, when the helpers start (this plan is also built for transition signatures).
+        reasons = {a.slot_id: a.reason for a in assignments if a.reason}
+        plan.slot_plans = tuple(
+            replace(slot, note="; ".join(x for x in (slot.note, reasons.get(slot.slot_id, "")) if x))
+            for slot in plan.slot_plans
+        )
+        return plan
 
     def _refresh_server_bootstrap(self, node: Node | None) -> None:
         """Обновить в фоне запомненный адрес сервера, не задерживая подключение."""
@@ -1184,7 +1349,7 @@ class AppController(QObject):
             elif session.sidecar_kind == "hysteria" and not replacement:
                 preferred_relay_port = session.sidecar_relay_port
         self._refresh_server_bootstrap(node)
-        return plan_singbox_proxy_runtime(
+        return self._attach_slot_plans(plan_singbox_proxy_runtime(
             document,
             node,
             allowed_proxy_ports=allowed_proxy_ports,
@@ -1192,7 +1357,7 @@ class AppController(QObject):
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
             pool_nodes=self._pool_candidate_nodes(node),
-        )
+        ), node)
 
     def _singbox_plan_facts(self, node: Node | None, *, tun: bool) -> SingboxPlanFacts | None:
         """Selector tags / provider / used_selected_node for signatures, cached.
@@ -1555,6 +1720,14 @@ class AppController(QObject):
                     getattr(self, "_front_target_generation", 0)
                 )
                 self._active_singbox_plan = plan
+                # Slots start after the main path is up and never fail it (a helper that does not start leaves its
+                # slot on the main server).
+                self.slot_runtime.start(
+                    list(getattr(plan, "slot_plans", ()) or ()),
+                    plan.clash_api_port,
+                    provider_tags=dict(plan.selector_tags or {}) if plan.provider_payload is not None else {},
+                    main_node_id=runtime_node.id if runtime_node is not None else None,
+                )
                 return True
 
             yield from self.singbox.stop_steps()
