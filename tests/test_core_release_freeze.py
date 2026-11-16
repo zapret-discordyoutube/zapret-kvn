@@ -136,6 +136,7 @@ class CoreReleaseFreezeTests(unittest.TestCase):
             self.assertIn("v3.1.20990101 h1:futurezip", changes[patch_path])
             self.assertIn("v3.1.20990101/go.mod h1:futuremod", changes[patch_path])
 
+    @unittest.skipUnless(ANDROID.is_dir(), "paired Android checkout not available")
     def test_android_retarget_moves_amnezia_context_in_later_patches(self):
         # 2026-11-16: Amnezia v3.1.20261116 rewrote 0005, and 0014 (Xray go.mod edit) no longer applied
         # because it carries the old Amnezia require line as context.
