@@ -15,7 +15,7 @@ from . import singbox as singbox_rules
 from . import wireguard as wireguard_rules
 from . import xray as xray_rules
 from .merge import effective
-from .model import Core, MaskingSettings, ServerShape
+from .model import XRAY_PROTOCOLS, Core, MaskingSettings, ServerShape
 
 _NOT_SERVERS = {"selector", "urltest", "direct", "block", "dns", "tor", "freedom", "blackhole"}
 
@@ -59,6 +59,13 @@ def shape_of(outbound: dict[str, Any]) -> ServerShape | None:
             network=str(transport.get("type") or "tcp").lower(),
             security=_security(outbound.get("tls")),
             flow=outbound.get("flow") or None,
+        )
+    if protocol in XRAY_PROTOCOLS and "protocol" in outbound:  # Xray-shaped VMess / Trojan
+        stream = outbound.get("streamSettings") if isinstance(outbound.get("streamSettings"), dict) else {}
+        return ServerShape(
+            Core.XRAY, protocol,
+            network=str(stream.get("network") or "tcp").lower(),
+            security=str(stream.get("security") or "none").lower(),
         )
     if protocol in {"wireguard", "awg"}:
         return ServerShape(Core.AMNEZIA, protocol)

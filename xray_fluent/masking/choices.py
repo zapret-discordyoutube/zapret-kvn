@@ -18,6 +18,7 @@ from .model import (
     MaskingSettings,
     MuxCool,
     OverrideKind,
+    XRAY_PROTOCOLS,
     SingboxFragment,
     XrayFragment,
     XrayShaping,
@@ -145,8 +146,8 @@ def server_choices(protocol: str) -> list[tuple[str, str]]:
         masking = preset.masking
         fits = (
             (protocol in {"wireguard", "awg"} and masking.wireguard is not None)
-            or (protocol == "vless" and masking.xray is not None)
-            or (protocol not in {"wireguard", "awg", "vless", "hy2", "hysteria2"} and masking.singbox is not None)
+            or (protocol in XRAY_PROTOCOLS and masking.xray is not None)
+            or (protocol not in {"wireguard", "awg", "hy2", "hysteria2"} | XRAY_PROTOCOLS and masking.singbox is not None)
         )
         if fits:
             result.append((preset.id, preset.title))

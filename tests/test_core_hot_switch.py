@@ -90,7 +90,7 @@ class SingboxPoolTests(unittest.TestCase):
             "vless://11111111-1111-1111-1111-111111111111@two.example:443"
             "?type=tcp&security=tls&sni=two.example#two"
         )
-        native = parse_single("trojan://secret@native.example:443?security=tls#native")
+        native = parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@native.example:8388#native")
         nodes = [salamander, gecko, vless, native]
         document = parse_singbox_document(
             SINGBOX_TEMPLATE,
@@ -114,10 +114,8 @@ class SingboxPoolTests(unittest.TestCase):
 
     def test_native_nodes_are_exposed_through_provider_selector(self) -> None:
         nodes = [
-            parse_single(
-                "trojan://secret@two.example:443?security=tls&sni=two.example#two"
-            ),
-            parse_single("trojan://secret@three.example:443?security=tls&sni=three.example#three"),
+            parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@two.example:8388#two"),
+            parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@three.example:8388#three"),
         ]
         document = parse_singbox_document(SINGBOX_TEMPLATE, SINGBOX_TEMPLATE.read_text(encoding="utf-8"))
         plan = plan_singbox_proxy_runtime(document, nodes[0], pool_nodes=nodes)
@@ -143,7 +141,8 @@ class SingboxPoolTests(unittest.TestCase):
 
         self.assertTrue(plan.is_hybrid)
         self.assertGreater(plan.xray_sidecar.api_port, 0)
-        self.assertEqual(set(plan.selector_tags or {}), {nodes[0].id})
+        # Trojan runs on Xray too (2026-11-16): it joins the same sidecar pool as the XHTTP VLESS server.
+        self.assertEqual(set(plan.selector_tags or {}), {nodes[0].id, nodes[1].id})
         sidecar = plan.xray_sidecar.config
         self.assertEqual(sidecar["routing"]["balancers"][0]["tag"], XRAY_BALANCER_TAG)
         self.assertIn("RoutingService", sidecar["api"]["services"])

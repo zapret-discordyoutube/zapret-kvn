@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import unittest
 
 from xray_fluent.engines.singbox.config_builder import build_singbox_outbound
@@ -23,14 +24,16 @@ def _proxy(config: dict) -> dict:
 class SingBoxFingerprintTests(unittest.TestCase):
     """Без fp в ссылке рукопожатие с сервером — как у Chrome, а не ClientHello Go."""
 
+    # Trojan and VMess run on Xray since 2026-11-16: their fingerprint is Xray's own `fingerprint`.
     def test_trojan_without_fp_gets_chrome(self) -> None:
         node = parse_single("trojan://secret@vpn.example.com:443?sni=vpn.example.com#t")
-        tls = build_singbox_outbound(node)["tls"]
-        self.assertEqual(tls["utls"], {"enabled": True, "fingerprint": BROWSER_TLS_FINGERPRINT})
+        outbound = apply_browser_fingerprint(copy.deepcopy(node.outbound))
+        self.assertEqual(outbound["streamSettings"]["tlsSettings"]["fingerprint"], BROWSER_TLS_FINGERPRINT)
 
     def test_explicit_fp_is_kept(self) -> None:
         node = parse_single("trojan://secret@vpn.example.com:443?sni=vpn.example.com&fp=firefox#t")
-        self.assertEqual(build_singbox_outbound(node)["tls"]["utls"]["fingerprint"], "firefox")
+        outbound = apply_browser_fingerprint(copy.deepcopy(node.outbound))
+        self.assertEqual(outbound["streamSettings"]["tlsSettings"]["fingerprint"], "firefox")
 
     def test_plain_tcp_without_tls_is_untouched(self) -> None:
         node = parse_single("ss://YWVzLTI1Ni1nY206c2VjcmV0@vpn.example.com:8388#s")

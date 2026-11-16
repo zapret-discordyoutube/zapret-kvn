@@ -27,11 +27,11 @@ class YoutubeRescueTests(unittest.TestCase):
     def decide(self, **overrides):
         args = dict(
             current_id="a",
-            nodes=[node("main"), node("a"), node("b", speed=10), node("c", speed=50), node("tro", protocol="trojan", speed=99)],
+            nodes=[node("main"), node("a"), node("b", speed=10), node("c", speed=50), node("tro", protocol="shadowsocks", speed=99)],
             main_node_id="main",
             other_slots={"ai": "c"},
             failed={},
-            reachable=lambda n: n.scheme != "trojan",
+            reachable=lambda n: n.scheme != "shadowsocks",
             now=1000.0,
             last_move_at=None,
         )
@@ -41,7 +41,7 @@ class YoutubeRescueTests(unittest.TestCase):
     def test_moves_to_the_best_free_reachable_server_never_the_dead_one(self):
         decision = self.decide()
         self.assertTrue(decision.move)
-        # c is taken by the AI slot, trojan is not reachable hot, a is where the video died.
+        # c is taken by the AI slot, shadowsocks is not reachable hot, a is where the video died.
         self.assertEqual("b", decision.node.id)
 
     def test_cooldown_holds_the_slot(self):
@@ -99,10 +99,10 @@ class SlotHotMoveTests(unittest.TestCase):
         self.assertEqual("vl", self.service.server_of("youtube"))
 
     def test_move_to_a_provider_server_or_back_to_main(self):
-        trojan = node("tro", protocol="trojan")
-        self.assertTrue(self.service.can_move_hot(trojan))
-        self.assertFalse(self.service.can_move_hot(node("other", protocol="trojan")))
-        self.move(trojan)
+        shadowsocks = node("tro", protocol="shadowsocks")
+        self.assertTrue(self.service.can_move_hot(shadowsocks))
+        self.assertFalse(self.service.can_move_hot(node("other", protocol="shadowsocks")))
+        self.move(shadowsocks)
         self.assertEqual(("zapret-slot-youtube", "__app_nodes/node_t"), self.selected[-1])
         self.move(None)
         self.assertEqual(("zapret-slot-youtube", "proxy"), self.selected[-1])

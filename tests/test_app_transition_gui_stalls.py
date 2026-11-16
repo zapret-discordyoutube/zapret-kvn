@@ -296,7 +296,7 @@ class TransitionGuiStallTests(unittest.TestCase):
         controller.disconnect_current = counting_disconnect  # type: ignore[method-assign]
 
         cls.nodes = [
-            parse_single("trojan://secret@one.example:443?security=tls&sni=one.example#one"),
+            parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@one.example:8388#one"),
             parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@two.example:8388#two"),
             parse_single(
                 "vless://11111111-1111-1111-1111-111111111111@three.example:443"

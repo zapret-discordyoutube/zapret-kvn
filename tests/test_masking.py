@@ -30,7 +30,7 @@ VISION = ServerShape(Core.XRAY, "vless", network="tcp", security="reality", flow
 XHTTP = ServerShape(Core.XRAY, "vless", network="xhttp", security="reality")
 KCP = ServerShape(Core.XRAY, "vless", network="kcp", security="none")
 WG = ServerShape(Core.AMNEZIA, "wireguard")
-TROJAN = ServerShape(Core.SINGBOX, "trojan", security="tls")
+ANYTLS = ServerShape(Core.SINGBOX, "anytls", security="tls")
 
 
 class WireGuardTests(unittest.TestCase):
@@ -161,11 +161,20 @@ class MergeAndApplyTests(unittest.TestCase):
 
     def test_singbox_fragment(self) -> None:
         settings = MaskingSettings(True, Masking(singbox=SingboxFragment(record_fragment=True, fallback_delay_ms=500)))
-        masked, _ = apply.apply_server({"type": "trojan", "tls": {"enabled": True, "server_name": "x"}}, settings, None)
+        masked, _ = apply.apply_server({"type": "anytls", "tls": {"enabled": True, "server_name": "x"}}, settings, None)
         self.assertEqual({"enabled": True, "server_name": "x", "fragment": True, "record_fragment": True,
                           "fragment_fallback_delay": "500ms"}, masked["tls"])
-        self.assertIsNone(effective(settings, None, ServerShape(Core.SINGBOX, "trojan", security="reality")).masking.singbox)
-        self.assertTrue(singbox.applies(TROJAN))
+        self.assertIsNone(effective(settings, None, ServerShape(Core.SINGBOX, "anytls", security="reality")).masking.singbox)
+        self.assertTrue(singbox.applies(ANYTLS))
+
+    def test_trojan_and_vmess_are_xray_servers(self) -> None:
+        # Owner decision 2026-11-16: Xray owns VLESS, VMess and Trojan; sing-box fragment no longer fits them.
+        for protocol in ("trojan", "vmess"):
+            outbound = {"protocol": protocol, "streamSettings": {"network": "ws", "security": "tls"}}
+            shape = apply.shape_of(outbound)
+            self.assertEqual((Core.XRAY, protocol, "ws", "tls"), (shape.core, shape.protocol, shape.network, shape.security))
+            self.assertFalse(singbox.applies(shape))
+        self.assertEqual(Core.SINGBOX, apply.shape_of({"type": "trojan", "tls": {"enabled": True}}).core)
 
     def test_log_line(self) -> None:
         self.assertIsNone(apply.log_line(False, 0, []))

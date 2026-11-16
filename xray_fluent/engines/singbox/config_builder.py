@@ -6,7 +6,8 @@ from typing import Any
 from xray_fluent.application.protocol_core import ProtocolCore, protocol_core
 from xray_fluent.engines.tls_fingerprint import BROWSER_TLS_FINGERPRINT, tls_over_quic
 
-_SUPPORTED_NATIVE_PROTOCOLS = {"vmess", "trojan", "shadowsocks", "socks", "http"}
+# VLESS, VMess and Trojan belong to Xray (owner decision 2026-11-16); sing-box converts only these.
+_SUPPORTED_NATIVE_PROTOCOLS = {"shadowsocks", "socks", "http"}
 
 # Типы, которые sing-box 1.13+ принимает только в top-level массиве `endpoints[]`,
 # а не в `outbounds[]`.
@@ -45,12 +46,12 @@ def unenforced_tls_pin_warning(node) -> str:
 
 
 def build_singbox_outbound(node, *, tag: str = "proxy") -> dict[str, Any]:
-    """Convert a stored node outbound into a native sing-box outbound."""
+    """Convert a stored node outbound into a native sing-box outbound (Shadowsocks, SOCKS, HTTP)."""
     source = deepcopy(node.outbound or {})
     protocol = str(source.get("protocol") or "").lower()
     native_type = str(source.get("type") or "").lower()
     if protocol_core(node) is not ProtocolCore.SINGBOX:
-        raise ValueError("VLESS belongs to Xray; Hysteria2 belongs to the official Hysteria core.")
+        raise ValueError("VLESS, VMess and Trojan belong to Xray; Hysteria2 belongs to the official Hysteria core.")
     if native_type and not protocol:
         # Служебные ключи приложения (`_dns` и прочие с префиксом `_`) не входят
         # в схему sing-box, строгий декодер их отвергает — отбрасываем.
@@ -64,11 +65,6 @@ def build_singbox_outbound(node, *, tag: str = "proxy") -> dict[str, Any]:
         )
 
     outbound = _convert_outbound(source)
-    unsupported_transport = str(outbound.pop("_unsupported_transport", "") or "").strip()
-    if unsupported_transport:
-        raise ValueError(
-            f"Текущий сервер нельзя конвертировать в native sing-box outbound: transport `{unsupported_transport}` не поддерживается"
-        )
 
     outbound["tag"] = tag
     return outbound
@@ -81,22 +77,7 @@ def _convert_outbound(xray_ob: dict[str, Any]) -> dict[str, Any]:
 
     sb: dict[str, Any] = {"type": protocol}
 
-    if protocol == "vmess":
-        vnext = (xray_settings.get("vnext") or [{}])[0]
-        sb["server"] = str(vnext.get("address") or "")
-        sb["server_port"] = int(vnext.get("port") or 0)
-        users = (vnext.get("users") or [{}])[0]
-        sb["uuid"] = str(users.get("id") or "")
-        sb["alter_id"] = int(users.get("alterId") or 0)
-        sb["security"] = str(users.get("security") or "auto")
-
-    elif protocol == "trojan":
-        servers = (xray_settings.get("servers") or [{}])[0]
-        sb["server"] = str(servers.get("address") or "")
-        sb["server_port"] = int(servers.get("port") or 0)
-        sb["password"] = str(servers.get("password") or "")
-
-    elif protocol == "shadowsocks":
+    if protocol == "shadowsocks":
         servers = (xray_settings.get("servers") or [{}])[0]
         sb["server"] = str(servers.get("address") or "")
         sb["server_port"] = int(servers.get("port") or 0)
@@ -113,7 +94,6 @@ def _convert_outbound(xray_ob: dict[str, Any]) -> dict[str, Any]:
             sb["password"] = str(user_list[0].get("pass") or "")
 
     _apply_tls(sb, stream)
-    _apply_transport(sb, stream)
     return sb
 
 
@@ -155,103 +135,3 @@ def _apply_tls(sb: dict[str, Any], stream: dict[str, Any]) -> None:
             tls["insecure"] = True
 
     sb["tls"] = tls
-
-
-def _split_early_data(path: str) -> tuple[str, int]:
-    """``/ws?ed=2048`` → (``/ws``, 2048); остальные параметры пути остаются."""
-
-    base, mark, query = path.partition("?")
-    if not mark:
-        return path, 0
-    kept: list[str] = []
-    early = 0
-    for part in query.split("&"):
-        key, _, value = part.partition("=")
-        if key == "ed" and value.isdigit():
-            early = int(value)
-        elif part:
-            kept.append(part)
-    return (f"{base}?{'&'.join(kept)}" if kept else base), early
-
-
-def _http1_only(sb: dict[str, Any]) -> None:
-    """WebSocket и HTTP upgrade работают только поверх HTTP/1.1.
-
-    Ссылка с ``alpn=h2,http/1.1`` давала серверу выбрать h2: TLS
-    устанавливался, а запрос WebSocket — нет, и трафик не шёл (Xray в этом
-    случае сам оставляет только http/1.1).
-    """
-
-    tls = sb.get("tls")
-    if not isinstance(tls, dict) or not tls.get("alpn"):
-        return
-    alpn = [value for value in tls["alpn"] if str(value).lower() not in ("h2", "h3")]
-    if alpn:
-        tls["alpn"] = alpn
-    else:
-        tls.pop("alpn")
-
-
-def _apply_transport(sb: dict[str, Any], stream: dict[str, Any]) -> None:
-    network = str(stream.get("network") or "tcp").lower()
-    if network == "tcp":
-        return
-
-    if network == "ws":
-        ws_settings = dict(stream.get("wsSettings") or {})
-        transport: dict[str, Any] = {"type": "ws"}
-        path, early_data = _split_early_data(str(ws_settings.get("path") or ""))
-        if path:
-            transport["path"] = path
-        if early_data:
-            # Xray читает «?ed=2048» из пути как ранние данные в заголовке
-            # Sec-WebSocket-Protocol; sing-box отправил бы его в пути, и сервер
-            # ответил бы 404.
-            transport["max_early_data"] = early_data
-            transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
-        headers = dict(ws_settings.get("headers") or {})
-        host = str(ws_settings.get("host") or "")
-        if host and not any(str(key).lower() == "host" for key in headers):
-            headers["Host"] = host
-        if headers:
-            transport["headers"] = headers
-        sb["transport"] = transport
-        _http1_only(sb)
-        return
-
-    if network == "httpupgrade":
-        upgrade_settings = dict(stream.get("httpupgradeSettings") or {})
-        transport = {"type": "httpupgrade"}
-        host = str(upgrade_settings.get("host") or "")
-        if host:
-            transport["host"] = host
-        path = str(upgrade_settings.get("path") or "")
-        if path:
-            transport["path"] = path
-        sb["transport"] = transport
-        _http1_only(sb)
-        return
-
-    if network in ("http", "h2"):
-        http_settings = dict(stream.get("httpSettings") or stream.get("h2Settings") or {})
-        transport = {"type": "http"}
-        host = http_settings.get("host")
-        if host:
-            transport["host"] = list(host) if isinstance(host, list) else [str(host)]
-        path = str(http_settings.get("path") or "")
-        if path:
-            transport["path"] = path
-        sb["transport"] = transport
-        return
-
-    if network == "grpc":
-        grpc_settings = dict(stream.get("grpcSettings") or {})
-        transport = {"type": "grpc"}
-        service_name = str(grpc_settings.get("serviceName") or "")
-        if service_name:
-            transport["service_name"] = service_name
-        sb["transport"] = transport
-        return
-
-    if network == "xhttp":
-        sb["_unsupported_transport"] = "xhttp"

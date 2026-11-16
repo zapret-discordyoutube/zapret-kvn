@@ -85,14 +85,12 @@ class XrayShareLinkPinTests(unittest.TestCase):
         self.assertNotIn("allowInsecure", _tls(node))
         self.assertIsNone(validate_node_outbound(node))
 
-    def test_trojan_allow_insecure_without_pin_stays_runnable_in_singbox(self) -> None:
+    def test_trojan_allow_insecure_without_pin_is_verified_normally_like_vless(self) -> None:
+        # Trojan runs on Xray (2026-11-16): Xray 26.x has no allowInsecure, so the certificate is checked.
         node = parse_single("trojan://pw@a.example:443?security=tls&allowInsecure=1#T")
         self.assertIsNone(validate_node_outbound(node))
-        self.assertTrue(build_singbox_outbound(node)["tls"]["insecure"])
-        # временный xray для замера скорости такой сервер не потянет
-        skip, message = should_skip_speed_test(node)
-        self.assertTrue(skip)
-        self.assertIn("allowInsecure", message)
+        self.assertNotIn("allowInsecure", _tls(node))
+        self.assertFalse(should_skip_speed_test(node)[0])
 
     def test_vmess_json_fields_are_mapped(self) -> None:
         payload = {
@@ -107,29 +105,25 @@ class XrayShareLinkPinTests(unittest.TestCase):
 
         payload.pop("pcs")
         node = parse_single("vmess://" + base64.b64encode(json.dumps(payload).encode()).decode())
-        self.assertTrue(_tls(node)["allowInsecure"])
+        self.assertNotIn("allowInsecure", _tls(node))
 
     def test_plain_vless_without_pin_is_unchanged(self) -> None:
         node = parse_single(f"vless://{UUID}@a.example:443?security=tls&sni=a.example#V")
         self.assertEqual(_tls(node), {"serverName": "a.example"})
 
 
-class SingboxPinConversionTests(unittest.TestCase):
-    def test_pin_is_not_enforced_and_warns(self) -> None:
-        node = parse_single(f"trojan://pw@a.example:443?security=tls&sni=a.example&allowInsecure=1&pcs={PIN}#T")
-        tls = build_singbox_outbound(node)["tls"]
-        self.assertTrue(tls["insecure"])
-        self.assertNotIn("certificate_public_key_sha256", tls)
-        warning = unenforced_tls_pin_warning(node)
-        self.assertIn("не проверяется", warning)
-        self.assertIn("T", warning)
+class XrayPinEnforcementTests(unittest.TestCase):
+    """Trojan and VMess run on Xray (2026-11-16), which checks the pin itself; sing-box never saw it."""
 
-    def test_no_warning_without_pin_or_for_vless(self) -> None:
-        plain = parse_single("trojan://pw@a.example:443?security=tls#T")
-        self.assertEqual(unenforced_tls_pin_warning(plain), "")
-        self.assertNotIn("insecure", build_singbox_outbound(plain)["tls"])
-        vless = parse_single(f"vless://{UUID}@a.example:443?security=tls&pcs={PIN}#V")
-        self.assertEqual(unenforced_tls_pin_warning(vless), "")
+    def test_trojan_pin_is_enforced_by_xray_so_there_is_no_warning(self) -> None:
+        node = parse_single(f"trojan://pw@a.example:443?security=tls&sni=a.example&allowInsecure=1&pcs={PIN}#T")
+        self.assertEqual(_tls(node)["pinnedPeerCertSha256"], PIN)
+        self.assertNotIn("allowInsecure", _tls(node))
+        self.assertEqual(unenforced_tls_pin_warning(node), "")
+
+    def test_sing_box_nodes_without_tls_have_no_warning(self) -> None:
+        node = parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@a.example:8388#S")
+        self.assertEqual(unenforced_tls_pin_warning(node), "")
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from typing import Any
 
 from .model import Core, Problem, ServerShape, SingboxFragment
 
-PROTOCOLS = frozenset({"trojan", "vmess", "anytls", "http", "shadowtls"})
+PROTOCOLS = frozenset({"anytls", "http", "shadowtls"})  # Trojan and VMess moved to Xray (2026-11-16)
 MAX_FALLBACK_DELAY_MS = 10_000
 
 

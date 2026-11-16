@@ -8,8 +8,8 @@ runtime plans and the transition signatures are exactly what they were before.
 | Section | Native core | What the app writes (to a runtime copy of the node) |
 |---|---|---|
 | WireGuard masking | Amnezia runtime (`runtime/amnezia`) | `jc`, `jmin`, `jmax`, `i1`..`i5` in the endpoint's `amnezia` object |
-| Xray shaping | Xray sidecar | `mux` on the outbound, `xmux` in XHTTP settings (inside `extra` when present), `finalmask.tcp` fragment |
-| TLS fragment | sing-box (Trojan, VMess, AnyTLS, HTTP, ShadowTLS) | `tls.fragment`, `tls.record_fragment`, `tls.fragment_fallback_delay` |
+| Xray shaping (VLESS, VMess, Trojan) | Xray sidecar | `mux` on the outbound, `xmux` in XHTTP settings (inside `extra` when present), `finalmask.tcp` fragment |
+| TLS fragment | sing-box (AnyTLS, HTTP, ShadowTLS; Trojan and VMess moved to Xray, which uses `finalmask`) | `tls.fragment`, `tls.record_fragment`, `tls.fragment_fallback_delay` |
 | Packet tricks | sing-box front, socket to the VLESS server | route options `tls_spoof` / `kvn_desync` (see below) |
 | Hysteria2 | official Hysteria | nothing: obfs is part of the link |
 

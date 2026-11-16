@@ -22,6 +22,16 @@ def _vless(server: str = "vpn.example") -> Node:
     )
 
 
+def _shadowsocks(server: str = "ss.example") -> Node:
+    return Node(
+        id="s", name="s", scheme="ss", server=server, port=8388,
+        outbound={
+            "protocol": "shadowsocks",
+            "settings": {"servers": [{"address": server, "port": 8388, "method": "aes-256-gcm", "password": "p"}]},
+        },
+    )
+
+
 def _trojan(server: str = "tr.example") -> Node:
     return Node(
         id="t", name="t", scheme="trojan", server=server, port=443,
@@ -73,9 +83,9 @@ class CoreConfigTests(unittest.TestCase):
         self.assertEqual(config["inbounds"][0]["port"], 19102)
 
     def test_singbox_resolves_the_server_from_predefined_hosts(self) -> None:
-        config = latency_probe._singbox_config(_trojan(), 19102, "tr.example", ["203.0.113.6"])
+        config = latency_probe._singbox_config(_shadowsocks(), 19102, "ss.example", ["203.0.113.6"])
         self.assertEqual(config["route"]["default_domain_resolver"], "probe-hosts")
-        self.assertEqual(config["dns"]["servers"][0]["predefined"], {"tr.example": ["203.0.113.6"]})
+        self.assertEqual(config["dns"]["servers"][0]["predefined"], {"ss.example": ["203.0.113.6"]})
         self.assertEqual(config["outbounds"][0]["tag"], "proxy")
         self.assertEqual(config["inbounds"][0]["listen_port"], 19102)
 
@@ -94,8 +104,10 @@ class CoreConfigTests(unittest.TestCase):
         ):
             vless = latency_probe._launch(_vless(), 1, "vpn.example", ["203.0.113.5"], paths)
             trojan = latency_probe._launch(_trojan(), 1, "tr.example", ["203.0.113.6"], paths)
+            shadowsocks = latency_probe._launch(_shadowsocks(), 1, "ss.example", ["203.0.113.8"], paths)
         self.assertIn("xray", vless.command[0])
-        self.assertIn("sing-box", trojan.command[0])
+        self.assertIn("xray", trojan.command[0])  # Trojan and VMess run on Xray since 2026-11-16
+        self.assertIn("sing-box", shadowsocks.command[0])
 
     def test_amneziawg_is_not_measured(self) -> None:
         node = Node(id="w", name="w", scheme="wireguard", server="wg.example", port=51820,

@@ -228,7 +228,7 @@ class PlannerBootstrapFallbackTests(unittest.TestCase):
         template = ROOT / "data" / "templates" / "sing-box" / "default.json"
         self.document = parse_singbox_document(template, template.read_text(encoding="utf-8"))
         # Нативный sing-box-узел с доменным адресом (не hysteria-sidecar).
-        self.node = parse_single("trojan://secret@vpn.example.com:443?sni=vpn.example.com")
+        self.node = parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@vpn.example.com:8388#n")
 
     def _plan(self) -> dict:
         return plan_singbox_runtime(self.document, self.node).singbox_config

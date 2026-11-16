@@ -179,6 +179,8 @@ class Core(str, Enum):
     SINGBOX = "sing-box"
 
 
+# Protocols the native Xray core executes (owner decision 2026-11-16: VLESS, VMess and Trojan).
+XRAY_PROTOCOLS = frozenset({"vless", "vmess", "trojan"})
 _MULTIPLEXED = {"xhttp", "splithttp", "grpc", "h2", "http"}
 _TCP_STREAMS = {"tcp", "raw", "ws", "httpupgrade", "xhttp", "splithttp", "grpc", "h2", "http"}
 

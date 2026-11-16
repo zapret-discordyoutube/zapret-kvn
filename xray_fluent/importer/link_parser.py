@@ -483,7 +483,13 @@ def _build_stream_settings(
             tls_settings["serverName"] = sni
         alpn = _get_param(params, "alpn")
         if alpn:
-            tls_settings["alpn"] = [item.strip() for item in alpn.split(",") if item.strip()]
+            items = [item.strip() for item in alpn.split(",") if item.strip()]
+            if network in {"ws", "httpupgrade"}:
+                # WebSocket и HTTPUpgrade работают только поверх HTTP/1.1: сервер, выбравший h2, обрывает
+                # рукопожатие («подключается, но трафика нет»). Xray подставляет http/1.1 лишь при пустом alpn.
+                items = [item for item in items if item.lower() not in {"h2", "h3"}]
+            if items:
+                tls_settings["alpn"] = items
         fp = _get_param(params, "fp", "fingerprint")
         if fp:
             tls_settings["fingerprint"] = fp
@@ -501,9 +507,9 @@ def _build_stream_settings(
         )
         if cert_names:
             tls_settings["verifyPeerCertByName"] = cert_names
-        # VLESS исполняет только Xray, а без пина ему нечем заменить allowInsecure:
-        # сертификат проверяется обычным образом, как в Android-клиенте, вместо
-        # отказа запускать сервер. Trojan/VMess идут в sing-box, где insecure есть.
+        # VLESS, VMess и Trojan исполняет только Xray, а без пина ему нечем заменить
+        # allowInsecure: сертификат проверяется обычным образом, как в Android-клиенте,
+        # вместо отказа запускать сервер. xray_only=False остаётся у протоколов sing-box.
         allow_insecure = _get_param(params, "allowInsecure", "allow_insecure", "insecure")
         if not pins and not xray_only and _to_bool(allow_insecure):
             tls_settings["allowInsecure"] = True
@@ -676,13 +682,22 @@ def validate_node_outbound(node: Node) -> str | None:
             return f"Сервер {node.name or native_type} не содержит UUID для TUIC."
         return None
 
+    if protocol == "vmess":
+        for vnext in (outbound.get("settings") or {}).get("vnext") or []:
+            for user in (vnext or {}).get("users") or []:
+                if int((user or {}).get("alterId") or 0) > 0:
+                    return (
+                        f"Сервер {node.name or node.server} использует VMess с alterId > 0 (старый протокол "
+                        "без AEAD). Ядро Xray его не поддерживает: нужен сервер с alterId=0."
+                    )
+
     stream_settings = outbound.get("streamSettings") if isinstance(outbound, dict) else None
     if not isinstance(stream_settings, dict):
         return None
 
-    # VLESS всегда исполняет Xray (в том числе как sidecar sing-box), а он не
-    # принимает allowInsecure без пина. Trojan/VMess в sing-box с insecure работают.
-    if protocol == "vless":
+    # VLESS, VMess и Trojan всегда исполняет Xray (как sidecar sing-box), а он не
+    # принимает allowInsecure без пина.
+    if protocol in {"vless", "vmess", "trojan"}:
         tls_problem = xray_core_tls_problem(node)
         if tls_problem:
             return tls_problem
@@ -736,6 +751,11 @@ def _parse_vmess(link: str) -> Node:
         "pcs": str(payload.get("pcs") or payload.get("pinnedPeerCertSha256") or ""),
         "vcn": str(payload.get("vcn") or payload.get("verifyPeerCertByName") or ""),
     }
+    if str(payload.get("net") or "").lower() in {"xhttp", "splithttp"}:
+        # v2rayN кладёт режим XHTTP в поле type, а extra — строкой или объектом.
+        params["mode"] = str(payload.get("type") or "") if str(payload.get("type") or "") in _XHTTP_MODES else ""
+        extra = payload.get("extra")
+        params["extra"] = json.dumps(extra) if isinstance(extra, (dict, list)) else str(extra or "")
 
     outbound = {
         "protocol": "vmess",
@@ -754,7 +774,9 @@ def _parse_vmess(link: str) -> Node:
                 }
             ]
         },
-        "streamSettings": _build_stream_settings(params, default_network=params["net"], default_security=params["security"]),
+        "streamSettings": _build_stream_settings(
+            params, default_network=params["net"], default_security=params["security"], xray_only=True
+        ),
     }
 
     name = _clean_name(str(payload.get("ps") or ""), f"vmess-{server}:{port}")
@@ -790,7 +812,9 @@ def _parse_trojan(link: str) -> Node:
                 }
             ]
         },
-        "streamSettings": _build_stream_settings(params, default_network="tcp", default_security=params.get("security", "tls")),
+        "streamSettings": _build_stream_settings(
+            params, default_network="tcp", default_security=params.get("security", "tls"), xray_only=True
+        ),
     }
 
     name = _clean_name(parsed.fragment, f"trojan-{server}:{port}")

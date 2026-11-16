@@ -31,7 +31,7 @@ a user action from the GUI (like the existing "restore stock" actions), and noth
 - One routing exit: the template's `proxy` outbound. The runtime replaces it (`engines/singbox/runtime_planner.py`
   ~433-500): a `selector` tagged `proxy` over the local provider `__app_nodes` when the selected server runs on
   sing-box itself, otherwise the single native outbound.
-- Only servers whose core is sing-box go into that provider. VLESS goes to ONE Xray sidecar (hybrid mode: `proxy`
+- Only servers whose core is sing-box go into that provider. VLESS, VMess and Trojan go to ONE Xray sidecar (hybrid mode: `proxy`
   becomes a selector over two loopback SOCKS relays into Xray, `runtime_planner.py` ~715-890, the Xray pool and its
   balancer in `outbound_pool_service.py`). Hysteria2 goes to ONE `hysteria.exe` sidecar behind a SOCKS relay. AWG to
   Amnezia. The controller owns one manager of each (`controller.py` ~415-418).
@@ -81,8 +81,8 @@ A slot on a different server than the main one needs that server's native core t
 
 | Slot server's core | What it needs |
 |---|---|
-| sing-box (Trojan, Shadowsocks, VMess, ...) | nothing new: it is already a member of `__app_nodes` |
-| Xray (VLESS Reality / XHTTP) | the same ONE Xray sidecar, one more loopback relay inbound per slot routed to that server's outbound |
+| sing-box (Shadowsocks, SOCKS, HTTP, ...) | nothing new: it is already a member of `__app_nodes` |
+| Xray (VLESS, VMess, Trojan; Reality / XHTTP) | the same ONE Xray sidecar, one more loopback relay inbound per slot routed to that server's outbound |
 | Hysteria2 | one more `hysteria.exe` per distinct Hysteria2 server in use (up to 4 with 3 slots) |
 | AWG (Amnezia) | one more Amnezia instance per distinct server (heaviest; WireGuard adapters) |
 

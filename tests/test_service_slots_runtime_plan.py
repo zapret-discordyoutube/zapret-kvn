@@ -15,8 +15,8 @@ from xray_fluent.slots.runtime_plan import ensure_helper_direct_routes, plan_slo
 ROOT = Path(__file__).resolve().parents[1]
 PROVIDER = "__app_nodes"
 
-MAIN = Node(id="main", scheme="trojan", outbound={"protocol": "trojan"})
-TROJAN = Node(id="tro", scheme="trojan", outbound={"protocol": "trojan"})
+MAIN = Node(id="main", scheme="shadowsocks", outbound={"protocol": "shadowsocks"})
+SHADOWSOCKS = Node(id="tro", scheme="shadowsocks", outbound={"protocol": "shadowsocks"})
 HY2 = Node(id="hy", scheme="hysteria2", link="hy2://x@h:443", outbound={"protocol": "hysteria2"})
 VLESS = Node(id="vl", scheme="vless", outbound={"protocol": "vless", "settings": {}})
 AWG = Node(id="awg", scheme="awg", outbound={"protocol": "awg"})
@@ -44,7 +44,7 @@ def plan(config, assignments, provider_tags=None):
         provider_tag=PROVIDER,
         allocate_port=Ports(),
         credentials=lambda prefix: (f"{prefix}-user", f"{prefix}-pass"),
-        build_native_outbound=lambda node, tag: {"type": "trojan", "tag": tag, "server": node.id},
+        build_native_outbound=lambda node, tag: {"type": "shadowsocks", "tag": tag, "server": node.id},
     )
 
 
@@ -70,7 +70,7 @@ class SlotRuntimePlanTests(unittest.TestCase):
 
     def test_singbox_server_in_the_provider_is_a_provider_member(self):
         config = runtime({catalog.YOUTUBE})
-        [only] = plan(config, {"youtube": TROJAN}, provider_tags={"tro": "__app_nodes/node_t", "main": "__app_nodes/node_m"})
+        [only] = plan(config, {"youtube": SHADOWSOCKS}, provider_tags={"tro": "__app_nodes/node_t", "main": "__app_nodes/node_m"})
         self.assertEqual("__app_nodes/node_t", only.member_tag)
         selector = outbound(config, "zapret-slot-youtube")
         self.assertEqual(["__app_nodes"], selector["providers"])
@@ -79,9 +79,9 @@ class SlotRuntimePlanTests(unittest.TestCase):
 
     def test_singbox_server_without_provider_gets_its_native_outbound(self):
         config = runtime({catalog.YOUTUBE})
-        [only] = plan(config, {"youtube": TROJAN})
+        [only] = plan(config, {"youtube": SHADOWSOCKS})
         self.assertEqual("zapret-slot-out-youtube", only.member_tag)
-        self.assertEqual({"type": "trojan", "tag": "zapret-slot-out-youtube", "server": "tro"},
+        self.assertEqual({"type": "shadowsocks", "tag": "zapret-slot-out-youtube", "server": "tro"},
                          outbound(config, "zapret-slot-out-youtube"))
         selector = outbound(config, "zapret-slot-youtube")
         self.assertEqual(["proxy", "zapret-slot-relay-youtube", "zapret-slot-out-youtube"], selector["outbounds"])
@@ -121,7 +121,7 @@ class SlotRuntimePlanTests(unittest.TestCase):
 
     def test_helper_executables_leave_the_tunnel_directly_once(self):
         config = runtime({catalog.YOUTUBE, catalog.TELEGRAM, catalog.AI})
-        plans = plan(config, {"youtube": HY2, "telegram": VLESS, "ai": TROJAN})
+        plans = plan(config, {"youtube": HY2, "telegram": VLESS, "ai": SHADOWSOCKS})
         paths = lambda core, slot: f"C:/app/slots/{core.value}-slot-{slot}.exe"  # noqa: E731
         ensure_helper_direct_routes(config, plans, paths)
         ensure_helper_direct_routes(config, plans, paths)

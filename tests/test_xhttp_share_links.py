@@ -4,6 +4,7 @@ Xray owns XHTTP: the parser only writes the native `xhttpSettings` object, where
 is the URL-decoded JSON object that Xray itself merges (see infra/conf SplitHTTPConfig).
 """
 
+import base64
 import json
 import unittest
 from urllib.parse import quote
@@ -15,6 +16,8 @@ from xray_fluent.importer.link_parser import (
     repair_node_outbound_from_link,
     validate_node_outbound,
 )
+import base64
+
 from xray_fluent.masking import xray as masking_xray
 from xray_fluent.masking.apply import shape_of
 
@@ -116,6 +119,21 @@ class XhttpShareLinkTests(unittest.TestCase):
         self.assertNotIn("xmux", _xhttp(with_extra))
         self.assertEqual({"path": "/p", "xmux": {"maxConnections": "2"}}, _xhttp(plain))
         self.assertEqual("xhttp", shape_of(plain.outbound).network)
+
+    def test_vmess_json_link_carries_mode_and_extra(self) -> None:
+        payload = {"v": "2", "ps": "v", "add": "h.example", "port": "443", "id": UUID, "aid": "0", "net": "xhttp",
+                   "type": "stream-up", "host": "cdn.example", "path": "/v", "tls": "tls", "sni": "h.example",
+                   "extra": {"uplinkHTTPMethod": "GET"}}
+        node = parse_single("vmess://" + base64.b64encode(json.dumps(payload).encode()).decode())
+        self.assertEqual(
+            {"path": "/v", "host": "cdn.example", "mode": "stream-up", "extra": {"uplinkHTTPMethod": "GET"}},
+            _xhttp(node),
+        )
+
+    def test_trojan_link_carries_xhttp_extra(self) -> None:
+        extra = quote(json.dumps({"xPaddingObfsMode": True}), safe="")
+        node = parse_single(f"trojan://pw@h.example:443?type=xhttp&security=tls&path=%2Ft&mode=packet-up&extra={extra}#t")
+        self.assertEqual({"path": "/t", "mode": "packet-up", "extra": {"xPaddingObfsMode": True}}, _xhttp(node))
 
     def test_other_transports_are_unchanged(self) -> None:
         node = parse_single(_link("type=ws&security=tls&path=%2Fw&host=w.example"))

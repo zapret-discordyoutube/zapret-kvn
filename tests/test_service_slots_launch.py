@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "data/templates/sing-box/default.json"
 LINUX_SINGBOX = ROOT.parent / "android/core-build/output/sing-box"
 
-MAIN = parse_single("trojan://secret@main.example:443?security=tls#main")
-OTHER = parse_single("trojan://secret@other.example:443?security=tls#other")
+MAIN = parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@main.example:8388#main")
+OTHER = parse_single("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@other.example:8388#other")
 HY2 = parse_single("hy2://secret@hy.example:443/?sni=hy.example#hy")
 VLESS = parse_single("vless://11111111-1111-1111-1111-111111111111@vl.example:443?type=tcp&security=tls&sni=vl.example#vl")
 NODES = [MAIN, OTHER, HY2, VLESS]
@@ -74,7 +74,7 @@ class SlotLaunchTests(unittest.TestCase):
         self.assertEqual("hysteria_sidecar", plan.outcome)
         [ai] = plan.slot_plans
         self.assertEqual("zapret-slot-out-ai", ai.member_tag)
-        self.assertEqual("trojan", outbound(plan.singbox_config, "zapret-slot-out-ai")["type"])
+        self.assertEqual("shadowsocks", outbound(plan.singbox_config, "zapret-slot-out-ai")["type"])
 
     @unittest.skipUnless(LINUX_SINGBOX.is_file(), "Linux sing-box of the pinned core not available")
     def test_launch_config_with_slots_passes_the_pinned_core_check(self):

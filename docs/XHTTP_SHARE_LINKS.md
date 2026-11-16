@@ -23,5 +23,17 @@ and older carry an `xhttpSettings`-less outbound. `prepare_node_for_runtime` re-
 before it starts (`repair_node_outbound_from_link`), so such nodes are repaired on the next connect and
 saved; no re-import is needed. Nodes without a link (pasted JSON) already hold native settings.
 
-Not covered: VMess/Trojan over XHTTP (sing-box has no XHTTP transport in the Windows build, the node is
-marked unsupported), and the `fm` share-link parameter (Xray finalmask JSON), which neither platform imports.
+VMess and Trojan over XHTTP: Xray supports them (transport is independent of protocol), and since the owner
+decision of 2026-11-16 Xray owns VLESS, VMess and Trojan (`application/protocol_core.py`). Their stored outbound is
+already in Xray's JSON shape, so the Xray sidecar takes `xhttpSettings` unchanged; nothing is converted for
+sing-box (it had no XHTTP path for them: the old `_unsupported_transport` marker is gone with the dead conversion).
+The VMess JSON link carries the XHTTP mode in `type` and `extra` as a string or an object.
+
+Other Xray-owned details of the parser: WebSocket and HTTPUpgrade drop `h2`/`h3` from `alpn` (HTTP/1.1-only
+transports; Xray defaults to http/1.1 only when alpn is empty); `allowInsecure` without a pin is never passed
+to Xray (it would refuse to start), the certificate is verified normally; VMess with `alterId > 0` (legacy
+protocol without AEAD) is refused with a Russian message. Raw sing-box JSON outbounds pasted by the user
+(`type` key, no Xray `protocol` key) stay with sing-box.
+
+Not covered: the `fm` share-link parameter (Xray finalmask JSON); the masking session owns it
+(`/root/.agent-todo/zapret-kvn/2026-11-15-obfuscation-question.md`).
