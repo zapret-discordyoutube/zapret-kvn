@@ -48,7 +48,7 @@ WIREGUARD_JUNK_ONLY = Preset(
     Masking(wireguard=WireGuardMasking(jc=3, jmin=10, jmax=30)),
 )
 XRAY_MUX = Preset(
-    "xray-mux", Group.XRAY, "Mux (VLESS по TCP)",
+    "xray-mux", Group.XRAY, "Mux (VLESS, VMess, Trojan по TCP)",
     "Много запросов идут в нескольких долгих соединениях: меньше рукопожатий подряд. "
     "QUIC в mux отклоняется, приложения перейдут на TCP.",
     Masking(xray=XrayShaping(mux=MuxCool())),
@@ -78,7 +78,7 @@ XRAY_FRAGMENT = Preset(
     Masking(xray=XrayShaping(fragment=XrayFragment())),
 )
 SINGBOX_FRAGMENT = Preset(
-    "singbox-fragment", Group.EXPERIMENT, "Фрагментация TLS (Trojan, VMess)",
+    "singbox-fragment", Group.EXPERIMENT, "Фрагментация TLS (AnyTLS, HTTP, ShadowTLS)",
     "Эксперимент. То же для протоколов sing-box. На REALITY не действует.",
     Masking(singbox=SingboxFragment()),
 )

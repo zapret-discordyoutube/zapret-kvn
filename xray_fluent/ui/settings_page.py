@@ -280,7 +280,7 @@ class SettingsPage(ScrollablePage):
             [(title, choice) for choice, title in masking_choices.WIREGUARD_CHOICES], parent=masking_group,
         )
         self.masking_mux_card = SwitchSettingCard(
-            FIF.CONNECT, "Xray mux (VLESS по TCP)",
+            FIF.CONNECT, "Xray mux (VLESS, VMess, Trojan по TCP)",
             "Меньше рукопожатий подряд. QUIC в mux отклоняется: приложения перейдут на TCP",
             parent=masking_group,
         )
@@ -295,12 +295,12 @@ class SettingsPage(ScrollablePage):
             parent=masking_group,
         )
         self.masking_singbox_fragment_card = SwitchSettingCard(
-            FIF.CUT, "Фрагментация TLS (Trojan, VMess) — эксперимент",
-            "То же для протоколов sing-box; на REALITY не действует",
+            FIF.CUT, "Фрагментация TLS (AnyTLS, HTTP, ShadowTLS) — эксперимент",
+            "Для протоколов sing-box; на REALITY не действует. Для VLESS, VMess и Trojan есть фрагментация Xray",
             parent=masking_group,
         )
         self.masking_desync_card = _ComboCard(
-            FIF.FILTER, "Пакеты-обманки (VLESS по TCP) — эксперимент",
+            FIF.FILTER, "Пакеты-обманки (VLESS, VMess, Trojan по TCP) — эксперимент",
             "Обманка уходит через драйвер WinDivert, и Zapret тогда не трогает пакеты этого сервера; "
             "беспорядок теряет начало первого пакета по пути",
             [(title, choice) for choice, title in masking_choices.DESYNC_CHOICES], parent=masking_group,
