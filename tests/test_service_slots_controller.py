@@ -114,6 +114,17 @@ class ControllerSlotTests(unittest.TestCase):
         self.assertTrue(AppController._youtube_slot_rescue(fake, ["sn-abc"]))
         self.assertEqual([], fake.slot_runtime.moves)
 
+class SlotHostKeyTests(unittest.TestCase):
+    def test_names_on_one_address_are_one_machine_by_the_session_dns_snapshot(self):
+        same = {"a.example": ["203.0.113.7"], "b.example": ["203.0.113.7"]}
+        with patch.object(controller_module, "cached_addresses", lambda host: same.get(host, [])):
+            a, b, c = (controller_module._slot_host_keys(Node(id=i, server=f"{i}.example")) for i in "abc")
+            literal = controller_module._slot_host_keys(Node(id="d", server="203.0.113.7"))
+        self.assertTrue(a & b)
+        self.assertFalse(a & c)
+        self.assertTrue(literal & a)
+        self.assertEqual(frozenset({"id:e"}), controller_module._slot_host_keys(Node(id="e")))
+
 
 if __name__ == "__main__":
     unittest.main()

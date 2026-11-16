@@ -261,6 +261,7 @@ from ..importer.subscription_http import (
     validate_hwid,
 )
 from ..importer.subscription_parser import validate_filter_patterns
+from ..network.bootstrap_dns import cached_addresses
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
 from ..network.physical_route import (
@@ -294,7 +295,7 @@ from ..engines.zapret.manager import ZapretManager
 from ..engines.singbox.runtime_planner import attach_service_slots
 from ..constants import HYSTERIA_PATH_DEFAULT as _SLOT_HYSTERIA_SOURCE, XRAY_PATH_DEFAULT as _SLOT_XRAY_DEFAULT
 from ..profiles.path_utils import resolve_configured_path as _resolve_core_path
-from ..slots.assigner import assign_slots, slot_capable
+from ..slots.assigner import assign_slots, default_host_keys, off_machines, slot_capable
 from ..slots.runtime_plan import slot_selector_ids
 from ..slots.rescue import youtube_rescue
 from ..slots.config_writer import apply_slots as apply_service_slots, enabled_slots as enabled_service_slots
@@ -387,6 +388,15 @@ class HotSwitchPlan:
     tag: str
     control_core: str
     previous_tag: str
+
+
+def _slot_host_keys(node: Node) -> frozenset[str]:
+    """The machine of a server for the slots: its host name plus the addresses this session's DNS snapshot knows for
+    it (stable for the session, so a background DNS refresh never changes a built plan)."""
+    keys = default_host_keys(node)
+    if node.server:
+        keys = keys | frozenset(cached_addresses(node.server))
+    return keys
 
 
 class AppController(QObject):
@@ -1243,9 +1253,14 @@ class AppController(QObject):
         if slot_id not in self.slot_runtime.active_slots:
             return
         others = {v for k, v in self.slot_runtime.servers_in_use().items() if k != slot_id}
-        candidates = [n for n in self.state.nodes if n.id not in others and self.slot_runtime.can_move_hot(n)]
+        reachable = [n for n in self.state.nodes if n.id not in others and self.slot_runtime.can_move_hot(n)]
+        # «Авто» avoids the other slots' machines; a pin is honoured as it is, even on a sibling entry.
+        main_id = self.slot_runtime.main_node_id
+        apart = {n.id for n in off_machines(reachable, self.state.nodes, [*others, main_id], _slot_host_keys)}
+        candidates = [n for n in reachable if n.id == node_id or n.id in apart]
         [assignment] = assign_slots(
-            [slot_id], candidates, main_node_id=self.slot_runtime.main_node_id, pins=pins, failed=self._slot_failed,
+            [slot_id], candidates, main_node_id=main_id, pins=pins, failed=self._slot_failed,
+            host_keys=_slot_host_keys,
         )
         target = assignment.node
         if node_id and (target is None or target.id != node_id) and node_id != self.slot_runtime.main_node_id:
@@ -1279,6 +1294,7 @@ class AppController(QObject):
             reachable=self.slot_runtime.can_move_hot,
             now=now,
             last_move_at=getattr(self, "_youtube_slot_moved_at", None),
+            host_keys=_slot_host_keys,
         )
         if not decision.move:
             if decision.reason:
@@ -1317,6 +1333,7 @@ class AppController(QObject):
             main_node_id=main_id,
             pins=dict(self.state.settings.service_slot_pins),
             failed=getattr(self, "_slot_failed", None),
+            host_keys=_slot_host_keys,
         )
         plan = attach_service_slots(plan, {a.slot_id: a.node for a in assignments}, main_node_id=main_id)
         # The reason is logged once, when the helpers start (this plan is also built for transition signatures).

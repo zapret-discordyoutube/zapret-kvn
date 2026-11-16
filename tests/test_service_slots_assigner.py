@@ -5,11 +5,12 @@ from __future__ import annotations
 import unittest
 
 from xray_fluent.profiles.models import Node
-from xray_fluent.slots.assigner import assign_slots, slot_capable
+from xray_fluent.slots.assigner import assign_slots, off_machines, slot_capable
 
 
-def node(node_id, *, alive=True, speed=None, ping=None, protocol="trojan"):
-    return Node(id=node_id, scheme=protocol, outbound={"protocol": protocol}, is_alive=alive, speed_mbps=speed, ping_ms=ping)
+def node(node_id, *, alive=True, speed=None, ping=None, protocol="trojan", server=""):
+    return Node(id=node_id, scheme=protocol, outbound={"protocol": protocol}, is_alive=alive, speed_mbps=speed,
+                ping_ms=ping, server=server)
 
 
 class SlotAssignerTests(unittest.TestCase):
@@ -54,6 +55,45 @@ class SlotAssignerTests(unittest.TestCase):
         pool = [node("main"), node("unknown", alive=None, speed=80), node("near", ping=30), node("far", ping=200)]
         [first, second, third] = assign_slots(["ai", "youtube", "telegram"], pool, main_node_id="main", pins={})
         self.assertEqual(["near", "far", "unknown"], [first.node.id, second.node.id, third.node.id])
+
+
+
+class SlotMachineTests(unittest.TestCase):
+    """One provider machine often comes as several entries (2026-11-16 e2e: five entries, one address)."""
+
+    def test_sibling_entries_of_the_main_machine_are_not_a_slot_server(self):
+        pool = [node("main", server="fi.example"), node("fi-2", speed=99, server="FI.example"),
+                node("nl", speed=5, server="nl.example")]
+        [only] = assign_slots(["youtube"], pool, main_node_id="main", pins={})
+        self.assertEqual("nl", only.node.id)
+
+    def test_two_slots_never_share_a_machine_and_a_crowded_pool_follows_the_main_server(self):
+        pool = [node("main", server="m.example"), node("fi-1", speed=50, server="fi.example"),
+                node("fi-2", speed=40, server="fi.example")]
+        ai, youtube = assign_slots(["ai", "youtube"], pool, main_node_id="main", pins={})
+        self.assertEqual("fi-1", ai.node.id)
+        self.assertIsNone(youtube.node)
+
+    def test_resolved_addresses_join_different_host_names(self):
+        addresses = {"a.example": "203.0.113.7", "b.example": "203.0.113.7", "c.example": "198.51.100.1"}
+        keys = lambda n: frozenset({n.server, addresses[n.server]})  # noqa: E731
+        pool = [node("main", server="a.example"), node("b", speed=99, server="b.example"),
+                node("c", speed=1, server="c.example")]
+        [only] = assign_slots(["youtube"], pool, main_node_id="main", pins={}, host_keys=keys)
+        self.assertEqual("c", only.node.id)
+
+    def test_a_pin_on_a_sibling_entry_is_honoured(self):
+        pool = [node("main", server="fi.example"), node("fi-2", server="fi.example"), node("nl", server="nl.example")]
+        [only] = assign_slots(["youtube"], pool, main_node_id="main", pins={"youtube": "fi-2"})
+        self.assertEqual(("fi-2", True), (only.node.id, only.pinned))
+
+    def test_entries_without_a_server_are_separate_machines(self):
+        pool = [node("main"), node("a", speed=2), node("b", speed=1)]
+        self.assertEqual(["a", "b"], [a.node.id for a in assign_slots(["ai", "youtube"], pool, main_node_id="main", pins={})])
+
+    def test_off_machines_drops_siblings_but_keeps_the_named_entries(self):
+        nodes = [node("x", server="fi.example"), node("x2", server="fi.example"), node("y", server="nl.example")]
+        self.assertEqual(["x", "y"], [n.id for n in off_machines(nodes, nodes, ["x"])])
 
 
 if __name__ == "__main__":

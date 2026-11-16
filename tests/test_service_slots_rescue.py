@@ -44,6 +44,16 @@ class YoutubeRescueTests(unittest.TestCase):
         # c is taken by the AI slot, shadowsocks is not reachable hot, a is where the video died.
         self.assertEqual("b", decision.node.id)
 
+    def test_a_sibling_entry_of_the_dead_machine_is_not_a_move(self):
+        def at(node_id, server, speed=None):
+            item = node(node_id, speed=speed)
+            item.server = server
+            return item
+        nodes = [at("main", "m.example"), at("a", "fi.example"), at("a2", "fi.example", speed=99),
+                 at("b", "nl.example", speed=1), at("m2", "m.example", speed=98)]
+        decision = self.decide(nodes=nodes, other_slots={})
+        self.assertEqual("b", decision.node.id)
+
     def test_cooldown_holds_the_slot(self):
         held = self.decide(last_move_at=1000.0 - COOLDOWN_SEC + 1)
         self.assertFalse(held.move)

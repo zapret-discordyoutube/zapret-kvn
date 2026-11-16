@@ -160,6 +160,13 @@ Plan:
   при низкой скорости», not «сервер выбран вручную» (that is the main server's pick). Log `[slots] youtube: кластер …
   не отвечает на A, слот YouTube -> B`; status «… YouTube переведён на B, остальные программы не тронуты.
   Перезапустите видео …».
+- **One machine is one server:** a provider machine often comes as several entries (VLESS gRPC, VLESS WS, Hysteria2,
+  each with its own host name). The assigner counts entries whose host keys meet as one server (`host_keys`: the host
+  name plus the addresses of this session's DNS snapshot, `bootstrap_dns.cached_addresses`, stable for the session so
+  a background refresh never changes a built plan). «Авто» never puts a slot on the main server's machine or on another
+  slot's machine through a sibling entry; with no other machine free the slot follows the main server. The YouTube
+  rescue never moves to a sibling of the machine the video died on (same address, same cache cluster). A pin is
+  honoured as it is. A fresh install learns the addresses of the other pool servers after its first connection.
 - **Live e2e on win10 (2026-11-16, source ff37b8c):** headless AppController in proxy mode against five
   loopback servers of the real cores (three `hysteria.exe server` with a self-signed certificate and
   `pinSHA256`, two `xray.exe` VLESS over TCP). Main server hy1. Ticking the three services gave AI -> hy2,
@@ -169,5 +176,11 @@ Plan:
   vl2 while connected moved it Hysteria -> Xray behind the same relay, with the same sing-box PID and no
   reconnect, and traffic kept flowing. Disconnect left no slot helper running. Not covered: real
   censorship and the provider-member path (no sing-box-only server in the set).
+- **Live e2e on real vpnbot nodes (2026-11-16, source 0f53c7d):** a synthetic vpnbot test person, 12 entries (7 VLESS
+  incl. one Reality with ML-KEM VLESS encryption, 5 Hysteria2 with salamander obfs) on 6 machines. Its link serves
+  Mihomo YAML only, so the entries were converted to links and imported (`slots_e2e.py --links`). Main server HY2
+  Finaltelekom; the three slots got `xray-slot-*.exe` helpers on their relays; YouTube 204, ChatGPT 200, Telegram 200,
+  main 200 in 1-2 s; a hot pin move kept the sing-box PID. The run showed the gap fixed above: the main server, all
+  three slots and the move target were five entries of ONE machine (same address), so nothing was really separated.
 - **Not yet:** slow-video rescue (Windows has no slow-video detector, only dead clusters), AWG slot servers (`slot_capable` keeps them out of the card list, and an old AWG pin falls back with the reason «серверы AmneziaWG для сервисов пока не поддерживаются»), a speed
-  history per service, per-slot traffic on the card, the e2e against real vpnbot nodes (vpnbot test account pending).
+  history per service, per-slot traffic on the card, Clash/Mihomo YAML subscriptions (neither app imports them).
