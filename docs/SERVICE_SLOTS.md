@@ -155,5 +155,5 @@ Plan:
   при низкой скорости», not «сервер выбран вручную» (that is the main server's pick). Log `[slots] youtube: кластер …
   не отвечает на A, слот YouTube -> B`; status «… YouTube переведён на B, остальные программы не тронуты.
   Перезапустите видео …».
-- **Not yet:** slow-video rescue (Windows has no slow-video detector, only dead clusters), AWG slot servers, a speed
+- **Not yet:** slow-video rescue (Windows has no slow-video detector, only dead clusters), AWG slot servers (`slot_capable` keeps them out of the card list, and an old AWG pin falls back with the reason «серверы AmneziaWG для сервисов пока не поддерживаются»), a speed
   history per service, per-slot traffic on the card, e2e on win10.

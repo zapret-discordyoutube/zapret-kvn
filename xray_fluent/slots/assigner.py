@@ -24,6 +24,11 @@ class SlotAssignment:
     reason: str = ""
 
 
+def slot_capable(node: Node) -> bool:
+    """Whether a server can carry a slot: AWG has no slot helper yet. The card lists only these servers."""
+    return protocol_core(node) is not ProtocolCore.AMNEZIA
+
+
 def _rank(node: Node) -> tuple:
     alive = 0 if node.is_alive is True else (2 if node.is_alive is False else 1)
     speed = -(node.speed_mbps or 0.0)
@@ -39,7 +44,9 @@ def assign_slots(
     pins: Mapping[str, str],
     failed: Mapping[str, set[str]] | None = None,
 ) -> list[SlotAssignment]:
-    nodes = [n for n in pool if protocol_core(n) is not ProtocolCore.AMNEZIA]
+    pool = list(pool)
+    nodes = [n for n in pool if slot_capable(n)]
+    awg = {n.id for n in pool if not slot_capable(n)}
     by_id = {n.id: n for n in nodes}
     failed = failed or {}
     used = {main_node_id} if main_node_id else set()
@@ -58,7 +65,9 @@ def assign_slots(
             used.add(pin)
             continue
         reason = ""
-        if pin and pin not in by_id:
+        if pin and pin in awg:
+            reason = "серверы AmneziaWG для сервисов пока не поддерживаются"
+        elif pin and pin not in by_id:
             reason = "закреплённого сервера нет в списке"
         elif pin:
             reason = "закреплённый сервер не отвечал"

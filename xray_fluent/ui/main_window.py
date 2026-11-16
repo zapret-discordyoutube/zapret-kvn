@@ -1539,7 +1539,7 @@ class MainWindow(FluentWindow):
             available=bool(view.get("available")),
             enabled=view.get("enabled") or set(),
             pins=view.get("pins") or {},
-            nodes=list(self.controller.state.nodes),
+            nodes=list(view.get("nodes") or ()),
             live=view.get("live") or {},
             connected=bool(view.get("connected")),
             note=str(view.get("note") or ""),

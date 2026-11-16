@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from xray_fluent.profiles.models import Node
-from xray_fluent.slots.assigner import assign_slots
+from xray_fluent.slots.assigner import assign_slots, slot_capable
 
 
 def node(node_id, *, alive=True, speed=None, ping=None, protocol="trojan"):
@@ -41,6 +41,14 @@ class SlotAssignerTests(unittest.TestCase):
         [only] = assign_slots(["youtube"], pool, main_node_id="main", pins={})
         self.assertIsNone(only.node)
         self.assertTrue(only.reason)
+
+    def test_an_awg_pin_falls_back_and_says_awg_is_not_supported(self):
+        pool = [node("main"), node("awg", protocol="awg", speed=99), node("a")]
+        [only] = assign_slots(["youtube"], pool, main_node_id="main", pins={"youtube": "awg"})
+        self.assertEqual(("a", False), (only.node.id, only.pinned))
+        self.assertIn("AmneziaWG", only.reason, "the server is in the list: do not say it is missing")
+        self.assertFalse(slot_capable(pool[1]))
+        self.assertTrue(slot_capable(pool[2]))
 
     def test_unmeasured_ranks_after_alive_and_ping_breaks_ties(self):
         pool = [node("main"), node("unknown", alive=None, speed=80), node("near", ping=30), node("far", ping=200)]

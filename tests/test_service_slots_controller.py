@@ -74,6 +74,12 @@ class ControllerSlotTests(unittest.TestCase):
         self.assertEqual(set(), view["enabled"], "the template has no slot ticked")
         self.assertEqual("b", view["live"]["youtube"].id)
 
+    def test_view_lists_only_servers_a_slot_can_use(self):
+        fake = fake_controller()
+        fake.state.nodes.append(Node(id="awg", name="AWG", scheme="awg", outbound={"protocol": "awg"}))
+        ids = [n.id for n in AppController.service_slots_view(fake)["nodes"]]
+        self.assertEqual(["main", "a", "b"], ids, "AmneziaWG has no slot helper yet: the card does not offer it")
+
     def test_pin_moves_a_running_slot_hot_and_auto_picks_the_best_free(self):
         fake = fake_controller(active=["youtube"], servers={"youtube": "a"})
         AppController.set_service_slot_pin(fake, "youtube", "a")

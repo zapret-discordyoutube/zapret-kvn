@@ -294,7 +294,7 @@ from ..engines.zapret.manager import ZapretManager
 from ..engines.singbox.runtime_planner import attach_service_slots
 from ..constants import HYSTERIA_PATH_DEFAULT as _SLOT_HYSTERIA_SOURCE, XRAY_PATH_DEFAULT as _SLOT_XRAY_DEFAULT
 from ..profiles.path_utils import resolve_configured_path as _resolve_core_path
-from ..slots.assigner import assign_slots
+from ..slots.assigner import assign_slots, slot_capable
 from ..slots.runtime_plan import slot_selector_ids
 from ..slots.rescue import youtube_rescue
 from ..slots.config_writer import apply_slots as apply_service_slots, enabled_slots as enabled_service_slots
@@ -1205,6 +1205,7 @@ class AppController(QObject):
             "available": has_proxy,
             "enabled": enabled_service_slots(config),
             "pins": dict(self.state.settings.service_slot_pins),
+            "nodes": [n for n in self.state.nodes if slot_capable(n)],
             "live": live,
             "connected": bool(self.slot_runtime.active_slots),
             "note": "" if has_proxy else "В конфиге sing-box нет outbound «proxy»: сервисам не на что опереться.",
