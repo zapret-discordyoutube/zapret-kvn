@@ -276,6 +276,8 @@ def build_runtime_xray_config(controller: AppController, node: Node | None = Non
                 outbounds[index] = proxy_outbound
             used_selected_node = True
             break
+        # «Пакеты-обманки» run in the sing-box front; a raw Xray config starts without it.
+        masking_runtime.strip_desync(outbounds)
 
     loop_prevention_interface = ""
     loop_prevention_patched_outbounds = 0

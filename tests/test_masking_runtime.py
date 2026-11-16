@@ -69,6 +69,74 @@ class MaskingRuntimeTests(unittest.TestCase):
         self.assertEqual({"h1": "5"}, endpoint["amnezia"])
 
 
+class DesyncRuntimeTests(unittest.TestCase):
+    """«Пакеты-обманки» on Windows: a sing-box route option of the server socket, never Xray."""
+
+    def setUp(self) -> None:
+        self.document = parse_singbox_document(TEMPLATE_PATH, TEMPLATE_PATH.read_text(encoding="utf-8"))
+        self.node = parse_single(REALITY)
+
+    def plan(self, masking):
+        node = masking_runtime.masked_node(self.node, MaskingSettings(True, masking))
+        return plan_singbox_runtime(self.document, node, pool_nodes=[node])
+
+    def protect_rules(self, plan) -> list[dict]:
+        return [rule for rule in plan.singbox_config["route"]["rules"]
+                if isinstance(rule, dict) and rule.get("inbound") == ["__app_hybrid_protect_in"]]
+
+    def test_fake_becomes_tls_spoof_for_that_server_and_xray_never_sees_it(self) -> None:
+        from xray_fluent.masking import desync
+
+        plan = self.plan(presets.DESYNC_FAKE.masking)
+        rules = self.protect_rules(plan)
+        spoof = [rule for rule in rules if rule.get("action") == "route-options"]
+        self.assertEqual(1, len(spoof))
+        self.assertEqual(["reality.example"], spoof[0]["domain"])
+        self.assertEqual("vk.com", spoof[0]["tls_spoof"])
+        self.assertEqual("wrong-sequence", spoof[0]["tls_spoof_method"])
+        # Before the protect route itself, so the options apply to its connections.
+        self.assertEqual("direct", rules[-1].get("outbound"))
+        self.assertLess(rules.index(spoof[0]), rules.index(rules[-1]))
+        for outbound in plan.xray_sidecar.config["outbounds"]:
+            self.assertNotIn(desync.CARRY_KEY, outbound)
+        self.assertTrue(desync.uses_windivert(plan.singbox_config))
+        self.assertNotIn(desync.CARRY_KEY, self.node.outbound)
+
+    def test_disorder_becomes_kvn_desync_without_windivert(self) -> None:
+        from xray_fluent.masking import desync
+
+        plan = self.plan(presets.DESYNC_DISORDER.masking)
+        options = [rule for rule in self.protect_rules(plan) if rule.get("action") == "route-options"]
+        self.assertEqual("disorder:sni", options[0]["kvn_desync"])
+        self.assertFalse(desync.uses_windivert(plan.singbox_config))
+
+    def test_no_tricks_no_rule_and_a_replan_does_not_pile_rules_up(self) -> None:
+        plan = self.plan(SETTINGS.global_masking)
+        self.assertFalse([rule for rule in self.protect_rules(plan) if rule.get("action") == "route-options"])
+        from xray_fluent.engines.singbox.runtime_planner import _ensure_hybrid_desync_routes
+
+        config = {"route": {"rules": [{"inbound": ["__app_hybrid_protect_in"], "outbound": "direct"}]}}
+        targets = [(["a.example"], {"method": "split", "split_at": "sni"})]
+        _ensure_hybrid_desync_routes(config, targets)
+        _ensure_hybrid_desync_routes(config, targets)
+        self.assertEqual(2, len(config["route"]["rules"]))
+
+    def test_raw_xray_config_gets_no_carried_plan(self) -> None:
+        from xray_fluent.masking import desync
+
+        masked = masking_runtime.masked_node(self.node, MaskingSettings(True, presets.DESYNC_FAKE.masking))
+        self.assertTrue(masking_runtime.carries_desync(masked))
+        outbounds = [dict(masked.outbound)]
+        self.assertEqual(1, masking_runtime.strip_desync(outbounds))
+        self.assertNotIn(desync.CARRY_KEY, outbounds[0])
+
+    def test_desync_of_names_the_servers_whose_socket_gets_tricks(self) -> None:
+        on = MaskingSettings(True, presets.DESYNC_FAKE.masking)
+        self.assertEqual("fake", masking_runtime.desync_of(self.node, on).method)
+        self.assertIsNone(masking_runtime.desync_of(self.node, MaskingSettings(True, presets.DESYNC_FAKE.masking, {self.node.id: OFF})))
+        self.assertIsNone(masking_runtime.desync_of(self.node, MaskingSettings(False, presets.DESYNC_FAKE.masking)))
+
+
 class ControllerOverrideTests(unittest.TestCase):
     def test_set_masking_override_writes_the_document_and_goes_through_update_settings(self) -> None:
         from types import SimpleNamespace

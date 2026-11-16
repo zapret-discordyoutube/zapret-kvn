@@ -19,6 +19,9 @@ PROCESS_LOOKUP_PATCH = "singbox-process-lookup-cache.patch"
 # Прямые HTTPS-запросы приложения сетевым стеком Chromium (`tools browser-fetch`):
 # только новые файлы, общий патч с Android (там — 0007 в series).
 BROWSER_FETCH_PATCH = "browser-fetch.patch"
+# «Маскировка», пакеты-обманки: движок common/kvndesync (тот же, что Android 0017) и опция
+# маршрута `kvn_desync` для сокета VPN-сервера (беспорядок, разрез); обманка — штатный tls_spoof.
+KVN_DESYNC_PATCH = "kvn-desync.patch"
 # Signs that upstream already stopped scanning the whole connection table per
 # lookup (sing dev 4ca3bebe: keyed TCP owner lookup; any table cache/single-flight).
 UPSTREAM_OWNER_LOOKUP_MARKERS = ("FindSocketOwner", "nsiGetTCPConnection", "singleflight")
@@ -36,8 +39,13 @@ def _git_blob_id(path: Path) -> str:
 
 def apply_process_lookup_patch(source: Path, patch: Path) -> None:
     """Apply the patch only to the exact upstream files it was written for."""
-    port_hint = (f"перенесите патч {patch.name} на новую версию или удалите его, "
-                 "если upstream исправил поиск сам")
+    apply_exact_patch(source, patch, what="поиск процесса", port_hint=(
+        f"перенесите патч {patch.name} на новую версию или удалите его, "
+        "если upstream исправил поиск сам"))
+
+
+def apply_exact_patch(source: Path, patch: Path, *, what: str, port_hint: str) -> None:
+    """`git apply` only onto the exact upstream blobs named in the patch's full index lines."""
     text = patch.read_text(encoding="utf-8")
     bases = re.findall(r"^diff --git a/(\S+) b/\S+\n(?:(?:new|deleted) file mode \d+\n)?index ([0-9a-f]{40})\.\.",
                        text, re.MULTILINE)
@@ -47,16 +55,16 @@ def apply_process_lookup_patch(source: Path, patch: Path) -> None:
         target = source / name
         if blob == "0" * 40:
             if target.exists():
-                raise StaleProcessLookupPatch(f"upstream изменил поиск процесса: {name} уже существует — {port_hint}")
+                raise StaleProcessLookupPatch(f"upstream изменил {what}: {name} уже существует — {port_hint}")
             continue
         actual = _git_blob_id(target) if target.is_file() else "нет файла"
         if actual != blob:
             raise StaleProcessLookupPatch(
-                f"upstream изменил поиск процесса: {name} (blob {actual}, патч написан для {blob}) — {port_hint}")
+                f"upstream изменил {what}: {name} (blob {actual}, патч написан для {blob}) — {port_hint}")
     check = subprocess.run(["git", "apply", "--check", str(patch)], cwd=source, capture_output=True, text=True)
     if check.returncode != 0:
         raise StaleProcessLookupPatch(
-            f"upstream изменил поиск процесса: git apply --check не прошёл ({check.stderr.strip()}) — {port_hint}")
+            f"upstream изменил {what}: git apply --check не прошёл ({check.stderr.strip()}) — {port_hint}")
     subprocess.run(["git", "apply", str(patch)], cwd=source, check=True)
 
 
@@ -121,6 +129,9 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     browser_patch = manifest.parent / BROWSER_FETCH_PATCH
     subprocess.run(['git', 'apply', '--check', str(browser_patch)], cwd=source, check=True)
     subprocess.run(['git', 'apply', str(browser_patch)], cwd=source, check=True)
+    desync_patch = manifest.parent / KVN_DESYNC_PATCH
+    apply_exact_patch(source, desync_patch, what="маршрутные опции", port_hint=(
+        f"перенесите патч {desync_patch.name} на новую версию sing-box"))
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
     # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
@@ -135,6 +146,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     tags = (source / "release/DEFAULT_BUILD_TAGS").read_text().strip() + ",with_purego"
     # Без libcronet рядом тест ClientHello пропускается, остальные идут всегда.
     subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, './common/browserfetch', '-run', '^TestZapret', '-count=1'],
+                   cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
+    subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, './common/kvndesync', './route/rule', '-count=1'],
                    cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
     for tags_variant in ("", "with_low_memory"):
         subprocess.run([go, "test", "-mod=readonly", "-tags", tags_variant,
@@ -155,7 +168,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                   "udp_patch": json.loads((dependency.parent / "provenance.json").read_text()),
                   "dns_warning_patch_sha256": sha256(dns_patch),
                   "process_lookup_patch_sha256": sha256(process_patch),
-                  "browser_fetch_patch_sha256": sha256(browser_patch)}
+                  "browser_fetch_patch_sha256": sha256(browser_patch),
+                  "kvn_desync_patch_sha256": sha256(desync_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
 

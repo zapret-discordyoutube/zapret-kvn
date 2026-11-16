@@ -26,6 +26,8 @@ from ...constants import RUNTIME_DIR, SINGBOX_CONFIG_FILE, SINGBOX_PATH_DEFAULT
 from ...profiles.path_utils import resolve_configured_path
 from ...network.proxy_readiness import LISTENER_POLL_MS, ports_listening, probe_listener_role
 from .config_check import check_config
+from .. import windivert_release
+from ...masking import desync as desync_rules
 from ...platform.windows.subprocess_utils import (
     decode_output,
     kill_processes_by_path,
@@ -74,6 +76,8 @@ class SingBoxManager(QObject):
     log_received = pyqtSignal(str)
     error = pyqtSignal(str)
     state_changed = pyqtSignal(bool)
+    #: App-side notes about the core's resources (WinDivert release), one line each.
+    notice = pyqtSignal(str)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -98,6 +102,8 @@ class SingBoxManager(QObject):
         self._deferred_startup_failure: str | None = None
         self._last_start_failure_retryable = False
         self.diagnostic_config: dict[str, Any] | None = None
+        # A started config opened WinDivert (`tls_spoof`): release the driver once it exited.
+        self._windivert_pending = False
         # Правила route последних запусков: диагностика видит и конфиг до правки.
         self.diagnostic_route_history: deque[dict[str, Any]] = deque(maxlen=8)
 
@@ -208,8 +214,11 @@ class SingBoxManager(QObject):
         killed = yield run_in_worker(lambda: _kill_orphaned_blocking(exe))
         if killed:
             yield sleep_ms(1000)
+        # A core that crashed with WinDivert open: release before the next one.
+        yield from self._release_windivert_steps()
         if not _still_wanted(should_continue):
             return False
+        self._windivert_pending = desync_rules.uses_windivert(config)
         self._uses_tun = uses_tun
         self._tun_interface_name = tun_interface_name or ""
 
@@ -319,6 +328,7 @@ class SingBoxManager(QObject):
                 self.state_changed.emit(False)
             self._starting = False
             self._uses_tun = False
+            yield from self._release_windivert_steps()
             return True
 
         used_tun = self._uses_tun
@@ -341,7 +351,21 @@ class SingBoxManager(QObject):
         if used_tun:
             yield from self._wait_tun_released_steps(tun_name)
             self._tun_stopped_at = time.monotonic()
+        yield from self._release_windivert_steps()
         return True
+
+    def _release_windivert_steps(self) -> TransitionSteps:
+        """After a core that opened WinDivert exited: unload the driver if nobody else uses it.
+
+        «Пакеты-обманки» (masking/desync.py, owner 2026-11-16): off, session over or app exit
+        leave WinDivert unloaded and available (engines/windivert_release.py).
+        """
+        if not self._windivert_pending or self._process.state() != QProcess.ProcessState.NotRunning:
+            return None
+        self._windivert_pending = False
+        outcome = yield run_in_worker(windivert_release.release_if_unused)
+        self.notice.emit(str(outcome))
+        return None
 
     @staticmethod
     def _wait_tun_released_steps(interface_name: str = "", max_wait: float = 10.0) -> TransitionSteps:

@@ -38,6 +38,11 @@ XMUX_CHOICES: list[tuple[str, str]] = [
     ("xmux-rotate", "Частая смена"),
     ("xmux-few", "Мало соединений"),
 ]
+DESYNC_CHOICES: list[tuple[str, str]] = [
+    (NONE_ID, "Выключены"),
+    ("desync-fake", "Обманка"),
+    ("desync-disorder", "Беспорядок пакетов"),
+]
 CUSTOM_TITLE = "Свои значения"
 
 
@@ -67,6 +72,17 @@ def xmux_choice(masking: Masking) -> str:
     return CUSTOM_ID
 
 
+def desync_choice(masking: Masking) -> str:
+    desync = masking.xray.desync if masking.xray is not None and masking.xray.enabled else None
+    if desync is None or not desync.enabled:
+        return NONE_ID
+    for preset_id, _ in DESYNC_CHOICES[1:]:
+        preset = _preset(preset_id)
+        if preset is not None and preset.masking.xray is not None and preset.masking.xray.desync == desync:
+            return preset_id
+    return CUSTOM_ID
+
+
 def mux_on(masking: Masking) -> bool:
     xray = masking.xray
     return bool(xray and xray.enabled and xray.mux and xray.mux.enabled)
@@ -83,6 +99,7 @@ def singbox_fragment_on(masking: Masking) -> bool:
 
 def compose_global(
     current: Masking, *, wireguard: str, mux: bool, xmux: str, xray_fragment: bool, singbox_fragment: bool,
+    desync: str = CUSTOM_ID,
 ) -> Masking:
     """The global set after the controls changed; CUSTOM keeps the current section."""
     if wireguard == CUSTOM_ID:
@@ -105,8 +122,15 @@ def compose_global(
     fragment_section = (
         current_xray.fragment if current_xray.fragment is not None and current_xray.fragment.enabled else XrayFragment()
     ) if xray_fragment else None
-    xray = XrayShaping(mux=mux_section, xmux=xmux_section, fragment=fragment_section)
-    if xray.mux is None and xray.xmux is None and xray.fragment is None:
+    if desync == CUSTOM_ID:
+        desync_section = current_xray.desync
+    elif desync == NONE_ID:
+        desync_section = None
+    else:
+        preset = _preset(desync)
+        desync_section = preset.masking.xray.desync if preset is not None and preset.masking.xray else None
+    xray = XrayShaping(mux=mux_section, xmux=xmux_section, fragment=fragment_section, desync=desync_section)
+    if xray.mux is None and xray.xmux is None and xray.fragment is None and xray.desync is None:
         xray = None
 
     singbox = (current.singbox if current.singbox is not None and current.singbox.enabled else SingboxFragment()) if singbox_fragment else None
@@ -154,7 +178,7 @@ def override_label(override: MaskingOverride) -> str:
 
 
 __all__ = [
-    "CUSTOM_ID", "CUSTOM_TITLE", "INHERIT", "NONE_ID", "WIREGUARD_CHOICES", "XMUX_CHOICES",
-    "compose_global", "mux_on", "override_label", "server_choices", "singbox_fragment_on",
+    "CUSTOM_ID", "CUSTOM_TITLE", "DESYNC_CHOICES", "INHERIT", "NONE_ID", "WIREGUARD_CHOICES", "XMUX_CHOICES",
+    "compose_global", "desync_choice", "mux_on", "override_label", "server_choices", "singbox_fragment_on",
     "wireguard_choice", "with_override", "xmux_choice", "xray_fragment_on",
 ]

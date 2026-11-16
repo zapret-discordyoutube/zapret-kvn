@@ -532,6 +532,70 @@ class GateTests(unittest.TestCase):
 
 
 
+class OwnDesyncTests(unittest.TestCase):
+    """«Маскировка» runs its own packet tricks on a server: winws2 must leave it alone.
+
+    Owner 2026-11-16: with spoofing on, the Zapret rule for that server is off — one
+    WinDivert desync per flow, no double fakes.
+    """
+
+    def setUp(self) -> None:
+        patcher = patch("xray_fluent.application.server_bypass.EndpointResolver")
+        self.resolver = patcher.start()
+        self.addCleanup(patcher.stop)
+        remember = patch("xray_fluent.application.node_runtime_service.remember_country_addresses")
+        remember.start()
+        self.addCleanup(remember.stop)
+
+    def _controller(self, node: Node, masking) -> Mock:
+        from xray_fluent.masking import codec
+        from xray_fluent.masking.model import MaskingSettings
+
+        controller = _controller(node)
+        controller.state.settings.masking = codec.encode(MaskingSettings(True, masking))
+        controller.state.nodes = [node]
+        return controller
+
+    def test_spoofed_server_gets_pass_and_needs_no_bypass(self) -> None:
+        from xray_fluent.masking import presets
+
+        node = _vless()
+        controller = self._controller(node, presets.DESYNC_FAKE.masking)
+        bypass = ServerBypass(controller)
+        endpoint = endpoint_for_node(node)
+        self.assertTrue(ZapretTargetSettings().enabled(endpoint.kind))
+        self.assertFalse(bypass.required(node))
+        self.assertTrue(bypass._strategy(endpoint).is_pass)
+        # No winws2 running: nothing is started just to say "pass", the VPN may start.
+        self.assertTrue(bypass.ready_for(node))
+        bypass.prepare(5)
+        bypass._on_resolved(5, endpoint, _resolved(node), None)
+        self.assertEqual(controller.zapret.launches, [])
+        self.assertTrue(any("пакеты-обманки" in str(c.args[0]) for c in controller._log.call_args_list))
+
+    def test_running_preset_carries_pass_for_the_spoofed_server(self) -> None:
+        from xray_fluent.masking import presets
+
+        node = _vless()
+        controller = self._controller(node, presets.DESYNC_DISORDER.masking)
+        controller.zapret.apply(ZapretPlan("Default"))
+        controller.zapret.process_started()
+        bypass = ServerBypass(controller)
+        bypass.prepare(5)
+        bypass._on_resolved(5, endpoint_for_node(node), _resolved(node), None)
+        plan, _ = controller.zapret.launches[-1]
+        self.assertTrue(plan.rule.strategy.is_pass)
+
+    def test_masking_without_tricks_keeps_the_chosen_strategy(self) -> None:
+        from xray_fluent.masking import presets
+
+        node = _vless()
+        controller = self._controller(node, presets.XRAY_MUX.masking)
+        bypass = ServerBypass(controller)
+        self.assertTrue(bypass.required(node))
+        self.assertFalse(bypass._strategy(endpoint_for_node(node)).is_pass)
+
+
 class PoolRuleTests(unittest.TestCase):
     """One winws2 rule for the whole running pool: a switch inside it keeps the tunnel."""
 

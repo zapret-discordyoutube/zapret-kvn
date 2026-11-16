@@ -85,13 +85,23 @@ SINGBOX_FRAGMENT = Preset(
 
 
 def desync_fake(ttl: int) -> Preset:
+    """Android's decoy presets differ by TTL; kept for the shared ids and the tests."""
     return Preset(
         f"desync-fake-{ttl}", Group.EXPERIMENT, f"Обманка, TTL {ttl}",
-        "Эксперимент. Перед настоящим первым пакетом уходит пакет-обманка с другим именем сайта и "
-        "коротким TTL: его видит фильтр, но не сервер. TTL зависит от сети: подбор пробует несколько.",
+        "Эксперимент. Перед настоящим первым пакетом уходит пакет-обманка с другим именем сайта.",
         Masking(xray=XrayShaping(desync=Desync(method="fake", fake_ttl=ttl))),
     )
 
+
+#: Windows decoy: sing-box `tls_spoof` over WinDivert. The decoy carries a wrong TCP sequence
+#: number, so the server drops it whatever the TTL: one preset instead of Android's two.
+DESYNC_FAKE = Preset(
+    "desync-fake", Group.EXPERIMENT, "Обманка",
+    "Эксперимент. Перед настоящим первым пакетом уходит пакет-обманка с другим именем сайта и "
+    "неверным номером TCP: его видит фильтр, а сервер отбрасывает. Нужен драйвер WinDivert, "
+    "на это время Zapret не трогает пакеты этого сервера.",
+    Masking(xray=XrayShaping(desync=Desync(method="fake"))),
+)
 
 DESYNC_DISORDER = Preset(
     "desync-disorder", Group.EXPERIMENT, "Беспорядок пакетов",
@@ -100,13 +110,12 @@ DESYNC_DISORDER = Preset(
     Masking(xray=XrayShaping(desync=Desync(method="disorder"))),
 )
 
-# The Windows engine for packet tricks is not built yet: its presets stay out of the lists and
-# the tester until it is, so nothing is offered that would silently do nothing.
-DESYNC_ENGINE_AVAILABLE = False
+#: The Windows engine: sing-box `tls_spoof` (WinDivert) and core patch kvn-desync.patch.
+DESYNC_ENGINE_AVAILABLE = True
 
 
 def desync_presets() -> list[Preset]:
-    return [desync_fake(3), desync_fake(5), DESYNC_DISORDER]
+    return [DESYNC_FAKE, DESYNC_DISORDER]
 
 
 def all_presets() -> list[Preset]:

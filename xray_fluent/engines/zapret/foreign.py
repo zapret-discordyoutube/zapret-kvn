@@ -39,6 +39,13 @@ class _ProcessEntry(ctypes.Structure):
 def running_zapret_processes() -> list[tuple[int, str]]:
     """Все запущенные winws.exe / winws2.exe: ``(pid, полный путь)``. Только Windows."""
 
+    return [(pid, path) for pid, _name, path in running_processes(ZAPRET_EXE_NAMES)]
+
+
+def running_processes(names: Iterable[str]) -> list[tuple[int, str, str]]:
+    """Запущенные процессы с этими именами exe: ``(pid, имя, полный путь)``. Только Windows."""
+
+    wanted = {name.lower() for name in names}
     if os.name != "nt":
         return []
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -59,14 +66,14 @@ def running_zapret_processes() -> list[tuple[int, str]]:
     snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
     if not snapshot or snapshot == _INVALID_HANDLE:
         return []
-    found: list[tuple[int, str]] = []
+    found: list[tuple[int, str, str]] = []
     try:
         entry = _ProcessEntry()
         entry.dwSize = ctypes.sizeof(_ProcessEntry)
         more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
         while more:
             # Имя из снимка дешёвое: путь спрашиваем только у тёзок.
-            if entry.szExeFile.lower() in ZAPRET_EXE_NAMES:
+            if entry.szExeFile.lower() in wanted:
                 handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, entry.th32ProcessID)
                 path = ""
                 if handle:
@@ -77,7 +84,7 @@ def running_zapret_processes() -> list[tuple[int, str]]:
                             path = buffer.value
                     finally:
                         kernel32.CloseHandle(handle)
-                found.append((int(entry.th32ProcessID), path))
+                found.append((int(entry.th32ProcessID), entry.szExeFile.lower(), path))
             more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
         kernel32.CloseHandle(snapshot)
@@ -102,4 +109,4 @@ def foreign_zapret_processes(
     return foreign
 
 
-__all__ = ["ZAPRET_EXE_NAMES", "foreign_zapret_processes", "running_zapret_processes"]
+__all__ = ["ZAPRET_EXE_NAMES", "foreign_zapret_processes", "running_processes", "running_zapret_processes"]

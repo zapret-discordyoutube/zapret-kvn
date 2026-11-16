@@ -49,9 +49,10 @@ from ..engines.zapret.endpoint import (
 )
 from ..network.bootstrap_dns import cached_addresses
 from ..engines.zapret.manager import ZapretPlan
-from ..engines.zapret.strategies import server_strategy
+from ..engines.zapret.strategies import Strategy, pass_strategy, server_strategy
 from ..network.background_workers import EndpointResolver
 from ..profiles.models import ZapretTargetSettings
+from . import masking_runtime
 from .async_steps import TransitionSteps, run_in_worker
 from .transition_engine import transition_request_delay_ms
 
@@ -118,6 +119,36 @@ class ServerBypass(QObject):
 
     # ── questions ────────────────────────────────────────────────────────
 
+    def _own_desync(self) -> frozenset[ServerEndpoint]:
+        """Servers whose socket gets the app's own packet tricks («Маскировка»).
+
+        One desync per flow: while sing-box fakes or reorders a server's first packet
+        (WinDivert ``tls_spoof`` or ``kvn_desync``), winws2 must leave that server's
+        packets alone — its rule for the server becomes ``pass`` and bypass is not
+        required for it (owner 2026-11-16).
+        """
+        c = self._controller
+        masking = masking_runtime.settings_of(c.state.settings)
+        if not masking.enabled:
+            return frozenset()
+        endpoints: set[ServerEndpoint] = set()
+        for node in getattr(c.state, "nodes", ()) or ():
+            if masking_runtime.desync_of(node, masking) is None:
+                continue
+            endpoint = endpoint_for_node(node)
+            if endpoint is not None:
+                endpoints.add(endpoint)
+        return frozenset(endpoints)
+
+    def _strategy(self, endpoint: ServerEndpoint) -> Strategy | None:
+        if endpoint in self._own_desync():
+            return pass_strategy(endpoint.transport)
+        return server_strategy(self.settings, endpoint)
+
+    def _bypass_on(self, endpoint: ServerEndpoint) -> bool:
+        """Bypass is on for the server's kind and the app does not run its own tricks on it."""
+        return self.settings.enabled(endpoint.kind) and endpoint not in self._own_desync()
+
     @property
     def settings(self) -> ZapretTargetSettings:
         return self._controller.state.settings.zapret_target
@@ -134,7 +165,7 @@ class ServerBypass(QObject):
         """The server's kind has bypass on: the VPN must not start without it."""
 
         endpoint = endpoint_for_node(node)
-        return endpoint is not None and self.settings.enabled(endpoint.kind)
+        return endpoint is not None and self._bypass_on(endpoint)
 
     def ready_for(self, node: Node | None) -> bool:
         """winws2 is in the state this node needs, proven by a started process."""
@@ -145,12 +176,12 @@ class ServerBypass(QObject):
         if self._zapret.pending:
             return False
         try:
-            strategy = server_strategy(self.settings, endpoint)
+            strategy = self._strategy(endpoint)
         except ValueError:
             return False
         if strategy is None:
             return True
-        if not self.settings.enabled(endpoint.kind) and not self._zapret.active:
+        if not self._bypass_on(endpoint) and not self._zapret.active:
             return True  # "pass" with no winws2 at all: nothing touches the server
         plan = self._zapret.plan
         return (
@@ -197,11 +228,11 @@ class ServerBypass(QObject):
             self._drop_rule()
             return False
         try:
-            server_strategy(self.settings, endpoint)
+            self._strategy(endpoint)
         except ValueError as exc:
             c._cancel_target_transition(f"Zapret: {exc}")
             return True
-        if self._sites_on and self.settings.enabled(endpoint.kind) and not self._ensure_preset():
+        if self._sites_on and self._bypass_on(endpoint) and not self._ensure_preset():
             return True
 
         if c.connected and not self.ready_for(node):
@@ -312,7 +343,7 @@ class ServerBypass(QObject):
             if endpoint is None or endpoint == selected or endpoint in endpoints:
                 continue
             try:
-                if server_strategy(self.settings, endpoint) is None:
+                if self._strategy(endpoint) is None:
                     continue
             except ValueError:
                 continue
@@ -323,7 +354,7 @@ class ServerBypass(QObject):
         rules: list[ServerRule] = []
         for resolved in known:
             try:
-                strategy = server_strategy(self.settings, resolved.endpoint)
+                strategy = self._strategy(resolved.endpoint)
             except ValueError:
                 continue
             if strategy is not None:
@@ -352,10 +383,10 @@ class ServerBypass(QObject):
         if endpoint is None:
             return True
         try:
-            strategy = server_strategy(self.settings, endpoint)
+            strategy = self._strategy(endpoint)
         except ValueError:
             return False
-        if strategy is None or (not self.settings.enabled(endpoint.kind) and not self._zapret.active):
+        if strategy is None or (not self._bypass_on(endpoint) and not self._zapret.active):
             return True
         plan = self._zapret.plan
         if plan is None or not self._zapret.is_applied(plan):
@@ -396,7 +427,7 @@ class ServerBypass(QObject):
         node = c._runtime_selected_node()
         if endpoint != endpoint_for_node(node):
             return
-        required = self.settings.enabled(endpoint.kind)
+        required = self._bypass_on(endpoint)
         if error is not None:
             c._log(
                 f"[zapret] DNS выбранного сервера host={', '.join(endpoint.hosts)} "
@@ -414,10 +445,15 @@ class ServerBypass(QObject):
         remember_country_addresses(c, node, resolved.ips)
 
         try:
-            strategy = server_strategy(self.settings, endpoint)
+            strategy = self._strategy(endpoint)
         except ValueError as exc:
             c._cancel_target_transition(f"Zapret: {exc}")
             return
+        if endpoint in self._own_desync():
+            c._log(
+                "[zapret] у сервера свои пакеты-обманки маскировки: Zapret его пакеты не трогает"
+                + ("" if self._zapret.active else " (Zapret не запущен)")
+            )
         if strategy is None or (not required and not self._zapret.active):
             # TCP with bypass off (the preset decides) or "pass" with no winws2.
             self._drop_rule()
@@ -597,7 +633,7 @@ class ServerBypass(QObject):
             return
         endpoint = endpoint_for_node(node) if c._active_config_uses_selected_node(node) else None
         try:
-            strategy = server_strategy(self.settings, endpoint) if endpoint is not None else None
+            strategy = self._strategy(endpoint) if endpoint is not None else None
         except ValueError as exc:
             self._settle_manual_busy()
             c._set_connection_status("error", f"Zapret не запущен: {exc}", level="warning")

@@ -11,8 +11,10 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..masking import codec
-from ..masking.apply import apply_server, log_line
-from ..masking.model import NONE, MaskingOverride, MaskingSettings
+from ..masking import desync as desync_rules
+from ..masking.apply import apply_server, log_line, shape_of
+from ..masking.merge import effective
+from ..masking.model import NONE, Core, Desync, MaskingOverride, MaskingSettings
 from ..profiles.models import Node
 
 
@@ -92,6 +94,33 @@ def mask_pool_outbounds(
         notes.extend(outbound_notes)
         result.append(masked)
     return result, changed, notes
+
+
+#: Note of the connect log when the plan cannot run: a raw Xray config has no sing-box front.
+DESYNC_WITHOUT_FRONT = "Пакеты-обманки не применены: свой конфиг Xray запускается без sing-box."
+
+
+def carries_desync(node: Node | None) -> bool:
+    outbound = getattr(node, "outbound", None)
+    return isinstance(outbound, dict) and desync_rules.CARRY_KEY in outbound
+
+
+def strip_desync(outbounds: list[Any]) -> int:
+    """Remove carried packet-trick plans from outbounds that go to Xray as they are."""
+    return sum(desync_rules.take(outbound) is not None for outbound in outbounds if isinstance(outbound, dict))
+
+
+def desync_of(node: Node | None, settings: MaskingSettings) -> Desync | None:
+    """The packet tricks a connect runs on this node's server socket, or None."""
+    if node is None or not settings.enabled or not isinstance(node.outbound, dict):
+        return None
+    shape = shape_of(node.outbound)
+    if shape is None or shape.core is not Core.XRAY or not shape.is_tcp_stream:
+        return None
+    xray = effective(settings, node.id, shape).masking.xray
+    if xray is None or not xray.enabled or xray.desync is None or not xray.desync.enabled:
+        return None
+    return xray.desync if xray.desync.method in desync_rules.WINDOWS_METHODS else None
 
 
 def describe(settings: MaskingSettings, changed: int, notes: list[str]) -> str | None:

@@ -1,0 +1,1287 @@
+diff --git a/adapter/inbound.go b/adapter/inbound.go
+index c3efc1a055775e36b842c42ae110dd906c8d7493..4be7ed3d84e31ff828d3b789efbe5b994bcef3a3 100644
+--- a/adapter/inbound.go
++++ b/adapter/inbound.go
+@@ -6,6 +6,7 @@ import (
+ 	"net/netip"
+ 	"time"
+ 
++	"github.com/sagernet/sing-box/common/kvndesync"
+ 	"github.com/sagernet/sing-box/common/tlsspoof"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+@@ -84,6 +85,7 @@ type InboundContext struct {
+ 	TLSRecordFragment         bool
+ 	TLSSpoof                  string
+ 	TLSSpoofMethod            tlsspoof.Method
++	KVNDesync                 *kvndesync.Plan
+ 
+ 	NetworkStrategy     *C.NetworkStrategy
+ 	NetworkType         []C.InterfaceType
+diff --git a/common/kvndesync/conn.go b/common/kvndesync/conn.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dadb7ca83988c2694c345d8f77d87712a958d0e4
+--- /dev/null
++++ b/common/kvndesync/conn.go
+@@ -0,0 +1,136 @@
++package kvndesync
++
++import (
++	"net"
++	"sync"
++	"time"
++
++	N "github.com/sagernet/sing/common/network"
++)
++
++// sentWait bounds the wait for a piece to leave the host before its TTL is raised again.
++const sentWait = 50 * time.Millisecond
++
++// Conn executes the plan on the first non-empty write and is transparent afterwards.
++type Conn struct {
++	net.Conn
++	plan   *Plan
++	tcp    *net.TCPConn
++	report func(error)
++	once   sync.Once
++}
++
++// Client wraps a dialed connection to the VPN server. report receives the reason when the
++// plan could not run and the first write went out plainly (never the payload).
++func Client(conn net.Conn, plan *Plan, report func(error)) net.Conn {
++	tcp, _ := N.UnwrapReader(conn).(*net.TCPConn)
++	return &Conn{Conn: conn, plan: plan, tcp: tcp, report: report}
++}
++
++func (c *Conn) Write(b []byte) (int, error) {
++	if len(b) == 0 {
++		return c.Conn.Write(b)
++	}
++	n, err, done := 0, error(nil), false
++	c.once.Do(func() { n, err, done = c.first(b) })
++	if done {
++		return n, err
++	}
++	return c.Conn.Write(b)
++}
++
++// first returns done=false when nothing was sent and the caller writes b plainly.
++func (c *Conn) first(b []byte) (int, error, bool) {
++	if c.tcp == nil {
++		c.fail(errNoTCP)
++		return 0, nil, false
++	}
++	raw, err := c.tcp.SyscallConn()
++	if err != nil {
++		c.fail(err)
++		return 0, nil, false
++	}
++	pos := c.plan.SplitPos(b)
++	if c.plan.Method == MethodFake {
++		// The decoy stands in for the whole first write (one buffer, up to 16 KB).
++		pos = min(len(b), pageSizeLimit)
++	}
++	if pos == 0 {
++		return 0, nil, false
++	}
++	_ = c.tcp.SetNoDelay(true)
++	v6 := isIPv6(c.tcp.RemoteAddr())
++	switch c.plan.Method {
++	case MethodSplit:
++		return c.pieces(b, pos, func() error { _, err := c.tcp.Write(b[:pos]); return err })
++	case MethodDisorder:
++		return c.pieces(b, pos, func() error { return writeWithTTL(raw, c.tcp, b[:pos], 1, v6) })
++	case MethodOOB:
++		return c.pieces(b, pos, func() error { return writeOOB(raw, b[:pos]) })
++	case MethodFake:
++		sent, err := sendFake(raw, b[:pos], FakeClientHello(pos, c.plan.FakeSNI), c.plan.FakeTTL, v6)
++		if !sent {
++			c.fail(err)
++			return 0, nil, false
++		}
++		if err != nil {
++			return 0, err, true
++		}
++		if pos == len(b) {
++			return len(b), nil, true
++		}
++		m, err := c.tcp.Write(b[pos:])
++		return pos + m, err, true
++	}
++	return 0, nil, false
++}
++
++// pieces sends b[:pos] with send, then the rest plainly. A failure before any byte left
++// falls back to the plain write; after that the error is the caller's.
++func (c *Conn) pieces(b []byte, pos int, send func() error) (int, error, bool) {
++	if err := send(); err != nil {
++		if sendNothing(err) {
++			c.fail(err)
++			return 0, nil, false
++		}
++		return 0, err, true
++	}
++	m, err := c.tcp.Write(b[pos:])
++	return pos + m, err, true
++}
++
++func (c *Conn) fail(err error) {
++	if c.report != nil && err != nil {
++		c.report(err)
++	}
++}
++
++func (c *Conn) Upstream() any { return c.Conn }
++
++func (c *Conn) ReaderReplaceable() bool { return true }
++
++func (c *Conn) WriterReplaceable() bool { return false }
++
++func isIPv6(addr net.Addr) bool {
++	tcp, ok := addr.(*net.TCPAddr)
++	return ok && tcp.IP.To4() == nil
++}
++
++type planError string
++
++func (e planError) Error() string { return string(e) }
++
++const (
++	errNoTCP       = planError("desync: not a TCP socket, first write sent plainly")
++	errUnsupported = planError("desync: method needs Linux, first write sent plainly")
++)
++
++// sendNothing: errors that come from setsockopt before the piece was written.
++func sendNothing(err error) bool {
++	_, ok := err.(beforeSend)
++	return ok || err == errUnsupported
++}
++
++type beforeSend struct{ error }
++
++func (e beforeSend) Unwrap() error { return e.error }
+diff --git a/common/kvndesync/conn_linux_test.go b/common/kvndesync/conn_linux_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..353bad3fdd5e2d3e168585e18994353de235b8ad
+--- /dev/null
++++ b/common/kvndesync/conn_linux_test.go
+@@ -0,0 +1,156 @@
++//go:build linux
++
++package kvndesync
++
++import (
++	"bytes"
++	"crypto/tls"
++	"io"
++	"net"
++	"os"
++	"testing"
++	"time"
++)
++
++// loopback returns a client connection and a channel with everything the server read until
++// the client closed. Loopback never decrements TTL, so it shows the mechanism, not the drop.
++func loopback(t *testing.T) (*net.TCPConn, <-chan []byte) {
++	t.Helper()
++	listener, err := net.Listen("tcp4", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	received := make(chan []byte, 1)
++	go func() {
++		defer listener.Close()
++		conn, err := listener.Accept()
++		if err != nil {
++			received <- nil
++			return
++		}
++		data, _ := io.ReadAll(conn)
++		received <- data
++	}()
++	conn, err := net.Dial("tcp4", listener.Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	return conn.(*net.TCPConn), received
++}
++
++func TestEveryMethodButFakeDeliversTheExactStream(t *testing.T) {
++	hello := clientHello(t, "example.com")
++	for _, method := range []Method{MethodSplit, MethodDisorder, MethodOOB} {
++		t.Run(string(method), func(t *testing.T) {
++			raw, received := loopback(t)
++			var failed error
++			conn := Client(raw, &Plan{Method: method, SplitAt: SplitSNI, FakeTTL: DefaultTTL}, func(err error) { failed = err })
++			if n, err := conn.Write(hello); err != nil || n != len(hello) {
++				t.Fatalf("write %d %v", n, err)
++			}
++			if _, err := conn.Write([]byte("after")); err != nil {
++				t.Fatal(err)
++			}
++			conn.Close()
++			got := <-received
++			if failed != nil {
++				t.Fatalf("plan did not run: %v", failed)
++			}
++			if want := append(append([]byte{}, hello...), "after"...); !bytes.Equal(got, want) {
++				t.Fatalf("stream differs: got %d bytes, want %d", len(got), len(want))
++			}
++		})
++	}
++}
++
++// On loopback the decoy is delivered (no router to drop it): the server reads a decoy of the
++// same length with the decoy name, then the rest of the stream in order. The lab test below
++// shows that over a real hop the decoy dies and the real bytes arrive instead.
++func TestFakePutsTheDecoyOnTheWireFromTheSamePage(t *testing.T) {
++	hello := clientHello(t, "example.com")
++	raw, received := loopback(t)
++	conn := Client(raw, &Plan{Method: MethodFake, SplitAt: SplitSNI, FakeTTL: 3, FakeSNI: "vk.com"}, func(err error) { t.Errorf("plan did not run: %v", err) })
++	if n, err := conn.Write(hello); err != nil || n != len(hello) {
++		t.Fatalf("write %d %v", n, err)
++	}
++	if _, err := conn.Write([]byte("after")); err != nil {
++		t.Fatal(err)
++	}
++	conn.Close()
++	got := <-received
++	if len(got) != len(hello)+len("after") || !bytes.HasSuffix(got, []byte("after")) {
++		t.Fatalf("got %d bytes", len(got))
++	}
++	if bytes.Equal(got[:len(hello)], hello) || !bytes.Contains(got[:len(hello)], []byte("vk.com")) {
++		t.Fatal("loopback must carry the decoy, not the real hello")
++	}
++}
++
++func TestTTLIsRestoredAfterTheTrick(t *testing.T) {
++	hello := clientHello(t, "example.com")
++	raw, received := loopback(t)
++	sc, _ := raw.SyscallConn()
++	before, _ := getTTL(sc, false)
++	conn := Client(raw, &Plan{Method: MethodDisorder, SplitAt: SplitSNI, FakeTTL: DefaultTTL}, nil)
++	if _, err := conn.Write(hello); err != nil {
++		t.Fatal(err)
++	}
++	after, _ := getTTL(sc, false)
++	conn.Close()
++	<-received
++	if before != after {
++		t.Fatalf("ttl %d -> %d", before, after)
++	}
++}
++
++// TestLab needs a TLS server one router hop or more away (a TTL 1 packet must die in path):
++// KVN_DESYNC_LAB=10.10.10.14:443 KVN_DESYNC_LAB_SNI=git.zapret.moe go test -run TestLab ./common/kvndesync
++// The decoy at TTL 1 must leave the handshake intact (it died, the real hello was
++// retransmitted); the same decoy at TTL 64 must break it (it reached the server), which proves
++// the decoy really goes on the wire and only the TTL keeps it from the server.
++func TestLab(t *testing.T) {
++	address, sni := os.Getenv("KVN_DESYNC_LAB"), os.Getenv("KVN_DESYNC_LAB_SNI")
++	if address == "" || sni == "" {
++		t.Skip("KVN_DESYNC_LAB / KVN_DESYNC_LAB_SNI not set")
++	}
++	handshake := func(plan *Plan) error {
++		raw, err := net.DialTimeout("tcp", address, 5*time.Second)
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer raw.Close()
++		_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
++		var failed error
++		conn := Client(raw, plan, func(err error) { failed = err })
++		err = tls.Client(conn, &tls.Config{ServerName: sni}).Handshake()
++		if failed != nil {
++			t.Fatalf("%s: plan did not run: %v", plan, failed)
++		}
++		return err
++	}
++	for _, plan := range []*Plan{
++		{Method: MethodFake, SplitAt: SplitSNI, FakeTTL: 1, FakeSNI: "vk.com"},
++		{Method: MethodDisorder, SplitAt: SplitSNI, FakeTTL: DefaultTTL},
++		{Method: MethodSplit, SplitAt: SplitSNI, FakeTTL: DefaultTTL},
++	} {
++		started := time.Now()
++		if err := handshake(plan); err != nil {
++			t.Errorf("%s: handshake failed: %v", plan, err)
++		} else {
++			t.Logf("%s: handshake ok in %v", plan, time.Since(started).Round(time.Millisecond))
++		}
++	}
++	// OOB is path-dependent: a middlebox that clears URG turns the urgent byte into stream data
++	// (2026-11-16: passes on loopback, times out to 10.10.10.14 through the host's NAT). Logged,
++	// not asserted; the app keeps it out of presets and the tester.
++	if err := handshake(&Plan{Method: MethodOOB, SplitAt: SplitSNI, FakeTTL: DefaultTTL}); err != nil {
++		t.Logf("oob over this path: %v", err)
++	} else {
++		t.Log("oob over this path: handshake ok")
++	}
++	if err := handshake(&Plan{Method: MethodFake, SplitAt: SplitSNI, FakeTTL: 64, FakeSNI: "vk.com"}); err == nil {
++		t.Error("a decoy that reaches the server must break the handshake")
++	} else {
++		t.Logf("control, decoy at TTL 64 reaches the server: %v", err)
++	}
++}
+diff --git a/common/kvndesync/conn_windows_test.go b/common/kvndesync/conn_windows_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..39d2f40f6de86f63b0039f0df6258f8774090b60
+--- /dev/null
++++ b/common/kvndesync/conn_windows_test.go
+@@ -0,0 +1,139 @@
++//go:build windows
++
++package kvndesync
++
++import (
++	"bytes"
++	"crypto/tls"
++	"io"
++	"net"
++	"os"
++	"testing"
++	"time"
++)
++
++func loopback(t *testing.T) (*net.TCPConn, <-chan []byte) {
++	t.Helper()
++	listener, err := net.Listen("tcp4", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	received := make(chan []byte, 1)
++	go func() {
++		defer listener.Close()
++		conn, err := listener.Accept()
++		if err != nil {
++			received <- nil
++			return
++		}
++		data, _ := io.ReadAll(conn)
++		received <- data
++	}()
++	conn, err := net.Dial("tcp4", listener.Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	return conn.(*net.TCPConn), received
++}
++
++func TestSplitAndDisorderDeliverTheExactStream(t *testing.T) {
++	hello := clientHello(t, "example.com")
++	for _, method := range []Method{MethodSplit, MethodDisorder} {
++		t.Run(string(method), func(t *testing.T) {
++			raw, received := loopback(t)
++			var failed error
++			conn := Client(raw, &Plan{Method: method, SplitAt: SplitSNI, FakeTTL: DefaultTTL}, func(err error) { failed = err })
++			if n, err := conn.Write(hello); err != nil || n != len(hello) {
++				t.Fatalf("write %d %v", n, err)
++			}
++			if _, err := conn.Write([]byte("after")); err != nil {
++				t.Fatal(err)
++			}
++			conn.Close()
++			got := <-received
++			if failed != nil {
++				t.Fatalf("plan did not run: %v", failed)
++			}
++			if want := append(append([]byte{}, hello...), "after"...); !bytes.Equal(got, want) {
++				t.Fatalf("stream differs: got %d bytes, want %d", len(got), len(want))
++			}
++		})
++	}
++}
++
++func TestFakeAndOOBFallBackToAPlainWrite(t *testing.T) {
++	hello := clientHello(t, "example.com")
++	for _, method := range []Method{MethodFake, MethodOOB} {
++		t.Run(string(method), func(t *testing.T) {
++			raw, received := loopback(t)
++			var failed error
++			conn := Client(raw, &Plan{Method: method, SplitAt: SplitSNI, FakeTTL: 3, FakeSNI: "vk.com"}, func(err error) { failed = err })
++			if n, err := conn.Write(hello); err != nil || n != len(hello) {
++				t.Fatalf("write %d %v", n, err)
++			}
++			conn.Close()
++			if got := <-received; !bytes.Equal(got, hello) {
++				t.Fatalf("got %d bytes, want the plain hello", len(got))
++			}
++			if failed != errUnsupported {
++				t.Fatalf("report %v, want errUnsupported", failed)
++			}
++		})
++	}
++}
++
++func TestTTLIsRestoredAfterTheTrick(t *testing.T) {
++	hello := clientHello(t, "example.com")
++	raw, received := loopback(t)
++	sc, _ := raw.SyscallConn()
++	before, err := getTTL(sc, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := bytesOut(sc); !ok {
++		t.Log("SIO_TCP_INFO unavailable: waitSent uses the floor only")
++	}
++	conn := Client(raw, &Plan{Method: MethodDisorder, SplitAt: SplitSNI, FakeTTL: DefaultTTL}, nil)
++	if _, err := conn.Write(hello); err != nil {
++		t.Fatal(err)
++	}
++	after, _ := getTTL(sc, false)
++	conn.Close()
++	<-received
++	if before != after {
++		t.Fatalf("ttl %d -> %d", before, after)
++	}
++}
++
++// TestLab needs a TLS server at least one router hop away:
++// set KVN_DESYNC_LAB=host:443 KVN_DESYNC_LAB_SNI=name. Disorder must leave the handshake
++// intact: the TTL 1 piece died in path and the stack retransmitted it with the normal TTL.
++func TestLab(t *testing.T) {
++	address, sni := os.Getenv("KVN_DESYNC_LAB"), os.Getenv("KVN_DESYNC_LAB_SNI")
++	if address == "" || sni == "" {
++		t.Skip("KVN_DESYNC_LAB / KVN_DESYNC_LAB_SNI not set")
++	}
++	for _, plan := range []*Plan{
++		{Method: MethodDisorder, SplitAt: SplitSNI, FakeTTL: DefaultTTL},
++		{Method: MethodSplit, SplitAt: SplitSNI, FakeTTL: DefaultTTL},
++	} {
++		raw, err := net.DialTimeout("tcp", address, 5*time.Second)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
++		var failed error
++		conn := Client(raw, plan, func(err error) { failed = err })
++		started := time.Now()
++		err = tls.Client(conn, &tls.Config{ServerName: sni}).Handshake()
++		raw.Close()
++		if failed != nil {
++			t.Fatalf("%s: plan did not run: %v", plan, failed)
++		}
++		if err != nil {
++			t.Errorf("%s: handshake failed: %v", plan, err)
++		} else {
++			t.Logf("%s: handshake ok in %v", plan, time.Since(started).Round(time.Millisecond))
++		}
++	}
++}
+diff --git a/common/kvndesync/plan.go b/common/kvndesync/plan.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..34353b804f3dae918c59d1c0613c713bfa91e7f3
+--- /dev/null
++++ b/common/kvndesync/plan.go
+@@ -0,0 +1,221 @@
++// Package kvndesync shapes the first write of an app socket to the VPN server so that
++// in-path DPI misreads it, from an ordinary connected socket: no root, no raw sockets,
++// no driver (Zapret KVN masking-design/04).
++//
++// The app decides the plan (the :masking module); this package only executes it. Every
++// method keeps the stream intact: the server receives exactly the bytes that were written,
++// once, in order.
++//
++//   - split:    the first write goes out in two TCP segments, cut at the plan's offset.
++//   - disorder: the first piece goes out with TTL 1 and dies at the first router; the
++//     kernel retransmits it after the second piece, so the path sees the pieces reversed.
++//   - oob:      one urgent byte (MSG_OOB) after the first piece; the server's stream drops
++//     it (no SO_OOBINLINE), a reassembling DPI does not.
++//   - fake:     a decoy ClientHello of the same length with another SNI goes out first with
++//     a low TTL that dies before the server; the kernel then retransmits the REAL bytes
++//     from the same page (Linux vmsplice, the ByeDPI technique).
++package kvndesync
++
++import (
++	"crypto/rand"
++	"encoding/binary"
++	"fmt"
++	"strconv"
++	"strings"
++
++	tf "github.com/sagernet/sing-box/common/tlsfragment"
++)
++
++type Method string
++
++const (
++	MethodSplit    Method = "split"
++	MethodDisorder Method = "disorder"
++	MethodOOB      Method = "oob"
++	MethodFake     Method = "fake"
++)
++
++// SplitSNI cuts one byte into the server name, so that no segment carries it whole.
++const SplitSNI = "sni"
++
++const (
++	MaxOffset   = 1400
++	MaxTTL      = 32
++	DefaultTTL  = 3
++	maxHostname = 253
++)
++
++type Plan struct {
++	Method  Method
++	SplitAt string // SplitSNI or a decimal byte offset 1..MaxOffset
++	FakeTTL int
++	FakeSNI string
++}
++
++// Parse reads the plan the app wrote (`xray_masking.desync`). Strict: an unknown key or an
++// out-of-range number is an error, so the core never runs something the app did not mean.
++func Parse(value any) (*Plan, error) {
++	fields, ok := value.(map[string]any)
++	if !ok {
++		return nil, fmt.Errorf("desync: want an object")
++	}
++	plan := &Plan{SplitAt: SplitSNI, FakeTTL: DefaultTTL}
++	for key, raw := range fields {
++		switch key {
++		case "method":
++			text, _ := raw.(string)
++			plan.Method = Method(text)
++		case "split_at":
++			text, ok := raw.(string)
++			if !ok {
++				return nil, fmt.Errorf("desync.split_at: want a string")
++			}
++			plan.SplitAt = text
++		case "fake_ttl":
++			number, ok := raw.(float64)
++			if !ok || number != float64(int(number)) {
++				return nil, fmt.Errorf("desync.fake_ttl: want an integer")
++			}
++			plan.FakeTTL = int(number)
++		case "fake_sni":
++			text, ok := raw.(string)
++			if !ok {
++				return nil, fmt.Errorf("desync.fake_sni: want a string")
++			}
++			plan.FakeSNI = text
++		default:
++			return nil, fmt.Errorf("desync: unknown key %s", key)
++		}
++	}
++	switch plan.Method {
++	case MethodSplit, MethodDisorder, MethodOOB, MethodFake:
++	default:
++		return nil, fmt.Errorf("desync.method: %q", plan.Method)
++	}
++	if plan.SplitAt != SplitSNI {
++		offset, err := strconv.Atoi(plan.SplitAt)
++		if err != nil || offset < 1 || offset > MaxOffset {
++			return nil, fmt.Errorf("desync.split_at: %q", plan.SplitAt)
++		}
++	}
++	if plan.FakeTTL < 1 || plan.FakeTTL > MaxTTL {
++		return nil, fmt.Errorf("desync.fake_ttl: %d", plan.FakeTTL)
++	}
++	if plan.Method == MethodFake && !validHostname(plan.FakeSNI) {
++		return nil, fmt.Errorf("desync.fake_sni: %q", plan.FakeSNI)
++	}
++	return plan, nil
++}
++
++func (p *Plan) String() string {
++	switch p.Method {
++	case MethodFake:
++		return fmt.Sprintf("fake ttl=%d sni=%s", p.FakeTTL, p.FakeSNI)
++	case MethodDisorder:
++		return "disorder at " + p.SplitAt
++	default:
++		return string(p.Method) + " at " + p.SplitAt
++	}
++}
++
++// SplitPos is where the first write is cut: inside the server name, or the fixed offset.
++// 0 means "do not cut" (the write is too short, or a TLS record without a server name).
++func (p *Plan) SplitPos(first []byte) int {
++	var pos int
++	if p.SplitAt == SplitSNI {
++		name := tf.IndexTLSServerName(first)
++		if name == nil || name.Length < 2 {
++			return 0
++		}
++		pos = name.Index + 1
++	} else {
++		pos, _ = strconv.Atoi(p.SplitAt)
++	}
++	if pos <= 0 || pos >= len(first) {
++		return 0
++	}
++	return pos
++}
++
++func validHostname(host string) bool {
++	if host == "" || len(host) > maxHostname || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
++		return false
++	}
++	for _, label := range strings.Split(host, ".") {
++		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
++			return false
++		}
++		for _, r := range label {
++			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
++				return false
++			}
++		}
++	}
++	return true
++}
++
++// FakeClientHello is a well-formed TLS 1.3 ClientHello for sni, exactly length bytes long
++// (a padding extension fills the rest), with fresh random, session id and key share. When
++// length is below the smallest such record, the record is cut to length: the decoy must have
++// the same length as the real bytes it stands in for.
++func FakeClientHello(length int, sni string) []byte {
++	var extensions []byte
++	host := []byte(sni)
++	// server_name
++	extensions = appendExtension(extensions, 0x0000, func(b []byte) []byte {
++		b = binary.BigEndian.AppendUint16(b, uint16(len(host)+3))
++		b = append(b, 0)
++		b = binary.BigEndian.AppendUint16(b, uint16(len(host)))
++		return append(b, host...)
++	})
++	// supported_groups: x25519
++	extensions = appendExtension(extensions, 0x000a, func(b []byte) []byte { return append(b, 0, 2, 0, 0x1d) })
++	// signature_algorithms
++	extensions = appendExtension(extensions, 0x000d, func(b []byte) []byte {
++		return append(b, 0, 8, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01, 0x05, 0x03)
++	})
++	// supported_versions: TLS 1.3, 1.2
++	extensions = appendExtension(extensions, 0x002b, func(b []byte) []byte { return append(b, 4, 0x03, 0x04, 0x03, 0x03) })
++	// key_share: x25519 with a random key
++	extensions = appendExtension(extensions, 0x0033, func(b []byte) []byte {
++		b = append(b, 0, 36, 0, 0x1d, 0, 32)
++		return append(b, random(32)...)
++	})
++	body := []byte{0x03, 0x03}
++	body = append(body, random(32)...)
++	body = append(body, 32)
++	body = append(body, random(32)...)
++	body = append(body, 0, 6, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03)
++	body = append(body, 1, 0)
++	const fixed = 5 + 4 + 2 // record header, handshake header, extensions length
++	padding := length - fixed - len(body) - len(extensions) - 4
++	if padding >= 0 {
++		extensions = appendExtension(extensions, 0x0015, func(b []byte) []byte { return append(b, make([]byte, padding)...) })
++	}
++	body = binary.BigEndian.AppendUint16(body, uint16(len(extensions)))
++	body = append(body, extensions...)
++	handshake := []byte{1, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
++	handshake = append(handshake, body...)
++	record := []byte{0x16, 0x03, 0x01}
++	record = binary.BigEndian.AppendUint16(record, uint16(len(handshake)))
++	record = append(record, handshake...)
++	if len(record) > length {
++		record = record[:length]
++	}
++	return record
++}
++
++func appendExtension(b []byte, kind uint16, data func([]byte) []byte) []byte {
++	b = binary.BigEndian.AppendUint16(b, kind)
++	start := len(b)
++	b = append(b, 0, 0)
++	b = data(b)
++	binary.BigEndian.PutUint16(b[start:], uint16(len(b)-start-2))
++	return b
++}
++
++func random(n int) []byte {
++	b := make([]byte, n)
++	_, _ = rand.Read(b)
++	return b
++}
+diff --git a/common/kvndesync/plan_test.go b/common/kvndesync/plan_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..da424ab632fbb6acd83b67a16d967047104180e4
+--- /dev/null
++++ b/common/kvndesync/plan_test.go
+@@ -0,0 +1,90 @@
++package kvndesync
++
++import (
++	"bytes"
++	"crypto/tls"
++	"net"
++	"testing"
++	"time"
++
++	tf "github.com/sagernet/sing-box/common/tlsfragment"
++)
++
++// clientHello is the first write of a real Go TLS client for host.
++func clientHello(t *testing.T, host string) []byte {
++	t.Helper()
++	client, server := net.Pipe()
++	defer server.Close()
++	go func() {
++		_ = tls.Client(client, &tls.Config{ServerName: host}).Handshake()
++		client.Close()
++	}()
++	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
++	buf := make([]byte, 64*1024)
++	n, err := server.Read(buf)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return buf[:n]
++}
++
++func TestParseIsStrict(t *testing.T) {
++	plan, err := Parse(map[string]any{"method": "fake", "fake_ttl": float64(4), "fake_sni": "vk.com"})
++	if err != nil || plan.FakeTTL != 4 || plan.SplitAt != SplitSNI {
++		t.Fatalf("plan %+v err %v", plan, err)
++	}
++	for _, bad := range []map[string]any{
++		{"method": "spoof"},
++		{"method": "split", "split_at": "0"},
++		{"method": "split", "split_at": "1401"},
++		{"method": "split", "ttl": float64(3)},
++		{"method": "fake", "fake_sni": "vk.com", "fake_ttl": float64(33)},
++		{"method": "fake", "fake_sni": "VK.com"},
++		{"method": "fake"},
++		{"method": "disorder", "fake_ttl": 2.5},
++	} {
++		if _, err := Parse(bad); err == nil {
++			t.Errorf("accepted %v", bad)
++		}
++	}
++}
++
++func TestSplitPosCutsInsideTheServerName(t *testing.T) {
++	hello := clientHello(t, "example.com")
++	name := tf.IndexTLSServerName(hello)
++	if name == nil {
++		t.Fatal("no server name")
++	}
++	plan := &Plan{Method: MethodSplit, SplitAt: SplitSNI}
++	if got := plan.SplitPos(hello); got != name.Index+1 {
++		t.Fatalf("split at %d, name at %d", got, name.Index)
++	}
++	if got := (&Plan{SplitAt: "5"}).SplitPos(hello); got != 5 {
++		t.Fatalf("fixed offset: %d", got)
++	}
++	if got := plan.SplitPos([]byte("GET / HTTP/1.1\r\n")); got != 0 {
++		t.Fatalf("no TLS record must not be cut by sni: %d", got)
++	}
++	if got := (&Plan{SplitAt: "100"}).SplitPos(make([]byte, 50)); got != 0 {
++		t.Fatalf("offset past the write: %d", got)
++	}
++}
++
++func TestFakeClientHelloHasTheLengthAndTheDecoyName(t *testing.T) {
++	for _, length := range []int{180, 517, 1800, 4000} {
++		fake := FakeClientHello(length, "vk.com")
++		if len(fake) != length {
++			t.Fatalf("length %d: got %d", length, len(fake))
++		}
++		name := tf.IndexTLSServerName(fake)
++		if name == nil || name.ServerName != "vk.com" {
++			t.Fatalf("length %d: server name %+v", length, name)
++		}
++	}
++	if bytes.Equal(FakeClientHello(517, "vk.com"), FakeClientHello(517, "vk.com")) {
++		t.Fatal("two decoys must differ (random, session id, key share)")
++	}
++	if short := FakeClientHello(40, "vk.com"); len(short) != 40 || short[0] != 0x16 {
++		t.Fatalf("short decoy %x", short)
++	}
++}
+diff --git a/common/kvndesync/socket_linux.go b/common/kvndesync/socket_linux.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfaa4089376878b5796fd25e3d66c05da4af04eb
+--- /dev/null
++++ b/common/kvndesync/socket_linux.go
+@@ -0,0 +1,187 @@
++//go:build linux
++
++package kvndesync
++
++import (
++	"net"
++	"syscall"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++// pageSizeLimit caps the decoy: it lives in one vmsplice'd buffer.
++const pageSizeLimit = 16 * 1024
++
++func ttlOption(v6 bool) (int, int) {
++	if v6 {
++		return unix.IPPROTO_IPV6, unix.IPV6_UNICAST_HOPS
++	}
++	return unix.IPPROTO_IP, unix.IP_TTL
++}
++
++func control(raw syscall.RawConn, f func(fd int) error) error {
++	var inner error
++	if err := raw.Control(func(fd uintptr) { inner = f(int(fd)) }); err != nil {
++		return err
++	}
++	return inner
++}
++
++func getTTL(raw syscall.RawConn, v6 bool) (int, error) {
++	level, name := ttlOption(v6)
++	var ttl int
++	err := control(raw, func(fd int) error {
++		var err error
++		ttl, err = unix.GetsockoptInt(fd, level, name)
++		return err
++	})
++	return ttl, err
++}
++
++func setTTL(raw syscall.RawConn, ttl int, v6 bool) error {
++	level, name := ttlOption(v6)
++	return control(raw, func(fd int) error { return unix.SetsockoptInt(fd, level, name, ttl) })
++}
++
++// waitSent waits (bounded) until the kernel handed every queued byte to IP; kernels without
++// tcpi_notsent_bytes report 0 at once, and the short floor covers them.
++func waitSent(raw syscall.RawConn) {
++	deadline := time.Now().Add(sentWait)
++	time.Sleep(time.Millisecond)
++	for time.Now().Before(deadline) {
++		var notSent uint32 = 1
++		_ = control(raw, func(fd int) error {
++			info, err := unix.GetsockoptTCPInfo(fd, unix.IPPROTO_TCP, unix.TCP_INFO)
++			if err == nil {
++				notSent = info.Notsent_bytes
++			}
++			return err
++		})
++		if notSent == 0 {
++			return
++		}
++		time.Sleep(time.Millisecond)
++	}
++}
++
++// writeWithTTL writes piece with a temporary TTL and restores the socket's own TTL only after
++// the piece left the host, so the piece can never go out with the normal TTL by accident.
++func writeWithTTL(raw syscall.RawConn, tcp *net.TCPConn, piece []byte, ttl int, v6 bool) error {
++	old, err := getTTL(raw, v6)
++	if err != nil {
++		return beforeSend{err}
++	}
++	if err := setTTL(raw, ttl, v6); err != nil {
++		return beforeSend{err}
++	}
++	_, werr := tcp.Write(piece)
++	waitSent(raw)
++	if err := setTTL(raw, old, v6); err != nil && werr == nil {
++		werr = err
++	}
++	return werr
++}
++
++// writeOOB sends piece followed by one urgent byte; the server's stream never contains it.
++func writeOOB(raw syscall.RawConn, piece []byte) error {
++	buf := append(append(make([]byte, 0, len(piece)+1), piece...), 'a')
++	var sendErr error
++	sent := 0
++	err := raw.Write(func(fd uintptr) bool {
++		for sent < len(buf) {
++			// Only the last byte of the last send is urgent: send the piece first, then the byte.
++			chunk, flags := buf[sent:len(buf)-1], 0
++			if sent >= len(buf)-1 {
++				chunk, flags = buf[len(buf)-1:], unix.MSG_OOB
++			}
++			n, err := unix.SendmsgN(int(fd), chunk, nil, nil, flags|unix.MSG_NOSIGNAL)
++			if err == unix.EAGAIN {
++				return false
++			}
++			if err != nil {
++				sendErr = err
++				return true
++			}
++			sent += n
++		}
++		return true
++	})
++	if err != nil {
++		return err
++	}
++	if sendErr != nil && sent == 0 {
++		return beforeSend{sendErr}
++	}
++	return sendErr
++}
++
++// sendFake puts decoy (same length as real) on the wire with a low TTL from a page the socket
++// references without copying (vmsplice + splice), waits until it left the host, then writes the
++// real bytes into the same page and restores the TTL: the kernel's retransmission carries the
++// real bytes. sent=false: nothing reached the socket and the caller writes plainly.
++func sendFake(raw syscall.RawConn, real []byte, decoy []byte, ttl int, v6 bool) (bool, error) {
++	size := (len(real) + unix.Getpagesize() - 1) &^ (unix.Getpagesize() - 1)
++	page, err := unix.Mmap(-1, 0, size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_ANONYMOUS)
++	if err != nil {
++		return false, err
++	}
++	defer unix.Munmap(page)
++	copy(page, decoy)
++	var pipe [2]int
++	if err := unix.Pipe2(pipe[:], unix.O_CLOEXEC); err != nil {
++		return false, err
++	}
++	defer unix.Close(pipe[0])
++	defer unix.Close(pipe[1])
++	old, err := getTTL(raw, v6)
++	if err != nil {
++		return false, err
++	}
++	if err := setTTL(raw, ttl, v6); err != nil {
++		return false, err
++	}
++	iov := []unix.Iovec{{Base: &page[0]}}
++	iov[0].SetLen(len(real))
++	queued, err := unix.Vmsplice(pipe[1], iov, unix.SPLICE_F_GIFT)
++	if err != nil || queued != len(real) {
++		_ = setTTL(raw, old, v6)
++		if err == nil {
++			err = unix.EIO
++		}
++		return false, err
++	}
++	var spliceErr error
++	moved := 0
++	werr := raw.Write(func(fd uintptr) bool {
++		for moved < queued {
++			n, err := unix.Splice(pipe[0], nil, int(fd), nil, queued-moved, unix.SPLICE_F_NONBLOCK)
++			if err == unix.EAGAIN {
++				return false
++			}
++			if err != nil {
++				spliceErr = err
++				return true
++			}
++			moved += int(n)
++		}
++		return true
++	})
++	if werr == nil {
++		werr = spliceErr
++	}
++	if moved == 0 {
++		_ = setTTL(raw, old, v6)
++		return false, werr
++	}
++	waitSent(raw)
++	// From here every (re)transmission of these bytes reads the real data.
++	copy(page, real)
++	if err := setTTL(raw, old, v6); err != nil && werr == nil {
++		werr = err
++	}
++	if werr == nil && moved != len(real) {
++		werr = unix.EIO
++	}
++	return true, werr
++}
+diff --git a/common/kvndesync/socket_other.go b/common/kvndesync/socket_other.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b5f22653f09545d98f1773e41ac685031eced47
+--- /dev/null
++++ b/common/kvndesync/socket_other.go
+@@ -0,0 +1,16 @@
++//go:build !linux && !windows
++
++package kvndesync
++
++import (
++	"net"
++	"syscall"
++)
++
++const pageSizeLimit = 16 * 1024
++
++func writeWithTTL(syscall.RawConn, *net.TCPConn, []byte, int, bool) error { return errUnsupported }
++
++func writeOOB(syscall.RawConn, []byte) error { return errUnsupported }
++
++func sendFake(syscall.RawConn, []byte, []byte, int, bool) (bool, error) { return false, errUnsupported }
+diff --git a/common/kvndesync/socket_windows.go b/common/kvndesync/socket_windows.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cda6531971d15dddbfd28dbfba597d978735a64c
+--- /dev/null
++++ b/common/kvndesync/socket_windows.go
+@@ -0,0 +1,111 @@
++//go:build windows
++
++package kvndesync
++
++import (
++	"encoding/binary"
++	"net"
++	"syscall"
++	"time"
++	"unsafe"
++
++	"golang.org/x/sys/windows"
++)
++
++// pageSizeLimit caps the piece the decoy would stand in for; Windows has no decoy here
++// (the app uses sing-box tls_spoof over WinDivert for that), the constant keeps conn.go shared.
++const pageSizeLimit = 16 * 1024
++
++// sioTCPInfo is SIO_TCP_INFO (_WSAIORW(IOC_VENDOR, 39)), Windows 10 1703 and later.
++const sioTCPInfo = 0xD8000027
++
++// tcpInfoSize and tcpInfoBytesOut: the size of TCP_INFO_v0 and the offset of its BytesOut.
++const (
++	tcpInfoSize     = 88
++	tcpInfoBytesOut = 48
++)
++
++func ttlOption(v6 bool) (int32, int32) {
++	if v6 {
++		return windows.IPPROTO_IPV6, windows.IPV6_UNICAST_HOPS
++	}
++	return windows.IPPROTO_IP, windows.IP_TTL
++}
++
++func control(raw syscall.RawConn, f func(fd windows.Handle) error) error {
++	var inner error
++	if err := raw.Control(func(fd uintptr) { inner = f(windows.Handle(fd)) }); err != nil {
++		return err
++	}
++	return inner
++}
++
++func getTTL(raw syscall.RawConn, v6 bool) (int, error) {
++	level, name := ttlOption(v6)
++	var ttl int
++	err := control(raw, func(fd windows.Handle) error {
++		var err error
++		ttl, err = windows.GetsockoptInt(fd, int(level), int(name))
++		return err
++	})
++	return ttl, err
++}
++
++func setTTL(raw syscall.RawConn, ttl int, v6 bool) error {
++	level, name := ttlOption(v6)
++	return control(raw, func(fd windows.Handle) error { return windows.SetsockoptInt(fd, int(level), int(name), ttl) })
++}
++
++// bytesOut reads TCP_INFO_v0.BytesOut: bytes the stack handed to IP, retransmissions included.
++func bytesOut(raw syscall.RawConn) (uint64, bool) {
++	var info [tcpInfoSize]byte
++	version := uint32(0)
++	var returned uint32
++	err := control(raw, func(fd windows.Handle) error {
++		return windows.WSAIoctl(fd, sioTCPInfo, (*byte)(unsafe.Pointer(&version)), 4,
++			&info[0], tcpInfoSize, &returned, nil, 0)
++	})
++	if err != nil || returned < tcpInfoBytesOut+8 {
++		return 0, false
++	}
++	return binary.LittleEndian.Uint64(info[tcpInfoBytesOut:]), true
++}
++
++// waitSent waits (bounded) until the stack sent want more bytes than before; without
++// SIO_TCP_INFO only the short floor is waited.
++func waitSent(raw syscall.RawConn, before uint64, known bool, want int) {
++	deadline := time.Now().Add(sentWait)
++	time.Sleep(time.Millisecond)
++	if !known {
++		return
++	}
++	for time.Now().Before(deadline) {
++		if out, ok := bytesOut(raw); !ok || out >= before+uint64(want) {
++			return
++		}
++		time.Sleep(time.Millisecond)
++	}
++}
++
++// writeWithTTL writes piece with a temporary TTL and restores the socket's own TTL only after
++// the piece left the host, so the piece can never go out with the normal TTL by accident.
++func writeWithTTL(raw syscall.RawConn, tcp *net.TCPConn, piece []byte, ttl int, v6 bool) error {
++	old, err := getTTL(raw, v6)
++	if err != nil {
++		return beforeSend{err}
++	}
++	before, known := bytesOut(raw)
++	if err := setTTL(raw, ttl, v6); err != nil {
++		return beforeSend{err}
++	}
++	_, werr := tcp.Write(piece)
++	waitSent(raw, before, known, len(piece))
++	if err := setTTL(raw, old, v6); err != nil && werr == nil {
++		werr = err
++	}
++	return werr
++}
++
++func writeOOB(syscall.RawConn, []byte) error { return errUnsupported }
++
++func sendFake(syscall.RawConn, []byte, []byte, int, bool) (bool, error) { return false, errUnsupported }
+diff --git a/common/kvndesync/spec.go b/common/kvndesync/spec.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..87cb7e53e01e1bdf4fa784dc938786f349d5aa6d
+--- /dev/null
++++ b/common/kvndesync/spec.go
+@@ -0,0 +1,28 @@
++package kvndesync
++
++import (
++	"fmt"
++	"strings"
++)
++
++// ParseSpec reads the route option `kvn_desync` the Windows app writes for the rule of one
++// VPN server: "method:split_at", for example "disorder:sni" or "split:120". Only the methods
++// an ordinary socket runs on Windows are accepted: the decoy there is sing-box `tls_spoof`
++// over WinDivert, and OOB depends on a path that keeps the URG flag. Empty means no plan.
++func ParseSpec(spec string) (*Plan, error) {
++	if spec == "" {
++		return nil, nil
++	}
++	method, splitAt, found := strings.Cut(spec, ":")
++	if !found || splitAt == "" {
++		return nil, fmt.Errorf("kvn_desync: want method:split_at, got %q", spec)
++	}
++	switch Method(method) {
++	case MethodSplit, MethodDisorder:
++	case MethodFake:
++		return nil, fmt.Errorf("kvn_desync: the decoy is tls_spoof, not %q", spec)
++	default:
++		return nil, fmt.Errorf("kvn_desync: method %q is not available here", method)
++	}
++	return Parse(map[string]any{"method": method, "split_at": splitAt})
++}
+diff --git a/common/kvndesync/zapret_spec_test.go b/common/kvndesync/zapret_spec_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e5f6639fd68c23eb4bb343bff78eb48820a28444
+--- /dev/null
++++ b/common/kvndesync/zapret_spec_test.go
+@@ -0,0 +1,22 @@
++package kvndesync
++
++import "testing"
++
++func TestZapretSpecReadsTheWindowsRouteOption(t *testing.T) {
++	plan, err := ParseSpec("disorder:sni")
++	if err != nil || plan.Method != MethodDisorder || plan.SplitAt != SplitSNI {
++		t.Fatalf("plan %+v err %v", plan, err)
++	}
++	plan, err = ParseSpec("split:120")
++	if err != nil || plan.Method != MethodSplit || plan.SplitAt != "120" {
++		t.Fatalf("plan %+v err %v", plan, err)
++	}
++	if plan, err := ParseSpec(""); plan != nil || err != nil {
++		t.Fatalf("empty: %+v %v", plan, err)
++	}
++	for _, bad := range []string{"disorder", "disorder:", "fake:sni", "oob:sni", "split:0", "split:1401", "spoof:sni", "split:sni:1"} {
++		if _, err := ParseSpec(bad); err == nil {
++			t.Errorf("%q accepted", bad)
++		}
++	}
++}
+diff --git a/option/rule_action.go b/option/rule_action.go
+index a81634d112845f671c83648c38ad3a22c5425f98..a73e6298c9298ae0fbf1f087d75475b67abc5f43 100644
+--- a/option/rule_action.go
++++ b/option/rule_action.go
+@@ -194,6 +194,8 @@ type RawRouteOptionsActionOptions struct {
+ 	TLSRecordFragment        bool               `json:"tls_record_fragment,omitempty"`
+ 	TLSSpoof                 string             `json:"tls_spoof,omitempty"`
+ 	TLSSpoofMethod           string             `json:"tls_spoof_method,omitempty" enum:"wrong-sequence,wrong-checksum,wrong-ack,wrong-md5,wrong-timestamp"`
++	// Zapret KVN: first-write desync of the VPN server socket (common/kvndesync.ParseSpec).
++	KVNDesync string `json:"kvn_desync,omitempty"`
+ }
+ 
+ type RouteOptionsActionOptions RawRouteOptionsActionOptions
+diff --git a/route/conn.go b/route/conn.go
+index 6a288f11937ce4ef81606751f819b456d8b2fb4e..793bf1537714e914b5d6c755c0e3ef27cb38f197 100644
+--- a/route/conn.go
++++ b/route/conn.go
+@@ -13,6 +13,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/dialer"
++	"github.com/sagernet/sing-box/common/kvndesync"
+ 	"github.com/sagernet/sing-box/common/sniff"
+ 	tf "github.com/sagernet/sing-box/common/tlsfragment"
+ 	"github.com/sagernet/sing-box/common/tlsspoof"
+@@ -132,6 +133,12 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
+ 	if metadata.TLSFragment || metadata.TLSRecordFragment {
+ 		remoteConn = tf.NewConn(remoteConn, ctx, metadata.TLSFragment, metadata.TLSRecordFragment, metadata.TLSFragmentFallbackDelay)
+ 	}
++	if metadata.KVNDesync != nil {
++		plan := metadata.KVNDesync
++		remoteConn = kvndesync.Client(remoteConn, plan, func(err error) {
++			m.logger.WarnContext(ctx, "kvn_desync ", plan, ": ", err)
++		})
++	}
+ 	if metadata.TLSSpoof != "" {
+ 		spoofConn, spoofErr := tlsspoof.NewConn(remoteConn, metadata.TLSSpoofMethod, metadata.TLSSpoof)
+ 		if spoofErr != nil {
+diff --git a/route/route.go b/route/route.go
+index 356299087ffa5c255907b7b3ea30e242a1ac66ec..6212c3c13da4b2c0f7c7929b3700e15ff69f93e3 100644
+--- a/route/route.go
++++ b/route/route.go
+@@ -681,6 +681,9 @@ match:
+ 				metadata.TLSSpoof = routeOptions.TLSSpoof
+ 				metadata.TLSSpoofMethod = routeOptions.TLSSpoofMethod
+ 			}
++			if routeOptions.KVNDesync != nil {
++				metadata.KVNDesync = routeOptions.KVNDesync
++			}
+ 		}
+ 		switch action := currentRule.Action().(type) {
+ 		case *R.RuleActionSniff:
+diff --git a/route/rule/rule_action.go b/route/rule/rule_action.go
+index d30336c82259c54572940f3ef1c26d8f9c831554..d5e53110f33552a41b82e2c2c4e280b15b812596 100644
+--- a/route/rule/rule_action.go
++++ b/route/rule/rule_action.go
+@@ -10,6 +10,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/dialer"
++	"github.com/sagernet/sing-box/common/kvndesync"
+ 	"github.com/sagernet/sing-box/common/sniff"
+ 	"github.com/sagernet/sing-box/common/tlsspoof"
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -29,6 +30,10 @@ func newRuleActionRouteOptions(options option.RawRouteOptionsActionOptions) (Rul
+ 	if err != nil {
+ 		return RuleActionRouteOptions{}, err
+ 	}
++	desync, err := kvndesync.ParseSpec(options.KVNDesync)
++	if err != nil {
++		return RuleActionRouteOptions{}, err
++	}
+ 	var overrideGateway *netip.Addr
+ 	if options.OverrideGateway != "" {
+ 		parsed := M.ParseAddr(options.OverrideGateway)
+@@ -48,6 +53,7 @@ func newRuleActionRouteOptions(options option.RawRouteOptionsActionOptions) (Rul
+ 		TLSRecordFragment:         options.TLSRecordFragment,
+ 		TLSSpoof:                  spoof,
+ 		TLSSpoofMethod:            spoofMethod,
++		KVNDesync:                 desync,
+ 	}, nil
+ }
+ 
+@@ -244,6 +250,7 @@ type RuleActionRouteOptions struct {
+ 	TLSRecordFragment         bool
+ 	TLSSpoof                  string
+ 	TLSSpoofMethod            tlsspoof.Method
++	KVNDesync                 *kvndesync.Plan
+ }
+ 
+ func (r *RuleActionRouteOptions) Type() string {
+@@ -299,6 +306,9 @@ func (r *RuleActionRouteOptions) Descriptions() []string {
+ 		descriptions = append(descriptions, F.ToString("tls-spoof=", r.TLSSpoof))
+ 		descriptions = append(descriptions, F.ToString("tls-spoof-method=", r.TLSSpoofMethod.String()))
+ 	}
++	if r.KVNDesync != nil {
++		descriptions = append(descriptions, F.ToString("kvn-desync=", r.KVNDesync.String()))
++	}
+ 	return descriptions
+ }
+ 

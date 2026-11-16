@@ -610,6 +610,7 @@ class AppController(QObject):
         self.singbox.stopped.connect(lambda code: self._on_core_stopped("singbox", code))
         # The slot helpers serve only through sing-box: they stop with it.
         self.singbox.stopped.connect(lambda _code: self.slot_runtime.stop())
+        self.singbox.notice.connect(lambda line: self._log(f"[masking] {line}"))
 
         self._bind_hysteria_manager(self.hysteria)
 
@@ -1329,6 +1330,8 @@ class AppController(QObject):
         masking = masking_runtime.settings_of(self.state.settings)
         notes: list[str] = []
         masked = masking_runtime.masked_node(node, masking, notes)
+        if masking_runtime.carries_desync(masked) and self.uses_xray_raw_config():
+            notes.append(masking_runtime.DESYNC_WITHOUT_FRONT)
         line = masking_runtime.describe(masking, int(masked is not node), notes)
         if line:
             self._log(f"[masking] {line}")

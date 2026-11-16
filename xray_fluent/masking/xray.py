@@ -13,11 +13,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import desync as desync_rules
 from .model import (
     DESYNC_MAX_OFFSET,
     DESYNC_MAX_TTL,
     DESYNC_METHODS,
-    DESYNC_SAFE_TTL,
     UDP443_MODES,
     Core,
     Desync,
@@ -72,7 +72,7 @@ def validate(shaping: XrayShaping) -> list[Problem]:
 
 
 def emit(shaping: XrayShaping, shape: ServerShape) -> tuple[dict[str, Any] | None, list[str]]:
-    """The `{"mux", "xmux", "finalmask"}` block for this server, or None, plus the notes."""
+    """The `{"mux", "xmux", "finalmask", "desync"}` block for this server, or None, plus the notes."""
     if not shaping.enabled or shape.core is not Core.XRAY:
         return None, []
     notes: list[str] = []
@@ -95,9 +95,14 @@ def emit(shaping: XrayShaping, shape: ServerShape) -> tuple[dict[str, Any] | Non
         else:
             notes.append(f"Фрагментация не применена: {shape.network} идёт не по TCP.")
     if shaping.desync is not None and shaping.desync.enabled:
-        # Never an Xray field: the app's own dialer runs it (Android core patch 0017). The
-        # Windows engine is not built yet, so nothing is sent and the log says so.
-        notes.append("Пакеты-обманки пока работают только в приложении для Android.")
+        # Never an Xray field: sing-box runs it on the server socket (masking/desync.py); the
+        # planner takes the carried plan off the outbound before Xray sees the config.
+        if not shape.is_tcp_stream:
+            notes.append(f"Пакеты-обманки не применены: {shape.network} идёт не по TCP.")
+        elif shaping.desync.method not in desync_rules.WINDOWS_METHODS:
+            notes.append("Пакеты-обманки не применены: OOB на Windows нет.")
+        else:
+            block["desync"] = desync_rules.plan_json(shaping.desync)
     return (block or None), notes
 
 
@@ -150,6 +155,8 @@ def apply_to_outbound(outbound: dict[str, Any], block: dict[str, Any]) -> None:
             outbound["mux"] = value
         elif key == "finalmask":
             stream["finalmask"] = value
+        elif key == "desync":
+            outbound[desync_rules.CARRY_KEY] = value
         elif key == "xmux":
             settings_key = "xhttpSettings" if isinstance(stream.get("xhttpSettings"), dict) else "splithttpSettings"
             xhttp = stream.get(settings_key)
@@ -165,7 +172,7 @@ _HOSTNAME = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a
 
 
 def validate_desync(desync: Desync) -> list[Problem]:
-    """The limits of Android core patch 0017 `kvndesync.Parse` (same as Android XrayShapingRules)."""
+    """The limits of `kvndesync.Parse` (Android 0017, Windows kvn-desync.patch); OOB is Android-only."""
     problems: list[Problem] = []
     if desync.method not in DESYNC_METHODS:
         problems.append(Problem("desync.method", "Способ: fake, disorder, split или oob."))
@@ -173,14 +180,12 @@ def validate_desync(desync: Desync) -> list[Problem]:
     if split_at != "sni" and not (split_at.isdigit() and 1 <= int(split_at) <= DESYNC_MAX_OFFSET):
         problems.append(Problem("desync.splitAt", f"Место разреза: sni или номер байта от 1 до {DESYNC_MAX_OFFSET}."))
     if desync.method == "fake":
+        # The shared format keeps the TTL range; Windows does not use it (the decoy carries a
+        # wrong sequence number instead, masking/desync.py), so there is no "too high" warning.
         if not 1 <= desync.fake_ttl <= DESYNC_MAX_TTL:
             problems.append(Problem("desync.fakeTtl", f"TTL обманки: от 1 до {DESYNC_MAX_TTL}."))
-        elif desync.fake_ttl > DESYNC_SAFE_TTL:
-            problems.append(Problem(
-                "desync.fakeTtl", f"TTL больше {DESYNC_SAFE_TTL}: обманка может дойти до сервера и сломать подключение.", error=False,
-            ))
         if not _HOSTNAME.match(desync.fake_sni.strip().lower()):
             problems.append(Problem("desync.fakeSni", "Имя в обманке: домен, например vk.com."))
     if desync.method == "oob":
-        problems.append(Problem("desync.method", "OOB ломает подключение там, где сеть срезает флаг URG: проверьте подбором.", error=False))
+        problems.append(Problem("desync.method", "OOB на Windows нет: выберите обманку, беспорядок или разрез."))
     return problems

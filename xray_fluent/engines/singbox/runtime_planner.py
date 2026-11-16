@@ -39,6 +39,7 @@ from ...application.protocol_core import ProtocolCore, protocol_core
 from ...profiles.models import Node
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity
 from ...network.bootstrap_dns import cached_addresses
+from ...masking import desync as desync_rules
 from ..hysteria.config_adapter import build_uri_client_config
 from .config_builder import build_singbox_outbound, is_singbox_endpoint_node
 
@@ -753,7 +754,7 @@ def _plan_hybrid_runtime(
     )
     _validate_runtime_dns_contract(runtime_config)
 
-    sidecar_config, sidecar_tags = _build_xray_sidecar_config(
+    sidecar_config, sidecar_tags, desync_targets = _build_xray_sidecar_config(
         node,
         pool_nodes=pool_nodes,
         api_port=api_port,
@@ -763,6 +764,7 @@ def _plan_hybrid_runtime(
         protect_port=protect_port,
         protect_password=protect_password,
     )
+    _ensure_hybrid_desync_routes(runtime_config, desync_targets)
     sidecar = SingboxXraySidecarPlan(
         relay_port=relay_port,
         relay_username=relay_username,
@@ -803,7 +805,7 @@ def _build_xray_sidecar_config(
     relay_password: str,
     protect_port: int,
     protect_password: str,
-) -> tuple[dict[str, Any], dict[str, str]]:
+) -> tuple[dict[str, Any], dict[str, str], list[tuple[list[str], dict[str, Any]]]]:
     if not isinstance(node.outbound, dict) or not node.outbound:
         raise ValueError("Выбранный сервер не содержит outbound JSON для xray sidecar.")
     if not str(node.outbound.get("protocol") or "").strip():
@@ -815,7 +817,13 @@ def _build_xray_sidecar_config(
             raise ValueError(f"Выбранный сервер не подходит для текущего Xray: {reason}.")
         raise ValueError("Выбранный сервер нельзя добавить в Xray sidecar pool.")
     proxy_outbounds = pool.outbounds()
+    desync_targets: list[tuple[list[str], dict[str, Any]]] = []
     for proxy_outbound in proxy_outbounds:
+        # «Маскировка»: the packet-trick plan rides on the masked copy; sing-box runs it on the
+        # server socket (masking/desync.py), Xray must never see the key.
+        plan = desync_rules.take(proxy_outbound)
+        if plan is not None:
+            desync_targets.append((desync_rules.server_hosts(proxy_outbound), plan))
         stream_settings = proxy_outbound.get("streamSettings")
         if not isinstance(stream_settings, dict):
             stream_settings = {}
@@ -892,7 +900,7 @@ def _build_xray_sidecar_config(
         },
     }
     ensure_xray_pool_control_plane(config, pool)
-    return config, dict(pool.tags)
+    return config, dict(pool.tags), desync_targets
 
 
 def _is_domain_name(value: str) -> bool:
@@ -1034,6 +1042,31 @@ def _ensure_hybrid_server_bootstrap(payload: dict[str, Any], servers: Any) -> No
         "action": "resolve",
         "server": _APP_NODE_BOOTSTRAP_TAG,
     })
+
+
+def _ensure_hybrid_desync_routes(payload: dict[str, Any], targets: list[tuple[list[str], dict[str, Any]]]) -> None:
+    """«Пакеты-обманки»: one app `route-options` rule per server, just before the protect route.
+
+    Only connections of the Xray sidecar to that server (protect inbound + its name or known
+    addresses) get `kvn_desync` / `tls_spoof`; earlier app rules of this kind are replaced.
+    """
+    route = _ensure_dict(payload, "route")
+    rules = _ensure_list(route, "rules")
+    protect = [_APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG]
+    rules[:] = [
+        rule for rule in rules
+        if not (isinstance(rule, dict) and rule.get("action") == "route-options" and rule.get("inbound") == protect
+                and ("kvn_desync" in rule or "tls_spoof" in rule))
+    ]
+    added = desync_rules.route_rules(targets, _APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG, cached_addresses)
+    if not added:
+        return
+    position = next(
+        (index for index, rule in enumerate(rules)
+         if isinstance(rule, dict) and rule.get("inbound") == protect and rule.get("outbound") == "direct"),
+        0,
+    )
+    rules[position:position] = added
 
 
 def _ensure_hybrid_protect_route(payload: dict[str, Any]) -> None:

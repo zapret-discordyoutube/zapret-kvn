@@ -299,6 +299,12 @@ class SettingsPage(ScrollablePage):
             "То же для протоколов sing-box; на REALITY не действует",
             parent=masking_group,
         )
+        self.masking_desync_card = _ComboCard(
+            FIF.FILTER, "Пакеты-обманки (VLESS по TCP) — эксперимент",
+            "Обманка уходит через драйвер WinDivert, и Zapret тогда не трогает пакеты этого сервера; "
+            "беспорядок теряет начало первого пакета по пути",
+            [(title, choice) for choice, title in masking_choices.DESYNC_CHOICES], parent=masking_group,
+        )
         self.masking_custom_card = PushSettingCard(
             "Изменить", FIF.EDIT, masking_choices.CUSTOM_TITLE,
             "Все числа набора; формат общий с Android. Для отдельного сервера — меню «Ещё» в списке серверов",
@@ -311,8 +317,8 @@ class SettingsPage(ScrollablePage):
         )
         for card in (
             self.masking_card, self.masking_wg_card, self.masking_mux_card, self.masking_xmux_card,
-            self.masking_xray_fragment_card, self.masking_singbox_fragment_card, self.masking_custom_card,
-            self.masking_tune_card,
+            self.masking_xray_fragment_card, self.masking_singbox_fragment_card, self.masking_desync_card,
+            self.masking_custom_card, self.masking_tune_card,
         ):
             masking_group.addSettingCard(card)
         root.addWidget(masking_group)
@@ -610,6 +616,7 @@ class SettingsPage(ScrollablePage):
             card.checkedChanged.connect(self._auto_save)
         self.masking_wg_card.combo.currentIndexChanged.connect(self._auto_save)
         self.masking_xmux_card.combo.currentIndexChanged.connect(self._auto_save)
+        self.masking_desync_card.combo.currentIndexChanged.connect(self._auto_save)
         self.masking_custom_card.clicked.connect(self._edit_custom_masking)
         self.masking_tune_card.clicked.connect(self.masking_tune_requested.emit)
         self.lan_proxy_card.checkedChanged.connect(self._sync_lan_proxy_hint)
@@ -790,6 +797,7 @@ class SettingsPage(ScrollablePage):
         self.masking_card.setChecked(masking.enabled)
         self._set_masking_combo(self.masking_wg_card, masking_choices.wireguard_choice(current))
         self._set_masking_combo(self.masking_xmux_card, masking_choices.xmux_choice(current))
+        self._set_masking_combo(self.masking_desync_card, masking_choices.desync_choice(current))
         self.masking_mux_card.setChecked(masking_choices.mux_on(current))
         self.masking_xray_fragment_card.setChecked(masking_choices.xray_fragment_on(current))
         self.masking_singbox_fragment_card.setChecked(masking_choices.singbox_fragment_on(current))
@@ -803,6 +811,7 @@ class SettingsPage(ScrollablePage):
             xmux=str(self.masking_xmux_card.combo.currentData() or masking_choices.NONE_ID),
             xray_fragment=self.masking_xray_fragment_card.isChecked(),
             singbox_fragment=self.masking_singbox_fragment_card.isChecked(),
+            desync=str(self.masking_desync_card.combo.currentData() or masking_choices.NONE_ID),
         )
         updated = replace(settings, enabled=self.masking_card.isChecked(), global_masking=global_masking)
         if updated == settings and previous:
