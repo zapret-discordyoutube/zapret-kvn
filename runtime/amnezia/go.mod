@@ -3,7 +3,7 @@ module git.zapret.moe/zapretkvn/zapret-kvn/runtime/amnezia
 go 1.26.4
 
 require (
-	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828
+	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20261116
 	golang.org/x/net v0.44.0
 	golang.org/x/sys v0.36.0
 )
