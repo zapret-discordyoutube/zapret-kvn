@@ -160,5 +160,14 @@ Plan:
   при низкой скорости», not «сервер выбран вручную» (that is the main server's pick). Log `[slots] youtube: кластер …
   не отвечает на A, слот YouTube -> B`; status «… YouTube переведён на B, остальные программы не тронуты.
   Перезапустите видео …».
+- **Live e2e on win10 (2026-11-16, source ff37b8c):** headless AppController in proxy mode against five
+  loopback servers of the real cores (three `hysteria.exe server` with a self-signed certificate and
+  `pinSHA256`, two `xray.exe` VLESS over TCP). Main server hy1. Ticking the three services gave AI -> hy2,
+  YouTube -> hy3 (both `hysteria-slot-*.exe`) and Telegram -> vl1 (`xray-slot-telegram.exe`), each selector
+  on its own relay. Through the local SOCKS: YouTube 204, ChatGPT 200, Telegram 200, Wikipedia 200. Each
+  Hysteria server saw exactly one client, so every service really used its own server. Pinning YouTube to
+  vl2 while connected moved it Hysteria -> Xray behind the same relay, with the same sing-box PID and no
+  reconnect, and traffic kept flowing. Disconnect left no slot helper running. Not covered: real
+  censorship and the provider-member path (no sing-box-only server in the set).
 - **Not yet:** slow-video rescue (Windows has no slow-video detector, only dead clusters), AWG slot servers (`slot_capable` keeps them out of the card list, and an old AWG pin falls back with the reason «серверы AmneziaWG для сервисов пока не поддерживаются»), a speed
-  history per service, per-slot traffic on the card, e2e on win10.
+  history per service, per-slot traffic on the card, the e2e against real vpnbot nodes (vpnbot test account pending).
