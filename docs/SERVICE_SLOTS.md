@@ -166,7 +166,9 @@ Plan:
   a background refresh never changes a built plan). «Авто» never puts a slot on the main server's machine or on another
   slot's machine through a sibling entry; with no other machine free the slot follows the main server. The YouTube
   rescue never moves to a sibling of the machine the video died on (same address, same cache cluster). A pin is
-  honoured as it is. A fresh install learns the addresses of the other pool servers after its first connection.
+  honoured as it is. No new DNS lookup is made for this: the addresses come from the trusted bootstrap cache that the
+  server checks fill (each ping resolves its server by DoH and remembers the answer), and the app reads that cache once
+  per run, so servers first checked in this run are grouped from the next start of the app.
 - **Live e2e on win10 (2026-11-16, source ff37b8c):** headless AppController in proxy mode against five
   loopback servers of the real cores (three `hysteria.exe server` with a self-signed certificate and
   `pinSHA256`, two `xray.exe` VLESS over TCP). Main server hy1. Ticking the three services gave AI -> hy2,
@@ -182,5 +184,10 @@ Plan:
   Finaltelekom; the three slots got `xray-slot-*.exe` helpers on their relays; YouTube 204, ChatGPT 200, Telegram 200,
   main 200 in 1-2 s; a hot pin move kept the sing-box PID. The run showed the gap fixed above: the main server, all
   three slots and the move target were five entries of ONE machine (same address), so nothing was really separated.
+  After the fix (source 46c6e13), two app runs as a restart: run 1 pinged the pool (11 of 12 names in the trusted
+  cache, all 11 already frozen empty in that run's snapshot, as designed), run 2 put main Finaltelekom, YouTube
+  Rusina, AI Nithesina, Telegram us-vdsryzen-8 and the hot-move target Hiphopgen on five different machines. The
+  same runs found and verified the fix of a python.exe access violation (a finished worker step's deadline QTimer
+  collected on a worker thread, `async_steps.TransitionStep.release`).
 - **Not yet:** slow-video rescue (Windows has no slow-video detector, only dead clusters), AWG slot servers (`slot_capable` keeps them out of the card list, and an old AWG pin falls back with the reason «серверы AmneziaWG для сервисов пока не поддерживаются»), a speed
   history per service, per-slot traffic on the card, Clash/Mihomo YAML subscriptions (neither app imports them).
