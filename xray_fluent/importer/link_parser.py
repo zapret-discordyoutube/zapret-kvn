@@ -357,6 +357,47 @@ def _native_node(link: str, scheme: str, outbound: dict[str, Any], server: str, 
 _KNOWN_SECURITY_MODES = frozenset({"none", "tls", "reality"})
 
 
+_XHTTP_MODES = frozenset({"auto", "packet-up", "stream-up", "stream-one"})
+
+
+def _build_xhttp_settings(params: dict[str, str], host: str, path: str) -> dict[str, Any]:
+    """Собрать native Xray `xhttpSettings` из параметров ссылки (стандарт XTLS).
+
+    path, host и mode переносятся как есть, а `extra` — это encodeURIComponent(JSON-объект)
+    с остальными полями XHTTP (xmux, xPadding*, uplinkHTTPMethod, downloadSettings…).
+    Xray сам читает `xhttpSettings.extra`: он подставляет path/host/mode из внешнего
+    уровня и берёт остальное из extra, поэтому поля extra не переименовываются и не
+    проверяются здесь по именам — этим владеет ядро.
+    """
+
+    settings: dict[str, Any] = {}
+    if path:
+        settings["path"] = path
+    if host:
+        settings["host"] = host
+    mode = _get_param(params, "mode").strip().lower()
+    if mode:
+        if mode not in _XHTTP_MODES:
+            raise LinkParseError(
+                f"Неизвестный режим XHTTP «{mode}»: допустимы auto, packet-up, stream-up, stream-one."
+            )
+        settings["mode"] = mode
+    raw_extra = _get_param(params, "extra").strip()
+    # «extra=null» встречается в публичных подписках: Xray читает его как «не задано».
+    if raw_extra and raw_extra != "null":
+        try:
+            extra = json.loads(raw_extra)
+        except json.JSONDecodeError as exc:
+            raise LinkParseError(
+                "Не удалось разобрать XHTTP extra: ожидается URL-кодированный JSON-объект."
+            ) from exc
+        if not isinstance(extra, dict):
+            raise LinkParseError("XHTTP extra должен быть URL-кодированным JSON-объектом.")
+        if extra:
+            settings["extra"] = extra
+    return settings
+
+
 def _build_stream_settings(
     params: dict[str, str],
     default_network: str = "tcp",
@@ -365,6 +406,9 @@ def _build_stream_settings(
     xray_only: bool = False,
 ) -> dict[str, Any]:
     network = (_get_param(params, "type", "net", default=default_network or "tcp") or "tcp").lower()
+    if network == "splithttp":
+        # Прежнее имя XHTTP: Xray принимает оба, а остальной код сравнивает с «xhttp».
+        network = "xhttp"
     security = (_get_param(params, "security", "tls", default=default_security or "none") or "none").lower()
     if security == "none" and _get_param(params, "tls") == "tls":
         security = "tls"
@@ -402,6 +446,8 @@ def _build_stream_settings(
         if path:
             http_settings["path"] = path
         stream["httpSettings"] = http_settings
+    elif network == "xhttp":
+        stream["xhttpSettings"] = _build_xhttp_settings(params, host, path)
     elif network == "grpc":
         grpc_settings: dict[str, Any] = {}
         service_name = _get_param(params, "serviceName", "service_name")
