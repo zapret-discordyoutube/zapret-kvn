@@ -41,6 +41,21 @@ from .proxy_demand import is_proxied_chain
 _CLUSTER = re.compile(r"(?:---|\.)(sn-[a-z0-9]+)(?:-[a-z0-9]+)?\.googlevideo\.com$")
 
 
+SAME_SNAPSHOT_SEC = 1.0
+
+
+def excuse_reason(since_healthy_sec: float) -> str:
+    """Why an excused connection is not a dead cluster, for the log line.
+
+    Field 2026-11-16 (Android, Rusina, sn-ojnpo5): all three excuses came 0-2 ms after the
+    healthy connection, i.e. the connections were closed together by a server switch or a
+    stall reset, while the line claimed a full-buffer player pause.
+    """
+    if since_healthy_sec < SAME_SNAPSHOT_SEC:
+        return "закрыто вместе со здоровым соединением того же кластера, кластер отдаёт видео"
+    return "пауза плеера с полным буфером, не мёртвый кластер"
+
+
 def cluster_of(host: str | None) -> str | None:
     """Кластер из имени кеш-узла: ``rr2---sn-8ph2xajvh-3a4l.googlevideo.com`` -> ``sn-8ph2xajvh``.
 

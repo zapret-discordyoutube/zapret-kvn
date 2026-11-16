@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import unittest
 
-from xray_fluent.diagnostics.dead_video_cluster import ClusterEvent, DeadVideoClusterTracker, cluster_of
+from xray_fluent.diagnostics.dead_video_cluster import ClusterEvent, DeadVideoClusterTracker, cluster_of, excuse_reason
 
 DEAD = "rr2---sn-8ph2xajvh-3a4l.googlevideo.com"
 
@@ -306,6 +306,18 @@ class WorkerIntegrationTests(unittest.TestCase):
         with patch("xray_fluent.diagnostics.live_metrics_worker.urlopen", boom):
             self.assertEqual(worker._query_clash_api_totals(), (None, None))
         self.assertIsNone(worker._take_dead_video())
+
+
+class ExcuseReasonTests(unittest.TestCase):
+    def test_same_snapshot_excuse_is_not_called_a_player_pause(self):
+        # Field 2026-11-16 (Android): three excuses 0-2 ms after the healthy flow.
+        for since in (0.0, 0.002, 0.999):
+            self.assertEqual(
+                "закрыто вместе со здоровым соединением того же кластера, кластер отдаёт видео",
+                excuse_reason(since),
+            )
+        for since in (1.0, 11.0, 89.0):
+            self.assertEqual("пауза плеера с полным буфером, не мёртвый кластер", excuse_reason(since))
 
 
 if __name__ == "__main__":

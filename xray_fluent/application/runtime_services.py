@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ..constants import SINGBOX_CLASH_API_PORT
+from ..diagnostics.dead_video_cluster import excuse_reason
 from .async_steps import TransitionSteps, run_steps_blocking
 from .auto_switch_service import transport_kind_for_node
 from .smart_switch_service import cancel_smart_check, shutdown_smart_check
@@ -31,7 +32,7 @@ def _log_dead_cluster_event(controller: Any, event: Any) -> None:
     elif kind == "excused":
         controller._log(
             f"[youtube] кластер {cluster}: тихое соединение через {float(span_sec):.0f} с после здорового не засчитано "
-            "(пауза плеера с полным буфером, не мёртвый кластер)"
+            f"({excuse_reason(float(span_sec))})"
         )
 
 def start_metrics_worker(controller: AppController) -> None:
