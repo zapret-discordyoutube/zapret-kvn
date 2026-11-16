@@ -47,10 +47,27 @@ def android_pin_changes(android: Path, pin: dict) -> dict[Path, str]:
                 raise ValueError("Amnezia patch format changed; review module pin update")
     manifest_path = android / "core-patches/series.sha256"
     manifest = manifest_path.read_text(encoding="utf-8")
-    patch_hash = hashlib.sha256(patch.encode()).hexdigest()
-    manifest, count = re.subn(r'(?m)^[0-9a-f]{64}(\s+core-patches/0005-official-amnezia-wg-unified.patch)$', patch_hash + r'\1', manifest)
-    if count != 1:
-        raise ValueError("Missing official Amnezia patch in Android manifest")
+    rewritten = {patch_path: patch}
+    if previous != version:
+        # Later patches that edit go.mod near the Amnezia require line carry it as an unchanged
+        # context line (0014 does). After 0005 moves the module, that context must move too, or the
+        # series no longer applies (Amnezia v3.1.20261116, 2026-11-16). Only exact context lines of
+        # the go.mod require form are retargeted; anything else still fails the normal validation.
+        context = re.compile(rf'(?m)^( \s*{re.escape(module)} ){re.escape(previous)}$')
+        for relative in (line.split()[1] for line in manifest.splitlines() if line.strip()):
+            other = android / relative
+            if other == patch_path:
+                continue
+            text = other.read_text(encoding="utf-8")
+            text, count = context.subn(rf'\g<1>{version}', text)
+            if count:
+                rewritten[other] = text
+    for path, text in rewritten.items():
+        relative = path.relative_to(android).as_posix()
+        patch_hash = hashlib.sha256(text.encode()).hexdigest()
+        manifest, count = re.subn(rf'(?m)^[0-9a-f]{{64}}(\s+{re.escape(relative)})$', patch_hash + r'\1', manifest)
+        if count != 1:
+            raise ValueError(f"Missing {relative} in Android manifest")
     updates = {
         "ANDROID_WIREGUARD_GO": f"{module}@{version}",
         "ANDROID_AMNEZIAWG_GO": f"{module}@{version}",
@@ -60,7 +77,7 @@ def android_pin_changes(android: Path, pin: dict) -> dict[Path, str]:
         properties_text, count = re.subn(rf'(?m)^{key}=.*$', f"{key}={value}", properties_text)
         if count != 1:
             raise ValueError(f"Missing or repeated Android pin {key}")
-    return {properties_path: properties_text, patch_path: patch, manifest_path: manifest}
+    return {properties_path: properties_text, **rewritten, manifest_path: manifest}
 
 
 def android_resolver(android: Path):

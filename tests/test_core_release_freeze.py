@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -134,3 +135,32 @@ class CoreReleaseFreezeTests(unittest.TestCase):
                     self.assertEqual(old, new)
             self.assertIn("v3.1.20990101 h1:futurezip", changes[patch_path])
             self.assertIn("v3.1.20990101/go.mod h1:futuremod", changes[patch_path])
+
+    def test_android_retarget_moves_amnezia_context_in_later_patches(self):
+        # 2026-11-16: Amnezia v3.1.20261116 rewrote 0005, and 0014 (Xray go.mod edit) no longer applied
+        # because it carries the old Amnezia require line as context.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copyfile(ANDROID / "core.properties", root / "core.properties")
+            shutil.copytree(ANDROID / "core-patches", root / "core-patches")
+            pin = json.loads((ROOT / "scripts/core-lock.windows-x64.json").read_text())["amnezia"]
+            module, previous = pin["module"], pin["version"]
+            pin = copy.deepcopy(pin)
+            pin.update(version="v3.1.20990101", module_sum="h1:futurezip", module_go_mod_sum="h1:futuremod")
+            changes = android_pin_changes(root, pin)
+            xray = root / "core-patches/0014-xray-core-v26-11-9.patch"
+            self.assertIn(xray, changes)
+            before, after = xray.read_text().splitlines(), changes[xray].splitlines()
+            self.assertEqual(len(before), len(after))
+            moved = [(old, new) for old, new in zip(before, after) if old != new]
+            self.assertEqual([(f"\t{module} {previous}", f"\t{module} v3.1.20990101")],
+                             [(old[1:], new[1:]) for old, new in moved])
+            self.assertTrue(all(old.startswith(" ") and new.startswith(" ") for old, new in moved))
+            manifest = changes[root / "core-patches/series.sha256"]
+            for path in (xray, root / "core-patches/0005-official-amnezia-wg-unified.patch"):
+                digest_hex = hashlib.sha256(changes[path].encode()).hexdigest()
+                self.assertIn(f"{digest_hex}  core-patches/{path.name}", manifest)
+            properties = changes[root / "core.properties"]
+            self.assertIn(f"CORE_PATCH_SHA256={hashlib.sha256(manifest.encode()).hexdigest()}", properties)
+            untouched = [p for p in changes if p.suffix == ".patch" and p.name[:4] not in ("0005", "0014")]
+            self.assertEqual([], untouched)
