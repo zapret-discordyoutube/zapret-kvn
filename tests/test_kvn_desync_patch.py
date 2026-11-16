@@ -58,6 +58,8 @@ class KvnDesyncPatchTests(unittest.TestCase):
         self.assertIn('KVN_DESYNC_PATCH = "kvn-desync.patch"', text)
         self.assertIn("apply_exact_patch(source, desync_patch", text)
         self.assertIn("'./common/kvndesync'", text)
+        # route/rule links tfo-go: without -checklinkname=0 its test binary does not link (0.8.80 gate).
+        self.assertIn("'-ldflags=-checklinkname=0'", text)
         self.assertIn('"kvn_desync_patch_sha256"', text)
 
     def test_patch_applies_to_the_pinned_source_after_the_other_patches(self) -> None:

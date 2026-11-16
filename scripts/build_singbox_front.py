@@ -147,7 +147,9 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     # Без libcronet рядом тест ClientHello пропускается, остальные идут всегда.
     subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, './common/browserfetch', '-run', '^TestZapret', '-count=1'],
                    cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
-    subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, './common/kvndesync', './route/rule', '-count=1'],
+    # route/rule links tfo-go, whose linkname needs the release's -checklinkname=0 (release/LDFLAGS).
+    subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, '-ldflags=-checklinkname=0',
+                    './common/kvndesync', './route/rule', '-count=1'],
                    cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
     for tags_variant in ("", "with_low_memory"):
         subprocess.run([go, "test", "-mod=readonly", "-tags", tags_variant,
