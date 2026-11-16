@@ -91,6 +91,35 @@ Each helper ends in a loopback SOCKS relay that becomes a provider member `__app
 selector switches it with the same Clash API call as the main server. This keeps the architecture basis: every protocol
 on its own native core, sing-box only routes.
 
+## Phase 3 plan: how a slot reaches its server at runtime (2026-11-16, after reading the launch path)
+
+Facts: the provider file `__app_nodes` (`constants.SINGBOX_PROVIDER_FILE`) is written once at launch
+(`controller.py` ~1377) and holds every sing-box-core server of the pool; it is built only when the MAIN server is a
+sing-box-core server (`runtime_planner._plan_runtime_outbound` ~433-490). Helpers: one `HysteriaManager`
+(`controller.py` ~417), one Xray sidecar, one Amnezia.
+
+Plan:
+
+1. **One stable relay per slot.** When a slot is ticked, the runtime adds a loopback SOCKS outbound
+   `zapret-slot-relay-<id>` (own port and one-session credentials, like the Hysteria sidecar's `proxy` relay) and makes
+   it a member of the slot selector. Behind it runs the slot server's own native core: `hysteria.exe` for Hysteria2,
+   `xray.exe` for VLESS, Amnezia for AWG (owner 2026-11-16: «one per server»). Changing the slot's server to another
+   server of the same kind restarts only that helper on the same port: sing-box is not restarted and the main traffic
+   is not touched. (Change against the first draft: VLESS gets its own Xray per slot instead of a second inbound in the
+   main Xray sidecar, so a slot move never restarts the main server's helper.)
+2. **sing-box-core servers need no helper:** the provider is built whenever slots are on (not only when the main
+   server is a sing-box-core one) and the slot selector gets `providers: ["__app_nodes"]`; a move is one Clash API
+   `select` on the slot selector.
+3. **Members of a slot selector at runtime:** `proxy` (follow the main server), the slot relay, the provider. The
+   selected member is pinned through the Clash API before TUN/system proxy is exposed, as for `proxy` today.
+4. **Planner output:** `SlotRuntimePlan(slot_id, member_tag, helper: kind + node + relay port/credentials | None)`,
+   a pure function with tests; the controller owns the helpers' lifecycle (start after sing-box, stop with the session,
+   health like the main Hysteria sidecar).
+5. **Assignment** (which server per slot): pure, as on Android (`SlotPlanner`): pin first, then servers that worked
+   for the service (speed history), avoid the main server and other slots while the pool allows, skip servers that
+   failed recently. The slot's failover and the YouTube rescue (dead cluster, slow video) move the SLOT, not the main
+   server, when the YouTube slot is on.
+
 ## Phases
 
 1. Pure slot module + tests (spec, assignment from the pool, pin, failure marks) shared in idea with Android.
