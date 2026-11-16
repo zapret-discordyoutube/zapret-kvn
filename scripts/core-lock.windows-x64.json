@@ -14,15 +14,15 @@
     "id": "amnezia",
     "repository": "amnezia-vpn/amneziawg-go",
     "channel": "official-tags",
-    "version": "v3.1.20260828",
-    "commit": "b5928efb6ca19f0153958460c3d141f04abc5c2e",
+    "version": "v3.1.20261116",
+    "commit": "08fe3d33bbb116be09a6183d02609311b8b0c9e8",
     "module": "github.com/amnezia-vpn/amneziawg-go/v3",
-    "module_sum": "h1:D8d8gGvwXcTxUIsE4z6F6vjy4/VZddu95vMNtOygh1c=",
+    "module_sum": "h1:/LZYudfChLgd1qmfKR9gaNg1z4xBW9hyS+Ij0MJNVzo=",
     "module_go_mod_sum": "h1:YoPc6qcOZqD7TXZ1xpedD8Sx3aSKsxN05ZqEFmXDNHk=",
-    "sha256": "14f378d365a612a60aa4352e257d06a02a0091023fd47cb0b4fa7a3e27a174dd",
-    "asset_size": 197242,
+    "sha256": "5bbd6c0e52a7a6030921efd7b194c581f205f2a6fc331b9b5a3b8e768edf5548",
+    "asset_size": 198712,
     "release_prerelease": false,
-    "url": "https://github.com/amnezia-vpn/amneziawg-go/tree/b5928efb6ca19f0153958460c3d141f04abc5c2e",
+    "url": "https://github.com/amnezia-vpn/amneziawg-go/tree/08fe3d33bbb116be09a6183d02609311b8b0c9e8",
     "toolchain": {
       "version": "go1.27.3",
       "archive": "go1.27.3.windows-amd64.zip",
@@ -96,10 +96,10 @@
     },
     {
       "id": "runetfreedom-routing-data",
-      "version": "5b150d9387afc237f4f6a6257b1190c940db16cd",
-      "archive": "russia-v2ray-rules-dat-5b150d9387afc237f4f6a6257b1190c940db16cd.zip",
-      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/5b150d9387afc237f4f6a6257b1190c940db16cd.zip",
-      "sha256": "885cbd6f5926a10a92717169c15f49399b40932fdf99e974732b7f8cf6be6386",
+      "version": "24022f930750d69eadbce42d73abda8e483a0803",
+      "archive": "russia-v2ray-rules-dat-24022f930750d69eadbce42d73abda8e483a0803.zip",
+      "url": "https://github.com/runetfreedom/russia-v2ray-rules-dat/archive/24022f930750d69eadbce42d73abda8e483a0803.zip",
+      "sha256": "1edfc47aff2d8af2dd4dee69bec7a47bce718b00fd308bdcb35b817a01fb5b04",
       "files": [
         { "match": "(^|/)geoip\\.dat$", "target": "geoip.dat" },
         { "match": "(^|/)geosite\\.dat$", "target": "geosite.dat" },
@@ -111,7 +111,7 @@
       "repository": "runetfreedom/russia-v2ray-rules-dat",
       "channel": "release",
       "branch": "release",
-      "asset_size": 56992542
+      "asset_size": 56989688
     },
     {
       "id": "tun2socks",
