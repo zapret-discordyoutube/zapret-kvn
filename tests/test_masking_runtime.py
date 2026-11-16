@@ -137,6 +137,52 @@ class DesyncRuntimeTests(unittest.TestCase):
         self.assertIsNone(masking_runtime.desync_of(self.node, MaskingSettings(False, presets.DESYNC_FAKE.masking)))
 
 
+class TrojanVmessMaskingTests(unittest.TestCase):
+    """Xray owns Trojan and VMess since 2026-11-16: they get the same packet tricks as VLESS."""
+
+    def setUp(self) -> None:
+        self.document = parse_singbox_document(TEMPLATE_PATH, TEMPLATE_PATH.read_text(encoding="utf-8"))
+
+    def protect_options(self, node, masking):
+        masked = masking_runtime.masked_node(node, MaskingSettings(True, masking))
+        plan = plan_singbox_runtime(self.document, masked, pool_nodes=[masked])
+        return plan, [rule for rule in plan.singbox_config["route"]["rules"]
+                      if isinstance(rule, dict) and rule.get("inbound") == ["__app_hybrid_protect_in"]
+                      and rule.get("action") == "route-options"]
+
+    def test_a_trojan_tcp_server_gets_the_packet_trick_rule(self) -> None:
+        node = parse_single("trojan://pw@trojan.example:443?security=tls&sni=trojan.example#t")
+        plan, options = self.protect_options(node, presets.DESYNC_DISORDER.masking)
+        self.assertTrue(plan.is_hybrid)
+        self.assertEqual(1, len(options))
+        self.assertEqual(["trojan.example"], options[0]["domain"])
+        self.assertEqual("disorder:sni", options[0]["kvn_desync"])
+        self.assertEqual("disorder", masking_runtime.desync_of(node, MaskingSettings(True, presets.DESYNC_DISORDER.masking)).method)
+
+    def test_a_vmess_websocket_server_gets_them_too(self) -> None:
+        import base64
+        import json
+
+        payload = {"add": "vmess.example", "port": "443", "id": "11111111-1111-1111-1111-111111111111", "net": "ws",
+                   "path": "/w", "tls": "tls", "sni": "vmess.example"}
+        node = parse_single("vmess://" + base64.b64encode(json.dumps(payload).encode()).decode())
+        _, options = self.protect_options(node, presets.DESYNC_DISORDER.masking)
+        self.assertEqual(["vmess.example"], options[0]["domain"])
+
+    def test_an_old_sing_box_fragment_override_is_ignored_not_an_error(self) -> None:
+        from xray_fluent.masking.model import SingboxFragment
+
+        node = parse_single("trojan://pw@trojan.example:443?security=tls&sni=trojan.example#t")
+        old = MaskingSettings(True, Masking(singbox=SingboxFragment(record_fragment=True)))
+        restored = codec.decode(codec.encode(old))
+        self.assertEqual(old, restored)
+        masked = masking_runtime.masked_node(node, restored)
+        self.assertEqual(node.outbound, masked.outbound)
+        plan = plan_singbox_runtime(self.document, masked, pool_nodes=[masked])
+        self.assertTrue(plan.is_hybrid)
+        self.assertIsNone(masking_runtime.desync_of(node, restored))
+
+
 class ControllerOverrideTests(unittest.TestCase):
     def test_set_masking_override_writes_the_document_and_goes_through_update_settings(self) -> None:
         from types import SimpleNamespace
