@@ -54,6 +54,7 @@ from .nodes_page import NodesPage
 from .configs_page import SECTIONS as ROUTING_SECTIONS, ConfigsPage
 from .settings_page import SettingsPage
 from .subscriptions_page import SubscriptionDeleteDialog, SubscriptionsPage
+from .services_page import ServicesPage
 from .about_page import AboutPage
 from .about_us.page import AboutUsPage
 from .history_page import HistoryPage
@@ -186,6 +187,8 @@ class MainWindow(FluentWindow):
         self.dashboard_page = DashboardPage(self)
         self.nodes_page = DeferredPage(NodesPage, "nodes", self)
         self.subscriptions_page = DeferredPage(SubscriptionsPage, "subscriptions", self)
+        # «Сервисы» (owner 2026-11-17): own page with a full-page server picker instead of the main-page card.
+        self.services_page = DeferredPage(ServicesPage, "services", self)
         self.configs_page = DeferredPage(ConfigsPage, "configs", self)
         self.zapret_page = DeferredPage(ZapretPage, "zapret", self)
         self.logs_page = DeferredPage(LogsPage, "logs", self)
@@ -331,6 +334,7 @@ class MainWindow(FluentWindow):
         scroll = NavigationItemPosition.SCROLL
         self.addSubInterface(self.dashboard_page, FIF.SPEED_HIGH, "Панель", scroll)
         self.addSubInterface(self.nodes_page, FIF.LINK, "Серверы", scroll)
+        self.addSubInterface(self.services_page, FIF.APPLICATION, "Сервисы", scroll)
         self.addSubInterface(self.subscriptions_page, FIF.CLOUD, "Подписки", scroll)
         routing_item = self.addSubInterface(self.configs_page, FIF.IOT, "Маршрутизация", scroll)
         routing_item.clicked.connect(lambda *_args: self._open_routing_section("overview"))
@@ -553,9 +557,9 @@ class MainWindow(FluentWindow):
         )
         self.dashboard_page.configs_requested.connect(lambda: self.switchTo(self.configs_page))
         # «Серверы по сервисам» (docs/SERVICE_SLOTS.md).
-        self.dashboard_page.service_slots_card.slots_changed.connect(self._on_service_slots_changed)
-        self.dashboard_page.service_slots_card.pin_changed.connect(self._on_service_slot_pin_changed)
-        self.controller.slot_runtime.changed.connect(self._refresh_service_slots_card)
+        self.services_page.slots_changed.connect(self._on_service_slots_changed)
+        self.services_page.pin_changed.connect(self._on_service_slot_pin_changed)
+        self.controller.slot_runtime.changed.connect(self._refresh_services_page)
         self.nodes_page.import_clipboard_requested.connect(self._import_nodes_from_clipboard)
         self.nodes_page.delete_requested.connect(self.controller.remove_nodes)
         self.nodes_page.hide_subscription_nodes_requested.connect(self.controller.hide_subscription_nodes)
@@ -793,7 +797,7 @@ class MainWindow(FluentWindow):
         selected_id = self.controller.state.selected_node_id
         self.nodes_page.set_nodes(nodes, selected_id)
         self.dashboard_page.set_nodes(nodes, selected_id)
-        self._refresh_service_slots_card()
+        self._refresh_services_page()
         self._refresh_tray_tooltip()
         self.subscriptions_page.set_data(self.controller.state.subscriptions, nodes)
 
@@ -1533,9 +1537,9 @@ class MainWindow(FluentWindow):
         self.configs_page.set_status("singbox", level, message)
         self._show_status("success" if level == "success" else "warning-long" if level == "warning" else "error", message.splitlines()[0])
 
-    def _refresh_service_slots_card(self) -> None:
+    def _refresh_services_page(self) -> None:
         view = self.controller.service_slots_view()
-        self.dashboard_page.service_slots_card.set_state(
+        self.services_page.set_state(
             available=bool(view.get("available")),
             enabled=view.get("enabled") or set(),
             pins=view.get("pins") or {},
@@ -1553,11 +1557,11 @@ class MainWindow(FluentWindow):
             # The routing editor shows the same JSON: reload it so it does not save the old text over the slots.
             loaded_path, saved_text = self.controller.load_active_singbox_config_text()
             self.configs_page.set_document("singbox", loaded_path, saved_text)
-        self._refresh_service_slots_card()
+        self._refresh_services_page()
 
     def _on_service_slot_pin_changed(self, slot_id: str, node_id: str) -> None:
         self.controller.set_service_slot_pin(slot_id, node_id)
-        self._refresh_service_slots_card()
+        self._refresh_services_page()
 
     def _apply_core_config(self, core: str, text: str) -> None:
         if core == "singbox":

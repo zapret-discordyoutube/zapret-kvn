@@ -37,6 +37,16 @@ class SlotAssignerTests(unittest.TestCase):
         [gone] = assign_slots(["youtube"], pool, main_node_id="main", pins={"youtube": "zzz"})
         self.assertIn("нет в списке", gone.reason)
 
+    def test_a_pin_on_a_server_that_failed_its_check_falls_back_and_says_why(self):
+        # Owner 2026-11-17: the program picks the best server when the user's pinned one is bad.
+        pool = [node("main"), node("pinned", alive=False), node("good", speed=10)]
+        [only] = assign_slots(["youtube"], pool, main_node_id="main", pins={"youtube": "pinned"})
+        self.assertEqual(("good", False), (only.node.id, only.pinned))
+        self.assertIn("не отвечал", only.reason)
+        pool[1].is_alive = None  # not checked yet: the pin is trusted
+        [back] = assign_slots(["youtube"], pool, main_node_id="main", pins={"youtube": "pinned"})
+        self.assertEqual(("pinned", True), (back.node.id, back.pinned))
+
     def test_dead_and_awg_servers_are_skipped_and_a_small_pool_follows_the_main_server(self):
         pool = [node("main"), node("dead", alive=False, speed=99), node("awg", protocol="awg", speed=99)]
         [only] = assign_slots(["youtube"], pool, main_node_id="main", pins={})

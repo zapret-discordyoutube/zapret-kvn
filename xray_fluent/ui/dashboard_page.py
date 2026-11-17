@@ -66,7 +66,6 @@ from .traffic_graph import DetailTrafficGraphWidget, TrafficGraphWidget
 from .adaptive_buttons import AdaptiveButtonRow
 from .pending_state import PendingValue
 from .notifications import notify
-from .service_slots_card import ServiceSlotsCard
 
 #: Ширина области прокрутки, ниже которой карточки встают в одну колонку.
 NARROW_WIDTH = 900
@@ -215,8 +214,6 @@ class DashboardPage(StackedSection):
 
         self._build_connection_card(container)
         self._build_mode_card(container)
-        # «Серверы по сервисам» (docs/SERVICE_SLOTS.md): under the server and mode cards, as on the phone.
-        self.service_slots_card = ServiceSlotsCard(container)
         self._build_traffic_card(container)
         self._build_processes_card(container)
         self._build_routing_card(container)
@@ -224,7 +221,6 @@ class DashboardPage(StackedSection):
         for card in (
             self.connection_card,
             self.mode_card,
-            self.service_slots_card,
             self.traffic_card,
             self.processes_card,
             self.routing_card,
@@ -242,7 +238,6 @@ class DashboardPage(StackedSection):
 
         root.addWidget(self.connection_card)
         root.addWidget(self.mode_card)
-        root.addWidget(self.service_slots_card)
         root.addWidget(self.traffic_card)
         root.addLayout(grid)
         root.addStretch(1)

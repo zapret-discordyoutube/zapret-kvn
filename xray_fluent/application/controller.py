@@ -1263,7 +1263,12 @@ class AppController(QObject):
             host_keys=_slot_host_keys,
         )
         target = assignment.node
-        if node_id and (target is None or target.id != node_id) and node_id != self.slot_runtime.main_node_id:
+        pinned_node = next((n for n in self.state.nodes if n.id == node_id), None)
+        if pinned_node is not None and pinned_node.is_alive is False:
+            # The pin is saved, but its server failed its last check: the slot takes the best server instead (owner
+            # 2026-11-17) and comes back to the pin once a check says the server is good.
+            self._log(f"[slots] {slot_id}: закреплённый сервер не отвечает, выбран лучший")
+        elif node_id and (target is None or target.id != node_id) and node_id != self.slot_runtime.main_node_id:
             # The pinned server cannot be reached without a restart (or another slot holds it): reconnect.
             self._log(f"[slots] {slot_id}: pinned server needs a restart of sing-box")
             if self.connected:

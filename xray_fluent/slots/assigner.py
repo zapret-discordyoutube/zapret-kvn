@@ -1,6 +1,9 @@
 """Which server each ticked slot uses (pure, as Android's SlotPlanner, docs/SERVICE_SLOTS.md "Phase 3 plan").
 
-Order of choice for a slot: the user's pin while that server exists and has not just failed for the slot; otherwise
+Order of choice for a slot: the user's pin while that server exists, has not just failed for the slot and did not fail
+its last check (owner 2026-11-17: "the program should choose the best server on its own, even if the user explicitly
+selected another one, if the server selected by the user is bad"; the pin stays saved and wins again once the server
+is good); otherwise
 the best server of the pool that the main server and the slots before it do not use (owner 2026-11-14: separate
 servers per service while the pool allows); otherwise the main server (the slot follows `proxy`).
 "Best" = measured alive first, then the faster speed test, then the lower ping; AWG servers are skipped (no slot helper
@@ -87,16 +90,19 @@ def assign_slots(
     used: set[str] = set()
     take(main_node_id)
     slot_ids = list(slot_ids)
+    def pin_good(slot_id: str, pin: str | None) -> bool:
+        return bool(pin) and pin in by_id and pin not in failed.get(slot_id, set()) and by_id[pin].is_alive is not False
+
     # Pins are reserved first: a slot on «Авто» earlier in the order must not take another slot's pinned server.
     for slot_id in slot_ids:
         pin = pins.get(slot_id)
-        if pin and pin in by_id and pin not in failed.get(slot_id, set()):
+        if pin_good(slot_id, pin):
             take(pin)
     result: list[SlotAssignment] = []
     for slot_id in slot_ids:
         bad = failed.get(slot_id, set())
         pin = pins.get(slot_id)
-        if pin and pin in by_id and pin not in bad:
+        if pin_good(slot_id, pin):
             result.append(SlotAssignment(slot_id, by_id[pin], pinned=True))
             continue
         reason = ""

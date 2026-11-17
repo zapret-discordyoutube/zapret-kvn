@@ -95,6 +95,15 @@ class ControllerSlotTests(unittest.TestCase):
         self.assertEqual([], fake.slot_runtime.moves)
         self.assertEqual(["service slot pin"], fake.transitions)
 
+    def test_a_pin_on_a_server_that_failed_its_check_takes_the_best_one_without_reconnecting(self):
+        # Owner 2026-11-17: a bad pinned server gives way to the best one; the pin itself stays saved.
+        fake = fake_controller(active=["youtube"], servers={"youtube": "a"})
+        next(n for n in fake.state.nodes if n.id == "b").is_alive = False
+        AppController.set_service_slot_pin(fake, "youtube", "b")
+        self.assertEqual({"youtube": "b"}, fake.state.settings.service_slot_pins)
+        self.assertEqual([], fake.transitions)
+        self.assertNotIn(("youtube", "b"), fake.slot_runtime.moves)
+
     def test_dead_cluster_moves_the_youtube_slot_not_the_main_server(self):
         fake = fake_controller(active=["youtube"], servers={"youtube": "a"})
         self.assertTrue(AppController._youtube_slot_rescue(fake, ["sn-abc"]))

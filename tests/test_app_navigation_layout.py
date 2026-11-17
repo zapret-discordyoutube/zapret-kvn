@@ -25,7 +25,7 @@ from qfluentwidgets.components.navigation.navigation_widget import NavigationTre
 from xray_fluent.ui.main_window import MainWindow  # noqa: E402
 
 _PAGES = (
-    "dashboard_page", "nodes_page", "subscriptions_page", "zapret_page", "logs_page",
+    "dashboard_page", "nodes_page", "services_page", "subscriptions_page", "zapret_page", "logs_page",
     "history_page", "about_page", "updates_page", "sharing_page", "settings_page",
     "about_us_page",
 )

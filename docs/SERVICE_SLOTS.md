@@ -2,7 +2,7 @@
 
 Status (2026-11-16): phases 1-5 in code, not yet released or tried on win10. Modules: `xray_fluent/slots/`
 (`catalog.py`, `config_writer.py`, `runtime_plan.py`, `assigner.py`, `rescue.py`),
-`application/slot_runtime_service.py`, `ui/service_slots_card.py`; tests `tests/test_service_slots_*.py` (51).
+`application/slot_runtime_service.py`, `ui/services_page.py`; tests `tests/test_service_slots_*.py` (51).
 
 ## Owner decisions (2026-11-16)
 
@@ -21,7 +21,9 @@ Status (2026-11-16): phases 1-5 in code, not yet released or tried on win10. Mod
    own `hysteria.exe` (up to 4), VLESS shares the one Xray sidecar.
 6. Scope of the first release (2026-11-16): «all three at once» — YouTube, AI and Telegram slots together.
 7. Place (2026-11-16): a card «Серверы по сервисам» on the main page under the server card: a tick per service and
-   «Авто» or a pinned server, as on the phone.
+   «Авто» or a pinned server, as on the phone. REPLACED 2026-11-17 (owner, with a screenshot: "they should be in a
+   separate tab and in a proper full-screen menu"; with thirty or more servers the card's ComboBoxes overflowed the
+   window, scrolled slowly and lagged): the «Сервисы» page, see "What is built".
 
 Point 4 is what keeps slots inside the routing contract: the active raw JSON stays the source of truth, the change is
 a user action from the GUI (like the existing "restore stock" actions), and nothing is injected at launch.
@@ -132,8 +134,13 @@ Plan:
 
 ## What is built (2026-11-16)
 
-- **Card** «Серверы по сервисам» on the main page (`ServiceSlotsCard`): a switch per service, «Авто» or a pinned
-  server, «сейчас: …» while connected. A switch calls `AppController.set_service_slots`, which writes the slot blocks
+- **Page** «Сервисы» in the navigation under «Серверы» (`ServicesPage`, since 0.8.85; it replaced the main-page card
+  `ServiceSlotsCard`): a row per service with its switch, «Сервер: Авто» or «Закреплён: …», «сейчас: …» while connected
+  and «Выбрать сервер». The button opens a full-page picker for that one service: a search field and a list view that
+  fills the page, «Авто» first, then the servers best first (answered, faster speed test, lower ping) with protocol, ping
+  and speed, the current choice marked. The list is built only when the picker opens; runtime refreshes
+  (`slot_runtime.changed`) only update the three rows (the old card refilled three ComboBoxes with every server on each
+  of them, which made it lag). A switch calls `AppController.set_service_slots`, which writes the slot blocks
   with `apply_slots` and saves through `apply_singbox_config_text` (the routing editor's own path: validation, save,
   reconnect when connected); the editor page reloads the saved JSON. Pins live in `AppSettings.service_slot_pins`.
 - **Launch:** `_plan_runtime_singbox` / `_plan_proxy_runtime_singbox` call `_attach_slot_plans`: `assign_slots` (pin
@@ -160,6 +167,12 @@ Plan:
   при низкой скорости», not «сервер выбран вручную» (that is the main server's pick). Log `[slots] youtube: кластер …
   не отвечает на A, слот YouTube -> B`; status «… YouTube переведён на B, остальные программы не тронуты.
   Перезапустите видео …».
+- **A bad pinned server gives way (owner decision 2026-11-17):** "the program should choose the best server on its own,
+  even if the user explicitly selected another one, if the server selected by the user is bad". A pin is honoured only
+  while its server did not fail for the slot (helper failure, dead YouTube cluster) and did not fail its last check
+  (`is_alive is False`); otherwise the slot takes the best free server with the reason «закреплённый сервер не отвечал».
+  The pin stays saved and wins again once a check says the server is good; pinning a server whose check failed moves
+  nothing and does not reconnect (log `[slots] <id>: закреплённый сервер не отвечает, выбран лучший`).
 - **One machine is one server:** a provider machine often comes as several entries (VLESS gRPC, VLESS WS, Hysteria2,
   each with its own host name). The assigner counts entries whose host keys meet as one server (`host_keys`: the host
   name plus the addresses of this session's DNS snapshot, `bootstrap_dns.cached_addresses`, stable for the session so
@@ -189,5 +202,5 @@ Plan:
   Rusina, AI Nithesina, Telegram us-vdsryzen-8 and the hot-move target Hiphopgen on five different machines. The
   same runs found and verified the fix of a python.exe access violation (a finished worker step's deadline QTimer
   collected on a worker thread, `async_steps.TransitionStep.release`).
-- **Not yet:** slow-video rescue (Windows has no slow-video detector, only dead clusters), AWG slot servers (`slot_capable` keeps them out of the card list, and an old AWG pin falls back with the reason «серверы AmneziaWG для сервисов пока не поддерживаются»), a speed
-  history per service, per-slot traffic on the card, Clash/Mihomo YAML subscriptions (neither app imports them).
+- **Not yet:** slow-video rescue (Windows has no slow-video detector, only dead clusters), AWG slot servers (`slot_capable` keeps them out of the picker list, and an old AWG pin falls back with the reason «серверы AmneziaWG для сервисов пока не поддерживаются»), a speed
+  history per service, per-slot traffic on the page, Clash/Mihomo YAML subscriptions (neither app imports them).
