@@ -271,7 +271,8 @@ class SlotRuntimeService(QObject):
             # Without its own copy the helper would share the main sidecar's orphan cleanup: do not run it.
             self._log(f"[slots] {slot_id}: could not prepare {target.name}")
             return False
-        self._log(f"[slots] {slot_id}: starting {core} helper relay=127.0.0.1:{helper.relay_port}")
+        self._log(f"[slots] {slot_id}: starting {core} helper relay=127.0.0.1:{helper.relay_port} "
+                  f"{RuntimeNodeIdentity.from_node(helper.node).fields()}")
         if helper.core is ProtocolCore.HYSTERIA:
             manager: HysteriaManager | XrayManager = HysteriaManager(
                 self, exe_path=target, config_file=slot_helper_config(core, slot_id),

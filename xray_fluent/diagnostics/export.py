@@ -145,7 +145,7 @@ def export_diagnostics(zip_path: Path, state: AppState, logs: list[str], *, runt
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("state_redacted.json", json.dumps(safe_state, ensure_ascii=True, indent=2))
         archive.writestr("meta.json", json.dumps(meta, ensure_ascii=True, indent=2))
-        archive.writestr("recent_logs.txt", "\n".join(_redact_log_line(line) for line in logs[-2000:]))
+        archive.writestr("recent_logs.txt", "\n".join(_redact_log_line(line) for line in logs[-5000:]))
         archive.writestr("runtime_errors.json", json.dumps(
             _redact([asdict(record) for record in runtime_errors]), ensure_ascii=False, indent=2,
         ))

@@ -274,20 +274,23 @@ def contextualize_runtime_log(
     return f"{prefix}[{' '.join(fields)}] {clean}".strip()
 
 
+# Above this many outbounds the map is one summary line. A user with 1100+ servers got ~2200 map lines per switch
+# (front + sidecar), which pushed every real event out of the diagnostics archive (2026-11-17, Titiru outage: 72 of
+# 2000 lines were events). Each core line already carries its node (``line_with_context``) and the archive has the
+# full map of the running generation in runtime_redacted.json (``log_context.outbound_nodes``).
+RUNTIME_MAP_FULL_LIMIT = 40
+
+
 def runtime_mapping_lines(context: RuntimeLogContext) -> list[str]:
-    result: list[str] = []
-    seen: set[tuple[str, RuntimeNodeIdentity]] = set()
-    for tag, identity in sorted(context.outbound_nodes.items()):
-        item = (tag, identity)
-        if item in seen:
-            continue
-        seen.add(item)
-        result.append(
-            f"[runtime-map] engine={context.engine} role={context.role} "
-            f"mode={context.mode} generation={context.generation} "
-            f"outbound={tag} {identity.fields()}"
-        )
-    return result
+    head = (
+        f"[runtime-map] engine={context.engine} role={context.role} "
+        f"mode={context.mode} generation={context.generation}"
+    )
+    items = sorted(context.outbound_nodes.items())
+    if len(items) > RUNTIME_MAP_FULL_LIMIT:
+        selected = f" {context.selected.fields()}" if context.selected is not None else ""
+        return [f"{head} outbounds={len(items)} (full map: runtime_redacted.json){selected}"]
+    return [f"{head} outbound={tag} {identity.fields()}" for tag, identity in items]
 
 
 def identities_for_tags(
