@@ -136,9 +136,12 @@ Plan:
 
 - **Page** «Сервисы» in the navigation under «Серверы» (`ServicesPage`, since 0.8.85; it replaced the main-page card
   `ServiceSlotsCard`): a row per service with its switch, «Сервер: Авто» or «Закреплён: …», «сейчас: …» while connected
-  and «Выбрать сервер». The button opens a full-page picker for that one service: a search field and a list view that
-  fills the page, «Авто» first, then the servers best first (answered, faster speed test, lower ping) with protocol, ping
-  and speed, the current choice marked. The list is built only when the picker opens; runtime refreshes
+  and «Выбрать сервер». The button opens a full-page picker for that one service. Since 0.8.86 (owner 2026-11-17: the
+  plain list was "nonsense", make a proper table) the picker is the same virtual table as «Серверы» (`NodesView` +
+  `NodesTableModel`): flag and name, protocol badge, ping, speed; groups by subscription (switchable: country,
+  protocol, none); sorted by ping, a header click sorts by name, protocol, ping or speed. The pinned server is drawn as
+  the active row. «Закрепить выбранный» (or a double click / Enter) pins the selected server, «Авто» drops the pin,
+  Esc goes back. The table model is filled only when the picker opens; runtime refreshes
   (`slot_runtime.changed`) only update the three rows (the old card refilled three ComboBoxes with every server on each
   of them, which made it lag). A switch calls `AppController.set_service_slots`, which writes the slot blocks
   with `apply_slots` and saves through `apply_singbox_config_text` (the routing editor's own path: validation, save,

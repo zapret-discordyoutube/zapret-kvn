@@ -804,6 +804,7 @@ class MainWindow(FluentWindow):
     def _on_subscriptions_changed(self, subscriptions: list[Subscription]) -> None:
         self.subscriptions_page.set_data(subscriptions, self.controller.state.nodes)
         self.nodes_page.set_subscriptions(subscriptions)
+        self._refresh_services_page()
 
     def _add_subscription(self) -> None:
         self.subscriptions_page.open_editor(None)
@@ -1547,6 +1548,7 @@ class MainWindow(FluentWindow):
             live=view.get("live") or {},
             connected=bool(view.get("connected")),
             note=str(view.get("note") or ""),
+            source_names={item.id: item.name or "Подписка" for item in self.controller.state.subscriptions},
         )
 
     def _on_service_slots_changed(self, wanted: object) -> None:
