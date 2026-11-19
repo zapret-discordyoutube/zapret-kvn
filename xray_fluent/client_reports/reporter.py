@@ -35,6 +35,7 @@ from .contract import (
     AttemptDetails,
     ForeignServer,
     short_version,
+    new_report_id,
     FAILED_FOR_MS,
     MAX_BATCH,
     MAX_BODY_BYTES,
@@ -515,7 +516,7 @@ class ClientReporter:
             failed_step=verdict.failed_step, detail=verdict.detail,
             elapsed_ms=max(0, min(int(elapsed_ms), MAX_ELAPSED_MS)),
             attempted_at_ms=int(attempted_at_ms), network_token=self._tokens.current(self._now_ms()),
-            foreign=foreign, details=(details or AttemptDetails()).cleaned(),
+            foreign=foreign, details=(details or AttemptDetails()).cleaned(), report_id=new_report_id(),
         )
         self._queue.add(record)
         step = f" at {verdict.failed_step} ({verdict.detail})" if verdict.failed_step else ""

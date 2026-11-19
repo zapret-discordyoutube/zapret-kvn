@@ -114,6 +114,25 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(self.DETAILS, pending[1].details)
             self.assertEqual(foreign, pending[2])
 
+    def test_report_id_is_made_once_and_survives_the_queue(self) -> None:
+        # vpnbot «report_id live» 2026-11-19: one attempt, one id, the same in every re-send.
+        import dataclasses
+
+        first, second = c.new_report_id(), c.new_report_id()
+        self.assertRegex(first, r"^[0-9a-f]{32}$")
+        self.assertNotEqual(first, second)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "queue.jsonl"
+            c.ReportQueue(path).add(dataclasses.replace(record(), report_id=first))
+            again = c.ReportQueue(path).pending(NOW)
+            self.assertEqual(first, again[0].report_id)
+            body = json.loads(c.batch_json(INSTALL, APP, again, c.SENT_DIRECT))
+            self.assertEqual(first, body["reports"][0]["report_id"])
+        # A line written before report_id goes out without one; a malformed id never reaches the queue.
+        self.assertNotIn("report_id", json.loads(c.batch_json(INSTALL, APP, [record()], c.SENT_DIRECT))["reports"][0])
+        for bad in ("ABCDEF" * 6, "0" * 31, "g" * 32):
+            self.assertFalse(c.is_valid(dataclasses.replace(record(), report_id=bad)))
+
     def test_connected_report_has_no_step_token_or_detail(self) -> None:
         body = json.loads(c.batch_json(INSTALL, APP, [record(c.Outcome.CONNECTED, "", "")], c.SENT_DIRECT))
         report = body["reports"][0]
@@ -241,6 +260,38 @@ class SubscriptionMapTests(unittest.TestCase):
         self.assertEqual({}, subscription.server_ids)
         self.assertIsNone(r.server_ref_for(state.nodes[0], state.subscriptions))
 
+    def test_service_subscription_without_ids_is_checked_once_even_with_auto_update_off(self) -> None:
+        # The owner's archive 2026-11-19: auto-update off, both vpnbot subscriptions fetched before the header
+        # existed, so not one report was ever written. A check (server list untouched) learns the ids.
+        from xray_fluent.application.controller import AppController
+        from xray_fluent.application.subscription_service import learn_server_ids, needs_server_ids
+
+        ours = Subscription(id="ours", service=True)
+        other = Subscription(id="other", service=False)
+        known = Subscription(id="known", service=True, server_ids={"Velnor": {"server_id": "hipnl", "product": "vless"}})
+        self.assertEqual([True, False, False], [needs_server_ids(s) for s in (ours, other, known)])
+
+        ids = header({"Velnor": {"server_id": "hipnl", "product": "hysteria2"}})
+        self.assertFalse(learn_server_ids(other, SubscriptionFetchResult(headers={c.SERVER_IDS_HEADER: ids})))
+        self.assertEqual({}, other.server_ids)
+        self.assertFalse(learn_server_ids(ours, SubscriptionFetchResult(headers={}, status=304, not_modified=True)))
+        self.assertTrue(learn_server_ids(ours, SubscriptionFetchResult(headers={c.SERVER_IDS_HEADER: ids}, status=304,
+                                                                       not_modified=True)))
+        self.assertEqual("hysteria2", ours.server_ids["Velnor"]["product"])
+
+        asked: list[str] = []
+        fake = SimpleNamespace(
+            locked=False, _server_ids_asked=set(), _log=lambda _line: None,
+            state=SimpleNamespace(subscriptions=[Subscription(id="a", service=True), other, known]),
+            check_subscription=lambda sid, mode: asked.append(sid),
+        )
+        AppController._learn_missing_server_ids(fake)
+        AppController._learn_missing_server_ids(fake)   # once per run, not on every call
+        self.assertEqual(["a"], asked)
+        fake.locked, fake._server_ids_asked, asked[:] = True, set(), []
+        AppController._learn_missing_server_ids(fake)
+        self.assertEqual([], asked)
+
 
 class _Ingest(BaseHTTPRequestHandler):
     received: list[dict] = []
@@ -339,6 +390,7 @@ class ReporterTests(unittest.TestCase):
         report = _Ingest.received[0]["reports"][0]
         self.assertEqual("direct", report["sent_via"])
         self.assertEqual("v1.tok.mac", report["network_token"])
+        self.assertRegex(report["report_id"], r"^[0-9a-f]{32}$")
         self.assertEqual(("failed", "handshake", "udp_no_answer"),
                          (report["outcome"], report["failed_step"], report["detail"]))
         self.assertTrue(c.is_install_id(report["install_id"]))

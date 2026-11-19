@@ -85,8 +85,7 @@ def apply_not_modified(
     _apply_cache_headers(subscription, fetch)
     # vpnbot sends zapret-server-ids on a 304 too: an app updated while its ETag stays valid
     # still learns the ids without waiting for the body to change.
-    if subscription.service and SERVER_IDS_HEADER in fetch.headers:
-        subscription.server_ids = _server_id_map(fetch)
+    learn_server_ids(subscription, fetch)
     return SubscriptionUpdateResult(
         subscription_id=subscription.id,
         success=True,
@@ -302,6 +301,24 @@ def _apply_success_metadata(
         subscription.last_modified = ""
     else:
         _apply_cache_headers(subscription, fetch)
+
+
+def needs_server_ids(subscription: Subscription) -> bool:
+    """A subscription of the service whose catalogue ids are unknown: no connection report can name its servers.
+
+    Found 2026-11-19 in the owner's archive: with subscription auto-update off, his two vpnbot subscriptions still
+    held the copy fetched before the ``zapret-server-ids`` header existed, so the app sent no reports at all.
+    """
+    return bool(subscription.service) and not subscription.server_ids
+
+
+def learn_server_ids(subscription: Subscription, fetch: SubscriptionFetchResult) -> bool:
+    """Take the catalogue ids from a reply of the service (full, 304 or a check): metadata about the servers, not
+    the server list, so a check that changes nothing else may store them. True when the header was there."""
+    if not subscription.service or SERVER_IDS_HEADER not in fetch.headers:
+        return False
+    subscription.server_ids = _server_id_map(fetch)
+    return True
 
 
 def _server_id_map(fetch: SubscriptionFetchResult) -> dict[str, dict[str, str]]:

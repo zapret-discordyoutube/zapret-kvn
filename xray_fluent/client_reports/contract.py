@@ -14,6 +14,7 @@ import binascii
 import json
 import os
 import re
+import secrets
 import threading
 import zlib
 from collections.abc import Callable
@@ -46,6 +47,7 @@ MAX_HEADER_CHARS = 16 * 1024
 MAX_INFLATED_BYTES = 512 * 1024
 
 _INSTALL_ID = re.compile(r"[0-9a-f]{32}")
+_REPORT_ID = re.compile(r"[0-9a-f]{32}")
 _SERVER_ID = re.compile(r"[a-z0-9_-]{1,64}")
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,47}")
 _VERSION = re.compile(r"[0-9A-Za-z.+-]{1,32}")
@@ -198,6 +200,14 @@ class AttemptRecord:
     #: A foreign server instead of server_id/product (those are empty then).
     foreign: ForeignServer | None = None
     details: AttemptDetails = AttemptDetails()
+    #: One attempt, one id (vpnbot «report_id live» 2026-11-19): made once when the attempt is recorded and kept in the
+    #: queue, so a re-send after a lost reply is stored once. Empty for queue lines written before it (sent without).
+    report_id: str = ""
+
+
+def new_report_id() -> str:
+    """32 lowercase hex characters from the system's random source."""
+    return secrets.token_hex(16)
 
 
 def is_install_id(value: str) -> bool:
@@ -228,6 +238,8 @@ def is_valid(record: AttemptRecord) -> bool:
     if record.detail and not _CODE.fullmatch(record.detail):
         return False
     if record.network_token and not is_network_token(record.network_token):
+        return False
+    if record.report_id and not _REPORT_ID.fullmatch(record.report_id):
         return False
     if record.outcome is Outcome.FAILED:
         return record.failed_step in STEPS
@@ -279,6 +291,8 @@ def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], 
         item["sent_via"] = sent_via
         if record.network_token:
             item["network_token"] = record.network_token
+        if record.report_id:
+            item["report_id"] = record.report_id
         item.update(_details_json(record.details))
         reports.append(item)
     return json.dumps({"reports": reports}, ensure_ascii=False, separators=(",", ":"))
@@ -478,6 +492,8 @@ def _queue_line(record: AttemptRecord) -> str:
         "f": record.failed_step, "d": record.detail, "e": int(record.elapsed_ms),
         "t": int(record.attempted_at_ms), "n": record.network_token,
     }
+    if record.report_id:
+        line["r"] = record.report_id
     if record.foreign is not None:
         line["g"] = {"h": record.foreign.host, "p": record.foreign.protocol, "m": record.foreign.name}
     details = _details_json(record.details)
@@ -499,6 +515,7 @@ def _parse_queue_line(line: str) -> AttemptRecord | None:
             failed_step=str(data["f"]), detail=str(data["d"]), elapsed_ms=int(data["e"]),
             attempted_at_ms=int(data["t"]), network_token=str(data["n"]), foreign=foreign,
             details=_details_from(data["x"]) if isinstance(data.get("x"), dict) else AttemptDetails(),
+            report_id=str(data.get("r") or ""),
         )
     except (ValueError, KeyError, TypeError):
         return None

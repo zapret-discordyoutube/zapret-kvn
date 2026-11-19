@@ -168,6 +168,8 @@ from .subscription_service import (
     AWAITING_NAME,
     apply_not_modified,
     hide_subscription_node as hide_subscription_node_operation,
+    learn_server_ids,
+    needs_server_ids,
     mark_subscription_failure,
     reconcile_subscription,
     remove_subscription as remove_subscription_operation,
@@ -518,6 +520,7 @@ class AppController(QObject):
         self._subscription_queued_ids: set[str] = set()
         self._pending_subscription_additions: dict[str, Subscription] = {}
         self._subscription_check_ids: set[str] = set()
+        self._server_ids_asked: set[str] = set()
         self._singbox_documents = SingboxDocumentCache()
         self._speed_total = 0
         self._speed_completed = 0
@@ -736,6 +739,7 @@ class AppController(QObject):
         self._subscription_timer.start()
         if self._startup_subscription_check_enabled():
             QTimer.singleShot(30_000, self._check_due_subscriptions)
+        QTimer.singleShot(45_000, self._learn_missing_server_ids)
         return True
 
     def set_data_passphrase(self, passphrase: str) -> None:
@@ -3532,6 +3536,8 @@ class AppController(QObject):
             hidden = set(subscription.hidden_source_keys)
             parsed.nodes = [node for node in parsed.nodes if node.source_key not in hidden]
         if subscription.id in self._subscription_check_ids:
+            if learn_server_ids(subscription, fetched):
+                self._log(f"[client-report] server ids from a check of «{subscription.name}»: {len(subscription.server_ids)}")
             subscription.last_checked_at = datetime.now(timezone.utc).isoformat()
             subscription.last_error = ""
             subscription.failure_count = 0
@@ -3672,6 +3678,19 @@ class AppController(QObject):
                 self._enqueue_subscription_update(
                     subscription, "auto", pending_add=False, apply_result=True
                 )
+
+    def _learn_missing_server_ids(self) -> None:
+        """Once per run, a check of each service subscription without catalogue ids, even with subscription
+        auto-update off: a check never changes the server list, it only reads the ``zapret-server-ids`` header,
+        without which no connection report can name a server of the service."""
+        if self.locked:
+            return
+        for subscription in self.state.subscriptions:
+            if subscription.id in self._server_ids_asked or not needs_server_ids(subscription):
+                continue
+            self._server_ids_asked.add(subscription.id)
+            self._log(f"[client-report] «{subscription.name}» has no server ids: one check for the header")
+            self.check_subscription(subscription.id, mode="auto")
 
     def _startup_subscription_check_enabled(self) -> bool:
         """AC4: gate for the one-shot startup check (load() and startup unlock)."""
@@ -4517,6 +4536,7 @@ class AppController(QObject):
             self.lock_state_changed.emit(False)
             if self._startup_subscription_check_enabled():
                 QTimer.singleShot(0, self._check_due_subscriptions)
+            QTimer.singleShot(15_000, self._learn_missing_server_ids)
             return True
 
         ok = verify_password(password, self.state.security.password_hash, self.state.security.salt)
@@ -4525,6 +4545,7 @@ class AppController(QObject):
             self.lock_state_changed.emit(False)
             if self._startup_subscription_check_enabled():
                 QTimer.singleShot(0, self._check_due_subscriptions)
+            QTimer.singleShot(15_000, self._learn_missing_server_ids)
         return ok
 
     def lock(self) -> None:

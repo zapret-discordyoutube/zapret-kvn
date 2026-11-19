@@ -42,8 +42,19 @@ sent only when the user presses «Отправить отчёт»: then `foreign
 `server_id`/`product` (exactly one of the two, or the receiver refuses), with the server's `server_ip` and
 `port`. The name loses Unicode control/format characters and is cut to 64 code points (flags survive);
 the host is lower-cased, an IPv6 zone is never sent. The receiver keeps them in its own table, never in
-our servers' verdict or ranking. No `report_id` yet: the receiver refuses unknown fields; it comes only
-after vpnbot announces it.
+our servers' verdict or ranking.
+
+`report_id` (vpnbot «report_id live», 2026-11-19): 32 lowercase hex characters from the system's secure random
+source, made once when the attempt is recorded and kept in the device queue (key `r`), so every re-send of the
+same attempt carries the same id and vpnbot stores the first copy only. Queue lines written before carry none and
+go out without it. The 202 reply also says how many were `repeated`; a 400 for a re-send older than 7 days drops it.
+
+Catalogue ids (`zapret-server-ids`) come only with a reply of the service subscription. A subscription fetched
+before the header existed (2026-11-19 13:07 UTC) keeps no ids, and then no report can name its servers: the
+owner's own PC, with subscription auto-update off, sent none. So once per run the app checks each service
+subscription without ids once, only for the header; the server list is not changed (Windows: a check-only
+fetch, `_learn_missing_server_ids`; Android: `ServerIdBackfill`, the body is dropped). Log line:
+`[client-report] … has no server ids: one check for the header` / `client-report: подписка сервиса без id серверов`.
 
 ## When a report is honest
 
