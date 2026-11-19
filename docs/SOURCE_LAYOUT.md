@@ -56,3 +56,13 @@ Windows: `python3 -m unittest discover -s tests`.
 Android: `scripts/verify-project.sh`, `:app:testDebugUnitTest`,
 `:app:assembleDebugAndroidTest`. Сборка instrumentation APK не означает,
 что тесты были выполнены на устройстве. Выпуск приложений — отдельная операция.
+
+## Site names of the updater (owner 2026-11-19)
+
+`updates/` reaches Forgejo only through the shared update core `zapret_update/mirrors.py`, a byte-for-byte copy of
+Zapret 2 GUI's `public_zapretgui/src/zapret_update` (sync with `scripts/sync_update_core.py`, never edit the copy).
+Russia cuts the whole zone `zapret.moe` by name (SNI), so the core accepts one label under any domain of the
+zapret-links pool: its seed starts with names on `fuckingspeedtest.com`, and further domains come from `domains`
+of a trusted list (`/_sites/mirrors.json`, the entry pages). Release files are trusted only on such learnt or seed
+names (`app_updater._is_trusted_release_url`); `tests/test_update_pool_mirrors.py` shows an update found and
+trusted when only pool names answer.
