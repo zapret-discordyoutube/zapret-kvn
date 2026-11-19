@@ -740,7 +740,8 @@ class DashboardPage(StackedSection):
         elif report.checking:
             text = "Проверяем, где закрыт путь до сервера…"
         elif report.diagnosis_text:
-            text = f"Проверка пути: {report.diagnosis_text}"
+            # vpnbot's verdict text as is (the app keeps no verdict texts), or the waiting line.
+            text = report.diagnosis_text
         else:
             text = ""
         self.diagnosis_label.setText(text)

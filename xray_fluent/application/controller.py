@@ -221,7 +221,7 @@ from ..engines.singbox import (
     select_outbound_when_ready_steps as select_singbox_outbound_when_ready_steps,
 )
 from ..client_reports.contract import INGEST_SEED, AttemptDetails, AttemptFacts, ReportSettings
-from ..client_reports.probe import BlockProbe
+from ..client_reports.probe import BlockProbe, NoDataProbe
 from ..client_reports.reporter import ClientReporter, core_versions, probe_target_for, server_ref_for
 from ..constants import (
     APP_NAME,
@@ -635,6 +635,9 @@ class AppController(QObject):
             # Path check after a failure (docs/CLIENT_REPORTS.md): control and "the real name on a working address"
             # use our pool front. The notice gets the result through a queued signal (the reporter's thread).
             probe=BlockProbe(lambda: [host for host in INGEST_SEED if not host.endswith(".zapret.moe")]),
+            # Tunnel up, no data (a VLESS start whose relay check got nothing): the same service by address and by
+            # name through the relay and directly; no probe of the server itself (its path is proven).
+            no_data_probe=NoDataProbe(),
             on_failure_changed=self.failure_report_changed.emit,
             # Schema 2: mode, masking and versions; DNS, QUIC and IPv6 live in the native JSON (left unknown).
             context=self._client_report_context,

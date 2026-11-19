@@ -7,9 +7,11 @@ probe through the Xray relay after a VLESS connect (owner decision 19.11.2026: l
 Hysteria/AmneziaWG engines already do at start). No timers: work runs when a report
 is queued and at start-up, on one background thread.
 
-After a failure ``probe.BlockProbe`` checks the path step by step (``diagnosis``): the conclusion goes into the
-report and onto the failure notice (``on_failure_changed``); the «Отправить отчёт» button is ``force_report``.
-After a success the freeze is measured through the session, once per server per ``MIN_INTERVAL_MS``.
+Schema 3 (vpnbot «schema 3 live» / «completion live» 2026-11-19): the app sends facts, vpnbot judges and answers
+with a verdict per report, whose text goes onto the failure notice (``on_failure_changed``). A failure goes at once;
+when the path is checked (``probe.BlockProbe``, rarely: ``PATH_CHECK_PER_SERVER_MS``, ``PATH_CHECK_PER_INSTALL_MS``)
+the same report follows whole. The «Отправить отчёт» button is ``force_report``. After a success the flow is
+measured through the session, once per server per ``FLOW_CHECK_PER_SERVER_MS``.
 """
 
 from __future__ import annotations
@@ -51,23 +53,28 @@ from .contract import (
     IngestHostCache,
     NetworkToken,
     NetworkTokenCache,
+    Outcome,
     ReportQueue,
     SendAction,
     ServerRef,
     after_response,
+    ServerVerdict,
+    attempt_core_code,
     batch_json,
-    classify,
-    classify_forced,
     domain_of,
     ingest_order,
     is_install_id,
     is_network_token,
+    outcome_of,
     parse_ingest_feed,
+    parse_reply,
     products_for_scheme,
     take_batch,
 )
-from .diagnosis import MIN_INTERVAL_MS, Diagnosis, DiagnosisFacts, describe, diagnose, diagnose_udp, freeze
-from .probe import BlockProbe, ProbeTarget, measure_freeze
+from . import checks as k
+from .checks import Check, carrier_of
+
+from .probe import BlockProbe, NoDataProbe, PathFacts, ProbeTarget, Relay, literal_address, measure_flow, needs_path_check
 
 
 APP_NAME = "zapret-kvn"
@@ -75,7 +82,18 @@ PLATFORM = "windows"
 _TIMEOUT = 15.0
 _PROBE_TIMEOUT = 10.0
 _MAX_ANSWER_BYTES = 4096
+#: 50 verdicts with their texts.
+_MAX_REPLY_BYTES = 64 * 1024
 UDP_SCHEMES = frozenset({"hysteria2", "hy2", "wireguard", "awg", "amneziawg", "wg", "tuic"})
+#: Path checks are rare (owner 2026-11-19: «check as rarely as possible and only if it's really necessary»): one per
+#: server (host and IP) a day, one per install in ten minutes, so clicking through servers probes at most one. vpnbot
+#: sums the reports of every install, so a rare check loses little.
+PATH_CHECK_PER_SERVER_MS = 24 * 3600 * 1000
+PATH_CHECK_PER_INSTALL_MS = 10 * 60 * 1000
+#: The flow probe runs inside the tunnel (nothing new on the wire), still not on every connect.
+FLOW_CHECK_PER_SERVER_MS = 6 * 3600 * 1000
+#: The notice while vpnbot's answer is not here (no rule and no verdict text in the app: owner 2026-11-19).
+WAITING_TEXT = "Разбор сбоя появится, когда отчёт дойдёт до сервиса."
 
 
 def server_ref_for(node: Any, subscriptions: list[Any]) -> ServerRef | None:
@@ -122,12 +140,15 @@ def probe_target_for(node: Any) -> ProbeTarget | None:
         name = str(outbound["tls"].get("server_name") or "").strip() or None
     quic = scheme in {"hysteria2", "hy2", "hysteria", "tuic"}
     network = str(stream.get("network") or "").lower()
+    tls_settings = stream.get("tlsSettings") if isinstance(stream.get("tlsSettings"), dict) else {}
+    alpn = tls_settings.get("alpn") if isinstance(tls_settings.get("alpn"), list) else []
     transport = "quic" if quic else "udp" if udp else (network or "tcp")
     report_security = "tls" if quic else (security or "none")
     # Hysteria/TUIC carry TLS over QUIC: there is no TCP TLS step for them.
     return ProbeTarget(
         host=host, port=port, server_name=name, uses_tls=not udp and security in {"tls", "reality"}, udp=udp,
         protocol="hysteria2" if scheme == "hy2" else scheme, transport=transport, security=report_security,
+        carrier=carrier_of(scheme, network, alpn),
     )
 
 
@@ -207,8 +228,10 @@ class FailureReport:
 
     attempt: int
     checking: bool
-    #: The finding (Russian); None — not checked (checked recently, or the check is still running).
+    #: vpnbot's verdict text for this report (Russian, shown as is), or WAITING_TEXT until it arrives; None — nothing
+    #: to show yet (the check is running).
     diagnosis_text: str | None
+    #: vpnbot's detail code of that verdict.
     detail: str | None
     status: SendStatus
 
@@ -227,8 +250,10 @@ class _PendingFailure:
         self.target = target
         self.checking = False
         self.checked = False
-        self.diagnosis: Diagnosis | None = None
-        self.diagnosis_facts: DiagnosisFacts | None = None
+        #: The Xray relay of a VLESS start whose check found no data (the tunnel was up).
+        self.relay: Relay | None = None
+        self.checks: dict[str, Check] = {}
+        self.probed_address: str | None = None
         self.record: AttemptRecord | None = None
         self.status = SendStatus.NOT_OURS if ref is None and target is None else SendStatus.AVAILABLE
 
@@ -254,7 +279,8 @@ class ClientReporter:
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         opener: Callable[[bool, int | None], urllib.request.OpenerDirector] | None = None,
         probe: BlockProbe | None = None,
-        freeze_probe: Callable[[int | None], int | None] = measure_freeze,
+        flow_probe: Callable[[int | None], Check | None] = measure_flow,
+        no_data_probe: NoDataProbe | None = None,
         on_failure_changed: Callable[[FailureReport | None], None] = lambda _report: None,
         context: Callable[[], AttemptDetails] = AttemptDetails,
         server_address: Callable[[str], str | None] = lambda _host: None,
@@ -285,13 +311,16 @@ class ClientReporter:
         self._flush_lock = threading.Lock()
         self._stopped_until_next = False
         self._probe = probe
-        self._freeze_probe = freeze_probe
+        self._flow_probe = flow_probe
+        self._no_data_probe = no_data_probe
+        #: report_id -> vpnbot's verdict, for the notice (the last few only).
+        self._verdicts: dict[str, ServerVerdict] = {}
         self._on_failure_changed = on_failure_changed
         # Schema 2: what is the same for all attempts now (mode, masking, versions) and the address the start used.
         self._context = context
         self._server_address = server_address
         self._probed_at: dict[str, int] = {}
-        self._freeze_checked_at: dict[str, int] = {}
+        self._flow_checked_at: dict[str, int] = {}
         self._failure: _PendingFailure | None = None
         self._failure_lock = threading.Lock()
 
@@ -340,11 +369,7 @@ class ClientReporter:
     def _force(self, pending: _PendingFailure) -> None:
         try:
             if pending.record is None:
-                pending.record = self._write(
-                    pending.ref, classify_forced(pending.facts, pending.diagnosis), pending.elapsed_ms,
-                    pending.attempted_at_ms, self._details(pending.target, pending.diagnosis_facts),
-                    foreign=self._foreign_of(pending) if pending.ref is None else None, flush=False,
-                )
+                pending.record = self._write_failure(pending, flush=False)
             self._stopped_until_next = False
             self._flush(wait=True)
         finally:
@@ -387,11 +412,13 @@ class ClientReporter:
         name: str = "",
     ) -> None:
         udp = str(scheme or "").lower() in UDP_SCHEMES
+        no_data: Relay | None = None
         if relay is not None:
             started = time.monotonic()
             passed = probe_relay(*relay)
             elapsed_ms += int((time.monotonic() - started) * 1000)
             facts = AttemptFacts(succeeded=passed, traffic_failed=not passed)
+            no_data = None if passed else Relay(*relay)
             self._log(f"[client-report] VLESS check through the server: {'passed' if passed else 'no answer'}")
         facts = AttemptFacts(
             cancelled=facts.cancelled, succeeded=facts.succeeded, core_code=facts.core_code,
@@ -399,73 +426,129 @@ class ClientReporter:
             tcp_preflight_failed=facts.tcp_preflight_failed, udp_transport=udp,
         )
         if facts.cancelled or facts.succeeded:
-            diagnosis = self._check_freeze(target) if facts.succeeded else None
+            found: dict[str, Check] = {}
             if facts.succeeded:
+                flow = self._check_flow(target)
+                if flow is not None:
+                    found["flow"] = flow
                 self._clear_failure()
             if ref is not None:
-                self._write(ref, classify(facts, diagnosis), elapsed_ms, attempted_at_ms, self._details(target, None))
+                self._write(ref, outcome_of(facts), elapsed_ms, attempted_at_ms, self._details(target, None),
+                            carrier=self._carrier(target, scheme), core_code="", found=found)
             return
-        self._on_failure(_PendingFailure(attempt, ref, scheme, facts, elapsed_ms, attempted_at_ms, target, name))
+        pending = _PendingFailure(attempt, ref, scheme, facts, elapsed_ms, attempted_at_ms, target, name)
+        pending.relay = no_data
+        self._on_failure(pending)
 
     def _on_failure(self, pending: _PendingFailure) -> None:
         with self._failure_lock:
             self._failure = pending
         self._publish(pending)
         target = pending.target
-        # In TUN mode a "direct" socket follows the user's routing: the probes would test the VPN, not the path.
-        if (target is not None and self._probe is not None and not pending.facts.network_lost
-                and self._direct_is_direct() and self._take_slot(self._probed_at, target.host)):
+        direct = self._direct_is_direct()
+        no_data = (pending.relay is not None and self._no_data_probe is not None and target is not None
+                   and self._probe_slot(target))
+        path = (pending.relay is None and target is not None and self._probe is not None and direct
+                and needs_path_check(attempt_core_code(pending.facts)) and self._probe_slot(target))
+        # Completion (vpnbot «completion live» 2026-11-19): the core's part goes at once, so the panel sees the failure
+        # without waiting for the probes and the attempt is placed in the network it was made from; the same report
+        # whole follows after the check.
+        pending.record = self._write_failure(pending, complete=False if (no_data or path) else None)
+        pending.status = self._status_of(pending)
+        self._publish(pending)
+        if no_data:
+            # The tunnel was up and carried nothing: the path to the server is proven, only the no-data probes say
+            # more (owner 2026-11-19: no probe that cannot change the answer).
             pending.checking = True
             self._publish(pending)
             try:
-                facts = self._probe.run(target)
+                pending.checks.update(self._no_data_probe.run(pending.relay, direct_allowed=direct))
+            except Exception as exc:  # a probe never breaks a report
+                self._log(f"[client-report] no-data check failed: {type(exc).__name__}")
+        # In TUN mode a "direct" socket follows the user's routing: the probes would test the VPN, not the path.
+        elif path:
+            pending.checking = True
+            self._publish(pending)
+            try:
+                path = self._probe.run(target, known_address=self._known_address(target))
             except Exception as exc:  # a probe never breaks a report
                 self._log(f"[client-report] path check failed: {type(exc).__name__}")
-                facts = None
-            pending.diagnosis_facts = facts
-            pending.diagnosis = (diagnose_udp(facts) if target.udp else diagnose(facts)) if facts is not None else None
-            pending.checked = True
+                path = PathFacts()
+            pending.checks.update(path.checks)
+            pending.probed_address = path.probed_address
+            if path.probed_address:
+                self._take_slot(self._probed_at, "ip:" + path.probed_address, PATH_CHECK_PER_SERVER_MS)
+        if pending.checking:
             pending.checking = False
-            found = f"{pending.diagnosis.failed_step}/{pending.diagnosis.detail}" if pending.diagnosis else "no conclusion"
-            self._log(f"[client-report] path check -> {found} ({_summary(facts)})")
-        # Everything that can be sent goes by itself (owner 2026-11-19: «send everything we possibly can automatically,
-        # even without the button»; the button is for a user who wants to send it himself). A failure not about the
-        # server goes as local_*, which vpnbot never counts against it; a server of the user's own goes in full
-        # (address, port, protocol, name: owner's explicit choice the same day).
-        foreign = self._foreign_of(pending) if pending.ref is None else None
-        if pending.ref is not None or foreign is not None:
-            pending.record = self._write(
-                pending.ref, classify_forced(pending.facts, pending.diagnosis), pending.elapsed_ms, pending.attempted_at_ms,
-                self._details(pending.target, pending.diagnosis_facts), foreign=foreign,
-            )
+            pending.checked = True
+            self._log(f"[client-report] path check -> {_summary(pending.checks)}")
+            # Everything that can be sent goes by itself (owner 2026-11-19: «send everything we possibly can
+            # automatically, even without the button»; the button is for a user who wants to send it himself). A server
+            # of the user's own goes in full (address, port, protocol, name: owner's explicit choice the same day).
+            first = pending.record
+            if first is not None:
+                pending.record = self._write_failure(pending, complete=True, report_id=first.report_id)
         pending.status = self._status_of(pending)
         self._publish(pending)
 
-    def _check_freeze(self, target: ProbeTarget | None) -> Diagnosis | None:
-        """The freeze after a success: at most once per server per ``MIN_INTERVAL_MS``, TCP servers only."""
-        if target is None or target.udp or self._probe is None or not self._take_slot(self._freeze_checked_at, target.host):
+    def _write_failure(self, pending: _PendingFailure, *, flush: bool = True, complete: bool | None = None,
+                       report_id: str = "") -> AttemptRecord | None:
+        foreign = self._foreign_of(pending) if pending.ref is None else None
+        if pending.ref is None and foreign is None:
+            return None
+        return self._write(
+            pending.ref, Outcome.FAILED, pending.elapsed_ms, pending.attempted_at_ms,
+            self._details(pending.target, pending.probed_address), foreign=foreign, flush=flush,
+            carrier=self._carrier(pending.target, pending.scheme), core_code=attempt_core_code(pending.facts),
+            found=pending.checks, complete=complete, report_id=report_id,
+        )
+
+    @staticmethod
+    def _carrier(target: ProbeTarget | None, scheme: str) -> str:
+        return target.carrier if target is not None else carrier_of(scheme)
+
+    def _known_address(self, target: ProbeTarget) -> str | None:
+        """The address the start itself used: then no DNS probe is needed."""
+        try:
+            return self._server_address(target.host)
+        except Exception:
+            return None
+
+    def _probe_slot(self, target: ProbeTarget) -> bool:
+        """At most one check per install in ``PATH_CHECK_PER_INSTALL_MS`` and per server host and server IP in
+        ``PATH_CHECK_PER_SERVER_MS`` (rows sharing an IP, e.g. «через Россию», share it)."""
+        address = literal_address(target.host) or self._known_address(target)
+        keys = [("install", PATH_CHECK_PER_INSTALL_MS), ("host:" + target.host, PATH_CHECK_PER_SERVER_MS)]
+        if address:
+            keys.append(("ip:" + address, PATH_CHECK_PER_SERVER_MS))
+        now = self._now_ms()
+        with self._lock:
+            if any(now - self._probed_at[key] < interval for key, interval in keys if key in self._probed_at):
+                return False
+        for key, interval in keys:
+            self._take_slot(self._probed_at, key, interval)
+        return True
+
+    def _check_flow(self, target: ProbeTarget | None) -> Check | None:
+        """``flow`` after a success: at most once per server per ``FLOW_CHECK_PER_SERVER_MS``, TCP lines only."""
+        if (target is None or target.carrier != "tcp" or self._probe is None
+                or not self._take_slot(self._flow_checked_at, target.host, FLOW_CHECK_PER_SERVER_MS)):
             return None
         port = self._tunnel_proxy_port()
         try:
-            stalled = self._freeze_probe(int(port) if port else None)
+            flow = self._flow_probe(int(port) if port else None)
         except Exception:
-            stalled = None
-        diagnosis = freeze(stalled)
-        self._log(
-            "[client-report] freeze check -> "
-            + (f"stalled after {stalled} B" if stalled is not None else "no stall")
-            + (", freeze_16k" if diagnosis else "")
-        )
-        return diagnosis
+            flow = None
+        self._log("[client-report] flow check -> " + (f"{flow.r}, {flow.b} B, {flow.ms} ms" if flow else "not run"))
+        return flow
 
-    def _take_slot(self, stamps: dict[str, int], key: str) -> bool:
+    def _take_slot(self, stamps: dict[str, int], key: str, interval_ms: int) -> bool:
         now = self._now_ms()
         with self._lock:
             last = stamps.get(key)
-            if last is not None and now - last < MIN_INTERVAL_MS:
+            if last is not None and now - last < interval_ms:
                 return False
-            stamps[key] = now
-            for stale in [name for name, at in stamps.items() if now - at >= MIN_INTERVAL_MS]:
+            for stale in [name for name, at in stamps.items() if now - at >= PATH_CHECK_PER_SERVER_MS]:
                 stamps.pop(stale, None)
             stamps[key] = now
             return True
@@ -476,7 +559,7 @@ class ClientReporter:
             return None
         return ForeignServer.of(target.host, target.protocol or pending.scheme, pending.name)
 
-    def _details(self, target: ProbeTarget | None, facts: DiagnosisFacts | None) -> AttemptDetails:
+    def _details(self, target: ProbeTarget | None, probed_address: str | None) -> AttemptDetails:
         """The report's details: the common part from ``context`` and this server's address, port, transport."""
         try:
             base = self._context()
@@ -486,15 +569,13 @@ class ClientReporter:
             return base.cleaned()
         from dataclasses import replace
 
-        from .probe import literal_address
-
         try:
             noted = self._server_address(target.host)
         except Exception:
             noted = None
         return replace(
             base,
-            server_ip=literal_address(target.host) or noted or (facts.probed_address if facts else None),
+            server_ip=literal_address(target.host) or noted or probed_address,
             port=target.port, transport=target.transport, security=target.security,
         ).cleaned()
 
@@ -506,11 +587,15 @@ class ClientReporter:
     def _publish(self, pending: _PendingFailure) -> None:
         if self._failure is not pending:
             return
+        verdict = self._verdicts.get(pending.record.report_id) if pending.record is not None else None
+        if verdict is not None:
+            text, detail = verdict.text, verdict.detail
+        elif pending.record is not None and not pending.checking:
+            text, detail = WAITING_TEXT, None
+        else:
+            text, detail = None, None
         self._on_failure_changed(FailureReport(
-            attempt=pending.attempt,
-            checking=pending.checking,
-            diagnosis_text=describe(pending.diagnosis, pending.diagnosis_facts) if pending.checked else None,
-            detail=pending.diagnosis.detail if pending.diagnosis else None,
+            attempt=pending.attempt, checking=pending.checking, diagnosis_text=text, detail=detail,
             status=pending.status,
         ))
 
@@ -524,30 +609,37 @@ class ClientReporter:
     def _write(
         self,
         ref: ServerRef | None,
-        verdict: Any,
+        outcome: Outcome,
         elapsed_ms: int,
         attempted_at_ms: int,
         details: AttemptDetails | None = None,
         *,
         foreign: ForeignServer | None = None,
         flush: bool = True,
+        carrier: str = "tcp",
+        core_code: str = "",
+        found: dict[str, Check] | None = None,
+        complete: bool | None = None,
+        report_id: str = "",
     ) -> AttemptRecord | None:
-        if verdict is None or (ref is None and foreign is None) or not self._enabled:
+        if (ref is None and foreign is None) or not self._enabled:
             return None
         if self._tokens.needs_refresh(self._now_ms()):
             self._refresh_token()
         record = AttemptRecord(
-            server_id=ref.server_id if ref else "", product=ref.product if ref else "", outcome=verdict.outcome,
-            failed_step=verdict.failed_step, detail=verdict.detail,
+            server_id=ref.server_id if ref else "", product=ref.product if ref else "", outcome=outcome,
+            failed_step="", detail="",
             elapsed_ms=max(0, min(int(elapsed_ms), MAX_ELAPSED_MS)),
             attempted_at_ms=int(attempted_at_ms), network_token=self._tokens.current(self._now_ms()),
-            foreign=foreign, details=(details or AttemptDetails()).cleaned(), report_id=new_report_id(),
-            via=ref.via if ref else "",
+            foreign=foreign, details=(details or AttemptDetails()).cleaned(), report_id=report_id or new_report_id(),
+            via=ref.via if ref else "", carrier=carrier if carrier in k.CARRIERS else "tcp",
+            core_code=k.core_code_of(core_code), checks=k.ordered(found or {}), complete=complete,
         )
         self._queue.add(record)
-        step = f" at {verdict.failed_step} ({verdict.detail})" if verdict.failed_step else ""
         who = (f"{ref.product}/{ref.server_id}" + (f" via {ref.via}" if ref.via else "")) if ref else f"foreign {foreign.protocol if foreign else ''}"
-        self._log(f"[client-report] {who} {verdict.outcome.value}{step}, queued {self._queue.size()}")
+        code = f" {record.core_code}" if record.core_code else ""
+        part = {False: ", first copy", True: ", completion"}.get(complete, "")
+        self._log(f"[client-report] {who} {outcome.value}{code}, {len(record.checks)} checks{part}, queued {self._queue.size()}")
         if flush:
             self._stopped_until_next = False
             self._flush()
@@ -604,14 +696,31 @@ class ClientReporter:
         for via, proxy_port in self._routes():
             body = batch_json(install_id, self._app, batch, via).encode("utf-8")
             for host in self._host_order()[:TRIES_PER_PATH]:
-                status = self._post(host, body, proxy_port)
+                status, reply = self._post(host, body, proxy_port)
                 action = after_response(status)
                 if action is SendAction.TRY_OTHER_PATH:
                     self._note_failed(host)
                     continue
                 self._log(f"[client-report] batch {len(batch)}, {len(body)} B ({via}, {domain_of(host)}) -> HTTP {status}")
+                if action is SendAction.REMOVE:
+                    self._note_verdicts(batch, parse_reply(reply, len(batch)))
                 return action
         return None
+
+    def _note_verdicts(self, batch: list[AttemptRecord], verdicts: list[ServerVerdict | None]) -> None:
+        """Keep vpnbot's verdicts by report_id and show the one of the failure on the notice."""
+        with self._lock:
+            for record, verdict in zip(batch, verdicts):
+                if verdict is not None and record.report_id:
+                    self._verdicts[record.report_id] = verdict
+            while len(self._verdicts) > 64:
+                self._verdicts.pop(next(iter(self._verdicts)))
+        pending = self._failure
+        if pending is not None and pending.record is not None and pending.record.report_id in self._verdicts:
+            verdict = self._verdicts[pending.record.report_id]
+            self._log(f"[client-report] verdict: {verdict.detail} ({verdict.level}, {verdict.confidence})")
+            pending.status = self._status_of(pending)
+            self._publish(pending)
 
     def _host_order(self) -> list[str]:
         now = self._now_ms()
@@ -651,19 +760,25 @@ class ClientReporter:
         except (OSError, ValueError, urllib.error.HTTPError):
             return None
 
-    def _post(self, host: str, body: bytes, proxy_port: int | None) -> int | None:
-        """One short connection per request (urllib never reuses one; ``Connection: close`` says so to the server)."""
+    def _post(self, host: str, body: bytes, proxy_port: int | None) -> tuple[int | None, bytes | None]:
+        """One short connection per request (urllib never reuses one; ``Connection: close`` says so to the server).
+        The status and, for an accepted batch, the answer (vpnbot's verdicts)."""
         request = urllib.request.Request(
             f"https://{host}/v1/reports", data=body, method="POST",
             headers={"Content-Type": "application/json", "Connection": "close"},
         )
         try:
             with self._opener(proxy_port is not None, proxy_port).open(request, timeout=_TIMEOUT) as response:
-                return int(response.status)
+                status = int(response.status)
+                try:
+                    reply = response.read(_MAX_REPLY_BYTES)
+                except OSError:
+                    reply = None
+                return status, reply
         except urllib.error.HTTPError as exc:
-            return int(exc.code)
+            return int(exc.code), None
         except (OSError, ValueError):
-            return None
+            return None, None
 
     def _refresh_token(self) -> None:
         """``GET /v1/network`` only directly: through the tunnel the ingest would see the VPN server's network."""
@@ -702,16 +817,12 @@ class ClientReporter:
             return value
 
 
-def _summary(facts: DiagnosisFacts | None) -> str:
-    """The probe steps in one line for the log (no addresses)."""
-    if facts is None:
-        return "probe failed"
-    dns = f"{len(facts.system_dns) if facts.system_dns is not None else '-'}/{len(facts.doh_dns) if facts.doh_dns is not None else '-'}"
-    return (
-        f"control={facts.control.value} tcp={facts.tcp_target.value} tcp443={facts.tcp_other_port.value} "
-        f"tls={facts.tls_real_name.value} neutral={facts.tls_neutral_name.value} "
-        f"elsewhere={facts.tls_real_name_elsewhere.value} dns={dns}" + (" nxdomain" if facts.doh_name_missing else "")
-    )
+def _summary(found: dict[str, Check]) -> str:
+    """The probes for the log: names, results and times, no addresses."""
+    if not found:
+        return "no probe"
+    return " ".join(f"{probe}={check.r}/{check.ms}ms" + (f"/{check.b}B" if check.b is not None else "")
+                    for probe, check in k.ordered(found))
 
 
 def _build_opener(via_proxy: bool, proxy_port: int | None) -> urllib.request.OpenerDirector:

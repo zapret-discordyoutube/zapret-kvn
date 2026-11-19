@@ -48,7 +48,7 @@ class DashboardFailureReportTest(unittest.TestCase):
                                               detail="sni_blocked_everywhere", status=SendStatus.AVAILABLE))
         self.assertFalse(page.report_btn.isHidden())
         self.assertTrue(page.report_btn.isEnabled())
-        self.assertEqual("Проверка пути: Имя сервера (SNI) закрыто на любом адресе.", page.diagnosis_label.text())
+        self.assertEqual("Имя сервера (SNI) закрыто на любом адресе.", page.diagnosis_label.text())   # vpnbot's text as is
         page.set_failure_report(FailureReport(1, False, "x", None, SendStatus.QUEUED))
         self.assertEqual("Отчёт в очереди, отправим при первой связи", page.report_status_label.text())
         self.assertFalse(page.report_btn.isHidden())                 # not sent yet: it can be pressed again

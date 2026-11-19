@@ -1,4 +1,4 @@
-"""The report contract, the server-id header, the attempt classifier, queue and token.
+"""The report contract, the server-id header, the attempt outcome, queue and token.
 
 Everything here is pure and unit-tested; the same rules as the Android module
 ``client-reports`` (both apps must send what vpnbot ``client_reports/contract.py``
@@ -24,9 +24,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .diagnosis import Diagnosis
+from . import checks as k
+from .checks import Check
 
-SCHEMA = 2  # since 2026-11-19 (vpnbot «schema 2 live» 16:07 UTC): foreign servers and attempt details
+#: Schema 3 since 2026-11-19 (vpnbot «schema 3 live» 21:37 UTC): raw probe facts, the server judges. A queue line
+#: written before (with failed_step/detail) is still sent as schema 2, which vpnbot keeps admitting.
+SCHEMA = 3
+LEGACY_SCHEMA = 2
 MAX_BATCH = 50
 MAX_ELAPSED_MS = 600_000
 MAX_AGE_MS = 7 * 24 * 3600 * 1000
@@ -210,6 +214,19 @@ class AttemptRecord:
     report_id: str = ""
     #: The relay key of a «… через Россию» line (see ServerRef.via); only with server_id, never with foreign.
     via: str = ""
+    #: Schema 3: what the core's first hop ran over ("tcp"/"udp"); empty only on a schema 2 line from the queue.
+    carrier: str = ""
+    #: Schema 3: the core's own code (checks.core_code_of) or "".
+    core_code: str = ""
+    #: Schema 3: the probes that ran, in the contract's order.
+    checks: tuple[tuple[str, Check], ...] = ()
+    #: Schema 3 completion (vpnbot «completion live» 2026-11-19 22:16 UTC): False — the first copy, sent at once while
+    #: the path check runs; True — the same report_id whole, after the check; None — a report that is final at once.
+    complete: bool | None = None
+
+    @property
+    def schema(self) -> int:
+        return SCHEMA if self.carrier else LEGACY_SCHEMA
 
 
 def new_report_id() -> str:
@@ -250,6 +267,16 @@ def is_valid(record: AttemptRecord) -> bool:
         return False
     if record.via and (record.foreign is not None or not _RELAY_KEY.fullmatch(record.via)):
         return False
+    if record.carrier:
+        # Schema 3: no app verdict, only facts.
+        return (
+            record.carrier in k.CARRIERS and record.failed_step == "" and record.detail == ""
+            and record.core_code == k.core_code_of(record.core_code)
+            and len(record.checks) <= len(k.PROBES) and k.are_valid_checks(record.checks)
+            and (record.complete is None or (isinstance(record.complete, bool) and bool(record.report_id)))
+        )
+    if record.core_code or record.checks or record.complete is not None:
+        return False
     if record.outcome is Outcome.FAILED:
         return record.failed_step in STEPS
     return record.failed_step == ""
@@ -278,7 +305,7 @@ def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], 
         if not is_valid(record):
             raise ValueError("record")
         item: dict[str, object] = {
-            "schema": SCHEMA,
+            "schema": record.schema,
             "install_id": install_id,
             "app": {"name": app.name, "version": app.version, "platform": app.platform},
         }
@@ -293,10 +320,19 @@ def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], 
                 foreign["name"] = record.foreign.name
             item["foreign"] = foreign
         item["outcome"] = record.outcome.value
-        if record.outcome is Outcome.FAILED:
-            item["failed_step"] = record.failed_step
-        if record.detail:
-            item["detail"] = record.detail
+        if record.carrier:
+            item["carrier"] = record.carrier
+            if record.core_code:
+                item["core_code"] = record.core_code
+            if record.checks:
+                item["checks"] = {probe: k.check_json(check) for probe, check in record.checks}
+            if record.complete is not None:
+                item["complete"] = record.complete
+        else:
+            if record.outcome is Outcome.FAILED:
+                item["failed_step"] = record.failed_step
+            if record.detail:
+                item["detail"] = record.detail
         item["elapsed_ms"] = int(record.elapsed_ms)
         item["attempted_at"] = iso_utc(record.attempted_at_ms)
         item["sent_via"] = sent_via
@@ -408,7 +444,7 @@ def products_for_scheme(scheme: str | None) -> frozenset[str]:
     return frozenset()
 
 
-# ── the attempt classifier ──
+# ── the attempt as facts (schema 3) ──
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,97 +460,63 @@ class AttemptFacts:
     udp_transport: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class AttemptVerdict:
-    outcome: Outcome
-    failed_step: str
-    detail: str
-
-
-def _failed(step: str, detail: str) -> AttemptVerdict:
-    return AttemptVerdict(Outcome.FAILED, step, detail)
-
-
-def classify(facts: AttemptFacts, diagnosis: Diagnosis | None = None) -> AttemptVerdict | None:
-    """The attempt on vpnbot's ladder; ``None`` when the failure is not about the server.
-
-    ``diagnosis`` (``diagnosis.diagnose`` after a failure) names the step and the kind of block more exactly
-    than the core code, so it goes first, but only for a failure that is not about the PC. After a success only
-    a freeze changes the verdict: the check passed, but a larger answer stalls, so sites will not open.
-    """
+def outcome_of(facts: AttemptFacts) -> Outcome:
+    """The attempt as a fact, not a verdict (schema 3): the server judges from ``core_code`` and the checks."""
     if facts.cancelled:
-        return AttemptVerdict(Outcome.CANCELLED, "", "cancelled")
+        return Outcome.CANCELLED
     if facts.succeeded:
-        if diagnosis is not None and diagnosis.detail == "freeze_16k":
-            return _failed(diagnosis.failed_step, diagnosis.detail)
-        return AttemptVerdict(Outcome.CONNECTED, "", "")
+        return Outcome.CONNECTED
+    return Outcome.FAILED
+
+
+def attempt_core_code(facts: AttemptFacts) -> str:
+    """The core code a report carries: a lost network is ``NETWORK_LOST``; other codes only in the contract's shape."""
     if facts.network_lost:
-        return None
-    code = facts.core_code
-    if code and code.startswith("LOCAL_"):
-        return None
-    if diagnosis is not None:
-        return _failed(diagnosis.failed_step, diagnosis.detail)
-    if code:
-        verdict = _by_core_code(code, facts)
-        if verdict is not None:
-            return verdict
-    if not facts.traffic_failed:
-        return None
-    if not facts.udp_transport and facts.tcp_preflight_failed:
-        return _failed("connect", "tcp_timeout")
-    return _failed("request", "no_response")
+        return k.NETWORK_LOST
+    return k.core_code_of(facts.core_code)
 
 
-def classify_forced(facts: AttemptFacts, diagnosis: Diagnosis | None = None) -> AttemptVerdict | None:
-    """For the «Отправить отчёт» button (owner decision 2026-11-19): a failure ``classify`` does not report (not
-    about the server) is still sent, marked ``local_*`` so vpnbot never counts it against the server."""
-    verdict = classify(facts, diagnosis)
-    if verdict is not None:
-        return verdict
-    if facts.succeeded:
-        return None
-    if facts.network_lost:
-        local = "local_network"
-    elif facts.core_code:
-        local = local_code(facts.core_code)
-    else:
-        local = "local_unknown"
-    return _failed("connect", local)
+# ── the ingest's answer: vpnbot's verdict per report (schema 3) ──
+
+MAX_VERDICT_TEXT = 300
 
 
-def local_code(core_code: str) -> str:
-    """LOCAL_BIND_COLLISION → local_bind_collision; the code is brought to the contract's shape."""
-    body = re.sub(r"[^a-z0-9_]", "_", core_code.removeprefix("LOCAL_").lower())
-    return ("local_" + body)[:48].rstrip("_") or "local_unknown"
+@dataclass(frozen=True, slots=True)
+class ServerVerdict:
+    """What vpnbot concluded about one report; ``text`` is shown to the person as is (the app has no texts)."""
+
+    detail: str
+    level: str
+    confidence: str
+    text: str
 
 
-def _by_core_code(code: str, facts: AttemptFacts) -> AttemptVerdict | None:
-    if code == "TARGET_AUTH_REJECTED":
-        return _failed("auth", "auth_rejected")
-    if code in {"TARGET_TLS_REJECTED", "TARGET_TLS_INTERNAL", "TARGET_TLS_UNKNOWN_AUTHORITY", "TARGET_PIN_MISMATCH"}:
-        return _failed("handshake", "tls_failed")
-    if code == "TARGET_OBFS_REJECTED":
-        return _failed("handshake", "obfs_rejected")
-    if code == "TARGET_CONNECTION_REFUSED":
-        return _failed("connect", "connection_refused")
-    if code == "TARGET_CONNECTION_CLOSED":
-        return _failed("handshake", "connection_closed")
-    if code == "TARGET_NETWORK_TIMEOUT":
-        if facts.udp_transport:
-            return _failed("handshake", "udp_no_answer")
-        if facts.tcp_preflight_failed:
-            return _failed("connect", "tcp_timeout")
-        return _failed("handshake", "handshake_timeout")
-    if code == "TARGET_DESTINATION_UNREACHABLE":
-        return _failed("request", "destination_unreachable")
-    return None
+def parse_reply(body: bytes | None, count: int) -> list[ServerVerdict | None]:
+    """``{"verdicts": [...]}`` of a 202, in batch order; anything malformed is ``None`` (the notice falls back to its
+    neutral line), never an error."""
+    empty: list[ServerVerdict | None] = [None] * count
+    try:
+        data = json.loads((body or b"").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return empty
+    items = data.get("verdicts") if isinstance(data, dict) else None
+    if not isinstance(items, list) or len(items) != count:
+        return empty
+    out: list[ServerVerdict | None] = []
+    for item in items:
+        verdict = None
+        if isinstance(item, dict) and all(isinstance(item.get(key), str) for key in ("detail", "level", "confidence", "text")):
+            text = "".join(ch for ch in item["text"] if not _is_control_or_format(ch)).strip()[:MAX_VERDICT_TEXT]
+            if text and _CODE.fullmatch(item["detail"]):
+                verdict = ServerVerdict(item["detail"], item["level"][:24], item["confidence"][:24], text)
+        out.append(verdict)
+    return out
 
 
 # ── the device queue and the network token ──
 
 
-_QUEUE_VERSION = 2
+_QUEUE_VERSION = 3
 
 
 def _queue_line(record: AttemptRecord) -> str:
@@ -532,6 +534,14 @@ def _queue_line(record: AttemptRecord) -> str:
     details = _details_json(record.details)
     if details:
         line["x"] = details
+    if record.carrier:
+        line["c"] = record.carrier
+        if record.core_code:
+            line["k"] = record.core_code
+        if record.checks:
+            line["q"] = {probe: k.check_json(check) for probe, check in record.checks}
+        if record.complete is not None:
+            line["z"] = record.complete
     return json.dumps(line, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -539,7 +549,7 @@ def _parse_queue_line(line: str) -> AttemptRecord | None:
     try:
         data = json.loads(line)
         # Version 1 = schema 1 lines from before 2026-11-19: read as reports without details.
-        if not isinstance(data, dict) or data.get("v") not in (1, _QUEUE_VERSION):
+        if not isinstance(data, dict) or data.get("v") not in (1, 2, _QUEUE_VERSION):
             return None
         g = data.get("g")
         foreign = ForeignServer(str(g.get("h", "")), str(g.get("p", "")), str(g.get("m", ""))) if isinstance(g, dict) else None
@@ -550,10 +560,25 @@ def _parse_queue_line(line: str) -> AttemptRecord | None:
             details=_details_from(data["x"]) if isinstance(data.get("x"), dict) else AttemptDetails(),
             report_id=str(data.get("r") or ""),
             via=str(data.get("w") or ""),
+            carrier=str(data.get("c") or ""),
+            core_code=str(data.get("k") or ""),
+            checks=_checks_from(data.get("q")),
+            complete=data.get("z") if isinstance(data.get("z"), bool) else None,
         )
     except (ValueError, KeyError, TypeError):
         return None
     return record if is_valid(record) else None
+
+
+def _checks_from(value: object) -> tuple[tuple[str, Check], ...]:
+    if not isinstance(value, dict):
+        return ()
+    found: dict[str, Check] = {}
+    for probe, item in value.items():
+        if isinstance(item, dict):
+            found[str(probe)] = Check(item.get("r"), item.get("ms"), item.get("b"), item.get("same"))
+    # A line edited by hand with a bad probe is invalid as a whole (is_valid), not silently trimmed.
+    return tuple((probe, found[probe]) for probe in found)
 
 
 def _write_atomic(path: Path, text: str) -> None:
@@ -574,10 +599,13 @@ class ReportQueue:
         self._lock = threading.Lock()
 
     def add(self, record: AttemptRecord) -> None:
+        """A record with the report_id of one still waiting replaces it (an unsent first copy gives way to its
+        completion: one record per attempt)."""
         if not is_valid(record):
             return
         with self._lock:
-            self._write((self._read() + [record])[-self._capacity:])
+            kept = [old for old in self._read() if not (record.report_id and old.report_id == record.report_id)]
+            self._write((kept + [record])[-self._capacity:])
 
     def pending(self, now_ms: int) -> list[AttemptRecord]:
         with self._lock:

@@ -173,21 +173,73 @@ class ContractTests(unittest.TestCase):
         self.assertEqual({}, c.parse_server_ids(None))
         self.assertEqual({}, c.parse_server_ids("A" * (c.MAX_HEADER_CHARS + 1)))
 
-    def test_classifier_maps_core_codes_onto_the_ladder(self) -> None:
-        def step(**facts):
-            verdict = c.classify(c.AttemptFacts(**facts))
-            return None if verdict is None else (verdict.failed_step, verdict.detail)
+    def test_the_attempt_is_a_fact_not_a_verdict(self) -> None:
+        # Schema 3: no app verdict; a lost network is a code the server knows, others only in the contract's shape.
+        self.assertEqual(c.Outcome.FAILED, c.outcome_of(c.AttemptFacts(core_code="TARGET_AUTH_REJECTED")))
+        self.assertEqual(c.Outcome.CANCELLED, c.outcome_of(c.AttemptFacts(cancelled=True)))
+        self.assertEqual(c.Outcome.CONNECTED, c.outcome_of(c.AttemptFacts(succeeded=True)))
+        self.assertEqual("NETWORK_LOST", c.attempt_core_code(c.AttemptFacts(network_lost=True, core_code="TARGET_X")))
+        self.assertEqual("LOCAL_BIND_COLLISION", c.attempt_core_code(c.AttemptFacts(core_code="LOCAL_BIND_COLLISION")))
+        self.assertEqual("", c.attempt_core_code(c.AttemptFacts(core_code="CORE_UNCLASSIFIED")))
 
-        self.assertEqual(("auth", "auth_rejected"), step(core_code="TARGET_AUTH_REJECTED"))
-        self.assertEqual(("handshake", "tls_failed"), step(core_code="TARGET_PIN_MISMATCH"))
-        self.assertEqual(("handshake", "udp_no_answer"), step(core_code="TARGET_NETWORK_TIMEOUT", udp_transport=True))
-        self.assertEqual(("handshake", "handshake_timeout"), step(core_code="TARGET_NETWORK_TIMEOUT"))
-        self.assertEqual(("connect", "connection_refused"), step(core_code="TARGET_CONNECTION_REFUSED"))
-        self.assertEqual(("request", "no_response"), step(traffic_failed=True))
-        self.assertIsNone(step(core_code="LOCAL_BIND_COLLISION", traffic_failed=True))
-        self.assertIsNone(step(network_lost=True, traffic_failed=True))
-        self.assertIsNone(step())
-        self.assertEqual(c.Outcome.CANCELLED, c.classify(c.AttemptFacts(cancelled=True)).outcome)
+    def test_schema_3_report_carries_facts_and_no_app_verdict(self) -> None:
+        from xray_fluent.client_reports.checks import Check
+
+        checks = (("control_front", Check("answered", 41)), ("tcp_target", Check("refused", 12)))
+        record3 = c.AttemptRecord("hiphopgen", "hysteria2", c.Outcome.FAILED, "", "", 4200, NOW - 1000, "",
+                                  carrier="udp", core_code="TARGET_NETWORK_TIMEOUT", checks=checks, report_id="ab" * 16)
+        report = json.loads(c.batch_json(INSTALL, APP, [record3], "direct"))["reports"][0]
+        self.assertEqual(3, report["schema"])
+        self.assertNotIn("failed_step", report)
+        self.assertNotIn("detail", report)
+        self.assertEqual(("udp", "TARGET_NETWORK_TIMEOUT"), (report["carrier"], report["core_code"]))
+        self.assertEqual({"control_front": {"r": "answered", "ms": 41}, "tcp_target": {"r": "refused", "ms": 12}},
+                         report["checks"])
+        # A schema 2 line still in the queue goes as schema 2.
+        self.assertEqual(2, json.loads(c.batch_json(INSTALL, APP, [record()], "direct"))["reports"][0]["schema"])
+        # Schema 3 never carries an app verdict; schema 2 never carries facts.
+        self.assertFalse(c.is_valid(c.AttemptRecord("hiphopgen", "hysteria2", c.Outcome.FAILED, "handshake", "x", 1, NOW, "",
+                                                    carrier="udp")))
+        self.assertFalse(c.is_valid(c.AttemptRecord("hiphopgen", "hysteria2", c.Outcome.FAILED, "handshake", "x", 1, NOW, "",
+                                                    core_code="TARGET_NETWORK_TIMEOUT")))
+
+    def test_schema_3_line_survives_the_queue(self) -> None:
+        from xray_fluent.client_reports.checks import Check
+
+        with tempfile.TemporaryDirectory() as folder:
+            queue = c.ReportQueue(Path(folder) / "queue.jsonl")
+            line = c.AttemptRecord("hiphopgen", "hysteria2", c.Outcome.CONNECTED, "", "", 900, NOW - 1000, "",
+                                   carrier="tcp", checks=(("flow", Check("timeout", 5000, b=14_000)),))
+            queue.add(line)
+            queue.add(record())
+            self.assertEqual([line, record()], c.ReportQueue(Path(folder) / "queue.jsonl").pending(NOW))
+
+    def test_an_unsent_first_copy_gives_way_to_its_completion(self) -> None:
+        from xray_fluent.client_reports.checks import Check
+
+        with tempfile.TemporaryDirectory() as folder:
+            queue = c.ReportQueue(Path(folder) / "queue.jsonl")
+            first = c.AttemptRecord("hiphopgen", "hysteria2", c.Outcome.FAILED, "", "", 900, NOW - 1000, "",
+                                    report_id="cd" * 16, carrier="udp", complete=False)
+            whole = c.AttemptRecord("hiphopgen", "hysteria2", c.Outcome.FAILED, "", "", 900, NOW - 1000, "",
+                                    report_id="cd" * 16, carrier="udp", complete=True,
+                                    checks=(("quic_neutral", Check("timeout", 3000)),))
+            queue.add(first)
+            queue.add(whole)
+            self.assertEqual([whole], queue.pending(NOW))
+            self.assertTrue(json.loads(c.batch_json(INSTALL, APP, [whole], "direct"))["reports"][0]["complete"])
+            # complete needs a report_id and exists only in schema 3.
+            self.assertFalse(c.is_valid(c.AttemptRecord("hiphopgen", "hysteria2", c.Outcome.FAILED, "", "", 1, NOW, "",
+                                                        carrier="udp", complete=True)))
+
+    def test_reply_verdicts_in_batch_order_and_anything_odd_is_none(self) -> None:
+        good = {"detail": "ip_blocked", "level": "ip", "confidence": "proven", "text": "Адрес закрыт.\u0007"}
+        got = c.parse_reply(json.dumps({"ok": True, "verdicts": [good, None, {"detail": 5}]}).encode(), 3)
+        self.assertEqual(c.ServerVerdict("ip_blocked", "ip", "proven", "Адрес закрыт."), got[0])
+        self.assertEqual([None, None], got[1:])
+        self.assertEqual([None, None], c.parse_reply(b'{"ok":true}', 2))
+        self.assertEqual([None], c.parse_reply(b"not json", 1))
+        self.assertEqual([None], c.parse_reply(json.dumps({"verdicts": [good, good]}).encode(), 1))
 
     def test_queue_orders_prunes_and_survives_restart(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -354,10 +406,15 @@ class _Ingest(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
-        type(self).received.append(json.loads(self.rfile.read(length)))
+        batch = json.loads(self.rfile.read(length))
+        type(self).received.append(batch)
         self.send_response(type(self).status)
         self.end_headers()
-        self.wfile.write(b'{"ok":true}')
+        # vpnbot (schema 3 live 2026-11-19): one verdict per report in batch order, null for schema 1/2.
+        verdicts = [dict(type(self).verdict) if item.get("schema") == 3 else None for item in batch["reports"]]
+        self.wfile.write(json.dumps({"ok": True, "accepted": len(verdicts), "repeated": 0, "verdicts": verdicts}).encode())
+
+    verdict = {"detail": "sni_blocked", "level": "sni", "confidence": "proven", "text": "Закрыто имя сервера."}
 
     feed: dict = {"schema": 1, "domains": ["fuckingspeedtest.com", "osjcpjzipyb.click"],
                   "services": {"reports": {"hosts": ["newnamexyz.osjcpjzipyb.click"]}}}
@@ -465,8 +522,9 @@ class ReporterTests(unittest.TestCase):
         self.assertEqual("direct", report["sent_via"])
         self.assertEqual("v1.tok.mac", report["network_token"])
         self.assertRegex(report["report_id"], r"^[0-9a-f]{32}$")
-        self.assertEqual(("failed", "handshake", "udp_no_answer"),
-                         (report["outcome"], report["failed_step"], report["detail"]))
+        self.assertEqual((3, "failed", "TARGET_NETWORK_TIMEOUT", "udp"),
+                         (report["schema"], report["outcome"], report["core_code"], report["carrier"]))
+        self.assertNotIn("detail", report)
         self.assertTrue(c.is_install_id(report["install_id"]))
         self.assertEqual(report["install_id"], (Path(self.folder.name) / "install-id").read_text())
         self.assertEqual(0, c.ReportQueue(Path(self.folder.name) / "queue.jsonl").size())
@@ -477,105 +535,186 @@ class ReporterTests(unittest.TestCase):
         reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
         self.assertEqual(1, c.ReportQueue(Path(self.folder.name) / "queue.jsonl").size())
 
-    def test_vless_relay_probe_decides_the_outcome(self) -> None:
+    def test_vless_relay_probe_decides_the_outcome_and_only_no_data_probes_run(self) -> None:
         from unittest.mock import patch
 
-        reporter = self._reporter()
+        from xray_fluent.client_reports.checks import Check
+        from xray_fluent.client_reports.probe import ProbeTarget
+
+        class NoData:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, relay, *, direct_allowed):
+                self.calls.append((relay, direct_allowed))
+                return {"tunnel_a": Check("timeout", 8000), "tunnel_b": Check("timeout", 8000),
+                        "direct_a": Check("answered", 90), "direct_b": Check("answered", 120)}
+
+        class PathProbe:
+            def run(self, _target, **_kw):
+                raise AssertionError("the tunnel was up: no probe of the server's path")
+
+        no_data = NoData()
+        reporter = r.ClientReporter(Path(self.folder.name), "0.8.98", tunnel_proxy_port=lambda: None, now_ms=lambda: NOW,
+                                    opener=self._opener, probe=PathProbe(), no_data_probe=no_data, enabled=True)
+        target = ProbeTarget("nl.node.example", 443, "www.microsoft.com", True, False)
         with patch.object(r, "probe_relay", return_value=False) as probe:
             reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True),
-                             900, NOW - 5000, (1234, "u", "p"))
+                              900, NOW - 5000, (1234, "u", "p"), target)
         probe.assert_called_once_with(1234, "u", "p")
-        report = _Ingest.received[0]["reports"][0]
-        self.assertEqual(("failed", "request", "no_response"),
-                         (report["outcome"], report["failed_step"], report["detail"]))
+        self.assertEqual([(r.Relay(1234, "u", "p"), True)], no_data.calls)
+        first, whole = (batch["reports"][0] for batch in _Ingest.received)
+        self.assertEqual(("failed", False), (first["outcome"], first["complete"]))
+        self.assertEqual(["tunnel_a", "tunnel_b", "direct_a", "direct_b"], list(whole["checks"]))
+        self.assertEqual((True, first["report_id"]), (whole["complete"], whole["report_id"]))
 
-    def test_not_about_the_server_is_reported_marked_local(self) -> None:
-        # Every failure is reported (owner 2026-11-19): one not about the server goes as local_*, which vpnbot never
-        # counts against it.
-        reporter = self._reporter()
+    def test_not_about_the_server_goes_with_the_raw_local_code_and_no_probe(self) -> None:
+        # Every failure is reported (owner 2026-11-19); vpnbot keeps LOCAL_* out of the server's verdict. The core's
+        # code proves nothing about the path, so no probe goes on the wire.
+        from xray_fluent.client_reports.probe import ProbeTarget
+
+        class PathProbe:
+            def run(self, _target, **_kw):
+                raise AssertionError("no probe for a local failure")
+
+        reporter = r.ClientReporter(Path(self.folder.name), "0.8.98", tunnel_proxy_port=lambda: None, now_ms=lambda: NOW,
+                                    opener=self._opener, probe=PathProbe(), enabled=True)
+        target = ProbeTarget("nl.node.example", 443, None, True, False)
         reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="LOCAL_BIND_COLLISION"),
-                         900, NOW - 5000, None)
-        self.assertEqual("local_bind_collision", _Ingest.received[0]["reports"][0]["detail"])
+                          900, NOW - 5000, None, target)
+        report = _Ingest.received[0]["reports"][0]
+        self.assertEqual(("failed", "LOCAL_BIND_COLLISION"), (report["outcome"], report["core_code"]))
+        self.assertNotIn("checks", report)
+
+    def test_a_core_code_that_proves_the_server_answered_skips_the_path_check(self) -> None:
+        from xray_fluent.client_reports.probe import ProbeTarget
+
+        class PathProbe:
+            def run(self, _target, **_kw):
+                raise AssertionError("the core already proved the address answers")
+
+        reporter = r.ClientReporter(Path(self.folder.name), "0.8.98", tunnel_proxy_port=lambda: None, now_ms=lambda: NOW,
+                                    opener=self._opener, probe=PathProbe(), enabled=True)
+        target = ProbeTarget("de.node.example", 443, None, False, True, carrier="udp")
+        reporter._attempt(c.ServerRef("hiphopgen", "hysteria2"), "hysteria2",
+                          c.AttemptFacts(core_code="TARGET_AUTH_REJECTED"), 900, NOW - 5000, None, target)
+        self.assertEqual("TARGET_AUTH_REJECTED", _Ingest.received[0]["reports"][0]["core_code"])
 
     def test_a_failure_without_any_code_is_reported_too(self) -> None:
         # The owner's Hosonl failure (2026-11-19) showed a notice but never reached the panel: no core code, no proof.
         reporter = self._reporter()
         reporter._attempt(c.ServerRef("hosonl", "hysteria2", "3af0bdfa97"), "hysteria2", c.AttemptFacts(), 900, NOW - 5000, None)
         report = _Ingest.received[0]["reports"][0]
-        self.assertEqual(("failed", "local_unknown", "3af0bdfa97"), (report["outcome"], report["detail"], report["via"]))
+        self.assertEqual(("failed", "udp", "3af0bdfa97"), (report["outcome"], report["carrier"], report["via"]))
+        self.assertNotIn("core_code", report)
 
-
-    def _diagnosing(self, facts, *, freeze_bytes=None):
-        from xray_fluent.client_reports import diagnosis as d
+    def _diagnosing(self, path, *, flow=None):
+        from xray_fluent.client_reports.probe import PathFacts
 
         class Probe:
-            def run(self, _target):
-                return facts
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, _target, **_kw):
+                self.calls += 1
+                return path or PathFacts()
 
         seen: list = []
+        probe = Probe()
         reporter = r.ClientReporter(
             Path(self.folder.name), "0.8.91", tunnel_proxy_port=lambda: 8080, now_ms=lambda: NOW, opener=self._opener,
-            probe=Probe(), freeze_probe=lambda _port: freeze_bytes, on_failure_changed=seen.append, enabled=True,
+            probe=probe, flow_probe=lambda _port: flow, on_failure_changed=seen.append, enabled=True,
         )
-        return reporter, seen, d
+        return reporter, seen, probe
 
-    def test_a_failure_is_checked_and_reported_with_the_kind_of_block(self) -> None:
-        from xray_fluent.client_reports.diagnosis import DiagnosisFacts, ProbeResult as P
-        from xray_fluent.client_reports.probe import ProbeTarget
+    def test_a_failure_is_checked_and_the_notice_shows_vpnbots_text(self) -> None:
+        from xray_fluent.client_reports.checks import Check
+        from xray_fluent.client_reports.probe import PathFacts, ProbeTarget
 
-        facts = DiagnosisFacts(control=P.ANSWERED, tcp_target=P.ANSWERED, uses_tls=True,
-                               tls_real_name=P.TIMEOUT, tls_neutral_name=P.ANSWERED)
-        reporter, seen, _d = self._diagnosing(facts)
+        path = PathFacts({"control_front": Check("answered", 40), "tcp_target": Check("answered", 60),
+                          "tls_real": Check("timeout", 5000), "tls_neutral": Check("answered", 70)}, "203.0.113.7")
+        reporter, seen, _probe = self._diagnosing(path)
         target = ProbeTarget("nl.node.example", 443, "www.microsoft.com", True, False)
-        # Xray gives no code for the server: before the path check such a failure was never reported.
         reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(), 900, NOW - 5000, None, target, 7)
-        report = _Ingest.received[0]["reports"][0]
-        self.assertEqual(("failed", "handshake", "sni_blocked"), (report["outcome"], report["failed_step"], report["detail"]))
-        self.assertTrue(seen[1].checking)
-        self.assertEqual("Закрыто имя сервера (SNI): с другим именем тот же адрес отвечает.", seen[-1].diagnosis_text)
+        # Completion: the failure goes at once (no checks yet), the same report whole after the check.
+        first, report = (batch["reports"][0] for batch in _Ingest.received)
+        self.assertEqual((False, None), (first["complete"], first.get("checks")))
+        self.assertEqual((True, first["report_id"], first["attempted_at"]),
+                         (report["complete"], report["report_id"], report["attempted_at"]))
+        self.assertEqual(["control_front", "tcp_target", "tls_real", "tls_neutral"], list(report["checks"]))
+        self.assertEqual("203.0.113.7", report["server_ip"])
+        self.assertTrue(any(item.checking for item in seen))
+        self.assertEqual("Закрыто имя сервера.", seen[-1].diagnosis_text)     # vpnbot's text, the app has none
+        self.assertEqual("sni_blocked", seen[-1].detail)
         self.assertEqual(r.SendStatus.SENT, seen[-1].status)
 
-    def test_a_local_failure_goes_out_by_itself_and_the_button_adds_nothing(self) -> None:
-        reporter, seen, _d = self._diagnosing(None)
-        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="LOCAL_BIND_COLLISION"),
+    def test_without_an_answer_the_notice_waits_and_the_button_adds_nothing(self) -> None:
+        _Ingest.status = 429
+        reporter, seen, _probe = self._diagnosing(None)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="TARGET_NETWORK_TIMEOUT"),
                           900, NOW - 5000, None, None, 3)
-        self.assertEqual("local_bind_collision", _Ingest.received[0]["reports"][0]["detail"])
-        self.assertEqual(r.SendStatus.SENT, seen[-1].status)
+        self.assertEqual(r.SendStatus.QUEUED, seen[-1].status)
+        self.assertEqual(r.WAITING_TEXT, seen[-1].diagnosis_text)
+        _Ingest.status = 202
         reporter._force(reporter._failure)
-        self.assertEqual(1, sum(len(batch["reports"]) for batch in _Ingest.received))   # the same report, not a second
+        self.assertEqual(1, len(_Ingest.received[-1]["reports"]))           # the same report, not a second
+        self.assertEqual("Закрыто имя сервера.", seen[-1].diagnosis_text)
 
     def test_a_foreign_server_is_reported_in_full_by_itself(self) -> None:
         # Owner 2026-11-19: «send everything we possibly can automatically, even without the button», own servers
         # in full (address too); the button only sends at once and never writes a second report.
-        from xray_fluent.client_reports.diagnosis import DiagnosisFacts, ProbeResult as P
-        from xray_fluent.client_reports.probe import ProbeTarget
+        from xray_fluent.client_reports.checks import Check
+        from xray_fluent.client_reports.probe import PathFacts, ProbeTarget
 
-        facts = DiagnosisFacts(control=P.ANSWERED, tcp_target=P.TIMEOUT, tcp_other_port=P.TIMEOUT, probed_address="203.0.113.10")
-        reporter, seen, _d = self._diagnosing(facts)
+        path = PathFacts({"control_front": Check("answered", 40), "tcp_target": Check("timeout", 4000),
+                          "tcp_443": Check("timeout", 4000)}, "203.0.113.10")
+        reporter, seen, _probe = self._diagnosing(path)
         target = ProbeTarget("x.example", 8443, None, True, False, protocol="vless", transport="ws", security="tls")
         reporter._attempt(None, "vless", c.AttemptFacts(), 900, NOW - 5000, None, target, 1, "Мой сервер 🇳🇱")
         self.assertEqual(r.SendStatus.SENT, seen[-1].status)              # went out by itself
-        self.assertEqual("Адрес сервера закрыт целиком: не отвечают ни его порт, ни порт 443.", seen[-1].diagnosis_text)
         reporter._force(reporter._failure)
-        self.assertEqual(1, sum(len(batch["reports"]) for batch in _Ingest.received))
-        report = _Ingest.received[0]["reports"][0]
+        # The first copy and its completion; the button writes nothing new.
+        self.assertEqual(2, sum(len(batch["reports"]) for batch in _Ingest.received))
+        report = _Ingest.received[1]["reports"][0]
         self.assertEqual({"host": "x.example", "protocol": "vless", "name": "Мой сервер 🇳🇱"}, report["foreign"])
-        self.assertEqual(("203.0.113.10", 8443, "ws", "tls", "ip_blocked"),
-                         (report["server_ip"], report["port"], report["transport"], report["security"], report["detail"]))
-        self.assertEqual(r.SendStatus.SENT, seen[-1].status)
+        self.assertEqual(("203.0.113.10", 8443, "ws", "tls", "tcp"),
+                         (report["server_ip"], report["port"], report["transport"], report["security"], report["carrier"]))
         # Without an address there is nothing to send: no button.
         reporter._attempt(None, "vless", c.AttemptFacts(), 900, NOW - 4000, None, None, 2)
         self.assertEqual(r.SendStatus.NOT_OURS, seen[-1].status)
 
-    def test_a_freeze_after_success_is_reported_as_a_failure_and_checked_rarely(self) -> None:
+    def test_one_check_per_server_and_per_address_in_ten_minutes(self) -> None:
         from xray_fluent.client_reports.probe import ProbeTarget
 
-        reporter, seen, _d = self._diagnosing(None, freeze_bytes=14_000)
+        reporter, _seen, probe = self._diagnosing(None)
+        reporter._server_address = lambda host: "203.0.113.20"
+        ref = c.ServerRef("hipnl", "vless")
+        reporter._attempt(ref, "vless", c.AttemptFacts(), 900, NOW - 5000, None, ProbeTarget("a.example", 443, None, True, False))
+        # Another row on the same address («через Россию» lines share it): no second probe.
+        reporter._attempt(ref, "vless", c.AttemptFacts(), 900, NOW - 4000, None, ProbeTarget("b.example", 443, None, True, False))
+        self.assertEqual(1, probe.calls)
+
+    def test_one_check_per_install_in_ten_minutes(self) -> None:
+        from xray_fluent.client_reports.probe import ProbeTarget
+
+        reporter, _seen, probe = self._diagnosing(None)
+        ref = c.ServerRef("hipnl", "vless")
+        reporter._attempt(ref, "vless", c.AttemptFacts(), 900, NOW - 5000, None, ProbeTarget("203.0.113.1", 443, None, True, False))
+        # The user clicks through servers: another server on another address is not probed within ten minutes.
+        reporter._attempt(ref, "vless", c.AttemptFacts(), 900, NOW - 4000, None, ProbeTarget("203.0.113.2", 443, None, True, False))
+        self.assertEqual(1, probe.calls)
+
+    def test_flow_after_success_is_a_fact_and_measured_rarely(self) -> None:
+        from xray_fluent.client_reports.checks import Check
+        from xray_fluent.client_reports.probe import ProbeTarget
+
+        reporter, _seen, _probe = self._diagnosing(None, flow=Check("timeout", 5000, b=14_000))
         target = ProbeTarget("nl.node.example", 443, None, True, False)
         reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None, target, 1)
         reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 4000, None, target, 2)
-        details = [item["reports"][0]["detail"] if "detail" in item["reports"][0] else "" for item in _Ingest.received]
-        self.assertEqual(["freeze_16k", ""], details)   # the second success is within 10 minutes: not measured
+        first, second = (item["reports"][0] for item in _Ingest.received)
+        self.assertEqual(("connected", {"flow": {"r": "timeout", "ms": 5000, "b": 14_000}}), (first["outcome"], first["checks"]))
+        self.assertNotIn("checks", second)       # within 10 minutes: not measured again
 
     def test_names_come_from_the_feed_and_a_silent_name_is_skipped(self) -> None:
         reporter = self._reporter()
