@@ -18,7 +18,7 @@ One report per finished connect or server switch (`connect`, `reconnect`, `tun_h
   inflated at most 512 KB), stored as `Subscription.server_ids` and matched by the node's
   `provider_name` and link scheme (Trojan/Shadowsocks/VMess lines of the VLESS subscription are product
   `vless`). vpnbot sends the header on a 304 too, so an unchanged subscription still refreshes the map.
-  Relay rows «… через Россию» are not in the header. No entry — no report by itself (only as `foreign`, by the button); the id is never guessed.
+  Relay rows «… через Россию» are not in the header. No entry — reported as `foreign` (below); the id is never guessed.
 - `outcome` `connected` / `failed` / `cancelled`, the failed step (resolve → connect → handshake → auth
   → tunnel → request), a short code, elapsed ms, attempt time, app name/version/platform, a random
   `install_id` (`data/client-reports/install-id`, not tied to the account), `sent_via`, `network_token`.
@@ -37,8 +37,9 @@ written only when known (a bad value drops out instead of losing the report, `At
 The receiver stores the sender's IP and its /24 (IPv4) or /48 (IPv6) for `sent_via: direct` reports
 only; tunnel reports store neither. Everything is kept 90 days.
 
-Foreign servers (not from the service's subscriptions) get the path check on screen, and their report is
-sent only when the user presses «Отправить отчёт»: then `foreign` {`host`, `protocol`, `name`} replaces
+Foreign servers (not from the service's subscriptions) get the path check on screen, and their failure is
+reported by itself (owner 2026-11-19: «send everything we possibly can automatically, even without the
+button», own servers in full, address included): `foreign` {`host`, `protocol`, `name`} replaces
 `server_id`/`product` (exactly one of the two, or the receiver refuses), with the server's `server_ip` and
 `port`. The name loses Unicode control/format characters and is cut to 64 code points (flags survive);
 the host is lower-cased, an IPv6 zone is never sent. The receiver keeps them in its own table, never in
@@ -79,8 +80,9 @@ fetch, `_learn_missing_server_ids`; Android: `ServerIdBackfill`, the body is dro
 - A failure is reported with the native core's own code for that server (Hysteria
   `last_failure_code`: `TARGET_AUTH_REJECTED` → auth, TLS/pin/obfs → handshake, `TARGET_NETWORK_TIMEOUT`
   → handshake `udp_no_answer`, …; AmneziaWG stage `handshake_readiness` → `udp_no_answer`) or with the path
-  check's verdict (below). Local failures (`LOCAL_*`, TUN, admin rights) give no report unless the user
-  presses «Отправить отчёт».
+  check's verdict (below). Every other failure is reported too: local ones (`LOCAL_*`, TUN, admin rights) and
+  ones without any code go as `local_*` (owner 2026-11-19, a Hysteria failure on his screen never reached the
+  panel).
 - A transition superseded by a newer request is `cancelled`.
 
 ## How it is sent
@@ -154,14 +156,16 @@ report out of a failure that had no core code (Xray, no evidence) when it proves
 not about the server (`LOCAL_*`, lost network) never becomes a server failure. The screen shows one Russian
 line («Проверка пути: …», `describe`) for any server, ours or not; it contains no address.
 
-## «Отправить отчёт» (owner 2026-11-19)
+## Every failure is sent by itself; «Отправить отчёт» (owner 2026-11-19)
 
-Next to the connection error there is a button «Отправить отчёт» while the report of that failure has not
-gone out. Pressing it writes the report if none was written yet (a failure that is not about the server goes
-as `failed` at `connect` with `detail` `local_<code>`, `local_network` or `local_unknown`; vpnbot keeps
-`local_*` out of the server ranking) and sends the queue at once. The note under it then says «Отчёт
-отправлен» or «Отчёт в очереди, отправим при первой связи» (the button stays). Foreign servers get the button too (when the profile names their address): their report goes with
-`foreign` and only by the button (see «What is sent»).
+Every failed attempt is written and sent without asking (owner 2026-11-19): a failure that is not about the
+server goes as `failed` at `connect` with `detail` `local_<code>`, `local_network` or `local_unknown`; vpnbot
+keeps `local_*` out of the server verdict and ranking. Servers of the user's own go as `foreign` (see «What is
+sent»).
+
+The button «Отправить отчёт» next to the error stays for a user who wants to send it himself: it sends the queue
+at once (the report is normally already written; it never writes a second one). The note under it says «Отчёт
+отправлен» or «Отчёт в очереди, отправим при первой связи».
 
 Windows has no per-socket bypass of the TUN: the path check runs only while no TUN session is up (after a
 failed connect the session is gone; a failed switch that kept a TUN session is not checked). The freeze is

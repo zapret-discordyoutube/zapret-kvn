@@ -313,7 +313,8 @@ class ClientReporter:
         """The «Отправить отчёт» button: a failure without a report yet is written (``local_*`` when it is not about
         the server) and the queue is sent now. The result arrives through ``on_failure_changed``."""
         pending = self._failure
-        # A foreign server is sent in full (address, port, protocol, name), but only by this button.
+        # A foreign server is sent in full (address, port, protocol, name); normally it is already written by itself,
+        # the button only sends at once.
         if pending is None or (pending.ref is None and self._foreign_of(pending) is None):
             return
         pending.status = SendStatus.SENDING
@@ -411,10 +412,15 @@ class ClientReporter:
             pending.checking = False
             found = f"{pending.diagnosis.failed_step}/{pending.diagnosis.detail}" if pending.diagnosis else "no conclusion"
             self._log(f"[client-report] path check -> {found} ({_summary(facts)})")
-        if pending.ref is not None:
+        # Everything that can be sent goes by itself (owner 2026-11-19: «send everything we possibly can automatically,
+        # even without the button»; the button is for a user who wants to send it himself). A failure not about the
+        # server goes as local_*, which vpnbot never counts against it; a server of the user's own goes in full
+        # (address, port, protocol, name: owner's explicit choice the same day).
+        foreign = self._foreign_of(pending) if pending.ref is None else None
+        if pending.ref is not None or foreign is not None:
             pending.record = self._write(
-                pending.ref, classify(pending.facts, pending.diagnosis), pending.elapsed_ms, pending.attempted_at_ms,
-                self._details(pending.target, pending.diagnosis_facts),
+                pending.ref, classify_forced(pending.facts, pending.diagnosis), pending.elapsed_ms, pending.attempted_at_ms,
+                self._details(pending.target, pending.diagnosis_facts), foreign=foreign,
             )
         pending.status = self._status_of(pending)
         self._publish(pending)

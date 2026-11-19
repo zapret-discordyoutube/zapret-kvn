@@ -240,6 +240,7 @@ class DeletedTimerAtExitTests(unittest.TestCase):
     """startup.log 2026-11-19: at every update exit since 0.8.89 the core process's ``finished`` fired after Qt had
     deleted the race timer, and «wrapped C/C++ object of type QTimer has been deleted» showed «не удалось запустить»."""
 
+    @unittest.skipIf(shutil.which("sleep") is None, "требуется бинарь sleep")
     def test_process_finishing_after_its_timer_was_deleted_still_resolves(self) -> None:
         from PyQt6 import sip
 

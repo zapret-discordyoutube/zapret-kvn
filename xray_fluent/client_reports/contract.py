@@ -104,7 +104,8 @@ def _is_control_or_format(ch: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ForeignServer:
-    """A server outside the service's subscriptions: only by the «Отправить отчёт» button (owner 2026-11-19).
+    """A server outside the service's subscriptions: sent by itself, address included, and by the «Отправить отчёт»
+    button (owner 2026-11-19).
     Its address and port go in the shared ``AttemptDetails.server_ip`` / ``port``."""
 
     host: str

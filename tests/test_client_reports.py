@@ -470,11 +470,20 @@ class ReporterTests(unittest.TestCase):
         self.assertEqual(("failed", "request", "no_response"),
                          (report["outcome"], report["failed_step"], report["detail"]))
 
-    def test_not_about_the_server_is_not_reported(self) -> None:
+    def test_not_about_the_server_is_reported_marked_local(self) -> None:
+        # Every failure is reported (owner 2026-11-19): one not about the server goes as local_*, which vpnbot never
+        # counts against it.
         reporter = self._reporter()
         reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="LOCAL_BIND_COLLISION"),
                          900, NOW - 5000, None)
-        self.assertEqual([], _Ingest.received)
+        self.assertEqual("local_bind_collision", _Ingest.received[0]["reports"][0]["detail"])
+
+    def test_a_failure_without_any_code_is_reported_too(self) -> None:
+        # The owner's Hosonl failure (2026-11-19) showed a notice but never reached the panel: no core code, no proof.
+        reporter = self._reporter()
+        reporter._attempt(c.ServerRef("hosonl", "hysteria2", "3af0bdfa97"), "hysteria2", c.AttemptFacts(), 900, NOW - 5000, None)
+        report = _Ingest.received[0]["reports"][0]
+        self.assertEqual(("failed", "local_unknown", "3af0bdfa97"), (report["outcome"], report["detail"], report["via"]))
 
 
     def _diagnosing(self, facts, *, freeze_bytes=None):
@@ -507,17 +516,18 @@ class ReporterTests(unittest.TestCase):
         self.assertEqual("Закрыто имя сервера (SNI): с другим именем тот же адрес отвечает.", seen[-1].diagnosis_text)
         self.assertEqual(r.SendStatus.SENT, seen[-1].status)
 
-    def test_the_button_sends_a_local_failure_marked_local(self) -> None:
+    def test_a_local_failure_goes_out_by_itself_and_the_button_adds_nothing(self) -> None:
         reporter, seen, _d = self._diagnosing(None)
         reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="LOCAL_BIND_COLLISION"),
                           900, NOW - 5000, None, None, 3)
-        self.assertEqual([], _Ingest.received)
-        self.assertEqual(r.SendStatus.AVAILABLE, seen[-1].status)
-        reporter._force(reporter._failure)
         self.assertEqual("local_bind_collision", _Ingest.received[0]["reports"][0]["detail"])
         self.assertEqual(r.SendStatus.SENT, seen[-1].status)
+        reporter._force(reporter._failure)
+        self.assertEqual(1, sum(len(batch["reports"]) for batch in _Ingest.received))   # the same report, not a second
 
-    def test_a_foreign_server_is_reported_in_full_only_by_the_button(self) -> None:
+    def test_a_foreign_server_is_reported_in_full_by_itself(self) -> None:
+        # Owner 2026-11-19: «send everything we possibly can automatically, even without the button», own servers
+        # in full (address too); the button only sends at once and never writes a second report.
         from xray_fluent.client_reports.diagnosis import DiagnosisFacts, ProbeResult as P
         from xray_fluent.client_reports.probe import ProbeTarget
 
@@ -525,10 +535,10 @@ class ReporterTests(unittest.TestCase):
         reporter, seen, _d = self._diagnosing(facts)
         target = ProbeTarget("x.example", 8443, None, True, False, protocol="vless", transport="ws", security="tls")
         reporter._attempt(None, "vless", c.AttemptFacts(), 900, NOW - 5000, None, target, 1, "Мой сервер 🇳🇱")
-        self.assertEqual([], _Ingest.received)                      # nothing goes out by itself
-        self.assertEqual(r.SendStatus.AVAILABLE, seen[-1].status)
+        self.assertEqual(r.SendStatus.SENT, seen[-1].status)              # went out by itself
         self.assertEqual("Адрес сервера закрыт целиком: не отвечают ни его порт, ни порт 443.", seen[-1].diagnosis_text)
         reporter._force(reporter._failure)
+        self.assertEqual(1, sum(len(batch["reports"]) for batch in _Ingest.received))
         report = _Ingest.received[0]["reports"][0]
         self.assertEqual({"host": "x.example", "protocol": "vless", "name": "Мой сервер 🇳🇱"}, report["foreign"])
         self.assertEqual(("203.0.113.10", 8443, "ws", "tls", "ip_blocked"),
