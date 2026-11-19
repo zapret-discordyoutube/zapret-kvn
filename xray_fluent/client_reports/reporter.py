@@ -99,6 +99,7 @@ class ClientReporter:
         app_version: str,
         *,
         tunnel_proxy_port: Callable[[], int | None],
+        direct_is_direct: Callable[[], bool] = lambda: True,
         log: Callable[[str], None] = lambda _line: None,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         opener: Callable[[bool, int | None], urllib.request.OpenerDirector] | None = None,
@@ -111,6 +112,9 @@ class ClientReporter:
         self._random = random.SystemRandom()
         self._failed_hosts: dict[str, int] = {}
         self._tunnel_proxy_port = tunnel_proxy_port
+        # In TUN mode Windows has no per-socket bypass: a "direct" request follows the user's routing and may leave
+        # through the VPN server, so the ingest would record the server's network. Then only the tunnel path is used.
+        self._direct_is_direct = direct_is_direct
         self._log = log
         self._now_ms = now_ms
         self._opener = opener or _build_opener
@@ -139,6 +143,13 @@ class ClientReporter:
         if self._stopped_until_next:
             return
         self._spawn(self._flush)
+
+    def prefetch_token(self) -> None:
+        """Ask ``GET /v1/network`` now, while requests are really direct (no TUN session): app start, the start of a
+        connection, after a disconnect. In TUN mode the token cannot be asked later."""
+        if not self._direct_is_direct() or not self._tokens.needs_refresh(self._now_ms()):
+            return
+        self._spawn(self._refresh_token)
 
     # ── work ──
 
@@ -224,10 +235,15 @@ class ClientReporter:
         return action
 
     def _routes(self) -> list[tuple[str, int | None]]:
-        routes: list[tuple[str, int | None]] = [(SENT_DIRECT, None)]
+        routes: list[tuple[str, int | None]] = [(SENT_DIRECT, None)] if self._direct_is_direct() else []
         port = self._tunnel_proxy_port()
         if port:
             routes.append((SENT_TUNNEL, int(port)))
+        elif not self._direct_is_direct():
+            # TUN session without a local HTTP inbound: a request without a proxy is captured by the TUN itself.
+            # If the user's routing sends it out directly after all, it is still labelled tunnel, and the ingest takes
+            # no network from the source of a tunnel report: never a false network.
+            routes.append((SENT_TUNNEL, None))
         return routes
 
     def _send_once(self, batch: list[AttemptRecord]) -> SendAction | None:
@@ -298,6 +314,8 @@ class ClientReporter:
 
     def _refresh_token(self) -> None:
         """``GET /v1/network`` only directly: through the tunnel the ingest would see the VPN server's network."""
+        if not self._direct_is_direct():
+            return
         if self._ingest.feed_due(self._now_ms(), nothing_answered=False):
             self._refresh_feed()
         data: Any = None

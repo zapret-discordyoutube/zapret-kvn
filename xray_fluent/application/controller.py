@@ -616,9 +616,18 @@ class AppController(QObject):
         self.client_reporter = ClientReporter(
             DATA_DIR / "client-reports",
             APP_VERSION,
-            tunnel_proxy_port=lambda: self.get_effective_http_proxy_port() if self.connected else None,
+            # Only a port the live session really listens on (the fallback of get_effective_http_proxy_port may be a
+            # default nobody listens on); in TUN mode without one the TUN itself carries the request.
+            tunnel_proxy_port=lambda: (
+                session.http_port
+                if self.connected and (session := self._active_session) is not None and session.http_port > 0
+                else None
+            ),
+            # A TUN session captures the app's own "direct" requests too: then reports go only via the tunnel.
+            direct_is_direct=lambda: self.active_tun_mode() is not True,
             log=lambda line: self._logger.info(line),
         )
+        self.client_reporter.prefetch_token()
         self.client_reporter.flush()
         self._client_report_started_ms = 0
         self._client_report_relay: tuple[int, str, str] | None = None
@@ -2862,6 +2871,9 @@ class AppController(QObject):
         self._transition_runner = runner
         self._transition_outcome.reset()
         self._client_report_started_ms = int(time.time() * 1000)
+        if action == "connect":
+            # Before the TUN comes up: one of the moments a network token is really direct.
+            self.client_reporter.prefetch_token()
         runner.start()
 
     def _on_transition_runner_finished(
@@ -2881,6 +2893,8 @@ class AppController(QObject):
             if runner.error is not None:
                 self._log(f"[transition] failed with error: {runner.error!r}")
             self._report_transition_attempt(action, runner, superseded)
+            if action == "disconnect" and not superseded:
+                self.client_reporter.prefetch_token()   # the TUN is gone: requests are direct again
             if action != "cleanup" and not superseded:
                 ok = bool(runner.result) and runner.error is None
                 if ok:

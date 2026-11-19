@@ -49,6 +49,14 @@ directly; Windows has no stable handle of the physical network, so the token is 
 and attached only while younger than two hours. 202 removes the batch, 400/413 drop it, 429/5xx keep
 it until the next report. Queue: `data/client-reports/queue.jsonl` (≤ 500, a week at most).
 
+TUN mode (found in the ingest data 2026-11-19): Windows has no per-socket bypass of the TUN, so a "direct" request
+follows the user's routing and may leave from the VPN server; the ingest then recorded the server's country (rows
+`direct` with DE/SE/KZ for servers in those countries). With a TUN session up (`direct_is_direct` is false) the
+reporter therefore sends only via the tunnel (`sent_via=tunnel`; through the session's local HTTP inbound, or,
+without one, a request the TUN captures itself) and never asks `GET /v1/network`. The token is asked while
+requests are really direct: at app start, at the start of a connection (before the TUN comes up) and after a
+disconnect (`prefetch_token`). Proxy mode is unaffected: there urllib without a proxy is really direct.
+
 ## Ingest names and small requests (owner 2026-11-19)
 
 `reports.zapret.moe` alone is usually cut in Russia: the whole zone `zapret.moe` is filtered by name (SNI).

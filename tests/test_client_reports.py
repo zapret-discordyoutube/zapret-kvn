@@ -244,9 +244,32 @@ class ReporterTests(unittest.TestCase):
 
         return Opener()
 
-    def _reporter(self, tunnel_port=None):
+    def _reporter(self, tunnel_port=None, *, tun=False):
         return r.ClientReporter(Path(self.folder.name), "0.8.88", tunnel_proxy_port=lambda: tunnel_port,
-                                now_ms=lambda: NOW, opener=self._opener)
+                                direct_is_direct=lambda: not tun, now_ms=lambda: NOW, opener=self._opener)
+
+    def test_in_tun_mode_reports_go_only_through_the_tunnel_and_no_token_is_asked(self) -> None:
+        # A TUN session captures the app's own "direct" requests: they could leave from the VPN server.
+        reporter = self._reporter(tunnel_port=8080, tun=True)
+        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        self.assertEqual("tunnel", _Ingest.received[0]["reports"][0]["sent_via"])
+        self.assertTrue(all(via for host, via in self.tried if host not in ("script.google.com", "gist.githubusercontent.com")))
+        self.assertFalse(any("/v1/network" in host for host, _ in self.tried))
+        self.assertNotIn("network_token", _Ingest.received[0]["reports"][0])
+
+    def test_tun_without_a_local_proxy_still_sends_through_the_tun(self) -> None:
+        reporter = self._reporter(tunnel_port=None, tun=True)
+        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        self.assertEqual("tunnel", _Ingest.received[0]["reports"][0]["sent_via"])
+
+    def test_token_is_prefetched_only_while_requests_are_direct(self) -> None:
+        tun = self._reporter(tun=True)
+        tun.prefetch_token()
+        self.assertEqual([], self.tried)
+        direct = self._reporter()
+        direct._refresh_token()          # what prefetch_token runs on its thread
+        self.assertEqual("v1.tok.mac", c.NetworkTokenCache(Path(self.folder.name) / "network-token").current(NOW))
+        self.assertTrue(all(not via for _host, via in self.tried))
 
     def test_attempt_is_sent_directly_with_token_and_install_id(self) -> None:
         reporter = self._reporter()
