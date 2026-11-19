@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "releases": {
-    "windows": "0.8.87",
-    "android": "v0.6.33"
+    "windows": "0.8.88",
+    "android": "v0.6.34"
   },
-  "checked_at_utc": "2026-11-19T13:10:01.893603+00:00",
+  "checked_at_utc": "2026-11-19T14:15:55.627420+00:00",
   "amnezia": {
     "id": "amnezia",
     "repository": "amnezia-vpn/amneziawg-go",
