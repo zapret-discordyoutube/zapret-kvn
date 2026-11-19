@@ -251,7 +251,7 @@ class ReporterTests(unittest.TestCase):
     def test_in_tun_mode_reports_go_only_through_the_tunnel_and_no_token_is_asked(self) -> None:
         # A TUN session captures the app's own "direct" requests: they could leave from the VPN server.
         reporter = self._reporter(tunnel_port=8080, tun=True)
-        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
         self.assertEqual("tunnel", _Ingest.received[0]["reports"][0]["sent_via"])
         self.assertTrue(all(via for host, via in self.tried if host not in ("script.google.com", "gist.githubusercontent.com")))
         self.assertFalse(any("/v1/network" in host for host, _ in self.tried))
@@ -259,7 +259,7 @@ class ReporterTests(unittest.TestCase):
 
     def test_tun_without_a_local_proxy_still_sends_through_the_tun(self) -> None:
         reporter = self._reporter(tunnel_port=None, tun=True)
-        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
         self.assertEqual("tunnel", _Ingest.received[0]["reports"][0]["sent_via"])
 
     def test_token_is_prefetched_only_while_requests_are_direct(self) -> None:
@@ -273,7 +273,7 @@ class ReporterTests(unittest.TestCase):
 
     def test_attempt_is_sent_directly_with_token_and_install_id(self) -> None:
         reporter = self._reporter()
-        reporter._record(c.ServerRef("hiphopgen", "hysteria2"), "hysteria2",
+        reporter._attempt(c.ServerRef("hiphopgen", "hysteria2"), "hysteria2",
                          c.AttemptFacts(core_code="TARGET_NETWORK_TIMEOUT"), 4200, NOW - 5000, None)
         report = _Ingest.received[0]["reports"][0]
         self.assertEqual("direct", report["sent_via"])
@@ -287,7 +287,7 @@ class ReporterTests(unittest.TestCase):
     def test_rate_limit_keeps_the_queue(self) -> None:
         _Ingest.status = 429
         reporter = self._reporter()
-        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
         self.assertEqual(1, c.ReportQueue(Path(self.folder.name) / "queue.jsonl").size())
 
     def test_vless_relay_probe_decides_the_outcome(self) -> None:
@@ -295,7 +295,7 @@ class ReporterTests(unittest.TestCase):
 
         reporter = self._reporter()
         with patch.object(r, "probe_relay", return_value=False) as probe:
-            reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True),
+            reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True),
                              900, NOW - 5000, (1234, "u", "p"))
         probe.assert_called_once_with(1234, "u", "p")
         report = _Ingest.received[0]["reports"][0]
@@ -304,15 +304,77 @@ class ReporterTests(unittest.TestCase):
 
     def test_not_about_the_server_is_not_reported(self) -> None:
         reporter = self._reporter()
-        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="LOCAL_BIND_COLLISION"),
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="LOCAL_BIND_COLLISION"),
                          900, NOW - 5000, None)
         self.assertEqual([], _Ingest.received)
 
 
+    def _diagnosing(self, facts, *, freeze_bytes=None):
+        from xray_fluent.client_reports import diagnosis as d
+
+        class Probe:
+            def run(self, _target):
+                return facts
+
+        seen: list = []
+        reporter = r.ClientReporter(
+            Path(self.folder.name), "0.8.91", tunnel_proxy_port=lambda: 8080, now_ms=lambda: NOW, opener=self._opener,
+            probe=Probe(), freeze_probe=lambda _port: freeze_bytes, on_failure_changed=seen.append,
+        )
+        return reporter, seen, d
+
+    def test_a_failure_is_checked_and_reported_with_the_kind_of_block(self) -> None:
+        from xray_fluent.client_reports.diagnosis import DiagnosisFacts, ProbeResult as P
+        from xray_fluent.client_reports.probe import ProbeTarget
+
+        facts = DiagnosisFacts(control=P.ANSWERED, tcp_target=P.ANSWERED, uses_tls=True,
+                               tls_real_name=P.TIMEOUT, tls_neutral_name=P.ANSWERED)
+        reporter, seen, _d = self._diagnosing(facts)
+        target = ProbeTarget("nl.node.example", 443, "www.microsoft.com", True, False)
+        # Xray gives no code for the server: before the path check such a failure was never reported.
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(), 900, NOW - 5000, None, target, 7)
+        report = _Ingest.received[0]["reports"][0]
+        self.assertEqual(("failed", "handshake", "sni_blocked"), (report["outcome"], report["failed_step"], report["detail"]))
+        self.assertTrue(seen[1].checking)
+        self.assertEqual("Закрыто имя сервера (SNI): с другим именем тот же адрес отвечает.", seen[-1].diagnosis_text)
+        self.assertEqual(r.SendStatus.SENT, seen[-1].status)
+
+    def test_the_button_sends_a_local_failure_marked_local(self) -> None:
+        reporter, seen, _d = self._diagnosing(None)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="LOCAL_BIND_COLLISION"),
+                          900, NOW - 5000, None, None, 3)
+        self.assertEqual([], _Ingest.received)
+        self.assertEqual(r.SendStatus.AVAILABLE, seen[-1].status)
+        reporter._force(reporter._failure)
+        self.assertEqual("local_bind_collision", _Ingest.received[0]["reports"][0]["detail"])
+        self.assertEqual(r.SendStatus.SENT, seen[-1].status)
+
+    def test_a_foreign_server_gets_the_check_but_no_report(self) -> None:
+        from xray_fluent.client_reports.diagnosis import DiagnosisFacts, ProbeResult as P
+        from xray_fluent.client_reports.probe import ProbeTarget
+
+        reporter, seen, _d = self._diagnosing(DiagnosisFacts(control=P.ANSWERED, tcp_target=P.TIMEOUT, tcp_other_port=P.TIMEOUT))
+        reporter._attempt(None, "vless", c.AttemptFacts(), 900, NOW - 5000, None, ProbeTarget("x.example", 443, None, True, False), 1)
+        self.assertEqual([], _Ingest.received)
+        self.assertEqual(r.SendStatus.NOT_OURS, seen[-1].status)
+        self.assertEqual("Адрес сервера закрыт целиком: не отвечают ни его порт, ни порт 443.", seen[-1].diagnosis_text)
+        reporter.force_report()                     # no button for a foreign server yet (schema 2)
+        self.assertEqual(r.SendStatus.NOT_OURS, seen[-1].status)
+
+    def test_a_freeze_after_success_is_reported_as_a_failure_and_checked_rarely(self) -> None:
+        from xray_fluent.client_reports.probe import ProbeTarget
+
+        reporter, seen, _d = self._diagnosing(None, freeze_bytes=14_000)
+        target = ProbeTarget("nl.node.example", 443, None, True, False)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None, target, 1)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 4000, None, target, 2)
+        details = [item["reports"][0]["detail"] if "detail" in item["reports"][0] else "" for item in _Ingest.received]
+        self.assertEqual(["freeze_16k", ""], details)   # the second success is within 10 minutes: not measured
+
     def test_names_come_from_the_feed_and_a_silent_name_is_skipped(self) -> None:
         reporter = self._reporter()
         self.dead = {"newnamexyz.osjcpjzipyb.click", "oeifnxndqq.fuckingspeedtest.com"}
-        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
         self.assertEqual(1, len(_Ingest.received))
         hosts = [h for h, _ in self.tried]
         self.assertIn("script.google.com", hosts)                               # the feed was asked first (no names yet)
@@ -323,7 +385,7 @@ class ReporterTests(unittest.TestCase):
     def test_nothing_answers_directly_so_the_tunnel_carries_the_batch(self) -> None:
         reporter = self._reporter(tunnel_port=8080)
         self.dead = set(c.INGEST_SEED) | {"newnamexyz.osjcpjzipyb.click"}
-        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
         self.assertEqual([], _Ingest.received)                                    # every name is dead on both paths
         self.assertEqual(1, c.ReportQueue(Path(self.folder.name) / "queue.jsonl").size())
         self.assertTrue(any(via for _h, via in self.tried))                       # the tunnel was tried too
@@ -401,7 +463,10 @@ class ControllerHookTests(unittest.TestCase):
             hysteria=SimpleNamespace(last_failure_code=failure),
             client_reporter=SimpleNamespace(on_attempt=lambda *args, **kwargs: calls.append((args, kwargs))),
             _logger=SimpleNamespace(info=lambda _line: None),
+            _client_report_attempt=5,
+            amnezia=SimpleNamespace(last_failure=None),
         )
+        fake._client_report_failure_code = lambda scheme: AppController._client_report_failure_code(fake, scheme)
         return AppController._report_transition_attempt, fake, calls
 
     def test_vless_success_asks_for_the_relay_probe(self) -> None:
@@ -415,14 +480,23 @@ class ControllerHookTests(unittest.TestCase):
         hook(fake, "connect", SimpleNamespace(result=True, error=None), False)
         self.assertEqual([], calls)
 
-    def test_hysteria_failure_needs_the_core_code(self) -> None:
+    def test_every_failure_goes_to_the_reporter_with_the_core_code_when_there_is_one(self) -> None:
+        # Without a code the reporter still checks the path; it reports only what the check or a code names.
         hook, fake, calls = self._controller("hysteria2")
         hook(fake, "connect", SimpleNamespace(result=False, error=None), False)
-        self.assertEqual([], calls)
+        (args, kwargs), = calls
+        self.assertIsNone(args[2].core_code)
+        self.assertEqual(5, kwargs["attempt"])
         hook, fake, calls = self._controller("hysteria2", failure=SimpleNamespace(name="TARGET_NETWORK_TIMEOUT"))
         hook(fake, "connect", SimpleNamespace(result=False, error=None), False)
         (args, _kwargs), = calls
         self.assertEqual("TARGET_NETWORK_TIMEOUT", args[2].core_code)
+
+    def test_awg_handshake_silence_is_a_udp_timeout(self) -> None:
+        hook, fake, calls = self._controller("awg")
+        fake.amnezia = SimpleNamespace(last_failure=("handshake_readiness", "no handshake"))
+        hook(fake, "connect", SimpleNamespace(result=False, error=None), False)
+        self.assertEqual("TARGET_NETWORK_TIMEOUT", calls[0][0][2].core_code)
 
     def test_superseded_is_cancelled_and_cleanup_is_ignored(self) -> None:
         hook, fake, calls = self._controller("hysteria2")

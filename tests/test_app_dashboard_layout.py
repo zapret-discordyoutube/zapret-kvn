@@ -36,6 +36,35 @@ def _routing_card_position(page: DashboardPage) -> tuple[int, int, int, int]:
     return grid.getItemPosition(index)
 
 
+class DashboardFailureReportTest(unittest.TestCase):
+    """Path check and «Отправить отчёт» beside a connection error (owner decision 2026-11-19)."""
+
+    def test_report_button_follows_the_report_and_only_in_error(self) -> None:
+        from xray_fluent.client_reports.reporter import FailureReport, SendStatus
+
+        page = DashboardPage()
+        page.set_runtime_status("error", "Сервер не отвечает")
+        page.set_failure_report(FailureReport(1, checking=False, diagnosis_text="Имя сервера (SNI) закрыто на любом адресе.",
+                                              detail="sni_blocked_everywhere", status=SendStatus.AVAILABLE))
+        self.assertFalse(page.report_btn.isHidden())
+        self.assertTrue(page.report_btn.isEnabled())
+        self.assertEqual("Проверка пути: Имя сервера (SNI) закрыто на любом адресе.", page.diagnosis_label.text())
+        page.set_failure_report(FailureReport(1, False, "x", None, SendStatus.QUEUED))
+        self.assertEqual("Отчёт в очереди, отправим при первой связи", page.report_status_label.text())
+        self.assertFalse(page.report_btn.isHidden())                 # not sent yet: it can be pressed again
+        page.set_failure_report(FailureReport(1, False, "x", None, SendStatus.SENT))
+        self.assertTrue(page.report_btn.isHidden())
+        self.assertEqual("Отчёт отправлен", page.report_status_label.text())
+        page.set_failure_report(FailureReport(1, False, "x", None, SendStatus.NOT_OURS))
+        self.assertTrue(page.report_btn.isHidden())
+        self.assertFalse(page.diagnosis_label.isHidden())            # a foreign server still gets the check
+        page.set_runtime_status("running", "")
+        page._do_refresh_dashboard()                                  # the refresh timer, run now
+        self.assertTrue(page.diagnosis_label.isHidden())
+        page.deleteLater()
+        QApplication.processEvents()
+
+
 class DashboardWordWrapTest(unittest.TestCase):
     """AC8: variable-length labels of the connection/routing cards wrap."""
 

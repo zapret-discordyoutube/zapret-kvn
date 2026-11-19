@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .diagnosis import Diagnosis
+
 SCHEMA = 1
 MAX_BATCH = 50
 MAX_ELAPSED_MS = 600_000
@@ -232,18 +234,27 @@ def _failed(step: str, detail: str) -> AttemptVerdict:
     return AttemptVerdict(Outcome.FAILED, step, detail)
 
 
-def classify(facts: AttemptFacts) -> AttemptVerdict | None:
-    """The attempt on vpnbot's ladder; ``None`` when the failure is not about the server."""
+def classify(facts: AttemptFacts, diagnosis: Diagnosis | None = None) -> AttemptVerdict | None:
+    """The attempt on vpnbot's ladder; ``None`` when the failure is not about the server.
+
+    ``diagnosis`` (``diagnosis.diagnose`` after a failure) names the step and the kind of block more exactly
+    than the core code, so it goes first, but only for a failure that is not about the PC. After a success only
+    a freeze changes the verdict: the check passed, but a larger answer stalls, so sites will not open.
+    """
     if facts.cancelled:
         return AttemptVerdict(Outcome.CANCELLED, "", "cancelled")
     if facts.succeeded:
+        if diagnosis is not None and diagnosis.detail == "freeze_16k":
+            return _failed(diagnosis.failed_step, diagnosis.detail)
         return AttemptVerdict(Outcome.CONNECTED, "", "")
     if facts.network_lost:
         return None
     code = facts.core_code
+    if code and code.startswith("LOCAL_"):
+        return None
+    if diagnosis is not None:
+        return _failed(diagnosis.failed_step, diagnosis.detail)
     if code:
-        if code.startswith("LOCAL_"):
-            return None
         verdict = _by_core_code(code, facts)
         if verdict is not None:
             return verdict
@@ -252,6 +263,29 @@ def classify(facts: AttemptFacts) -> AttemptVerdict | None:
     if not facts.udp_transport and facts.tcp_preflight_failed:
         return _failed("connect", "tcp_timeout")
     return _failed("request", "no_response")
+
+
+def classify_forced(facts: AttemptFacts, diagnosis: Diagnosis | None = None) -> AttemptVerdict | None:
+    """For the «Отправить отчёт» button (owner decision 2026-11-19): a failure ``classify`` does not report (not
+    about the server) is still sent, marked ``local_*`` so vpnbot never counts it against the server."""
+    verdict = classify(facts, diagnosis)
+    if verdict is not None:
+        return verdict
+    if facts.succeeded:
+        return None
+    if facts.network_lost:
+        local = "local_network"
+    elif facts.core_code:
+        local = local_code(facts.core_code)
+    else:
+        local = "local_unknown"
+    return _failed("connect", local)
+
+
+def local_code(core_code: str) -> str:
+    """LOCAL_BIND_COLLISION → local_bind_collision; the code is brought to the contract's shape."""
+    body = re.sub(r"[^a-z0-9_]", "_", core_code.removeprefix("LOCAL_").lower())
+    return ("local_" + body)[:48].rstrip("_") or "local_unknown"
 
 
 def _by_core_code(code: str, facts: AttemptFacts) -> AttemptVerdict | None:

@@ -6,6 +6,10 @@ would see the VPN server's network), ``POST /v1/reports`` and the one functional
 probe through the Xray relay after a VLESS connect (owner decision 19.11.2026: like the
 Hysteria/AmneziaWG engines already do at start). No timers: work runs when a report
 is queued and at start-up, on one background thread.
+
+After a failure ``probe.BlockProbe`` checks the path step by step (``diagnosis``): the conclusion goes into the
+report and onto the failure notice (``on_failure_changed``); the «Отправить отчёт» button is ``force_report``.
+After a success the freeze is measured through the session, once per server per ``MIN_INTERVAL_MS``.
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +51,7 @@ from .contract import (
     after_response,
     batch_json,
     classify,
+    classify_forced,
     domain_of,
     ingest_order,
     is_install_id,
@@ -53,6 +60,8 @@ from .contract import (
     products_for_scheme,
     take_batch,
 )
+from .diagnosis import MIN_INTERVAL_MS, Diagnosis, DiagnosisFacts, describe, diagnose, diagnose_udp, freeze
+from .probe import BlockProbe, ProbeTarget, measure_freeze
 
 
 APP_NAME = "zapret-kvn"
@@ -81,6 +90,33 @@ def server_ref_for(node: Any, subscriptions: list[Any]) -> ServerRef | None:
     return ServerRef(server_id, str(product))
 
 
+def probe_target_for(node: Any) -> ProbeTarget | None:
+    """The server of a node as a path-check target: address, port, TLS name, whether TLS, whether UDP."""
+    host = str(getattr(node, "server", "") or "").strip()
+    try:
+        port = int(getattr(node, "port", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if not host or not 0 < port < 65536:
+        return None
+    scheme = str(getattr(node, "scheme", "") or "").lower()
+    udp = scheme in UDP_SCHEMES
+    outbound = getattr(node, "outbound", None) or {}
+    stream = outbound.get("streamSettings") if isinstance(outbound, dict) else None
+    stream = stream if isinstance(stream, dict) else {}
+    security = str(stream.get("security") or "").lower()
+    name = None
+    for key in ("realitySettings", "tlsSettings"):
+        settings = stream.get(key)
+        if isinstance(settings, dict) and str(settings.get("serverName") or "").strip():
+            name = str(settings["serverName"]).strip()
+            break
+    if name is None and isinstance(outbound, dict) and isinstance(outbound.get("tls"), dict):
+        name = str(outbound["tls"].get("server_name") or "").strip() or None
+    # Hysteria/TUIC carry TLS over QUIC: there is no TCP TLS step for them.
+    return ProbeTarget(host=host, port=port, server_name=name, uses_tls=not udp and security in {"tls", "reality"}, udp=udp)
+
+
 def probe_relay(port: int, username: str, password: str, *, timeout: float = _PROBE_TIMEOUT) -> bool:
     """One HTTPS request through the Xray relay SOCKS inbound; the first answering endpoint wins."""
     for endpoint in HTTPS_ENDPOINTS:
@@ -90,6 +126,45 @@ def probe_relay(port: int, username: str, password: str, *, timeout: float = _PR
         except (OSError, ValueError):
             continue
     return False
+
+
+class SendStatus(str, Enum):
+    AVAILABLE = "available"
+    SENDING = "sending"
+    SENT = "sent"
+    QUEUED = "queued"
+    #: Not a server of the service's subscription: the diagnosis is shown, the button waits for schema 2.
+    NOT_OURS = "not_ours"
+
+
+@dataclass(frozen=True, slots=True)
+class FailureReport:
+    """The last failure for the notice: what the path check found and what happened to the report."""
+
+    attempt: int
+    checking: bool
+    #: The finding (Russian); None — not checked (checked recently, or the check is still running).
+    diagnosis_text: str | None
+    detail: str | None
+    status: SendStatus
+
+
+class _PendingFailure:
+    def __init__(self, attempt: int, ref: ServerRef | None, scheme: str, facts: AttemptFacts, elapsed_ms: int,
+                 attempted_at_ms: int, target: ProbeTarget | None) -> None:
+        self.attempt = attempt
+        self.ref = ref
+        self.scheme = scheme
+        self.facts = facts
+        self.elapsed_ms = elapsed_ms
+        self.attempted_at_ms = attempted_at_ms
+        self.target = target
+        self.checking = False
+        self.checked = False
+        self.diagnosis: Diagnosis | None = None
+        self.diagnosis_facts: DiagnosisFacts | None = None
+        self.record: AttemptRecord | None = None
+        self.status = SendStatus.NOT_OURS if ref is None else SendStatus.AVAILABLE
 
 
 class ClientReporter:
@@ -103,6 +178,9 @@ class ClientReporter:
         log: Callable[[str], None] = lambda _line: None,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         opener: Callable[[bool, int | None], urllib.request.OpenerDirector] | None = None,
+        probe: BlockProbe | None = None,
+        freeze_probe: Callable[[int | None], int | None] = measure_freeze,
+        on_failure_changed: Callable[[FailureReport | None], None] = lambda _report: None,
     ) -> None:
         self._root = Path(root)
         self._app = AppIdentity(APP_NAME, _safe_version(app_version), PLATFORM)
@@ -121,6 +199,13 @@ class ClientReporter:
         self._lock = threading.Lock()
         self._flush_lock = threading.Lock()
         self._stopped_until_next = False
+        self._probe = probe
+        self._freeze_probe = freeze_probe
+        self._on_failure_changed = on_failure_changed
+        self._probed_at: dict[str, int] = {}
+        self._freeze_checked_at: dict[str, int] = {}
+        self._failure: _PendingFailure | None = None
+        self._failure_lock = threading.Lock()
 
     # ── entry points (any thread; work goes to a daemon thread) ──
 
@@ -133,11 +218,47 @@ class ClientReporter:
         elapsed_ms: int,
         attempted_at_ms: int,
         relay: tuple[int, str, str] | None = None,
+        target: ProbeTarget | None = None,
+        attempt: int = 0,
     ) -> None:
-        """One finished attempt; ``relay`` asks for the VLESS probe before the verdict."""
-        if ref is None:
+        """One finished attempt; ``relay`` asks for the VLESS probe before the verdict. A report is written only for
+        a server of the service; the path check and the notice work for any server."""
+        if ref is None and (facts.succeeded or facts.cancelled) and relay is None:
+            if facts.succeeded:
+                self._clear_failure()
             return
-        self._spawn(lambda: self._record(ref, scheme, facts, elapsed_ms, attempted_at_ms, relay))
+        self._spawn(lambda: self._attempt(ref, scheme, facts, elapsed_ms, attempted_at_ms, relay, target, attempt))
+
+    def begin_attempt(self, attempt: int) -> None:
+        """A new connection attempt: the previous failure leaves the notice."""
+        with self._failure_lock:
+            if self._failure is not None and self._failure.attempt != attempt:
+                self._failure = None
+                self._on_failure_changed(None)
+
+    def force_report(self) -> None:
+        """The «Отправить отчёт» button: a failure without a report yet is written (``local_*`` when it is not about
+        the server) and the queue is sent now. The result arrives through ``on_failure_changed``."""
+        pending = self._failure
+        if pending is None or pending.ref is None:
+            return
+        pending.status = SendStatus.SENDING
+        self._publish(pending)
+        self._spawn(lambda: self._force(pending))
+
+    def _force(self, pending: _PendingFailure) -> None:
+        try:
+            if pending.record is None and pending.ref is not None:
+                pending.record = self._write(
+                    pending.ref, classify_forced(pending.facts, pending.diagnosis), pending.elapsed_ms,
+                    pending.attempted_at_ms, flush=False,
+                )
+            self._stopped_until_next = False
+            self._flush(wait=True)
+        finally:
+            pending.status = self._status_of(pending)
+            self._log(f"[client-report] report by button: {'sent' if pending.status is SendStatus.SENT else 'queued'}")
+            self._publish(pending)
 
     def flush(self) -> None:
         if self._stopped_until_next:
@@ -161,14 +282,16 @@ class ClientReporter:
                 self._log(f"[client-report] failed: {type(exc).__name__}")
         threading.Thread(target=run, name="client-report", daemon=True).start()
 
-    def _record(
+    def _attempt(
         self,
-        ref: ServerRef,
+        ref: ServerRef | None,
         scheme: str,
         facts: AttemptFacts,
         elapsed_ms: int,
         attempted_at_ms: int,
         relay: tuple[int, str, str] | None,
+        target: ProbeTarget | None = None,
+        attempt: int = 0,
     ) -> None:
         udp = str(scheme or "").lower() in UDP_SCHEMES
         if relay is not None:
@@ -177,13 +300,111 @@ class ClientReporter:
             elapsed_ms += int((time.monotonic() - started) * 1000)
             facts = AttemptFacts(succeeded=passed, traffic_failed=not passed)
             self._log(f"[client-report] VLESS check through the server: {'passed' if passed else 'no answer'}")
-        verdict = classify(AttemptFacts(
+        facts = AttemptFacts(
             cancelled=facts.cancelled, succeeded=facts.succeeded, core_code=facts.core_code,
             network_lost=facts.network_lost, traffic_failed=facts.traffic_failed,
             tcp_preflight_failed=facts.tcp_preflight_failed, udp_transport=udp,
-        ))
-        if verdict is None:
+        )
+        if facts.cancelled or facts.succeeded:
+            diagnosis = self._check_freeze(target) if facts.succeeded else None
+            if facts.succeeded:
+                self._clear_failure()
+            if ref is not None:
+                self._write(ref, classify(facts, diagnosis), elapsed_ms, attempted_at_ms)
             return
+        self._on_failure(_PendingFailure(attempt, ref, scheme, facts, elapsed_ms, attempted_at_ms, target))
+
+    def _on_failure(self, pending: _PendingFailure) -> None:
+        with self._failure_lock:
+            self._failure = pending
+        self._publish(pending)
+        target = pending.target
+        # In TUN mode a "direct" socket follows the user's routing: the probes would test the VPN, not the path.
+        if (target is not None and self._probe is not None and not pending.facts.network_lost
+                and self._direct_is_direct() and self._take_slot(self._probed_at, target.host)):
+            pending.checking = True
+            self._publish(pending)
+            try:
+                facts = self._probe.run(target)
+            except Exception as exc:  # a probe never breaks a report
+                self._log(f"[client-report] path check failed: {type(exc).__name__}")
+                facts = None
+            pending.diagnosis_facts = facts
+            pending.diagnosis = (diagnose_udp(facts) if target.udp else diagnose(facts)) if facts is not None else None
+            pending.checked = True
+            pending.checking = False
+            found = f"{pending.diagnosis.failed_step}/{pending.diagnosis.detail}" if pending.diagnosis else "no conclusion"
+            self._log(f"[client-report] path check -> {found} ({_summary(facts)})")
+        if pending.ref is not None:
+            pending.record = self._write(
+                pending.ref, classify(pending.facts, pending.diagnosis), pending.elapsed_ms, pending.attempted_at_ms,
+            )
+        pending.status = self._status_of(pending)
+        self._publish(pending)
+
+    def _check_freeze(self, target: ProbeTarget | None) -> Diagnosis | None:
+        """The freeze after a success: at most once per server per ``MIN_INTERVAL_MS``, TCP servers only."""
+        if target is None or target.udp or self._probe is None or not self._take_slot(self._freeze_checked_at, target.host):
+            return None
+        port = self._tunnel_proxy_port()
+        try:
+            stalled = self._freeze_probe(int(port) if port else None)
+        except Exception:
+            stalled = None
+        diagnosis = freeze(stalled)
+        self._log(
+            "[client-report] freeze check -> "
+            + (f"stalled after {stalled} B" if stalled is not None else "no stall")
+            + (", freeze_16k" if diagnosis else "")
+        )
+        return diagnosis
+
+    def _take_slot(self, stamps: dict[str, int], key: str) -> bool:
+        now = self._now_ms()
+        with self._lock:
+            last = stamps.get(key)
+            if last is not None and now - last < MIN_INTERVAL_MS:
+                return False
+            stamps[key] = now
+            for stale in [name for name, at in stamps.items() if now - at >= MIN_INTERVAL_MS]:
+                stamps.pop(stale, None)
+            stamps[key] = now
+            return True
+
+    def _status_of(self, pending: _PendingFailure) -> SendStatus:
+        if pending.record is None:
+            return SendStatus.NOT_OURS if pending.ref is None else SendStatus.AVAILABLE
+        return SendStatus.QUEUED if pending.record in self._queue.pending(self._now_ms()) else SendStatus.SENT
+
+    def _publish(self, pending: _PendingFailure) -> None:
+        if self._failure is not pending:
+            return
+        self._on_failure_changed(FailureReport(
+            attempt=pending.attempt,
+            checking=pending.checking,
+            diagnosis_text=describe(pending.diagnosis, pending.diagnosis_facts) if pending.checked else None,
+            detail=pending.diagnosis.detail if pending.diagnosis else None,
+            status=pending.status,
+        ))
+
+    def _clear_failure(self) -> None:
+        with self._failure_lock:
+            had = self._failure is not None
+            self._failure = None
+        if had:
+            self._on_failure_changed(None)
+
+    def _write(
+        self,
+        ref: ServerRef,
+        verdict: Any,
+        elapsed_ms: int,
+        attempted_at_ms: int,
+        *,
+        flush: bool = True,
+    ) -> AttemptRecord | None:
+        if verdict is None:
+            return None
         if self._tokens.needs_refresh(self._now_ms()):
             self._refresh_token()
         record = AttemptRecord(
@@ -197,11 +418,13 @@ class ClientReporter:
         self._log(
             f"[client-report] {ref.product}/{ref.server_id} {verdict.outcome.value}{step}, queued {self._queue.size()}"
         )
-        self._stopped_until_next = False
-        self._flush()
+        if flush:
+            self._stopped_until_next = False
+            self._flush()
+        return record
 
-    def _flush(self) -> None:
-        if not self._flush_lock.acquire(blocking=False):
+    def _flush(self, wait: bool = False) -> None:
+        if not self._flush_lock.acquire(blocking=wait):
             return
         try:
             while True:
@@ -347,6 +570,18 @@ class ClientReporter:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(value, encoding="utf-8")
             return value
+
+
+def _summary(facts: DiagnosisFacts | None) -> str:
+    """The probe steps in one line for the log (no addresses)."""
+    if facts is None:
+        return "probe failed"
+    dns = f"{len(facts.system_dns) if facts.system_dns is not None else '-'}/{len(facts.doh_dns) if facts.doh_dns is not None else '-'}"
+    return (
+        f"control={facts.control.value} tcp={facts.tcp_target.value} tcp443={facts.tcp_other_port.value} "
+        f"tls={facts.tls_real_name.value} neutral={facts.tls_neutral_name.value} "
+        f"elsewhere={facts.tls_real_name_elsewhere.value} dns={dns}" + (" nxdomain" if facts.doh_name_missing else "")
+    )
 
 
 def _build_opener(via_proxy: bool, proxy_port: int | None) -> urllib.request.OpenerDirector:

@@ -33,9 +33,11 @@ No account, key, address or domain; other providers' servers are never reported.
   the reporter makes one HTTPS request (`generate_204`, `socks_probe.HTTPS_ENDPOINTS`, first answer
   wins) through the Xray relay SOCKS inbound — the same path as the user's traffic, bypassing sing-box
   routing — and reports `connected` or `failed` at `request` (owner decision 19.11.2026).
-- A failure is reported only with the native core's own code for that server (Hysteria
+- A failure is reported with the native core's own code for that server (Hysteria
   `last_failure_code`: `TARGET_AUTH_REJECTED` → auth, TLS/pin/obfs → handshake, `TARGET_NETWORK_TIMEOUT`
-  → handshake `udp_no_answer`, …). Local failures (`LOCAL_*`, TUN, admin rights) give no report.
+  → handshake `udp_no_answer`, …; AmneziaWG stage `handshake_readiness` → `udp_no_answer`) or with the path
+  check's verdict (below). Local failures (`LOCAL_*`, TUN, admin rights) give no report unless the user
+  presses «Отправить отчёт».
 - A transition superseded by a newer request is `cancelled`.
 
 ## How it is sent
@@ -76,13 +78,61 @@ a TCP connection to part of the foreign networks after ~25 packets both ways (~1
 connection, and a TLS handshake plus 8 KB and the answer stay near 15 packets. A long queue goes as several
 small requests. The log line names the domain and the size: `batch 3, 1180 B (direct, osjcpjzipyb.click) -> HTTP 202`.
 
+## Path check after a failure (owner 2026-11-19)
+
+After a failed attempt the app checks where the path to the server is closed and swaps one thing at each
+step (pure decision `client_reports/diagnosis.py`, network `client_reports/probe.py`, the same steps and codes on both platforms):
+
+1. Control: TCP to our pool front (the ingest names, a Russian AS). No answer means the PC's own network
+   is down (captive portal, no internet): no verdict at all.
+2. DNS: the system resolver against our DoH for the server name. `dns_nxdomain` (every DoH says the name does
+   not exist), `dns_no_answer`, `dns_poisoned` (no common address). Named only when nothing below is closed:
+   the app connects by the DoH address, so a poisoned system DNS alone does not stop it.
+3. TCP to IP:port, then the same IP on 443: `port_blocked` (443 answers, even with a reset), `ip_blocked`
+   (both silent), `tcp_reset` (a reset proves the address is alive), `tcp_timeout` (443 not tried).
+4. TLS: one ClientHello (`diagnosis.client_hello`, byte-identical on both platforms, only the first answer byte is read)
+   with the real name on the server IP, then a neutral name (ya.ru, vk.com or www.gosuslugi.ru, open even
+   under white lists) on the same IP, then the real name on our front: `sni_blocked`,
+   `sni_blocked_everywhere`, `tls_blocked`. Any TLS record is an answer (a server that dislikes the name
+   sends an alert, Reality forwards it to its sample site). On the swapped probes only silence is a filter:
+   our front and many servers close the connection without an answer for a name that is not theirs
+   (seen 2026-11-19), so a reset there proves nothing.
+5. UDP servers (Hysteria 2, WireGuard/AWG): only whether the IP is alive, by TCP 443 (silence →
+   `ip_blocked`); the protocol verdict stays with the core's own code.
+6. Freeze: after a successful check, at most once per server per 10 minutes, the app reads up to 64 KB of the
+   speed-test file (`fra.download.datapacket.com`, not Russian, so "Russia directly" routing cannot take it
+   past the server) through the session. A stall between 1 000 and 24 000 bytes (the TSPU freezes a TCP
+   connection after ~25 packets, ~16 KB) turns the report into `failed` at `request` with `freeze_16k`:
+   such a server passes the small check but sites do not open.
+
+The check runs only after a failure, at most once per server per 10 minutes, in the background (one pass
+takes 1–40 s). The verdict refines the report (`AttemptClassifier.classify(facts, diagnosis)`), and makes a
+report out of a failure that had no core code (Xray, no evidence) when it proves a block; a failure that is
+not about the server (`LOCAL_*`, lost network) never becomes a server failure. The screen shows one Russian
+line («Проверка пути: …», `describe`) for any server, ours or not; it contains no address.
+
+## «Отправить отчёт» (owner 2026-11-19)
+
+Next to the connection error there is a button «Отправить отчёт» while the report of that failure has not
+gone out. Pressing it writes the report if none was written yet (a failure that is not about the server goes
+as `failed` at `connect` with `detail` `local_<code>`, `local_network` or `local_unknown`; vpnbot keeps
+`local_*` out of the server ranking) and sends the queue at once. The note under it then says «Отчёт
+отправлен» or «Отчёт в очереди, отправим при первой связи» (the button stays). Servers outside the service's
+subscriptions get the path check but no button: their reports need the receiver's schema 2 (`foreign`).
+
+Windows has no per-socket bypass of the TUN: the path check runs only while no TUN session is up (after a
+failed connect the session is gone; a failed switch that kept a TUN session is not checked). The freeze is
+measured through the session's local HTTP inbound. The dashboard shows the line and the button under the
+error status (`DashboardPage.set_failure_report`, fed by `AppController.failure_report_changed`).
+
 ## Seeing it act
 
 The log file has `[client-report]` lines: the VLESS check result, each queued report and each batch
-(`batch N (direct) -> HTTP 202`).
+(`batch N (direct) -> HTTP 202`), the path check (`path check -> handshake/sni_blocked (control=… tcp=…)`,
+no addresses), the freeze measure and each button press.
 
 ## Known limits
 
-- AmneziaWG/WireGuard failures are not reported on Windows: the engine gives no failure code, and a
-  failed start without one cannot be told from a local failure.
-- The `resolve` step is not reported yet; slots (YouTube, Telegram, AI) produce no reports.
+- AmneziaWG/WireGuard failures other than a silent handshake have no core code: they are reported only when
+  the path check proves a block.
+- The `resolve` step comes only from the path check (`dns_*`); slots (YouTube, Telegram, AI) produce no reports.

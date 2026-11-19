@@ -57,6 +57,12 @@ ALLOWED: dict[str, set[str]] = {
     # отчёт напрямую, без ответа — через локальный прокси VPN; токен сети — только напрямую.
     # Проверка VLESS идёт через engines/socks_probe.py (внутри туннеля).
     "client_reports/reporter.py": {"build_opener"},
+    # Проверка пути после неудачного подключения (решение владельца 19.11.2026): только после
+    # отказа и не чаще раза в 10 минут на сервер, только без TUN. TCP до сервера и его IP на 443,
+    # один ClientHello с настоящим, нейтральным (ya.ru, vk.com, www.gosuslugi.ru) и настоящим
+    # именем на нашем фронте пула; системный DNS против DoH. Заморозка — до 64 КБ файла замера
+    # скорости через локальный прокси VPN, только после удачи у сервера сервиса.
+    "client_reports/probe.py": {"build_opener", "create_connection", "getaddrinfo"},
     # Обновления приложения и ядер — наш сервер обновлений и GitHub, HTTPS.
     "network/http_utils.py": {"build_opener", "urlopen"},
     "updates/app_updater.py": {"build_opener"},

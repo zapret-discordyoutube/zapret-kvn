@@ -218,8 +218,9 @@ from ..engines.singbox import (
     select_outbound as select_singbox_outbound,
     select_outbound_when_ready_steps as select_singbox_outbound_when_ready_steps,
 )
-from ..client_reports.contract import AttemptFacts
-from ..client_reports.reporter import ClientReporter, server_ref_for
+from ..client_reports.contract import INGEST_SEED, AttemptFacts
+from ..client_reports.probe import BlockProbe
+from ..client_reports.reporter import ClientReporter, probe_target_for, server_ref_for
 from ..constants import (
     APP_NAME,
     APP_VERSION,
@@ -436,6 +437,8 @@ class AppController(QObject):
     passphrase_required = pyqtSignal()
     auto_switch_triggered = pyqtSignal(str)  # node name we're switching to
     transition_state_changed = pyqtSignal(bool, str)
+    # The last failure for the notice: path check and the report (client_reports.reporter.FailureReport or None).
+    failure_report_changed = pyqtSignal(object)
     # Строки лога из рабочих потоков (очередь прокси) — в GUI-поток.
     _background_log = pyqtSignal(str)
 
@@ -626,7 +629,12 @@ class AppController(QObject):
             # A TUN session captures the app's own "direct" requests too: then reports go only via the tunnel.
             direct_is_direct=lambda: self.active_tun_mode() is not True,
             log=lambda line: self._logger.info(line),
+            # Path check after a failure (docs/CLIENT_REPORTS.md): control and "the real name on a working address"
+            # use our pool front. The notice gets the result through a queued signal (the reporter's thread).
+            probe=BlockProbe(lambda: [host for host in INGEST_SEED if not host.endswith(".zapret.moe")]),
+            on_failure_changed=self.failure_report_changed.emit,
         )
+        self._client_report_attempt = 0
         self.client_reporter.prefetch_token()
         self.client_reporter.flush()
         self._client_report_started_ms = 0
@@ -2871,6 +2879,9 @@ class AppController(QObject):
         self._transition_runner = runner
         self._transition_outcome.reset()
         self._client_report_started_ms = int(time.time() * 1000)
+        self._client_report_attempt += 1
+        if action in _CLIENT_REPORT_ACTIONS:
+            self.client_reporter.begin_attempt(self._client_report_attempt)
         if action == "connect":
             # Before the TUN comes up: one of the moments a network token is really direct.
             self.client_reporter.prefetch_token()
@@ -2949,8 +2960,10 @@ class AppController(QObject):
 
         Hysteria and AmneziaWG succeed only after their engine proved the server at
         start; a VLESS success is confirmed by one HTTPS request through the Xray relay
-        (owner decision 19.11.2026). A failure is reported only with the native core's
-        own code for the server: a local failure must not paint a working server.
+        (owner decision 19.11.2026). A failure goes to the reporter for any server: it
+        checks the path (block diagnosis, shown on the notice) and writes a report only
+        for a server of the service, and only when the core's code or the path check
+        names the server: a local failure must not paint a working server.
         """
         try:
             if action not in _CLIENT_REPORT_ACTIONS:
@@ -2959,8 +2972,6 @@ class AppController(QObject):
             if node is None:
                 return
             ref = server_ref_for(node, list(self.state.subscriptions))
-            if ref is None:
-                return
             started = self._client_report_started_ms or int(time.time() * 1000)
             elapsed = max(0, int(time.time() * 1000) - started)
             scheme = str(node.scheme or "").lower()
@@ -2970,24 +2981,31 @@ class AppController(QObject):
                 facts = AttemptFacts(cancelled=True)
             elif ok:
                 facts = AttemptFacts(succeeded=True)
-                if scheme == "vless":
+                if scheme == "vless" and ref is not None:
                     relay = self._client_report_relay
                     session = self._active_session
                     if relay is None or session is None or int(session.sidecar_relay_port or 0) != relay[0]:
                         return
             else:
-                code = None
-                if scheme in {"hysteria2", "hy2"}:
-                    failure = getattr(self.hysteria, "last_failure_code", None)
-                    code = getattr(failure, "name", None)
-                if not code:
-                    return
-                facts = AttemptFacts(core_code=code)
+                facts = AttemptFacts(core_code=self._client_report_failure_code(scheme))
             self.client_reporter.on_attempt(
                 ref, scheme, facts, elapsed_ms=elapsed, attempted_at_ms=started, relay=relay,
+                target=probe_target_for(node), attempt=self._client_report_attempt,
             )
         except Exception as exc:  # a report never breaks a transition
             self._logger.info(f"[client-report] skipped: {type(exc).__name__}")
+
+    def _client_report_failure_code(self, scheme: str) -> str | None:
+        """The native core's own code for this server's failure, when it has one."""
+        if scheme in {"hysteria2", "hy2"}:
+            failure = getattr(self.hysteria, "last_failure_code", None)
+            return getattr(failure, "name", None)
+        if scheme in {"wireguard", "awg", "amneziawg", "wg"}:
+            last = getattr(getattr(self, "amnezia", None), "last_failure", None)
+            # The handshake never completed: the server stayed silent over UDP (transport_failure.py).
+            if isinstance(last, tuple) and last and last[0] == "handshake_readiness":
+                return "TARGET_NETWORK_TIMEOUT"
+        return None
 
     def _has_residual_processes(self) -> bool:
         """Processes alive without a connected session (aborted transition)."""

@@ -154,6 +154,8 @@ def telegram_socks_url(port: int) -> str:
 
 class DashboardPage(StackedSection):
     logs_requested = pyqtSignal()
+    #: «Отправить отчёт» at a failed connection (client_reports.reporter.ClientReporter.force_report).
+    report_requested = pyqtSignal()
     toggle_connection_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)
     tun_toggled = pyqtSignal(bool)
@@ -282,12 +284,26 @@ class DashboardPage(StackedSection):
         self.logs_btn = PushButton(FIF.DOCUMENT, "Открыть логи", self._hero_text)
         self.logs_btn.clicked.connect(self.logs_requested)
         self.logs_btn.hide()
+        # Path check after a failure and the report about it (owner decision 2026-11-19).
+        self.diagnosis_label = BodyLabel("", self._hero_text)
+        self.diagnosis_label.setWordWrap(True)
+        self.diagnosis_label.hide()
+        self.report_btn = PushButton(FIF.SEND, "Отправить отчёт", self._hero_text)
+        self.report_btn.clicked.connect(self.report_requested)
+        self.report_btn.hide()
+        self.report_status_label = CaptionLabel("", self._hero_text)
+        self.report_status_label.setWordWrap(True)
+        self.report_status_label.hide()
+        self._failure_report = None
         text.addStretch(1)
         text.addWidget(self.connection_state_label)
         text.addWidget(self.connection_uptime_label)
         text.addWidget(self.connection_status_label)
         text.addSpacing(4)
+        text.addWidget(self.diagnosis_label)
         text.addWidget(self.logs_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        text.addWidget(self.report_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        text.addWidget(self.report_status_label)
         text.addStretch(1)
         self._hero_layout.addWidget(self._hero_text, 2)
 
@@ -616,9 +632,11 @@ class DashboardPage(StackedSection):
             QBoxLayout.Direction.BottomToTop if stacked else QBoxLayout.Direction.LeftToRight
         )
         align = Qt.AlignmentFlag.AlignHCenter if stacked else Qt.AlignmentFlag.AlignLeft
-        for label in (self.connection_state_label, self.connection_uptime_label, self.connection_status_label):
+        for label in (self.connection_state_label, self.connection_uptime_label, self.connection_status_label,
+                      self.diagnosis_label, self.report_status_label):
             label.setAlignment(align | Qt.AlignmentFlag.AlignVCenter)
         self._hero_text_layout.setAlignment(self.logs_btn, align)
+        self._hero_text_layout.setAlignment(self.report_btn, align)
 
     def _update_adaptive_grid(self) -> None:
         """На узком окне (< 900 px) карточки встают в одну колонку.
@@ -708,6 +726,33 @@ class DashboardPage(StackedSection):
             self._connection_phase = "running"
             self._connection_message = self._default_connection_message()
         self._refresh_dashboard()
+
+    def set_failure_report(self, report: object | None) -> None:
+        """The path check and the report of the last failure (``FailureReport`` or None)."""
+        self._failure_report = report
+        self._refresh_failure_report()
+
+    def _refresh_failure_report(self) -> None:
+        report = self._failure_report if self._connection_phase == "error" else None
+        status = getattr(getattr(report, "status", None), "value", None)
+        if report is None:
+            text = ""
+        elif report.checking:
+            text = "Проверяем, где закрыт путь до сервера…"
+        elif report.diagnosis_text:
+            text = f"Проверка пути: {report.diagnosis_text}"
+        else:
+            text = ""
+        self.diagnosis_label.setText(text)
+        self.diagnosis_label.setVisible(bool(text))
+        # A server outside the service's subscriptions: the button waits for the receiver's schema 2.
+        show_button = status in {"available", "sending", "queued"}
+        self.report_btn.setVisible(show_button)
+        self.report_btn.setEnabled(status != "sending" and not getattr(report, "checking", False))
+        self.report_btn.setText("Отправляем…" if status == "sending" else "Отправить отчёт")
+        note = {"sent": "Отчёт отправлен", "queued": "Отчёт в очереди, отправим при первой связи"}.get(status or "", "")
+        self.report_status_label.setText(note)
+        self.report_status_label.setVisible(bool(note))
 
     def set_runtime_status(self, phase: str, message: str) -> None:
         normalized = (phase or "idle").strip().lower()
@@ -860,6 +905,7 @@ class DashboardPage(StackedSection):
         self.connection_status_label.setText(status)
         self.connection_status_label.setVisible(bool(status))
         self.logs_btn.setVisible(self._connection_phase == "error")
+        self._refresh_failure_report()
         orb_state = self._orb_state()
         self.connection_orb.set_state(orb_state)
         self.connection_orb.set_action_text("Подготовка…" if self._initializing else self._toggle_action_text())

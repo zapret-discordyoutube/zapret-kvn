@@ -546,6 +546,8 @@ class MainWindow(FluentWindow):
 
     def _connect_signals(self) -> None:
         self.dashboard_page.logs_requested.connect(lambda: self.switchTo(self.logs_page))
+        self.dashboard_page.report_requested.connect(self.controller.client_reporter.force_report)
+        self.controller.failure_report_changed.connect(self.dashboard_page.set_failure_report)
         self.dashboard_page.mode_changed.connect(self._set_mode_only)
         self.dashboard_page.toggle_connection_requested.connect(self.controller.toggle_connection)
         self.dashboard_page.tun_toggled.connect(self._on_dashboard_tun_toggled)
