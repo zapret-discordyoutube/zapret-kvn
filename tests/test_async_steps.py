@@ -236,6 +236,36 @@ class WaitProcessFinishedTests(unittest.TestCase):
         self.assertEqual(runner.result, (True, True))
 
 
+class DeletedTimerAtExitTests(unittest.TestCase):
+    """startup.log 2026-11-19: at every update exit since 0.8.89 the core process's ``finished`` fired after Qt had
+    deleted the race timer, and «wrapped C/C++ object of type QTimer has been deleted» showed «не удалось запустить»."""
+
+    def test_process_finishing_after_its_timer_was_deleted_still_resolves(self) -> None:
+        from PyQt6 import sip
+
+        process = QProcess()
+        process.start("sleep", ["0.15"])
+
+        def gen():
+            return (yield wait_process_finished(process, 5000))
+
+        runner = TransitionRunner(gen())
+        runner.start()
+        sip.delete(runner._current_step._timer)   # what Qt does to it at interpreter exit
+        self.assertTrue(_drive_until(lambda: runner.done, timeout_ms=8000))
+        self.assertIs(runner.result, True)
+
+    def test_cancel_and_sleep_tolerate_a_deleted_timer(self) -> None:
+        from PyQt6 import sip
+        from xray_fluent.application.async_steps import SleepStep
+
+        step = SleepStep(10_000)
+        step.start(lambda *_args: None)
+        sip.delete(step._timer)
+        step.cancel()   # must not raise
+
+
+
 class RunStepsBlockingTests(unittest.TestCase):
     def test_executes_steps_synchronously_and_returns_value(self) -> None:
         def gen():

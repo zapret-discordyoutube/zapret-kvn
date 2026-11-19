@@ -138,9 +138,20 @@ def _show_fatal_message_box() -> None:
         pass
 
 
+# Set once the Qt event loop has returned: the app is closing, not starting.
+_event_loop_exited = False
+
+
 def _log_unhandled_exception(exc_type, exc_value, exc_traceback) -> None:
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    if _event_loop_exited:
+        # An error while closing (for example when the update installer restarts the app) is logged only: the
+        # «не удалось запустить» box would claim a failed start although the next start is fine (owner, 2026-11-19).
+        _bootstrap_logger.exception(
+            "Unhandled exception after the event loop exited", exc_info=(exc_type, exc_value, exc_traceback)
+        )
         return
     _bootstrap_logger.exception("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
     _show_fatal_message_box()
@@ -439,6 +450,8 @@ def main() -> int:
     QTimer.singleShot(0, loader.start)
     _bootstrap_logger.info("Entering Qt event loop process_ms=%.0f", since_process_start_ms())
     exit_code = app.exec()
+    global _event_loop_exited
+    _event_loop_exited = True
     loader.finish_shutdown()
     for window in windows:
         window.finish_background_shutdown()

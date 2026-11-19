@@ -60,6 +60,15 @@ StepReport = Callable[[Any, BaseException | None], None]
 WORKER_STEP_DEADLINE_MS = 60_000
 
 
+def _stop_qtimer(timer: QTimer) -> None:
+    """Stop a step's QTimer, tolerating one Qt already deleted: at app exit a core process's ``finished`` can still
+    fire after the timers are gone (startup.log 2026-11-19, every update exit since 0.8.89: «wrapped C/C++ object of
+    type QTimer has been deleted», shown to the owner as «не удалось запустить»). A deleted timer has nothing to stop."""
+    try:
+        timer.stop()
+    except RuntimeError:
+        pass
+
 class StepDeadlineExceeded(TimeoutError):
     """A step did not complete before its hard deadline."""
 
@@ -149,7 +158,7 @@ class RunInWorkerStep(TransitionStep):
     def cancel(self) -> None:
         self._cancelled = True
         if self._timer is not None:
-            self._timer.stop()
+            _stop_qtimer(self._timer)
         if self._future is not None:
             self._future.cancel()
 
@@ -158,7 +167,7 @@ class RunInWorkerStep(TransitionStep):
         # the GUI thread, and break the step <-> future <-> callback cycle so nothing Qt is left for the collector.
         timer, self._timer = self._timer, None
         if timer is not None:
-            timer.stop()
+            _stop_qtimer(timer)
             try:
                 timer.timeout.disconnect()
             except (TypeError, RuntimeError):
@@ -197,7 +206,7 @@ class SleepStep(TransitionStep):
 
     def cancel(self) -> None:
         if self._timer is not None:
-            self._timer.stop()
+            _stop_qtimer(self._timer)
 
     def run_blocking(self) -> Any:
         sleep_with_events(self.ms / 1000.0)
@@ -248,7 +257,7 @@ class WaitProcessFinishedStep(TransitionStep):
                 except (TypeError, RuntimeError):
                     pass
             if self._timer is not None:
-                self._timer.stop()
+                _stop_qtimer(self._timer)
             report(value, None)
 
         for signal, value in self._watched_signals():
@@ -271,7 +280,7 @@ class WaitProcessFinishedStep(TransitionStep):
             except (TypeError, RuntimeError):
                 pass
         if self._timer is not None:
-            self._timer.stop()
+            _stop_qtimer(self._timer)
 
     def run_blocking(self) -> Any:
         return wait_for_qprocess_finished(self._process, self._timeout_ms)
