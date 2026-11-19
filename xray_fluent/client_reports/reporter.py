@@ -11,10 +11,12 @@ is queued and at start-up, on one background thread.
 from __future__ import annotations
 
 import json
+import random
 import secrets
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -22,13 +24,19 @@ from typing import Any
 
 from ..engines.socks_probe import HTTPS_ENDPOINTS, probe_https
 from .contract import (
+    INGEST_FEEDS,
+    FAILED_FOR_MS,
     MAX_BATCH,
+    MAX_BODY_BYTES,
+    MAX_FEED_BYTES,
+    TRIES_PER_PATH,
     MAX_ELAPSED_MS,
     SENT_DIRECT,
     SENT_TUNNEL,
     AppIdentity,
     AttemptFacts,
     AttemptRecord,
+    IngestHostCache,
     NetworkToken,
     NetworkTokenCache,
     ReportQueue,
@@ -37,13 +45,16 @@ from .contract import (
     after_response,
     batch_json,
     classify,
+    domain_of,
+    ingest_order,
     is_install_id,
     is_network_token,
+    parse_ingest_feed,
     products_for_scheme,
+    take_batch,
 )
 
 
-ENDPOINT = "https://reports.zapret.moe"
 APP_NAME = "zapret-kvn"
 PLATFORM = "windows"
 _TIMEOUT = 15.0
@@ -96,6 +107,9 @@ class ClientReporter:
         self._app = AppIdentity(APP_NAME, _safe_version(app_version), PLATFORM)
         self._queue = ReportQueue(self._root / "queue.jsonl")
         self._tokens = NetworkTokenCache(self._root / "network-token")
+        self._ingest = IngestHostCache(self._root / "ingest-hosts")
+        self._random = random.SystemRandom()
+        self._failed_hosts: dict[str, int] = {}
         self._tunnel_proxy_port = tunnel_proxy_port
         self._log = log
         self._now_ms = now_ms
@@ -180,7 +194,11 @@ class ClientReporter:
             return
         try:
             while True:
-                batch = self._queue.pending(self._now_ms())[:MAX_BATCH]
+                install_id = self._install_id()
+                batch = take_batch(
+                    self._queue.pending(self._now_ms()), MAX_BATCH, MAX_BODY_BYTES,
+                    lambda records: len(batch_json(install_id, self._app, records, SENT_DIRECT).encode("utf-8")),
+                )
                 if not batch:
                     return
                 action = self._send(batch)
@@ -193,25 +211,82 @@ class ClientReporter:
             self._flush_lock.release()
 
     def _send(self, batch: list[AttemptRecord]) -> SendAction:
-        install_id = self._install_id()
+        """Directly, then through the tunnel; up to ``TRIES_PER_PATH`` ingest names on each path. When no name
+        answered, the feed of names is asked once and the send repeated."""
+        if self._ingest.feed_due(self._now_ms(), nothing_answered=False):
+            self._refresh_feed()
+        action = self._send_once(batch)
+        if action is None and self._ingest.feed_due(self._now_ms(), nothing_answered=True) and self._refresh_feed():
+            action = self._send_once(batch)
+        if action is None:
+            self._log(f"[client-report] batch {len(batch)} not sent: no ingest name answered")
+            return SendAction.TRY_OTHER_PATH
+        return action
+
+    def _routes(self) -> list[tuple[str, int | None]]:
         routes: list[tuple[str, int | None]] = [(SENT_DIRECT, None)]
         port = self._tunnel_proxy_port()
         if port:
             routes.append((SENT_TUNNEL, int(port)))
-        for via, proxy_port in routes:
-            body = batch_json(install_id, self._app, batch, via).encode("utf-8")
-            status = self._post(body, proxy_port)
-            action = after_response(status)
-            if action is SendAction.TRY_OTHER_PATH:
-                continue
-            self._log(f"[client-report] batch {len(batch)} ({via}) -> HTTP {status}")
-            return action
-        return SendAction.TRY_OTHER_PATH
+        return routes
 
-    def _post(self, body: bytes, proxy_port: int | None) -> int | None:
+    def _send_once(self, batch: list[AttemptRecord]) -> SendAction | None:
+        install_id = self._install_id()
+        for via, proxy_port in self._routes():
+            body = batch_json(install_id, self._app, batch, via).encode("utf-8")
+            for host in self._host_order()[:TRIES_PER_PATH]:
+                status = self._post(host, body, proxy_port)
+                action = after_response(status)
+                if action is SendAction.TRY_OTHER_PATH:
+                    self._note_failed(host)
+                    continue
+                self._log(f"[client-report] batch {len(batch)}, {len(body)} B ({via}, {domain_of(host)}) -> HTTP {status}")
+                return action
+        return None
+
+    def _host_order(self) -> list[str]:
+        now = self._now_ms()
+        with self._lock:
+            for host in [h for h, at in self._failed_hosts.items() if now - at >= FAILED_FOR_MS]:
+                del self._failed_hosts[host]
+            failed = set(self._failed_hosts)
+        return ingest_order(self._ingest.hosts(), failed, self._random)
+
+    def _note_failed(self, host: str) -> None:
+        with self._lock:
+            self._failed_hosts[host] = self._now_ms()
+
+    def _refresh_feed(self) -> bool:
+        """Ingest names from the zapret-links feed (entry pages on script.google.com and the gist), directly, then
+        through the tunnel. True when at least one name was learnt."""
+        self._ingest.note_feed_attempt(self._now_ms())
+        for _via, proxy_port in self._routes():
+            for feed in INGEST_FEEDS:
+                text = self._get(feed, proxy_port, MAX_FEED_BYTES)
+                hosts = parse_ingest_feed(text) if text is not None else []
+                if hosts:
+                    self._ingest.store(hosts, self._now_ms())
+                    self._log(f"[client-report] ingest names from the feed {urllib.parse.urlsplit(feed).hostname}: {len(hosts)}")
+                    return True
+        self._log("[client-report] the feed of ingest names did not answer")
+        return False
+
+    def _get(self, url: str, proxy_port: int | None, max_bytes: int) -> bytes | None:
+        request = urllib.request.Request(url, headers={"Connection": "close"})
+        try:
+            with self._opener(proxy_port is not None, proxy_port).open(request, timeout=_TIMEOUT) as response:
+                if int(response.status) != 200:
+                    return None
+                data = response.read(max_bytes + 1)
+                return data if len(data) <= max_bytes else None
+        except (OSError, ValueError, urllib.error.HTTPError):
+            return None
+
+    def _post(self, host: str, body: bytes, proxy_port: int | None) -> int | None:
+        """One short connection per request (urllib never reuses one; ``Connection: close`` says so to the server)."""
         request = urllib.request.Request(
-            f"{ENDPOINT}/v1/reports", data=body, method="POST",
-            headers={"Content-Type": "application/json"},
+            f"https://{host}/v1/reports", data=body, method="POST",
+            headers={"Content-Type": "application/json", "Connection": "close"},
         )
         try:
             with self._opener(proxy_port is not None, proxy_port).open(request, timeout=_TIMEOUT) as response:
@@ -222,14 +297,20 @@ class ClientReporter:
             return None
 
     def _refresh_token(self) -> None:
-        request = urllib.request.Request(f"{ENDPOINT}/v1/network?install_id={self._install_id()}")
-        try:
-            with self._opener(False, None).open(request, timeout=_TIMEOUT) as response:
-                if int(response.status) != 200:
-                    return
-                data = json.loads(response.read(_MAX_ANSWER_BYTES).decode("utf-8"))
-        except (OSError, ValueError, urllib.error.HTTPError):
-            return
+        """``GET /v1/network`` only directly: through the tunnel the ingest would see the VPN server's network."""
+        if self._ingest.feed_due(self._now_ms(), nothing_answered=False):
+            self._refresh_feed()
+        data: Any = None
+        for host in self._host_order()[:TRIES_PER_PATH]:
+            text = self._get(f"https://{host}/v1/network?install_id={self._install_id()}", None, _MAX_ANSWER_BYTES)
+            if text is None:
+                self._note_failed(host)
+                continue
+            try:
+                data = json.loads(text.decode("utf-8"))
+            except ValueError:
+                data = None
+            break
         token = data.get("network_token") if isinstance(data, dict) else None
         if isinstance(token, str) and is_network_token(token):
             self._tokens.store(NetworkToken(token, self._now_ms()))

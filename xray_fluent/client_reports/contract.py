@@ -14,10 +14,12 @@ import os
 import re
 import threading
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 SCHEMA = 1
 MAX_BATCH = 50
@@ -431,3 +433,150 @@ def after_response(status: int | None) -> SendAction:
 
 
 
+
+
+# ── ingest names (owner 2026-11-19) ──
+#
+# reports.zapret.moe is usually cut in Russia (the zone zapret.moe is filtered by SNI), so the ingest is also
+# served under random names of the zapret-links pool (service ``reports``: a bridge to the same ingest, which
+# still sees the sender's network). The names come from the shared zapret-links feed: ``services.reports.hosts``
+# of its entry pages (script.google.com and the GitHub gist, both serve targets.json verbatim). The app keeps only
+# a fixed seed: pool names are never removed (zapret-links only stops handing them out), so the names of the
+# release day stay a working reserve. Same rules as Android ``IngestHosts``.
+
+INGEST_FIXED = "reports.zapret.moe"
+INGEST_SEED = ("oeifnxndqq.fuckingspeedtest.com", "wkjjjdcycb.osjcpjzipyb.click", INGEST_FIXED)
+INGEST_FEEDS = (
+    "https://script.google.com/macros/s/AKfycbzcEPk67WW6fYC0vPVm397QyDFHd4m-SrfKDBnfvG8jAD-n_HXVv8AqQnEHZ6A42oIh/exec?format=json",
+    "https://gist.githubusercontent.com/fuckyourkn/ecb9b6a03f53bddcdd47023ebc12d4f9/raw/targets.json",
+)
+MAX_FEED_BYTES = 64 * 1024
+MAX_INGEST_HOSTS = 8
+TRIES_PER_PATH = 4
+# One request body. The TSPU freezes a TCP connection to part of the foreign networks after ~25 packets both ways
+# (~16 KB), counted per connection: a TLS handshake with a certificate is ~6-8 packets, 8 KB of body ~6, the answer
+# 1-2, so one request stays near 15 packets, and every batch goes on its own new connection.
+MAX_BODY_BYTES = 8 * 1024
+FAILED_FOR_MS = 30 * 60 * 1000
+FEED_MAX_AGE_MS = 24 * 3600 * 1000
+FEED_RETRY_AFTER_MS = 3600 * 1000
+
+_HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
+
+
+def domain_of(host: str) -> str:
+    return host.split(".", 1)[1] if "." in host else host
+
+
+def is_host_name(host: str) -> bool:
+    return len(host) <= 253 and _HOST.fullmatch(host) is not None
+
+
+def parse_ingest_feed(text: str | bytes) -> list[str]:
+    """``services.reports.hosts`` of an entry page or links.json; a name only under ``domains`` of the same document
+    (without it, under a seed domain), at most ``MAX_INGEST_HOSTS``. A broken document gives nothing."""
+    try:
+        document = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(document, dict):
+        return []
+    raw_domains = document.get("domains")
+    domains = [d.lower() for d in raw_domains if isinstance(d, str)] if isinstance(raw_domains, list) else []
+    if not domains:
+        domains = [domain_of(h) for h in INGEST_SEED]
+    services = document.get("services")
+    reports = services.get("reports") if isinstance(services, dict) else None
+    hosts = reports.get("hosts") if isinstance(reports, dict) else None
+    if not isinstance(hosts, list):
+        return []
+    out: list[str] = []
+    for item in hosts:
+        if not isinstance(item, str):
+            continue
+        host = item.strip().lower()
+        if is_host_name(host) and any(host.endswith("." + d) for d in domains) and host not in out:
+            out.append(host)
+        if len(out) >= MAX_INGEST_HOSTS:
+            break
+    return out
+
+
+def ingest_order(learned: list[str], failed: set[str] | frozenset[str], rng: Any) -> list[str]:
+    """The names for one send: the feed's and the seed, shuffled, alternating domains; ``failed`` (recently silent)
+    at the end, the cut ``INGEST_FIXED`` last of the working ones. ``rng`` is a ``random.Random``-like object."""
+    every = list(dict.fromkeys([*learned, *INGEST_SEED]))
+    fresh = [h for h in every if h not in failed]
+    pool = [h for h in fresh if h != INGEST_FIXED]
+    rng.shuffle(pool)
+    groups: dict[str, list[str]] = {}
+    for host in pool:
+        groups.setdefault(domain_of(host), []).append(host)
+    interleaved: list[str] = []
+    queues = list(groups.values())
+    while any(queues):
+        for queue in queues:
+            if queue:
+                interleaved.append(queue.pop(0))
+    return interleaved + [h for h in fresh if h == INGEST_FIXED] + [h for h in every if h in failed]
+
+
+def take_batch(records: list[Any], max_count: int, max_bytes: int, body_bytes: Callable[[list[Any]], int]) -> list[Any]:
+    """The head of the queue: consecutive records while the body is at most ``max_bytes`` and the count at most
+    ``max_count``; one record always goes (it is under a kilobyte)."""
+    size = 0
+    for count in range(1, min(max_count, len(records)) + 1):
+        if count > 1 and body_bytes(records[:count]) > max_bytes:
+            break
+        size = count
+    return records[:size]
+
+
+class IngestHostCache:
+    """The ingest names learnt from the feed and when. The feed is asked on an event (a send), never by a timer:
+    when the names are older than a day or none answered, at most once an hour."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = Path(path)
+        self._lock = threading.Lock()
+        self._loaded = False
+        self._hosts: list[str] = []
+        self._fetched_at_ms = 0
+        self._last_attempt_ms: int | None = None
+
+    def hosts(self) -> list[str]:
+        with self._lock:
+            self._load()
+            return list(self._hosts)
+
+    def feed_due(self, now_ms: int, *, nothing_answered: bool) -> bool:
+        with self._lock:
+            self._load()
+            if self._last_attempt_ms is not None and 0 <= now_ms - self._last_attempt_ms < FEED_RETRY_AFTER_MS:
+                return False
+            return nothing_answered or not self._hosts or not 0 <= now_ms - self._fetched_at_ms < FEED_MAX_AGE_MS
+
+    def note_feed_attempt(self, now_ms: int) -> None:
+        with self._lock:
+            self._last_attempt_ms = now_ms
+
+    def store(self, learned: list[str], now_ms: int) -> None:
+        if not learned:
+            return
+        with self._lock:
+            self._load()
+            self._hosts = list(learned[:MAX_INGEST_HOSTS])
+            self._fetched_at_ms = int(now_ms)
+            _write_atomic(self._path, "\n".join([str(int(now_ms)), *self._hosts]) + "\n")
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            lines = [line.strip() for line in self._path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self._fetched_at_ms = int(lines[0])
+            # The domains were checked against the feed's ``domains`` when stored; here only the shape.
+            self._hosts = list(dict.fromkeys(h.lower() for h in lines[1:] if is_host_name(h.lower())))[:MAX_INGEST_HOSTS]
+        except (OSError, ValueError, IndexError):
+            self._hosts, self._fetched_at_ms = [], 0

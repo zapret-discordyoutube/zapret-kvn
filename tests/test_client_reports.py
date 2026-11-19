@@ -11,8 +11,9 @@ import json
 import os
 import tempfile
 import threading
-import zlib
 import unittest
+import urllib.request
+import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -191,7 +192,16 @@ class _Ingest(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"ok":true}')
 
+    feed: dict = {"schema": 1, "domains": ["fuckingspeedtest.com", "osjcpjzipyb.click"],
+                  "services": {"reports": {"hosts": ["newnamexyz.osjcpjzipyb.click"]}}}
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self.path.startswith("/v1/network"):
+            body = json.dumps(type(self).feed).encode()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body)
+            return
         body = json.dumps({"ok": True, "asn": 1, "region": "RU-MOW", "network_token": "v1.tok.mac"}).encode()
         self.send_response(200)
         self.end_headers()
@@ -209,14 +219,34 @@ class ReporterTests(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
+        self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        port = self.server.server_address[1]
-        self.original = r.ENDPOINT
-        r.ENDPOINT = f"http://127.0.0.1:{port}"
-        self.addCleanup(lambda: setattr(r, "ENDPOINT", self.original))
+        self.port = self.server.server_address[1]
+        self.tried: list[tuple[str, bool]] = []   # (host, through the tunnel)
+        self.dead: set[str] = set()
+
+    def _opener(self, via_proxy, _proxy_port):
+        """Every https://<name>/... goes to the local ingest; a name in ``dead`` does not answer."""
+        test = self
+
+        class Opener:
+            def open(self, request, timeout=None):
+                from urllib.parse import urlsplit
+                parts = urlsplit(request.full_url)
+                test.tried.append((parts.hostname, via_proxy))
+                if parts.hostname in test.dead:
+                    raise OSError("no answer")
+                local = urllib.request.Request(
+                    f"http://127.0.0.1:{test.port}{parts.path}" + (f"?{parts.query}" if parts.query else ""),
+                    data=request.data, method=request.get_method(), headers=dict(request.header_items()),
+                )
+                return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(local, timeout=timeout)
+
+        return Opener()
 
     def _reporter(self, tunnel_port=None):
-        return r.ClientReporter(Path(self.folder.name), "0.8.88", tunnel_proxy_port=lambda: tunnel_port, now_ms=lambda: NOW)
+        return r.ClientReporter(Path(self.folder.name), "0.8.88", tunnel_proxy_port=lambda: tunnel_port,
+                                now_ms=lambda: NOW, opener=self._opener)
 
     def test_attempt_is_sent_directly_with_token_and_install_id(self) -> None:
         reporter = self._reporter()
@@ -254,6 +284,78 @@ class ReporterTests(unittest.TestCase):
         reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(core_code="LOCAL_BIND_COLLISION"),
                          900, NOW - 5000, None)
         self.assertEqual([], _Ingest.received)
+
+
+    def test_names_come_from_the_feed_and_a_silent_name_is_skipped(self) -> None:
+        reporter = self._reporter()
+        self.dead = {"newnamexyz.osjcpjzipyb.click", "oeifnxndqq.fuckingspeedtest.com"}
+        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        self.assertEqual(1, len(_Ingest.received))
+        hosts = [h for h, _ in self.tried]
+        self.assertIn("script.google.com", hosts)                               # the feed was asked first (no names yet)
+        posted = [h for h in hosts if h not in ("script.google.com", "gist.githubusercontent.com")]
+        self.assertNotIn(c.INGEST_FIXED, posted[:-1])                            # the cut name is never tried before a pool name
+        self.assertEqual(["newnamexyz.osjcpjzipyb.click"], c.IngestHostCache(Path(self.folder.name) / "ingest-hosts").hosts())
+
+    def test_nothing_answers_directly_so_the_tunnel_carries_the_batch(self) -> None:
+        reporter = self._reporter(tunnel_port=8080)
+        self.dead = set(c.INGEST_SEED) | {"newnamexyz.osjcpjzipyb.click"}
+        reporter._record(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900, NOW - 5000, None)
+        self.assertEqual([], _Ingest.received)                                    # every name is dead on both paths
+        self.assertEqual(1, c.ReportQueue(Path(self.folder.name) / "queue.jsonl").size())
+        self.assertTrue(any(via for _h, via in self.tried))                       # the tunnel was tried too
+        self.dead = set()
+        reporter._flush()
+        self.assertEqual("direct", _Ingest.received[0]["reports"][0]["sent_via"])
+
+    def test_a_long_queue_goes_in_small_requests(self) -> None:
+        queue = c.ReportQueue(Path(self.folder.name) / "queue.jsonl")
+        for i in range(60):
+            queue.add(c.AttemptRecord("hipnl", "vless", c.Outcome.FAILED, "handshake", "handshake_timeout", 15000,
+                                      NOW - 10000 + i, "v1." + "a" * 120 + "." + "b" * 43))
+        self._reporter()._flush()
+        self.assertGreaterEqual(len(_Ingest.received), 3)
+        self.assertEqual(60, sum(len(batch["reports"]) for batch in _Ingest.received))
+        for batch in _Ingest.received:
+            self.assertLessEqual(len(json.dumps(batch).encode()), c.MAX_BODY_BYTES + 512)
+
+
+class IngestNamesTests(unittest.TestCase):
+    def test_feed_names_only_under_its_domains(self) -> None:
+        text = json.dumps({"domains": ["fuckingspeedtest.com"], "services": {"reports": {"hosts": [
+            "ok.fuckingspeedtest.com", "evil.example.org", "fuckingspeedtest.com.evil.org", "Bad Name", 7]}}})
+        self.assertEqual(["ok.fuckingspeedtest.com"], c.parse_ingest_feed(text))
+        self.assertEqual([], c.parse_ingest_feed('{"schema": 1, "families": {}}'))
+        self.assertEqual([], c.parse_ingest_feed("<html>"))
+
+    def test_order_alternates_domains_and_keeps_the_cut_name_last(self) -> None:
+        import random as rnd
+
+        learned = ["aaaaaaaaaa.fuckingspeedtest.com", "bbbbbbbbbb.fuckingspeedtest.com", "cccccccccc.osjcpjzipyb.click"]
+        for seed in range(20):
+            order = c.ingest_order(learned, set(), rnd.Random(seed))
+            self.assertEqual(c.INGEST_FIXED, order[-1])
+            self.assertNotEqual(c.domain_of(order[0]), c.domain_of(order[1]))
+        order = c.ingest_order([], {"oeifnxndqq.fuckingspeedtest.com", c.INGEST_FIXED}, rnd.Random(1))
+        self.assertEqual("wkjjjdcycb.osjcpjzipyb.click", order[0])
+
+    def test_take_batch_respects_bytes_and_count(self) -> None:
+        records = list(range(50))
+        self.assertEqual(20, len(c.take_batch(records, 50, c.MAX_BODY_BYTES, lambda xs: len(xs) * 400)))
+        self.assertEqual([0], c.take_batch(records, 50, 100, lambda xs: len(xs) * 1000))
+
+    def test_cache_feed_due_daily_or_after_silence_at_most_hourly(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            cache = c.IngestHostCache(Path(folder) / "ingest-hosts")
+            self.assertTrue(cache.feed_due(NOW, nothing_answered=False))
+            cache.note_feed_attempt(NOW)
+            self.assertFalse(cache.feed_due(NOW + 60_000, nothing_answered=True))
+            cache.store(["x1.osjcpjzipyb.click"], NOW)
+            again = c.IngestHostCache(Path(folder) / "ingest-hosts")
+            self.assertEqual(["x1.osjcpjzipyb.click"], again.hosts())
+            self.assertFalse(again.feed_due(NOW + 3_600_000, nothing_answered=False))
+            self.assertTrue(again.feed_due(NOW + 3_600_000, nothing_answered=True))
+            self.assertTrue(again.feed_due(NOW + c.FEED_MAX_AGE_MS, nothing_answered=False))
 
 
 class ControllerHookTests(unittest.TestCase):
