@@ -222,6 +222,13 @@ def capture_runtime_session(controller: AppController, plan: SingboxRuntimePlan,
     if session_node is not None:
         session_node.last_used_at = datetime.now(timezone.utc).isoformat()
     ping_host, ping_port = controller._infer_singbox_ping_target(plan.singbox_config, session_node)
+    # Вход Xray-ретранслятора для проверки VLESS-отчёта (client_reports): только в памяти.
+    sidecar = plan.xray_sidecar
+    controller._client_report_relay = (
+        (int(sidecar.relay_port), str(sidecar.relay_username), str(sidecar.relay_password))
+        if sidecar is not None and sidecar.relay_port
+        else None
+    )
     controller._capture_active_session(
         session_node,
         tun=tun,

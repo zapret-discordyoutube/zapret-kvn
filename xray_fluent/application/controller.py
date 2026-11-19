@@ -218,8 +218,12 @@ from ..engines.singbox import (
     select_outbound as select_singbox_outbound,
     select_outbound_when_ready_steps as select_singbox_outbound_when_ready_steps,
 )
+from ..client_reports.contract import AttemptFacts
+from ..client_reports.reporter import ClientReporter, server_ref_for
 from ..constants import (
     APP_NAME,
+    APP_VERSION,
+    DATA_DIR,
     DEFAULT_HTTP_PORT,
     DEFAULT_SOCKS_PORT,
     DEFAULT_XRAY_STATS_API_PORT,
@@ -369,6 +373,8 @@ def _write_json_atomically(path: Path, payload: object) -> None:
 # even if startup subscription updates hang or fail (spec limit: <= 30 s).
 STARTUP_CONNECT_FALLBACK_MS = 20_000
 
+# Transitions that try a server: each ends with one connection report (client_reports).
+_CLIENT_REPORT_ACTIONS = frozenset({"connect", "reconnect", "tun_hot_swap", "proxy_hot_swap"})
 _XRAY_METRICS_API_TAG = "__app_metrics_api"
 _XRAY_METRICS_API_INBOUND_TAG = "__app_metrics_api_in"
 _XRAY_TUN_INBOUND_TAG = "__app_tun_in"
@@ -605,6 +611,17 @@ class AppController(QObject):
         # Cause of the running transition's failure; published once by
         # _on_transition_runner_finished (see transition_outcome).
         self._transition_outcome = TransitionOutcome()
+        # Отчёты о подключениях к серверам сервиса для status.zapret.moe (docs/CLIENT_REPORTS.md).
+        # Журнал — только в файл: отчёт пишется из фонового потока.
+        self.client_reporter = ClientReporter(
+            DATA_DIR / "client-reports",
+            APP_VERSION,
+            tunnel_proxy_port=lambda: self.get_effective_http_proxy_port() if self.connected else None,
+            log=lambda line: self._logger.info(line),
+        )
+        self.client_reporter.flush()
+        self._client_report_started_ms = 0
+        self._client_report_relay: tuple[int, str, str] | None = None
         self._hysteria_cooldown_until: dict[str, float] = {}
         self._hysteria_failure_started_at = 0.0
         self._hysteria_return_episode = 0
@@ -2844,6 +2861,7 @@ class AppController(QObject):
         self._transition_requested_at = None
         self._transition_runner = runner
         self._transition_outcome.reset()
+        self._client_report_started_ms = int(time.time() * 1000)
         runner.start()
 
     def _on_transition_runner_finished(
@@ -2862,6 +2880,7 @@ class AppController(QObject):
         try:
             if runner.error is not None:
                 self._log(f"[transition] failed with error: {runner.error!r}")
+            self._report_transition_attempt(action, runner, superseded)
             if action != "cleanup" and not superseded:
                 ok = bool(runner.result) and runner.error is None
                 if ok:
@@ -2910,6 +2929,51 @@ class AppController(QObject):
                     # rule has nothing left to protect.
                     self.bypass.release()
                 self.transition_state_changed.emit(False, "")
+
+    def _report_transition_attempt(self, action: str, runner: TransitionRunner, superseded: bool) -> None:
+        """One connection report per finished connect/switch to a server of the service.
+
+        Hysteria and AmneziaWG succeed only after their engine proved the server at
+        start; a VLESS success is confirmed by one HTTPS request through the Xray relay
+        (owner decision 19.11.2026). A failure is reported only with the native core's
+        own code for the server: a local failure must not paint a working server.
+        """
+        try:
+            if action not in _CLIENT_REPORT_ACTIONS:
+                return
+            node = self._runtime_selected_node()
+            if node is None:
+                return
+            ref = server_ref_for(node, list(self.state.subscriptions))
+            if ref is None:
+                return
+            started = self._client_report_started_ms or int(time.time() * 1000)
+            elapsed = max(0, int(time.time() * 1000) - started)
+            scheme = str(node.scheme or "").lower()
+            ok = bool(runner.result) and runner.error is None
+            relay = None
+            if superseded:
+                facts = AttemptFacts(cancelled=True)
+            elif ok:
+                facts = AttemptFacts(succeeded=True)
+                if scheme == "vless":
+                    relay = self._client_report_relay
+                    session = self._active_session
+                    if relay is None or session is None or int(session.sidecar_relay_port or 0) != relay[0]:
+                        return
+            else:
+                code = None
+                if scheme in {"hysteria2", "hy2"}:
+                    failure = getattr(self.hysteria, "last_failure_code", None)
+                    code = getattr(failure, "name", None)
+                if not code:
+                    return
+                facts = AttemptFacts(core_code=code)
+            self.client_reporter.on_attempt(
+                ref, scheme, facts, elapsed_ms=elapsed, attempted_at_ms=started, relay=relay,
+            )
+        except Exception as exc:  # a report never breaks a transition
+            self._logger.info(f"[client-report] skipped: {type(exc).__name__}")
 
     def _has_residual_processes(self) -> bool:
         """Processes alive without a connected session (aborted transition)."""

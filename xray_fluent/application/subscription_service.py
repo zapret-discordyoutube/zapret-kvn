@@ -15,6 +15,7 @@ from ..profiles.models import (
     normalize_subscription_warnings,
     utc_now_iso,
 )
+from ..client_reports.contract import SERVER_IDS_HEADER, parse_server_ids
 from ..importer.subscription_http import SERVICE_HEADER, SubscriptionFetchResult, sanitize_fetch_error
 from ..importer.subscription_parser import (
     ParsedSubscription,
@@ -82,6 +83,10 @@ def apply_not_modified(
     subscription.retry_via_tunnel = False
     subscription.last_error = ""
     _apply_cache_headers(subscription, fetch)
+    # vpnbot sends zapret-server-ids on a 304 too: an app updated while its ETag stays valid
+    # still learns the ids without waiting for the body to change.
+    if subscription.service and SERVER_IDS_HEADER in fetch.headers:
+        subscription.server_ids = _server_id_map(fetch)
     return SubscriptionUpdateResult(
         subscription_id=subscription.id,
         success=True,
@@ -274,6 +279,8 @@ def _apply_success_metadata(
     subscription.retry_via_tunnel = False
     subscription.last_error = ""
     subscription.service = SERVICE_HEADER in fetch.headers
+    # Id каталога для отчётов о подключениях: только в ответе сервиса, ответ без заголовка карту стирает.
+    subscription.server_ids = _server_id_map(fetch) if subscription.service else {}
     metadata = parsed.metadata
     if not subscription.name:
         subscription.name = metadata.title
@@ -295,6 +302,13 @@ def _apply_success_metadata(
         subscription.last_modified = ""
     else:
         _apply_cache_headers(subscription, fetch)
+
+
+def _server_id_map(fetch: SubscriptionFetchResult) -> dict[str, dict[str, str]]:
+    return {
+        name: {"server_id": ref.server_id, "product": ref.product}
+        for name, ref in parse_server_ids(fetch.headers.get(SERVER_IDS_HEADER)).items()
+    }
 
 
 def _apply_cache_headers(subscription: Subscription, fetch: SubscriptionFetchResult) -> None:

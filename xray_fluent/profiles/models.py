@@ -239,6 +239,9 @@ class Subscription:
     # Последний ответ пришёл с заголовком сервиса Zapret VPN (SERVICE_HEADER):
     # адреса её серверов не раскрываются и страна не берётся из GeoIP.
     service: bool = False
+    # Id каталога сервиса для серверов этой подписки (заголовок zapret-server-ids): имя из
+    # ссылки → {"server_id", "product"}. Только для отчётов о подключениях (client_reports).
+    server_ids: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def effective_interval_hours(self) -> int:
@@ -276,6 +279,7 @@ class Subscription:
             "created_at": self.created_at,
             "sort_order": self.sort_order,
             "service": self.service,
+            "server_ids": {name: dict(entry) for name, entry in self.server_ids.items()},
         }
 
     @staticmethod
@@ -323,7 +327,20 @@ class Subscription:
             created_at=str(data.get("created_at") or utc_now_iso()),
             sort_order=_non_negative_int("sort_order"),
             service=data.get("service") is True,
+            server_ids=_server_ids(data.get("server_ids")),
         )
+
+
+def _server_ids(raw: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for name, entry in raw.items():
+        if isinstance(name, str) and isinstance(entry, dict):
+            server_id, product = entry.get("server_id"), entry.get("product")
+            if isinstance(server_id, str) and isinstance(product, str):
+                result[name] = {"server_id": server_id, "product": product}
+    return result
 
 
 @dataclass(slots=True)

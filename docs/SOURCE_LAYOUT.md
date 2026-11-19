@@ -10,6 +10,7 @@ runtime. Старых модулей-переадресаций в корне н
 xray_fluent/
 ├── __init__.py, constants.py   общая идентичность и константы
 ├── application/               контроллер, сессии, переключения, сценарии
+├── client_reports/            отчёты о подключениях для status.zapret.moe (docs/CLIENT_REPORTS.md)
 ├── engines/
 │   ├── singbox/               routing/DNS/TUN и native-протоколы
 │   ├── xray/                  VLESS transport
@@ -45,7 +46,8 @@ runtime/amnezia/               отдельный Go-модуль официал
   существующие функциональные пакеты сохранены.
 
 Встроенные Go-адаптеры Android Xray/Amnezia находятся в воспроизводимых
-`core-patches`, а не в пустых Kotlin-пакетах. Новых Gradle-модулей не добавлено.
+`core-patches`, а не в пустых Kotlin-пакетах. Чистые модули решений: `runtime-log`
+(журнал) и `client-reports` (отчёты о подключениях, `docs/CLIENT_REPORTS.md` Android).
 Имена Android VPN-сервиса/плитки, applicationId и пути данных не изменены.
 
 ## Проверка структуры

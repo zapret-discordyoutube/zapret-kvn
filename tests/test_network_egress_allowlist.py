@@ -52,6 +52,11 @@ ALLOWED: dict[str, set[str]] = {
     # цель, что у замера задержки). DNS → TCP → TLS напрямую и CONNECT через
     # локальный прокси VPN; узлы-серверы не затрагиваются.
     "network/fetch_diagnosis.py": {"create_connection", "getaddrinfo", "socket"},
+    # Отчёты о подключениях (решение владельца 19.11.2026, docs/CLIENT_REPORTS.md): только
+    # reports.zapret.moe и только после настоящей попытки подключения к серверу сервиса —
+    # отчёт напрямую, без ответа — через локальный прокси VPN; токен сети — только напрямую.
+    # Проверка VLESS идёт через engines/socks_probe.py (внутри туннеля).
+    "client_reports/reporter.py": {"build_opener"},
     # Обновления приложения и ядер — наш сервер обновлений и GitHub, HTTPS.
     "network/http_utils.py": {"build_opener", "urlopen"},
     "updates/app_updater.py": {"build_opener"},
