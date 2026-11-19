@@ -18,12 +18,32 @@ One report per finished connect or server switch (`connect`, `reconnect`, `tun_h
   inflated at most 512 KB), stored as `Subscription.server_ids` and matched by the node's
   `provider_name` and link scheme (Trojan/Shadowsocks/VMess lines of the VLESS subscription are product
   `vless`). vpnbot sends the header on a 304 too, so an unchanged subscription still refreshes the map.
-  Relay rows «… через Россию» are not in the header. No entry — no report; the id is never guessed.
+  Relay rows «… через Россию» are not in the header. No entry — no report by itself (only as `foreign`, by the button); the id is never guessed.
 - `outcome` `connected` / `failed` / `cancelled`, the failed step (resolve → connect → handshake → auth
   → tunnel → request), a short code, elapsed ms, attempt time, app name/version/platform, a random
   `install_id` (`data/client-reports/install-id`, not tied to the account), `sent_via`, `network_token`.
 
-No account, key, address or domain; other providers' servers are never reported.
+No account, key or domain.
+
+Schema 2 (owner decisions 2026-11-19, live at the receiver since 16:07 UTC) adds, all optional and
+written only when known (a bad value drops out instead of losing the report, `AttemptDetails.cleaned`):
+
+- `server_ip` (the address the start connected to, or the one the path check probed) and `port`;
+  `transport` (`tcp`, `ws`, `grpc`, `xhttp`, `quic`, `udp`, …) and `security` (`reality`, `tls`, `none`);
+- `network_type` (`wifi`, `cellular`, `ethernet`, `other`) (not sent on Windows yet);
+- `settings`: `mode` (`tun`/`proxy` of the live session), `masking` (`on`/`off`); `dns`, `quic_blocked` and `ipv6` live in the native JSON templates and are left unknown;
+- `versions`: `os` (`platform.version()`), `xray`, `singbox`, `hysteria` asked once per app run from the cores themselves (`<core> version`).
+
+The receiver stores the sender's IP and its /24 (IPv4) or /48 (IPv6) for `sent_via: direct` reports
+only; tunnel reports store neither. Everything is kept 90 days.
+
+Foreign servers (not from the service's subscriptions) get the path check on screen, and their report is
+sent only when the user presses «Отправить отчёт»: then `foreign` {`host`, `protocol`, `name`} replaces
+`server_id`/`product` (exactly one of the two, or the receiver refuses), with the server's `server_ip` and
+`port`. The name loses Unicode control/format characters and is cut to 64 code points (flags survive);
+the host is lower-cased, an IPv6 zone is never sent. The receiver keeps them in its own table, never in
+our servers' verdict or ranking. No `report_id` yet: the receiver refuses unknown fields; it comes only
+after vpnbot announces it.
 
 ## When a report is honest
 
@@ -117,8 +137,8 @@ Next to the connection error there is a button «Отправить отчёт»
 gone out. Pressing it writes the report if none was written yet (a failure that is not about the server goes
 as `failed` at `connect` with `detail` `local_<code>`, `local_network` or `local_unknown`; vpnbot keeps
 `local_*` out of the server ranking) and sends the queue at once. The note under it then says «Отчёт
-отправлен» or «Отчёт в очереди, отправим при первой связи» (the button stays). Servers outside the service's
-subscriptions get the path check but no button: their reports need the receiver's schema 2 (`foreign`).
+отправлен» or «Отчёт в очереди, отправим при первой связи» (the button stays). Foreign servers get the button too (when the profile names their address): their report goes with
+`foreign` and only by the button (see «What is sent»).
 
 Windows has no per-socket bypass of the TUN: the path check runs only while no TUN session is up (after a
 failed connect the session is gone; a failed switch that kept a TUN session is not checked). The freeze is

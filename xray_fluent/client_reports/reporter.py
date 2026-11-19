@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import secrets
 import threading
 import time
@@ -31,6 +32,9 @@ from typing import Any
 from ..engines.socks_probe import HTTPS_ENDPOINTS, probe_https
 from .contract import (
     INGEST_FEEDS,
+    AttemptDetails,
+    ForeignServer,
+    short_version,
     FAILED_FOR_MS,
     MAX_BATCH,
     MAX_BODY_BYTES,
@@ -113,8 +117,65 @@ def probe_target_for(node: Any) -> ProbeTarget | None:
             break
     if name is None and isinstance(outbound, dict) and isinstance(outbound.get("tls"), dict):
         name = str(outbound["tls"].get("server_name") or "").strip() or None
+    quic = scheme in {"hysteria2", "hy2", "hysteria", "tuic"}
+    network = str(stream.get("network") or "").lower()
+    transport = "quic" if quic else "udp" if udp else (network or "tcp")
+    report_security = "tls" if quic else (security or "none")
     # Hysteria/TUIC carry TLS over QUIC: there is no TCP TLS step for them.
-    return ProbeTarget(host=host, port=port, server_name=name, uses_tls=not udp and security in {"tls", "reality"}, udp=udp)
+    return ProbeTarget(
+        host=host, port=port, server_name=name, uses_tls=not udp and security in {"tls", "reality"}, udp=udp,
+        protocol="hysteria2" if scheme == "hy2" else scheme, transport=transport, security=report_security,
+    )
+
+
+_VERSION_NUMBER = re.compile(r"v?(\d+\.\d+\.\d+[0-9A-Za-z.+_-]*)")
+_versions_cache: tuple[tuple[str, str], ...] | None = None
+
+
+def core_versions() -> tuple[tuple[str, str], ...]:
+    """OS and core versions for the report, asked once per app run (each core answers ``version``)."""
+    global _versions_cache
+    if _versions_cache is not None:
+        return _versions_cache
+    found: list[tuple[str, str]] = []
+    try:
+        import platform
+
+        os_version = short_version(platform.version())
+        if os_version:
+            found.append(("os", os_version))
+        from ..constants import HYSTERIA_PATH_DEFAULT, SINGBOX_PATH_DEFAULT
+        from ..engines.singbox.core_updater import installed_version
+        from ..engines.xray import get_xray_version
+
+        for key, text in (
+            ("xray", get_xray_version("") or ""),
+            ("singbox", installed_version(SINGBOX_PATH_DEFAULT) if SINGBOX_PATH_DEFAULT.exists() else ""),
+            ("hysteria", _hysteria_version(HYSTERIA_PATH_DEFAULT)),
+        ):
+            match = _VERSION_NUMBER.search(text or "")
+            value = short_version(match.group(1)) if match else None
+            if value:
+                found.append((key, value))
+    except Exception:
+        pass
+    _versions_cache = tuple(found)
+    return _versions_cache
+
+
+def _hysteria_version(exe: Path) -> str:
+    if not exe.exists():
+        return ""
+    try:
+        from ..platform.windows.subprocess_utils import result_output_text, run_text
+
+        text = result_output_text(run_text([str(exe), "version"], timeout=5.0))
+    except Exception:
+        return ""
+    for line in str(text).splitlines():
+        if "version" in line.lower():
+            return line
+    return ""
 
 
 def probe_relay(port: int, username: str, password: str, *, timeout: float = _PROBE_TIMEOUT) -> bool:
@@ -151,8 +212,10 @@ class FailureReport:
 
 class _PendingFailure:
     def __init__(self, attempt: int, ref: ServerRef | None, scheme: str, facts: AttemptFacts, elapsed_ms: int,
-                 attempted_at_ms: int, target: ProbeTarget | None) -> None:
+                 attempted_at_ms: int, target: ProbeTarget | None, name: str = "") -> None:
         self.attempt = attempt
+        #: The node's name: the name of a foreign server in its report.
+        self.name = name
         self.ref = ref
         self.scheme = scheme
         self.facts = facts
@@ -164,7 +227,7 @@ class _PendingFailure:
         self.diagnosis: Diagnosis | None = None
         self.diagnosis_facts: DiagnosisFacts | None = None
         self.record: AttemptRecord | None = None
-        self.status = SendStatus.NOT_OURS if ref is None else SendStatus.AVAILABLE
+        self.status = SendStatus.NOT_OURS if ref is None and target is None else SendStatus.AVAILABLE
 
 
 class ClientReporter:
@@ -181,6 +244,8 @@ class ClientReporter:
         probe: BlockProbe | None = None,
         freeze_probe: Callable[[int | None], int | None] = measure_freeze,
         on_failure_changed: Callable[[FailureReport | None], None] = lambda _report: None,
+        context: Callable[[], AttemptDetails] = AttemptDetails,
+        server_address: Callable[[str], str | None] = lambda _host: None,
     ) -> None:
         self._root = Path(root)
         self._app = AppIdentity(APP_NAME, _safe_version(app_version), PLATFORM)
@@ -202,6 +267,9 @@ class ClientReporter:
         self._probe = probe
         self._freeze_probe = freeze_probe
         self._on_failure_changed = on_failure_changed
+        # Schema 2: what is the same for all attempts now (mode, masking, versions) and the address the start used.
+        self._context = context
+        self._server_address = server_address
         self._probed_at: dict[str, int] = {}
         self._freeze_checked_at: dict[str, int] = {}
         self._failure: _PendingFailure | None = None
@@ -220,6 +288,7 @@ class ClientReporter:
         relay: tuple[int, str, str] | None = None,
         target: ProbeTarget | None = None,
         attempt: int = 0,
+        name: str = "",
     ) -> None:
         """One finished attempt; ``relay`` asks for the VLESS probe before the verdict. A report is written only for
         a server of the service; the path check and the notice work for any server."""
@@ -227,7 +296,7 @@ class ClientReporter:
             if facts.succeeded:
                 self._clear_failure()
             return
-        self._spawn(lambda: self._attempt(ref, scheme, facts, elapsed_ms, attempted_at_ms, relay, target, attempt))
+        self._spawn(lambda: self._attempt(ref, scheme, facts, elapsed_ms, attempted_at_ms, relay, target, attempt, name))
 
     def begin_attempt(self, attempt: int) -> None:
         """A new connection attempt: the previous failure leaves the notice."""
@@ -240,7 +309,8 @@ class ClientReporter:
         """The «Отправить отчёт» button: a failure without a report yet is written (``local_*`` when it is not about
         the server) and the queue is sent now. The result arrives through ``on_failure_changed``."""
         pending = self._failure
-        if pending is None or pending.ref is None:
+        # A foreign server is sent in full (address, port, protocol, name), but only by this button.
+        if pending is None or (pending.ref is None and self._foreign_of(pending) is None):
             return
         pending.status = SendStatus.SENDING
         self._publish(pending)
@@ -248,10 +318,11 @@ class ClientReporter:
 
     def _force(self, pending: _PendingFailure) -> None:
         try:
-            if pending.record is None and pending.ref is not None:
+            if pending.record is None:
                 pending.record = self._write(
                     pending.ref, classify_forced(pending.facts, pending.diagnosis), pending.elapsed_ms,
-                    pending.attempted_at_ms, flush=False,
+                    pending.attempted_at_ms, self._details(pending.target, pending.diagnosis_facts),
+                    foreign=self._foreign_of(pending) if pending.ref is None else None, flush=False,
                 )
             self._stopped_until_next = False
             self._flush(wait=True)
@@ -292,6 +363,7 @@ class ClientReporter:
         relay: tuple[int, str, str] | None,
         target: ProbeTarget | None = None,
         attempt: int = 0,
+        name: str = "",
     ) -> None:
         udp = str(scheme or "").lower() in UDP_SCHEMES
         if relay is not None:
@@ -310,9 +382,9 @@ class ClientReporter:
             if facts.succeeded:
                 self._clear_failure()
             if ref is not None:
-                self._write(ref, classify(facts, diagnosis), elapsed_ms, attempted_at_ms)
+                self._write(ref, classify(facts, diagnosis), elapsed_ms, attempted_at_ms, self._details(target, None))
             return
-        self._on_failure(_PendingFailure(attempt, ref, scheme, facts, elapsed_ms, attempted_at_ms, target))
+        self._on_failure(_PendingFailure(attempt, ref, scheme, facts, elapsed_ms, attempted_at_ms, target, name))
 
     def _on_failure(self, pending: _PendingFailure) -> None:
         with self._failure_lock:
@@ -338,6 +410,7 @@ class ClientReporter:
         if pending.ref is not None:
             pending.record = self._write(
                 pending.ref, classify(pending.facts, pending.diagnosis), pending.elapsed_ms, pending.attempted_at_ms,
+                self._details(pending.target, pending.diagnosis_facts),
             )
         pending.status = self._status_of(pending)
         self._publish(pending)
@@ -371,9 +444,37 @@ class ClientReporter:
             stamps[key] = now
             return True
 
+    def _foreign_of(self, pending: _PendingFailure) -> ForeignServer | None:
+        target = pending.target
+        if target is None:
+            return None
+        return ForeignServer.of(target.host, target.protocol or pending.scheme, pending.name)
+
+    def _details(self, target: ProbeTarget | None, facts: DiagnosisFacts | None) -> AttemptDetails:
+        """The report's details: the common part from ``context`` and this server's address, port, transport."""
+        try:
+            base = self._context()
+        except Exception:
+            base = AttemptDetails()
+        if target is None:
+            return base.cleaned()
+        from dataclasses import replace
+
+        from .probe import literal_address
+
+        try:
+            noted = self._server_address(target.host)
+        except Exception:
+            noted = None
+        return replace(
+            base,
+            server_ip=literal_address(target.host) or noted or (facts.probed_address if facts else None),
+            port=target.port, transport=target.transport, security=target.security,
+        ).cleaned()
+
     def _status_of(self, pending: _PendingFailure) -> SendStatus:
         if pending.record is None:
-            return SendStatus.NOT_OURS if pending.ref is None else SendStatus.AVAILABLE
+            return SendStatus.NOT_OURS if pending.ref is None and self._foreign_of(pending) is None else SendStatus.AVAILABLE
         return SendStatus.QUEUED if pending.record in self._queue.pending(self._now_ms()) else SendStatus.SENT
 
     def _publish(self, pending: _PendingFailure) -> None:
@@ -396,28 +497,30 @@ class ClientReporter:
 
     def _write(
         self,
-        ref: ServerRef,
+        ref: ServerRef | None,
         verdict: Any,
         elapsed_ms: int,
         attempted_at_ms: int,
+        details: AttemptDetails | None = None,
         *,
+        foreign: ForeignServer | None = None,
         flush: bool = True,
     ) -> AttemptRecord | None:
-        if verdict is None:
+        if verdict is None or (ref is None and foreign is None):
             return None
         if self._tokens.needs_refresh(self._now_ms()):
             self._refresh_token()
         record = AttemptRecord(
-            server_id=ref.server_id, product=ref.product, outcome=verdict.outcome,
+            server_id=ref.server_id if ref else "", product=ref.product if ref else "", outcome=verdict.outcome,
             failed_step=verdict.failed_step, detail=verdict.detail,
             elapsed_ms=max(0, min(int(elapsed_ms), MAX_ELAPSED_MS)),
             attempted_at_ms=int(attempted_at_ms), network_token=self._tokens.current(self._now_ms()),
+            foreign=foreign, details=(details or AttemptDetails()).cleaned(),
         )
         self._queue.add(record)
         step = f" at {verdict.failed_step} ({verdict.detail})" if verdict.failed_step else ""
-        self._log(
-            f"[client-report] {ref.product}/{ref.server_id} {verdict.outcome.value}{step}, queued {self._queue.size()}"
-        )
+        who = f"{ref.product}/{ref.server_id}" if ref else f"foreign {foreign.protocol if foreign else ''}"
+        self._log(f"[client-report] {who} {verdict.outcome.value}{step}, queued {self._queue.size()}")
         if flush:
             self._stopped_until_next = False
             self._flush()

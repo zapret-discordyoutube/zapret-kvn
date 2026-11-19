@@ -222,9 +222,13 @@ class TargetTests(unittest.TestCase):
         node = type("Node", (), {})()
         node.server, node.port, node.scheme = "nl.node.example", 8443, "vless"
         node.outbound = {"streamSettings": {"security": "reality", "realitySettings": {"serverName": "www.microsoft.com"}}}
-        self.assertEqual(ProbeTarget("nl.node.example", 8443, "www.microsoft.com", True, False), probe_target_for(node))
+        self.assertEqual(ProbeTarget("nl.node.example", 8443, "www.microsoft.com", True, False, "vless", "tcp", "reality"),
+                         probe_target_for(node))
+        node.outbound = {"streamSettings": {"network": "xhttp", "security": "tls", "tlsSettings": {"serverName": "a.example"}}}
+        self.assertEqual(("xhttp", "tls"), (probe_target_for(node).transport, probe_target_for(node).security))
         node.scheme, node.outbound = "hysteria2", {"tls": {"server_name": "hy.example"}}
-        self.assertEqual(ProbeTarget("nl.node.example", 8443, "hy.example", False, True), probe_target_for(node))
+        self.assertEqual(ProbeTarget("nl.node.example", 8443, "hy.example", False, True, "hysteria2", "quic", "tls"),
+                         probe_target_for(node))
         node.port = 0
         self.assertIsNone(probe_target_for(node))
 

@@ -218,9 +218,9 @@ from ..engines.singbox import (
     select_outbound as select_singbox_outbound,
     select_outbound_when_ready_steps as select_singbox_outbound_when_ready_steps,
 )
-from ..client_reports.contract import INGEST_SEED, AttemptFacts
+from ..client_reports.contract import INGEST_SEED, AttemptDetails, AttemptFacts, ReportSettings
 from ..client_reports.probe import BlockProbe
-from ..client_reports.reporter import ClientReporter, probe_target_for, server_ref_for
+from ..client_reports.reporter import ClientReporter, core_versions, probe_target_for, server_ref_for
 from ..constants import (
     APP_NAME,
     APP_VERSION,
@@ -633,6 +633,9 @@ class AppController(QObject):
             # use our pool front. The notice gets the result through a queued signal (the reporter's thread).
             probe=BlockProbe(lambda: [host for host in INGEST_SEED if not host.endswith(".zapret.moe")]),
             on_failure_changed=self.failure_report_changed.emit,
+            # Schema 2: mode, masking and versions; DNS, QUIC and IPv6 live in the native JSON (left unknown).
+            context=self._client_report_context,
+            server_address=lambda host: next(iter(cached_addresses(host)), None),
         )
         self._client_report_attempt = 0
         self.client_reporter.prefetch_token()
@@ -2990,10 +2993,23 @@ class AppController(QObject):
                 facts = AttemptFacts(core_code=self._client_report_failure_code(scheme))
             self.client_reporter.on_attempt(
                 ref, scheme, facts, elapsed_ms=elapsed, attempted_at_ms=started, relay=relay,
-                target=probe_target_for(node), attempt=self._client_report_attempt,
+                target=probe_target_for(node), attempt=self._client_report_attempt, name=str(node.name or ""),
             )
         except Exception as exc:  # a report never breaks a transition
             self._logger.info(f"[client-report] skipped: {type(exc).__name__}")
+
+    def _client_report_context(self) -> AttemptDetails:
+        """What is the same for all attempts now (client_reports schema 2); no addresses."""
+        settings = self.state.settings
+        tun = self.active_tun_mode()
+        masking = settings.masking if isinstance(settings.masking, dict) else {}
+        return AttemptDetails(
+            settings=ReportSettings(
+                mode="tun" if (tun if tun is not None else settings.tun_mode) else "proxy",
+                masking="on" if masking.get("enabled") else "off",
+            ),
+            versions=core_versions(),
+        )
 
     def _client_report_failure_code(self, scheme: str) -> str | None:
         """The native core's own code for this server's failure, when it has one."""

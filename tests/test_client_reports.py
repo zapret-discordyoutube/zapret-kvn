@@ -50,8 +50,69 @@ class ContractTests(unittest.TestCase):
             set(report),
         )
         self.assertEqual({"name", "version", "platform"}, set(report["app"]))
-        self.assertEqual(1, report["schema"])
+        self.assertEqual(2, report["schema"])
         self.assertRegex(report["attempted_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    DETAILS = c.AttemptDetails(
+        server_ip="185.1.2.3", port=443, transport="tcp", security="reality", network_type="ethernet",
+        settings=c.ReportSettings(mode="tun", masking="off"),
+        versions=(("os", "10.0.19045"), ("xray", "26.11.9")),
+    )
+
+    def test_schema_two_carries_the_details_and_omits_the_unknown(self) -> None:
+        import dataclasses
+
+        report = json.loads(c.batch_json(INSTALL, APP, [dataclasses.replace(record(), details=self.DETAILS)], c.SENT_DIRECT))["reports"][0]
+        self.assertEqual(("185.1.2.3", 443, "reality", "ethernet"),
+                         (report["server_ip"], report["port"], report["security"], report["network_type"]))
+        self.assertEqual({"mode": "tun", "masking": "off"}, report["settings"])
+        self.assertEqual({"os": "10.0.19045", "xray": "26.11.9"}, report["versions"])
+        bare = json.loads(c.batch_json(INSTALL, APP, [record()], c.SENT_DIRECT))["reports"][0]
+        self.assertFalse({"settings", "versions", "server_ip", "port"} & set(bare))
+
+    def test_a_foreign_server_replaces_the_catalogue_id_and_its_name_is_cleaned(self) -> None:
+        foreign = c.ForeignServer.of("NL.Example.COM", "vless", "Мой\u200b сервер\u0007 🇳🇱")
+        self.assertEqual(c.ForeignServer("nl.example.com", "vless", "Мой сервер 🇳🇱"), foreign)
+        item = c.AttemptRecord("", "", c.Outcome.FAILED, "handshake", "sni_blocked", 900, NOW - 1000, "", foreign, self.DETAILS)
+        self.assertTrue(c.is_valid(item))
+        report = json.loads(c.batch_json(INSTALL, APP, [item], c.SENT_DIRECT))["reports"][0]
+        self.assertNotIn("server_id", report)
+        self.assertEqual({"host": "nl.example.com", "protocol": "vless", "name": "Мой сервер 🇳🇱"}, report["foreign"])
+        import dataclasses
+        self.assertFalse(c.is_valid(dataclasses.replace(item, server_id="hipnl", product="vless")))
+        self.assertFalse(c.is_valid(dataclasses.replace(item, foreign=None)))
+        self.assertIsNone(c.ForeignServer.of("fe80::1%eth0", "vless", "x"))
+        self.assertIsNone(c.ForeignServer.of("bad host", "vless", "x"))
+        self.assertEqual("2001:db8::7", c.ForeignServer.of("[2001:db8::7]", "hysteria2", "").host)
+        self.assertEqual(64, len(c.ForeignServer.of("a.example", "vless", "🇳🇱" * 40).name))
+
+    def test_bad_detail_values_drop_out_instead_of_losing_the_report(self) -> None:
+        dirty = c.AttemptDetails(
+            server_ip="fe80::1%eth0", port=70_000, transport="Web Socket", security="TLS", network_type="satellite",
+            settings=c.ReportSettings(mode="vpn", dns="Свой"),
+            versions=(("os", "10"), ("kernel", "6.1"), ("xray", "x" * 40)),
+        ).cleaned()
+        self.assertEqual(c.AttemptDetails(security="tls", versions=(("os", "10"),)), dirty)
+        self.assertEqual("1.260327.1-676eaf66f8f0",
+                         c.short_version("github.com/xtls/xray-core@v1.260327.1-0.20261109052709-676eaf66f8f0"))
+        self.assertEqual("2.14.0", c.short_version("app/v2.14.0"))
+
+    def test_queue_keeps_schema_two_and_reads_old_lines(self) -> None:
+        import dataclasses
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "queue.jsonl"
+            path.write_text('{"v":1,"s":"hipnl","p":"vless","o":"connected","f":"","d":"","e":900,"t":%d,"n":""}\n' % (NOW - 5000))
+            queue = c.ReportQueue(path)
+            foreign = c.AttemptRecord("", "", c.Outcome.FAILED, "connect", "ip_blocked", 900, NOW - 1000, "",
+                                      c.ForeignServer.of("x.example", "vless", "Сервер"), self.DETAILS)
+            queue.add(dataclasses.replace(record(), details=self.DETAILS))
+            queue.add(foreign)
+            pending = c.ReportQueue(path).pending(NOW)
+            self.assertEqual(3, len(pending))
+            self.assertEqual("hipnl", pending[0].server_id)
+            self.assertEqual(self.DETAILS, pending[1].details)
+            self.assertEqual(foreign, pending[2])
 
     def test_connected_report_has_no_step_token_or_detail(self) -> None:
         body = json.loads(c.batch_json(INSTALL, APP, [record(c.Outcome.CONNECTED, "", "")], c.SENT_DIRECT))
@@ -349,16 +410,25 @@ class ReporterTests(unittest.TestCase):
         self.assertEqual("local_bind_collision", _Ingest.received[0]["reports"][0]["detail"])
         self.assertEqual(r.SendStatus.SENT, seen[-1].status)
 
-    def test_a_foreign_server_gets_the_check_but_no_report(self) -> None:
+    def test_a_foreign_server_is_reported_in_full_only_by_the_button(self) -> None:
         from xray_fluent.client_reports.diagnosis import DiagnosisFacts, ProbeResult as P
         from xray_fluent.client_reports.probe import ProbeTarget
 
-        reporter, seen, _d = self._diagnosing(DiagnosisFacts(control=P.ANSWERED, tcp_target=P.TIMEOUT, tcp_other_port=P.TIMEOUT))
-        reporter._attempt(None, "vless", c.AttemptFacts(), 900, NOW - 5000, None, ProbeTarget("x.example", 443, None, True, False), 1)
-        self.assertEqual([], _Ingest.received)
-        self.assertEqual(r.SendStatus.NOT_OURS, seen[-1].status)
+        facts = DiagnosisFacts(control=P.ANSWERED, tcp_target=P.TIMEOUT, tcp_other_port=P.TIMEOUT, probed_address="203.0.113.10")
+        reporter, seen, _d = self._diagnosing(facts)
+        target = ProbeTarget("x.example", 8443, None, True, False, protocol="vless", transport="ws", security="tls")
+        reporter._attempt(None, "vless", c.AttemptFacts(), 900, NOW - 5000, None, target, 1, "Мой сервер 🇳🇱")
+        self.assertEqual([], _Ingest.received)                      # nothing goes out by itself
+        self.assertEqual(r.SendStatus.AVAILABLE, seen[-1].status)
         self.assertEqual("Адрес сервера закрыт целиком: не отвечают ни его порт, ни порт 443.", seen[-1].diagnosis_text)
-        reporter.force_report()                     # no button for a foreign server yet (schema 2)
+        reporter._force(reporter._failure)
+        report = _Ingest.received[0]["reports"][0]
+        self.assertEqual({"host": "x.example", "protocol": "vless", "name": "Мой сервер 🇳🇱"}, report["foreign"])
+        self.assertEqual(("203.0.113.10", 8443, "ws", "tls", "ip_blocked"),
+                         (report["server_ip"], report["port"], report["transport"], report["security"], report["detail"]))
+        self.assertEqual(r.SendStatus.SENT, seen[-1].status)
+        # Without an address there is nothing to send: no button.
+        reporter._attempt(None, "vless", c.AttemptFacts(), 900, NOW - 4000, None, None, 2)
         self.assertEqual(r.SendStatus.NOT_OURS, seen[-1].status)
 
     def test_a_freeze_after_success_is_reported_as_a_failure_and_checked_rarely(self) -> None:

@@ -45,6 +45,10 @@ class ProbeTarget:
     server_name: str | None
     uses_tls: bool
     udp: bool
+    #: For the report (schema 2): the scheme, transport and security as in the profile.
+    protocol: str = ""
+    transport: str | None = None
+    security: str | None = None
 
 
 def literal_address(value: str) -> str | None:
@@ -125,6 +129,7 @@ class BlockProbe:
         )
         if address is None:
             return facts
+        facts = replace(facts, probed_address=address)
         if target.udp:
             # A UDP port cannot be checked over TCP: 443 of the same IP tells whether the address is alive.
             return replace(facts, tcp_other_port=self._tcp(address, 443))

@@ -44,6 +44,8 @@ class DiagnosisFacts:
     tls_real_name_elsewhere: ProbeResult = ProbeResult.UNKNOWN
     udp_transport: bool = False
     stalled_after_bytes: int | None = None
+    #: The address that was probed (``server_ip`` of the report when the start named none).
+    probed_address: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,6 +8,8 @@ admits, because one field outside it refuses the whole batch).
 from __future__ import annotations
 
 import base64
+import ipaddress
+import unicodedata
 import binascii
 import json
 import os
@@ -23,7 +25,7 @@ from typing import Any
 
 from .diagnosis import Diagnosis
 
-SCHEMA = 1
+SCHEMA = 2  # since 2026-11-19 (vpnbot «schema 2 live» 16:07 UTC): foreign servers and attempt details
 MAX_BATCH = 50
 MAX_ELAPSED_MS = 600_000
 MAX_AGE_MS = 7 * 24 * 3600 * 1000
@@ -49,6 +51,15 @@ _CODE = re.compile(r"[a-z][a-z0-9_]{0,47}")
 _VERSION = re.compile(r"[0-9A-Za-z.+-]{1,32}")
 _NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _NETWORK_TOKEN = re.compile(r"[A-Za-z0-9_.-]{1,256}")
+_SHORT = re.compile(r"[a-z0-9]{1,16}")
+_SETTING = re.compile(r"[a-z0-9_]{1,24}")
+_VERSION_VALUE = re.compile(r"[0-9A-Za-z.+_-]{1,32}")
+_HOST_NAME = re.compile(r"[A-Za-z0-9.-]{1,253}")
+_PSEUDO = re.compile(r"(\d+\.\d+\.\d+)-0\.\d{14}-([0-9a-f]{12})")
+NETWORK_TYPES = frozenset({"wifi", "cellular", "ethernet", "other"})
+MODES = frozenset({"tun", "proxy"})
+VERSION_KEYS = frozenset({"os", "xray", "hysteria", "singbox", "amnezia"})
+MAX_FOREIGN_NAME = 64
 
 
 class Outcome(str, Enum):
@@ -70,6 +81,108 @@ class ServerRef:
     product: str
 
 
+def is_ip_literal(value: str) -> bool:
+    """An IP literal without a zone, as the receiver takes it (``server_ip``, ``foreign.host``)."""
+    if not value or "%" in value:
+        return False
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_control_or_format(ch: str) -> bool:
+    return unicodedata.category(ch) in {"Cc", "Cf", "Cs", "Cn"}
+
+
+@dataclass(frozen=True, slots=True)
+class ForeignServer:
+    """A server outside the service's subscriptions: only by the «Отправить отчёт» button (owner 2026-11-19).
+    Its address and port go in the shared ``AttemptDetails.server_ip`` / ``port``."""
+
+    host: str
+    protocol: str
+    name: str = ""
+
+    @staticmethod
+    def of(host: str, protocol: str, name: str) -> ForeignServer | None:
+        clean_name = "".join(ch for ch in str(name or "") if not _is_control_or_format(ch)).strip()[:MAX_FOREIGN_NAME]
+        candidate = ForeignServer(str(host or "").strip().strip("[]").lower(), str(protocol or "").lower(), clean_name)
+        return candidate if is_valid_foreign(candidate) else None
+
+
+def is_valid_foreign(foreign: ForeignServer) -> bool:
+    host_ok = is_ip_literal(foreign.host) or (
+        bool(_HOST_NAME.fullmatch(foreign.host)) and any(ch.isalpha() for ch in foreign.host)
+    )
+    return (
+        host_ok and bool(_SHORT.fullmatch(foreign.protocol)) and len(foreign.name) <= MAX_FOREIGN_NAME
+        and not any(_is_control_or_format(ch) for ch in foreign.name)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReportSettings:
+    mode: str | None = None
+    dns: str | None = None
+    masking: str | None = None
+    quic_blocked: bool | None = None
+    ipv6: bool | None = None
+
+    def cleaned(self) -> ReportSettings | None:
+        result = ReportSettings(
+            mode=self.mode if self.mode in MODES else None,
+            dns=self.dns if self.dns and _SETTING.fullmatch(self.dns) else None,
+            masking=self.masking if self.masking and _SETTING.fullmatch(self.masking) else None,
+            quic_blocked=self.quic_blocked if isinstance(self.quic_blocked, bool) else None,
+            ipv6=self.ipv6 if isinstance(self.ipv6, bool) else None,
+        )
+        return None if result == ReportSettings() else result
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptDetails:
+    """Schema 2 details, all optional: a bad value drops out instead of losing the report (``cleaned``)."""
+
+    server_ip: str | None = None
+    port: int | None = None
+    transport: str | None = None
+    security: str | None = None
+    network_type: str | None = None
+    settings: ReportSettings | None = None
+    versions: tuple[tuple[str, str], ...] = ()
+
+    def cleaned(self) -> AttemptDetails:
+        ip = (self.server_ip or "").strip().strip("[]")
+        transport = (self.transport or "").lower()
+        security = (self.security or "").lower()
+        return AttemptDetails(
+            server_ip=ip if is_ip_literal(ip) else None,
+            port=self.port if isinstance(self.port, int) and not isinstance(self.port, bool) and 0 < self.port < 65536 else None,
+            transport=transport if _SHORT.fullmatch(transport) else None,
+            security=security if _SHORT.fullmatch(security) else None,
+            network_type=self.network_type if self.network_type in NETWORK_TYPES else None,
+            settings=self.settings.cleaned() if self.settings is not None else None,
+            versions=tuple(sorted(
+                (key, value) for key, value in self.versions
+                if key in VERSION_KEYS and isinstance(value, str) and _VERSION_VALUE.fullmatch(value)
+            )),
+        )
+
+
+def short_version(value: str | None) -> str | None:
+    """``app/v2.14.0`` → ``2.14.0``, ``module@v3.1.x`` → ``3.1.x``, a Go pseudo-version → ``base-commit``."""
+    if not value:
+        return None
+    text = str(value).strip().rsplit("@", 1)[-1].rsplit("/", 1)[-1].removeprefix("v")
+    pseudo = _PSEUDO.fullmatch(text)
+    if pseudo:
+        text = f"{pseudo.group(1)}-{pseudo.group(2)}"
+    text = text[:32]
+    return text if text and _VERSION_VALUE.fullmatch(text) else None
+
+
 @dataclass(frozen=True, slots=True)
 class AttemptRecord:
     """One attempt in the device queue; install id and ``sent_via`` are added when sent."""
@@ -82,6 +195,9 @@ class AttemptRecord:
     elapsed_ms: int
     attempted_at_ms: int
     network_token: str
+    #: A foreign server instead of server_id/product (those are empty then).
+    foreign: ForeignServer | None = None
+    details: AttemptDetails = AttemptDetails()
 
 
 def is_install_id(value: str) -> bool:
@@ -97,7 +213,13 @@ def is_app_identity(app: AppIdentity) -> bool:
 
 
 def is_valid(record: AttemptRecord) -> bool:
-    if not _SERVER_ID.fullmatch(record.server_id) or record.product not in PRODUCTS:
+    # Exactly one of the two: a catalogue server or a foreign one.
+    ours = bool(_SERVER_ID.fullmatch(record.server_id)) and record.product in PRODUCTS
+    if record.foreign is None and not ours:
+        return False
+    if record.foreign is not None and (record.server_id or record.product or not is_valid_foreign(record.foreign)):
+        return False
+    if record.details != record.details.cleaned():
         return False
     if isinstance(record.elapsed_ms, bool) or not 0 <= int(record.elapsed_ms) <= MAX_ELAPSED_MS:
         return False
@@ -138,10 +260,16 @@ def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], 
             "schema": SCHEMA,
             "install_id": install_id,
             "app": {"name": app.name, "version": app.version, "platform": app.platform},
-            "server_id": record.server_id,
-            "product": record.product,
-            "outcome": record.outcome.value,
         }
+        if record.foreign is None:
+            item["server_id"] = record.server_id
+            item["product"] = record.product
+        else:
+            foreign: dict[str, str] = {"host": record.foreign.host, "protocol": record.foreign.protocol}
+            if record.foreign.name:
+                foreign["name"] = record.foreign.name
+            item["foreign"] = foreign
+        item["outcome"] = record.outcome.value
         if record.outcome is Outcome.FAILED:
             item["failed_step"] = record.failed_step
         if record.detail:
@@ -151,8 +279,36 @@ def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], 
         item["sent_via"] = sent_via
         if record.network_token:
             item["network_token"] = record.network_token
+        item.update(_details_json(record.details))
         reports.append(item)
     return json.dumps({"reports": reports}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _details_json(details: AttemptDetails) -> dict[str, object]:
+    """The optional schema 2 fields: only known values (absent = unknown)."""
+    out: dict[str, object] = {}
+    for key in ("server_ip", "port", "transport", "security", "network_type"):
+        value = getattr(details, key)
+        if value is not None:
+            out[key] = value
+    if details.settings is not None:
+        settings = {key: getattr(details.settings, key) for key in ("mode", "dns", "masking", "quic_blocked", "ipv6")}
+        out["settings"] = {key: value for key, value in settings.items() if value is not None}
+    if details.versions:
+        out["versions"] = dict(details.versions)
+    return out
+
+
+def _details_from(data: dict) -> AttemptDetails:
+    settings = data.get("settings") if isinstance(data.get("settings"), dict) else None
+    versions = data.get("versions") if isinstance(data.get("versions"), dict) else {}
+    return AttemptDetails(
+        server_ip=data.get("server_ip"), port=data.get("port"), transport=data.get("transport"),
+        security=data.get("security"), network_type=data.get("network_type"),
+        settings=ReportSettings(**{key: settings.get(key) for key in ("mode", "dns", "masking", "quic_blocked", "ipv6")})
+        if settings else None,
+        versions=tuple((str(key), value) for key, value in versions.items()),
+    ).cleaned()
 
 
 # ── the server-id header ──
@@ -313,23 +469,36 @@ def _by_core_code(code: str, facts: AttemptFacts) -> AttemptVerdict | None:
 # ── the device queue and the network token ──
 
 
+_QUEUE_VERSION = 2
+
+
 def _queue_line(record: AttemptRecord) -> str:
-    return json.dumps({
-        "v": 1, "s": record.server_id, "p": record.product, "o": record.outcome.value,
+    line: dict[str, object] = {
+        "v": _QUEUE_VERSION, "s": record.server_id, "p": record.product, "o": record.outcome.value,
         "f": record.failed_step, "d": record.detail, "e": int(record.elapsed_ms),
         "t": int(record.attempted_at_ms), "n": record.network_token,
-    }, ensure_ascii=True, separators=(",", ":"))
+    }
+    if record.foreign is not None:
+        line["g"] = {"h": record.foreign.host, "p": record.foreign.protocol, "m": record.foreign.name}
+    details = _details_json(record.details)
+    if details:
+        line["x"] = details
+    return json.dumps(line, ensure_ascii=True, separators=(",", ":"))
 
 
 def _parse_queue_line(line: str) -> AttemptRecord | None:
     try:
         data = json.loads(line)
-        if not isinstance(data, dict) or data.get("v") != 1:
+        # Version 1 = schema 1 lines from before 2026-11-19: read as reports without details.
+        if not isinstance(data, dict) or data.get("v") not in (1, _QUEUE_VERSION):
             return None
+        g = data.get("g")
+        foreign = ForeignServer(str(g.get("h", "")), str(g.get("p", "")), str(g.get("m", ""))) if isinstance(g, dict) else None
         record = AttemptRecord(
             server_id=str(data["s"]), product=str(data["p"]), outcome=Outcome(data["o"]),
             failed_step=str(data["f"]), detail=str(data["d"]), elapsed_ms=int(data["e"]),
-            attempted_at_ms=int(data["t"]), network_token=str(data["n"]),
+            attempted_at_ms=int(data["t"]), network_token=str(data["n"]), foreign=foreign,
+            details=_details_from(data["x"]) if isinstance(data.get("x"), dict) else AttemptDetails(),
         )
     except (ValueError, KeyError, TypeError):
         return None
