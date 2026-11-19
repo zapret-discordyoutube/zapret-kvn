@@ -323,7 +323,7 @@ def learn_server_ids(subscription: Subscription, fetch: SubscriptionFetchResult)
 
 def _server_id_map(fetch: SubscriptionFetchResult) -> dict[str, dict[str, str]]:
     return {
-        name: {"server_id": ref.server_id, "product": ref.product}
+        name: {"server_id": ref.server_id, "product": ref.product, **({"via": ref.via} if ref.via else {})}
         for name, ref in parse_server_ids(fetch.headers.get(SERVER_IDS_HEADER)).items()
     }
 

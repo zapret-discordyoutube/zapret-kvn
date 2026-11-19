@@ -280,6 +280,7 @@ class Subscription:
             "sort_order": self.sort_order,
             "service": self.service,
             "server_ids": {name: dict(entry) for name, entry in self.server_ids.items()},
+            "server_ids_format": SERVER_IDS_FORMAT,
         }
 
     @staticmethod
@@ -327,8 +328,15 @@ class Subscription:
             created_at=str(data.get("created_at") or utc_now_iso()),
             sort_order=_non_negative_int("sort_order"),
             service=data.get("service") is True,
-            server_ids=_server_ids(data.get("server_ids")),
+            server_ids=(
+                _server_ids(data.get("server_ids")) if data.get("server_ids_format") == SERVER_IDS_FORMAT else {}
+            ),
         )
+
+
+# 2: maps saved by 0.8.94 between vpnbot's two relay-line shapes may list a «через Россию» line as its
+# target. An older map is dropped on load and learned again from the header (learn_server_ids).
+SERVER_IDS_FORMAT = 2
 
 
 def _server_ids(raw: Any) -> dict[str, dict[str, str]]:
@@ -340,6 +348,9 @@ def _server_ids(raw: Any) -> dict[str, dict[str, str]]:
             server_id, product = entry.get("server_id"), entry.get("product")
             if isinstance(server_id, str) and isinstance(product, str):
                 result[name] = {"server_id": server_id, "product": product}
+                via = entry.get("via")
+                if isinstance(via, str) and via:
+                    result[name]["via"] = via
     return result
 
 

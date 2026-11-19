@@ -92,7 +92,8 @@ def server_ref_for(node: Any, subscriptions: list[Any]) -> ServerRef | None:
     server_id, product = entry.get("server_id"), entry.get("product")
     if not isinstance(server_id, str) or product not in products:
         return None
-    return ServerRef(server_id, str(product))
+    via = entry.get("via", "")
+    return ServerRef(server_id, str(product), via if isinstance(via, str) else "")
 
 
 def probe_target_for(node: Any) -> ProbeTarget | None:
@@ -251,7 +252,9 @@ class ClientReporter:
         self._root = Path(root)
         self._app = AppIdentity(APP_NAME, _safe_version(app_version), PLATFORM)
         self._queue = ReportQueue(self._root / "queue.jsonl")
-        self._tokens = NetworkTokenCache(self._root / "network-token")
+        # «-2»: vpnbot's v2 (2026-11-19 19:37 UTC) no longer places a v1 value in any network, so one kept by an
+        # older version is left behind and a fresh one is asked (the value itself stays opaque).
+        self._tokens = NetworkTokenCache(self._root / "network-token-2")
         self._ingest = IngestHostCache(self._root / "ingest-hosts")
         self._random = random.SystemRandom()
         self._failed_hosts: dict[str, int] = {}
@@ -517,10 +520,11 @@ class ClientReporter:
             elapsed_ms=max(0, min(int(elapsed_ms), MAX_ELAPSED_MS)),
             attempted_at_ms=int(attempted_at_ms), network_token=self._tokens.current(self._now_ms()),
             foreign=foreign, details=(details or AttemptDetails()).cleaned(), report_id=new_report_id(),
+            via=ref.via if ref else "",
         )
         self._queue.add(record)
         step = f" at {verdict.failed_step} ({verdict.detail})" if verdict.failed_step else ""
-        who = f"{ref.product}/{ref.server_id}" if ref else f"foreign {foreign.protocol if foreign else ''}"
+        who = (f"{ref.product}/{ref.server_id}" + (f" via {ref.via}" if ref.via else "")) if ref else f"foreign {foreign.protocol if foreign else ''}"
         self._log(f"[client-report] {who} {verdict.outcome.value}{step}, queued {self._queue.size()}")
         if flush:
             self._stopped_until_next = False

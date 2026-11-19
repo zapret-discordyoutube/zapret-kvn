@@ -49,6 +49,18 @@ source, made once when the attempt is recorded and kept in the device queue (key
 same attempt carries the same id and vpnbot stores the first copy only. Queue lines written before carry none and
 go out without it. The 202 reply also says how many were `repeated`; a 400 for a re-send older than 7 days drops it.
 
+`via` (vpnbot, 2026-11-19): a «… через Россию» line's header entry is `{"relay_of": "<target id>", "product",
+"via": "<10 hex>"}` with no `server_id`, so a parser that does not know relay lines (0.6.39 / 0.8.94 and older)
+skips it instead of counting the attempt against the target. A server's own line stays `{"server_id", "product"}`;
+any other shape (`server_id` together with `via` or `relay_of`, a relay without a readable key) is skipped. The
+report of a relay attempt carries `server_id` = the `relay_of` value and top-level `via` (queue key `w`), never with
+`foreign`; vpnbot keeps such attempts out of the target's own verdict and shows them as a separate path. For about
+an hour on 2026-11-19 vpnbot sent the interim shape `{"server_id", "product", "via"}`, which the older apps stored
+as the target itself, so the stored map got a format marker (`"server_ids_format": 2` in the subscription record): a map without it is dropped once and the
+backfill below learns it again from the header. The network value of `/v1/network` became v2 the same evening (it signs the
+address the ingest saw); v1 values are no longer placed in any network, so the cache file is `network-token-2` and
+an updated app asks a fresh one.
+
 Catalogue ids (`zapret-server-ids`) come only with a reply of the service subscription. A subscription fetched
 before the header existed (2026-11-19 13:07 UTC) keeps no ids, and then no report can name its servers: the
 owner's own PC, with subscription auto-update off, sent none. So once per run the app checks each service

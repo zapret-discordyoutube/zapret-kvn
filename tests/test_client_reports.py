@@ -260,6 +260,61 @@ class SubscriptionMapTests(unittest.TestCase):
         self.assertEqual({}, subscription.server_ids)
         self.assertIsNone(r.server_ref_for(state.nodes[0], state.subscriptions))
 
+    def test_relay_line_keeps_its_via_from_header_to_report(self) -> None:
+        # vpnbot 2026-11-19: a «… через Россию» line is {"relay_of", "product", "via"} with no server_id, so a parser
+        # that does not know via skips it; the report must carry the key, or a relay failure would count against the
+        # target itself.
+        import dataclasses
+
+        ids = header({
+            "Velnor через Россию": {"relay_of": "hipnl", "product": "hysteria2", "via": "3f9a0c21be"},
+            "Velnor": {"server_id": "hipnl", "product": "hysteria2"},
+            "Broken relay": {"relay_of": "hipnl", "product": "hysteria2", "via": "RU-NODE-1"},
+            "Relay without key": {"relay_of": "hipnl", "product": "hysteria2"},
+            "Interim shape": {"server_id": "hipnl", "product": "hysteria2", "via": "3f9a0c21be"},
+            "Both ids": {"server_id": "hipnl", "relay_of": "hipnl", "product": "hysteria2"},
+        })
+        parsed = c.parse_server_ids(ids)
+        self.assertEqual(c.ServerRef("hipnl", "hysteria2", "3f9a0c21be"), parsed["Velnor через Россию"])
+        self.assertEqual(c.ServerRef("hipnl", "hysteria2"), parsed["Velnor"])
+        # A relay line that cannot be told apart from the target is never reported as the target.
+        for name in ("Broken relay", "Relay without key", "Interim shape", "Both ids"):
+            self.assertNotIn(name, parsed)
+
+        subscription = Subscription(id="sub", service=True)
+        from xray_fluent.application.subscription_service import learn_server_ids
+
+        learn_server_ids(subscription, SubscriptionFetchResult(headers={c.SERVER_IDS_HEADER: ids}))
+        restored = Subscription.from_dict(subscription.to_dict())
+        node = Node(name="x", scheme="hysteria2", subscription_id="sub", provider_name="Velnor через Россию")
+        ref = r.server_ref_for(node, [restored])
+        self.assertEqual("3f9a0c21be", ref.via)
+
+        relayed = dataclasses.replace(record(), via="3f9a0c21be")
+        self.assertEqual("3f9a0c21be", json.loads(c.batch_json(INSTALL, APP, [relayed], c.SENT_DIRECT))["reports"][0]["via"])
+        self.assertNotIn("via", json.loads(c.batch_json(INSTALL, APP, [record()], c.SENT_DIRECT))["reports"][0])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "queue.jsonl"
+            c.ReportQueue(path).add(relayed)
+            self.assertEqual("3f9a0c21be", c.ReportQueue(path).pending(NOW)[0].via)
+        foreign = c.AttemptRecord("", "", c.Outcome.FAILED, "connect", "ip_blocked", 900, NOW - 1000, "",
+                                  c.ForeignServer.of("x.example", "vless", "Сервер"), via="3f9a0c21be")
+        self.assertFalse(c.is_valid(foreign))
+        self.assertFalse(c.is_valid(dataclasses.replace(record(), via="3F9A0C21BE")))
+
+    def test_map_saved_before_the_relay_shape_is_learned_again(self) -> None:
+        # 0.8.94 ignored via: a map saved between vpnbot's two relay-line shapes may list a «через Россию» line as
+        # its target, so a map without the current format marker is dropped and the header is asked again.
+        from xray_fluent.application.subscription_service import needs_server_ids
+
+        old = Subscription(id="sub", service=True, server_ids={"Velnor через Россию": {"server_id": "hipnl", "product": "hysteria2"}}).to_dict()
+        del old["server_ids_format"]
+        restored = Subscription.from_dict(old)
+        self.assertEqual({}, restored.server_ids)
+        self.assertTrue(needs_server_ids(restored))
+        current = Subscription(id="sub", service=True, server_ids={"Velnor": {"server_id": "hipnl", "product": "hysteria2"}})
+        self.assertEqual(current.server_ids, Subscription.from_dict(current.to_dict()).server_ids)
+
     def test_service_subscription_without_ids_is_checked_once_even_with_auto_update_off(self) -> None:
         # The owner's archive 2026-11-19: auto-update off, both vpnbot subscriptions fetched before the header
         # existed, so not one report was ever written. A check (server list untouched) learns the ids.
@@ -380,7 +435,7 @@ class ReporterTests(unittest.TestCase):
         self.assertEqual([], self.tried)
         direct = self._reporter()
         direct._refresh_token()          # what prefetch_token runs on its thread
-        self.assertEqual("v1.tok.mac", c.NetworkTokenCache(Path(self.folder.name) / "network-token").current(NOW))
+        self.assertEqual("v1.tok.mac", c.NetworkTokenCache(Path(self.folder.name) / "network-token-2").current(NOW))
         self.assertTrue(all(not via for _host, via in self.tried))
 
     def test_attempt_is_sent_directly_with_token_and_install_id(self) -> None:

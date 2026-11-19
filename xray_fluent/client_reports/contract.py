@@ -48,6 +48,7 @@ MAX_INFLATED_BYTES = 512 * 1024
 
 _INSTALL_ID = re.compile(r"[0-9a-f]{32}")
 _REPORT_ID = re.compile(r"[0-9a-f]{32}")
+_RELAY_KEY = re.compile(r"[0-9a-f]{10}")
 _SERVER_ID = re.compile(r"[a-z0-9_-]{1,64}")
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,47}")
 _VERSION = re.compile(r"[0-9A-Za-z.+-]{1,32}")
@@ -81,6 +82,9 @@ class AppIdentity:
 class ServerRef:
     server_id: str
     product: str
+    #: «… через Россию» lines (vpnbot «via live» 2026-11-19 19:37 UTC): a neutral 10-hex key of the relay node the
+    #: line dials; the report carries it so vpnbot keeps such attempts out of the target's own verdict.
+    via: str = ""
 
 
 def is_ip_literal(value: str) -> bool:
@@ -203,6 +207,8 @@ class AttemptRecord:
     #: One attempt, one id (vpnbot «report_id live» 2026-11-19): made once when the attempt is recorded and kept in the
     #: queue, so a re-send after a lost reply is stored once. Empty for queue lines written before it (sent without).
     report_id: str = ""
+    #: The relay key of a «… через Россию» line (see ServerRef.via); only with server_id, never with foreign.
+    via: str = ""
 
 
 def new_report_id() -> str:
@@ -241,6 +247,8 @@ def is_valid(record: AttemptRecord) -> bool:
         return False
     if record.report_id and not _REPORT_ID.fullmatch(record.report_id):
         return False
+    if record.via and (record.foreign is not None or not _RELAY_KEY.fullmatch(record.via)):
+        return False
     if record.outcome is Outcome.FAILED:
         return record.failed_step in STEPS
     return record.failed_step == ""
@@ -276,6 +284,8 @@ def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], 
         if record.foreign is None:
             item["server_id"] = record.server_id
             item["product"] = record.product
+            if record.via:
+                item["via"] = record.via
         else:
             foreign: dict[str, str] = {"host": record.foreign.host, "protocol": record.foreign.protocol}
             if record.foreign.name:
@@ -355,13 +365,33 @@ def parse_server_ids(value: str | None) -> dict[str, ServerRef]:
     for name, entry in root.items():
         if not isinstance(name, str) or not name.strip() or not isinstance(entry, dict):
             continue
-        server_id, product = entry.get("server_id"), entry.get("product")
-        if not isinstance(server_id, str) or not _SERVER_ID.fullmatch(server_id):
-            continue
-        if not isinstance(product, str) or product not in PRODUCTS:
-            continue
-        result[name] = ServerRef(server_id, product)
+        ref = _server_id_entry(entry)
+        if ref is not None:
+            result[name] = ref
     return result
+
+
+def _server_id_entry(entry: dict) -> ServerRef | None:
+    """One header entry. A server's own line is ``{"server_id", "product"}``; a line through a
+    Russian entry point is ``{"relay_of", "product", "via"}`` with no ``server_id`` (vpnbot,
+    owner decision 19.11.2026), so a parser that does not know ``via`` skips it instead of
+    counting the relay attempt against the target. Every other shape is skipped."""
+    product = entry.get("product")
+    if not isinstance(product, str) or product not in PRODUCTS:
+        return None
+    if "server_id" in entry:
+        server_id = entry["server_id"]
+        if "relay_of" in entry or "via" in entry:
+            return None
+        if not isinstance(server_id, str) or not _SERVER_ID.fullmatch(server_id):
+            return None
+        return ServerRef(server_id, product)
+    target, via = entry.get("relay_of"), entry.get("via")
+    if not isinstance(target, str) or not _SERVER_ID.fullmatch(target):
+        return None
+    if not isinstance(via, str) or not _RELAY_KEY.fullmatch(via):
+        return None
+    return ServerRef(target, product, via)
 
 
 def products_for_scheme(scheme: str | None) -> frozenset[str]:
@@ -494,6 +524,8 @@ def _queue_line(record: AttemptRecord) -> str:
     }
     if record.report_id:
         line["r"] = record.report_id
+    if record.via:
+        line["w"] = record.via
     if record.foreign is not None:
         line["g"] = {"h": record.foreign.host, "p": record.foreign.protocol, "m": record.foreign.name}
     details = _details_json(record.details)
@@ -516,6 +548,7 @@ def _parse_queue_line(line: str) -> AttemptRecord | None:
             attempted_at_ms=int(data["t"]), network_token=str(data["n"]), foreign=foreign,
             details=_details_from(data["x"]) if isinstance(data.get("x"), dict) else AttemptDetails(),
             report_id=str(data.get("r") or ""),
+            via=str(data.get("w") or ""),
         )
     except (ValueError, KeyError, TypeError):
         return None
