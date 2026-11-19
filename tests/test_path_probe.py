@@ -285,6 +285,20 @@ class NoDataTests(unittest.TestCase):
         self.assertEqual({"tunnel_a", "tunnel_b"}, set(found))
         self.assertFalse(any(kind == "direct" for kind, *_ in calls))
 
+    def test_a_drop_through_the_tunnel_is_a_reset_and_a_silent_lookup_a_timeout(self) -> None:
+        from xray_fluent.client_reports.probe import LocalRelayError, no_data_result
+        refused = ConnectionRefusedError(10061, "refused")
+        self.assertEqual("reset", no_data_result("tunnel_a", refused, 2.0))      # the core dropped the flow
+        self.assertEqual("reset", no_data_result("tunnel_b", ConnectionResetError(), 2.0))
+        self.assertEqual("unknown", no_data_result("tunnel_a", LocalRelayError("refused"), 0.01))
+        self.assertEqual("refused", no_data_result("direct_a", refused, 0.05))    # RST to the SYN
+        late = ConnectionResetError(10054, "reset")
+        late.after_connect = True
+        self.assertEqual("reset", no_data_result("direct_a", late, 0.3))
+        self.assertEqual("timeout", no_data_result("direct_b", socket.gaierror(11002, "try again"), 20.9))
+        self.assertEqual("unknown", no_data_result("direct_b", socket.gaierror(11001, "not found"), 0.04))
+        self.assertEqual("reset", no_data_result("tunnel_b", ssl.SSLEOFError(), 1.0))
+
 
 if __name__ == "__main__":
     unittest.main()

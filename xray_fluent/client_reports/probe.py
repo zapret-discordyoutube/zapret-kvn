@@ -404,19 +404,46 @@ class NoDataProbe:
             try:
                 work()
                 result = k.ANSWERED
-            except ssl.SSLError:
-                result = k.UNKNOWN
             except OSError as exc:
-                result = result_of(exc, connected=False)
+                result = no_data_result(probe, exc, self._clock() - started)
             except Exception:
                 result = k.UNKNOWN
             found[probe] = Check(result, k.clamp_ms((self._clock() - started) * 1000))
         return found
 
 
+LOOKUP_SILENT_S = 5.0
+"""A failed name lookup that took this long got no answer."""
+
+
+class LocalRelayError(OSError):
+    """The core's own local SOCKS inbound refused the connection: the app's side, proves nothing about the path."""
+
+
+def no_data_result(probe: str, exc: OSError, seconds: float) -> str:
+    """One no-data probe's error as a result (vpnbot 2026-11-19: tunnel_a «refused» after 2 s, tunnel_b «unknown»).
+
+    Through the tunnel the core's local inbound accepts the connection before the core dials anything, so a drop
+    there is the core's flow dropped (``reset``), never a refusal. Directly a RST is ``refused`` only to the SYN.
+    A name lookup with no answer in :data:`LOOKUP_SILENT_S` is ``timeout``; a quick failure proves nothing."""
+    if isinstance(exc, LocalRelayError):
+        return k.UNKNOWN
+    if isinstance(exc, socket.gaierror):
+        return k.TIMEOUT if seconds >= LOOKUP_SILENT_S else k.UNKNOWN
+    if isinstance(exc, (ssl.SSLEOFError, ssl.SSLZeroReturnError)):
+        return k.RESET
+    if isinstance(exc, ssl.SSLError):
+        return k.UNKNOWN
+    connected = probe.startswith("tunnel_") or bool(getattr(exc, "after_connect", False))
+    return result_of(exc, connected=connected)
+
+
 def _https_through_relay(relay: Relay, target: str, name: str, path: str, timeout: float) -> None:
-    sock = open_socks_connection(relay.port, username=relay.username, password=relay.password,
-                                 timeout=timeout, target_host=target)
+    try:
+        sock = open_socks_connection(relay.port, username=relay.username, password=relay.password,
+                                     timeout=timeout, target_host=target)
+    except ConnectionRefusedError as exc:     # only the local connect to 127.0.0.1 can be refused here
+        raise LocalRelayError(str(exc)) from exc
     try:
         https_answers(sock, name, path)
     finally:
@@ -427,5 +454,8 @@ def _https_direct(target: str, name: str, path: str, timeout: float) -> None:
     sock = socket.create_connection((target, 443), timeout=timeout)
     try:
         https_answers(sock, name, path)
+    except OSError as exc:
+        exc.after_connect = True              # a RST now is a reset, not a refusal
+        raise
     finally:
         sock.close()

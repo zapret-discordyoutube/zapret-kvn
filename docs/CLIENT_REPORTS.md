@@ -173,6 +173,10 @@ Inside the tunnel anything is invisible to DPI as a separate probe:
   address our DoH gave, so no DNS in the tunnel) and `tunnel_b` (the same by name, DNS through the tunnel) via the
   relay, and `direct_a`/`direct_b` (the same two directly) only when requests are really direct. No probe of the
   server's path then: the tunnel proved it.
+  Results (`no_data_result`, vpnbot 2026-11-19): the core's local SOCKS inbound accepts the connection before the
+  core dials anything, so a RST or EOF through it is `reset` (the core dropped the flow), never `refused`; the local
+  inbound itself refusing is `unknown`. Directly `refused` is only a RST to the SYN. A failed name lookup is
+  `timeout` after 5 s without an answer, `unknown` when quicker.
 
 ## Completion: the failure at once, the checks after (vpnbot «completion live» 2026-11-19 22:16 UTC)
 
