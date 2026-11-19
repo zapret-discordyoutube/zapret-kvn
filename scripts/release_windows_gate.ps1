@@ -236,10 +236,16 @@ function Ensure-DependenciesAndTests([string]$Root) {
     # system fonts so the result does not depend on the state of the machine.
     $previousFontDir = $env:QT_QPA_FONTDIR
     $env:QT_QPA_FONTDIR = Join-Path $env:WINDIR "Fonts"
+    # The e2e tests run the real controller against local test servers; their
+    # connection reports must not reach the production ingest (2026-11-19: rows
+    # "A-works", "B-udp-lost" from the 0.8.97 gate). docs/CLIENT_REPORTS.md.
+    $previousReports = $env:ZAPRET_KVN_CLIENT_REPORTS
+    $env:ZAPRET_KVN_CLIENT_REPORTS = "off"
     try {
         Invoke-Native $python @("-m", "unittest", "discover", "-s", "tests", "-v")
     } finally {
         $env:QT_QPA_FONTDIR = $previousFontDir
+        $env:ZAPRET_KVN_CLIENT_REPORTS = $previousReports
         Exit-HeavyLock $lock
     }
 }

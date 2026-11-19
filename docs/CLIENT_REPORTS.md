@@ -178,6 +178,15 @@ The log file has `[client-report]` lines: the VLESS check result, each queued re
 (`batch N (direct) -> HTTP 202`), the path check (`path check -> handshake/sni_blocked (control=… tcp=…)`,
 no addresses), the freeze measure and each button press.
 
+## Test runs send nothing (2026-11-19)
+
+The environment variable `ZAPRET_KVN_CLIENT_REPORTS=off` turns the reporter off for a process: nothing is
+written to the queue, no token is asked and nothing is sent; the notice and the path check still work. The
+release gate sets it around the test run (`scripts/release_windows_gate.ps1`), because the e2e tests drive the
+real controller against local test servers: the 0.8.97 gate had put the foreign rows «A-works» and
+«B-udp-lost» into the production store. The log says `[client-report] off (ZAPRET_KVN_CLIENT_REPORTS=off)`.
+Reporter unit tests pass `enabled=True`, so they keep working with the variable set.
+
 ## Known limits
 
 - AmneziaWG/WireGuard failures other than a silent handshake have no core code: they are reported only when

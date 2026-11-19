@@ -413,7 +413,26 @@ class ReporterTests(unittest.TestCase):
 
     def _reporter(self, tunnel_port=None, *, tun=False):
         return r.ClientReporter(Path(self.folder.name), "0.8.88", tunnel_proxy_port=lambda: tunnel_port,
-                                direct_is_direct=lambda: not tun, now_ms=lambda: NOW, opener=self._opener)
+                                direct_is_direct=lambda: not tun, now_ms=lambda: NOW, opener=self._opener,
+                                enabled=True)
+
+    def test_reports_off_for_test_runs_write_and_send_nothing(self) -> None:
+        # The release gate runs the real controller against local test servers: ZAPRET_KVN_CLIENT_REPORTS=off.
+        self.assertFalse(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "off"}))
+        self.assertTrue(r.reports_enabled({}))
+        self.assertTrue(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "on"}))
+        lines: list[str] = []
+        reporter = r.ClientReporter(Path(self.folder.name), "0.8.98", tunnel_proxy_port=lambda: None,
+                                    now_ms=lambda: NOW, opener=self._opener, log=lines.append, enabled=False)
+        reporter._attempt(c.ServerRef("hiphopgen", "hysteria2"), "hysteria2",
+                          c.AttemptFacts(core_code="TARGET_NETWORK_TIMEOUT"), 4200, NOW - 5000, None)
+        reporter.prefetch_token()
+        reporter.flush()
+        reporter._flush(wait=True)
+        self.assertEqual(0, c.ReportQueue(Path(self.folder.name) / "queue.jsonl").size())
+        self.assertEqual([], self.tried)
+        self.assertEqual([], _Ingest.received)
+        self.assertTrue(any("off" in line for line in lines))
 
     def test_in_tun_mode_reports_go_only_through_the_tunnel_and_no_token_is_asked(self) -> None:
         # A TUN session captures the app's own "direct" requests: they could leave from the VPN server.
@@ -496,7 +515,7 @@ class ReporterTests(unittest.TestCase):
         seen: list = []
         reporter = r.ClientReporter(
             Path(self.folder.name), "0.8.91", tunnel_proxy_port=lambda: 8080, now_ms=lambda: NOW, opener=self._opener,
-            probe=Probe(), freeze_probe=lambda _port: freeze_bytes, on_failure_changed=seen.append,
+            probe=Probe(), freeze_probe=lambda _port: freeze_bytes, on_failure_changed=seen.append, enabled=True,
         )
         return reporter, seen, d
 

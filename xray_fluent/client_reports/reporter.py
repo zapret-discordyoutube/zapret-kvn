@@ -15,6 +15,7 @@ After a success the freeze is measured through the session, once per server per 
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import secrets
@@ -23,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -232,6 +233,15 @@ class _PendingFailure:
         self.status = SendStatus.NOT_OURS if ref is None and target is None else SendStatus.AVAILABLE
 
 
+REPORTS_SWITCH = "ZAPRET_KVN_CLIENT_REPORTS"
+
+
+def reports_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Reports are on unless the process environment says ``ZAPRET_KVN_CLIENT_REPORTS=off`` (test runs only)."""
+    value = (os.environ if environ is None else environ).get(REPORTS_SWITCH, "")
+    return value.strip().lower() not in ("off", "0", "false", "no")
+
+
 class ClientReporter:
     def __init__(
         self,
@@ -248,8 +258,14 @@ class ClientReporter:
         on_failure_changed: Callable[[FailureReport | None], None] = lambda _report: None,
         context: Callable[[], AttemptDetails] = AttemptDetails,
         server_address: Callable[[str], str | None] = lambda _host: None,
+        enabled: bool | None = None,
     ) -> None:
         self._root = Path(root)
+        # Test runs (release gate, e2e on local test servers) set ZAPRET_KVN_CLIENT_REPORTS=off: nothing is written to
+        # the queue and nothing leaves for the ingest; the notice and the path check still work.
+        self._enabled = reports_enabled() if enabled is None else enabled
+        if not self._enabled:
+            log(f"[client-report] off ({REPORTS_SWITCH}=off): nothing is written or sent")
         self._app = AppIdentity(APP_NAME, _safe_version(app_version), PLATFORM)
         self._queue = ReportQueue(self._root / "queue.jsonl")
         # «-2»: vpnbot's v2 (2026-11-19 19:37 UTC) no longer places a v1 value in any network, so one kept by an
@@ -337,14 +353,14 @@ class ClientReporter:
             self._publish(pending)
 
     def flush(self) -> None:
-        if self._stopped_until_next:
+        if self._stopped_until_next or not self._enabled:
             return
         self._spawn(self._flush)
 
     def prefetch_token(self) -> None:
         """Ask ``GET /v1/network`` now, while requests are really direct (no TUN session): app start, the start of a
         connection, after a disconnect. In TUN mode the token cannot be asked later."""
-        if not self._direct_is_direct() or not self._tokens.needs_refresh(self._now_ms()):
+        if not self._enabled or not self._direct_is_direct() or not self._tokens.needs_refresh(self._now_ms()):
             return
         self._spawn(self._refresh_token)
 
@@ -516,7 +532,7 @@ class ClientReporter:
         foreign: ForeignServer | None = None,
         flush: bool = True,
     ) -> AttemptRecord | None:
-        if verdict is None or (ref is None and foreign is None):
+        if verdict is None or (ref is None and foreign is None) or not self._enabled:
             return None
         if self._tokens.needs_refresh(self._now_ms()):
             self._refresh_token()
@@ -538,7 +554,7 @@ class ClientReporter:
         return record
 
     def _flush(self, wait: bool = False) -> None:
-        if not self._flush_lock.acquire(blocking=wait):
+        if not self._enabled or not self._flush_lock.acquire(blocking=wait):
             return
         try:
             while True:
