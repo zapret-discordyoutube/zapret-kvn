@@ -375,12 +375,11 @@ def _build_xhttp_settings(params: dict[str, str], host: str, path: str) -> dict[
         settings["path"] = path
     if host:
         settings["host"] = host
+    # Xray accepts only these modes and stops the whole profile on any other («unsupported mode»). A link with
+    # another value (mode=none, the header default of v2rayN's shared field) keeps working on auto, as in v2rayN
+    # (V2rayOutboundService passes the mode only when Global.XhttpMode contains it). Android: core patch 0019.
     mode = _get_param(params, "mode").strip().lower()
-    if mode:
-        if mode not in _XHTTP_MODES:
-            raise LinkParseError(
-                f"Неизвестный режим XHTTP «{mode}»: допустимы auto, packet-up, stream-up, stream-one."
-            )
+    if mode in _XHTTP_MODES:
         settings["mode"] = mode
     raw_extra = _get_param(params, "extra").strip()
     # «extra=null» встречается в публичных подписках: Xray читает его как «не задано».
@@ -753,7 +752,8 @@ def _parse_vmess(link: str) -> Node:
     }
     if str(payload.get("net") or "").lower() in {"xhttp", "splithttp"}:
         # v2rayN кладёт режим XHTTP в поле type, а extra — строкой или объектом.
-        params["mode"] = str(payload.get("type") or "") if str(payload.get("type") or "") in _XHTTP_MODES else ""
+        vmess_mode = str(payload.get("type") or "").strip().lower()
+        params["mode"] = vmess_mode if vmess_mode in _XHTTP_MODES else ""
         extra = payload.get("extra")
         params["extra"] = json.dumps(extra) if isinstance(extra, (dict, list)) else str(extra or "")
 

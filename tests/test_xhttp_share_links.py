@@ -79,11 +79,14 @@ class XhttpShareLinkTests(unittest.TestCase):
                 node = parse_single(_link(f"type=xhttp&security=tls&path=%2Fp&extra={value}"))
                 self.assertEqual({"path": "/p"}, _xhttp(node))
 
-    def test_mode_is_lowercased_and_validated(self) -> None:
+    def test_mode_is_lowercased_and_unknown_falls_back_to_auto(self) -> None:
         node = parse_single(_link("type=xhttp&security=tls&mode=Stream-Up"))
         self.assertEqual("stream-up", _xhttp(node)["mode"])
-        with self.assertRaisesRegex(LinkParseError, "Неизвестный режим XHTTP"):
-            parse_single(_link("type=xhttp&security=tls&mode=turbo"))
+        # As in v2rayN: a value Xray does not know is left out (Xray then uses auto), the server stays.
+        for value in ("none", "turbo", "gun"):
+            with self.subTest(mode=value):
+                node = parse_single(_link(f"type=xhttp&security=tls&mode={value}"))
+                self.assertNotIn("mode", _xhttp(node))
 
     def test_broken_extra_gives_a_russian_error(self) -> None:
         with self.assertRaisesRegex(LinkParseError, "Не удалось разобрать XHTTP extra"):
@@ -129,6 +132,15 @@ class XhttpShareLinkTests(unittest.TestCase):
             {"path": "/v", "host": "cdn.example", "mode": "stream-up", "extra": {"uplinkHTTPMethod": "GET"}},
             _xhttp(node),
         )
+
+    def test_vmess_header_type_none_is_not_an_xhttp_mode(self) -> None:
+        # v2rayN keeps the header type ("none" by default) and the XHTTP mode in the same field "type".
+        for value, want in (("none", None), ("", None), ("Packet-Up", "packet-up")):
+            with self.subTest(type=value):
+                payload = {"v": "2", "ps": "v", "add": "h.example", "port": "443", "id": UUID, "aid": "0",
+                           "net": "xhttp", "type": value, "path": "/v", "tls": "tls"}
+                node = parse_single("vmess://" + base64.b64encode(json.dumps(payload).encode()).decode())
+                self.assertEqual(want, _xhttp(node).get("mode"))
 
     def test_trojan_link_carries_xhttp_extra(self) -> None:
         extra = quote(json.dumps({"xPaddingObfsMode": True}), safe="")

@@ -8,7 +8,7 @@ Owner of the protocol: the native Xray core. The importer (`xray_fluent/importer
 | `type=xhttp` (or the old `splithttp`) | `streamSettings.network = "xhttp"` | `splithttp` is renamed so the rest of the app compares one name. |
 | `path` | `xhttpSettings.path` | |
 | `host` | `xhttpSettings.host` | |
-| `mode` | `xhttpSettings.mode` | Lower-cased; only `auto`, `packet-up`, `stream-up`, `stream-one`, anything else is a Russian import error (Xray would refuse to start). Absent means Xray's default (`auto`). |
+| `mode` | `xhttpSettings.mode` | Lower-cased; only `auto`, `packet-up`, `stream-up`, `stream-one` are kept. Anything else (`mode=none` from v2rayN's shared header/mode field) is left out, so Xray uses `auto`, as v2rayN does (2026-11-19; it used to be an import error, and Android failed to start with «unsupported mode: none»). Absent means Xray's default (`auto`). |
 | `extra` | `xhttpSettings.extra` | XTLS share-link standard: `encodeURIComponent(JSON object)`. Kept verbatim, field names are not touched (`xPaddingObfsMode`, `uplinkHTTPMethod`, `xmux`, `downloadSettings`…). `extra=null`, empty or `{}` mean unset; invalid JSON or a non-object is an import error. |
 
 How Xray reads it (`infra/conf/transport_method.go`, `SplitHTTPConfig.Build`): when `extra` is present it
@@ -27,7 +27,7 @@ VMess and Trojan over XHTTP: Xray supports them (transport is independent of pro
 decision of 2026-11-16 Xray owns VLESS, VMess and Trojan (`application/protocol_core.py`). Their stored outbound is
 already in Xray's JSON shape, so the Xray sidecar takes `xhttpSettings` unchanged; nothing is converted for
 sing-box (it had no XHTTP path for them: the old `_unsupported_transport` marker is gone with the dead conversion).
-The VMess JSON link carries the XHTTP mode in `type` and `extra` as a string or an object.
+The VMess JSON link carries the XHTTP mode in `type` and `extra` as a string or an object. `type` is the mode only when it names one of the four (any case): its default `none` is the header type.
 
 Other Xray-owned details of the parser: WebSocket and HTTPUpgrade drop `h2`/`h3` from `alpn` (HTTP/1.1-only
 transports; Xray defaults to http/1.1 only when alpn is empty); `allowInsecure` without a pin is never passed
