@@ -520,6 +520,9 @@ class ReporterTests(unittest.TestCase):
         self.assertFalse(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "off"}))
         self.assertTrue(r.reports_enabled({}))
         self.assertTrue(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "on"}))
+        # This very run is off too (tests/conftest.py for pytest, the gate's environment for unittest): a real
+        # controller built by any test never sends to the production ingest.
+        self.assertFalse(r.reports_enabled())
         lines: list[str] = []
         reporter = r.ClientReporter(Path(self.folder.name), "0.8.98", tunnel_proxy_port=lambda: None,
                                     now_ms=lambda: NOW, opener=self._opener, log=lines.append, enabled=False)
