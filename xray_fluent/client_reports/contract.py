@@ -17,7 +17,7 @@ import re
 import secrets
 import threading
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -294,8 +294,12 @@ def iso_utc(epoch_ms: int) -> str:
     return datetime.fromtimestamp(epoch_ms // 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], sent_via: str) -> str:
-    """The body of ``POST /v1/reports``: exactly the contract's fields."""
+def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], sent_via: str,
+               clock_offset_ms: int = 0, sent_offsets: Mapping[str, int] | None = None) -> str:
+    """The body of ``POST /v1/reports``: exactly the contract's fields. ``clock_offset_ms`` is the ingest's clock
+    minus ours (:meth:`ReportClock.applied`): ``attempted_at`` goes in the ingest's time, so a PC clock running ahead
+    is not refused as «in the future» (vpnbot 2026-11-20). ``sent_offsets``: the offset a report_id was already
+    accepted with, so its completion copy carries the very same ``attempted_at``."""
     if not is_install_id(install_id) or not is_app_identity(app):
         raise ValueError("install_id or app")
     if sent_via not in (SENT_DIRECT, SENT_TUNNEL) or not 1 <= len(records) <= MAX_BATCH:
@@ -334,7 +338,8 @@ def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], 
             if record.detail:
                 item["detail"] = record.detail
         item["elapsed_ms"] = int(record.elapsed_ms)
-        item["attempted_at"] = iso_utc(record.attempted_at_ms)
+        offset = (sent_offsets or {}).get(record.report_id, clock_offset_ms) if record.report_id else clock_offset_ms
+        item["attempted_at"] = iso_utc(record.attempted_at_ms + int(offset))
         item["sent_via"] = sent_via
         if record.network_token:
             item["network_token"] = record.network_token
@@ -702,6 +707,66 @@ class SendAction(str, Enum):
     DROP = "drop"              # refused by the contract (400, 413): a retry gives the same
     KEEP_AND_STOP = "keep"     # rate limit or ingest failure: keep, wait for the next report
     TRY_OTHER_PATH = "other"   # no answer: keep and try the other path
+
+
+class ReportClock:
+    """The ingest's clock from the ``Date`` header of its replies (vpnbot 2026-11-20: PCs whose clock runs ahead had
+    whole batches refused as ``client_report_invalid_attempted_at``; the ingest takes now − 7 days … now + 10 min). The
+    app's own freshness check uses the same wrong clock, so only the ingest's time can tell. An offset under
+    :data:`THRESHOLD_MS` is ignored: ``Date`` has whole seconds and the reply takes a round trip. Same as Android
+    ``ReportClock``."""
+
+    THRESHOLD_MS = 60_000
+
+    def __init__(self) -> None:
+        self._offset_ms = 0
+
+    def learn(self, server_ms: int | None, local_ms: int) -> None:
+        if server_ms and server_ms > 0:
+            self._offset_ms = int(server_ms) - int(local_ms)
+
+    def applied(self) -> int:
+        return self._offset_ms if abs(self._offset_ms) > self.THRESHOLD_MS else 0
+
+
+def date_header_ms(value: str | None) -> int | None:
+    """An HTTP ``Date`` header as epoch milliseconds, or None."""
+    if not value:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        moment = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if moment is None or moment.tzinfo is None:
+        return None
+    return int(moment.timestamp() * 1000)
+
+
+SPLIT_BUDGET = 16
+
+
+def deliver(batch: list, send, resolved, budget: list[int] | None = None) -> SendAction | None:
+    """A refused batch (400 or 413) is never dropped with its good reports (vpnbot 2026-11-20: the ingest validates the
+    whole batch and names no index). ``send(part)`` says what happened to one batch; a refused one is split in halves
+    until the refused reports stand alone, and only those are dropped. ``resolved(part, action)`` gets every part that
+    is done (accepted or refused alone). None when the whole batch is done, else the action that stopped the rest.
+    The split makes at most :data:`SPLIT_BUDGET` extra requests; past it the refused part is dropped whole. Same as
+    Android ``BatchDelivery``."""
+    budget = [SPLIT_BUDGET] if budget is None else budget
+    action = send(batch)
+    if action is SendAction.REMOVE or (action is SendAction.DROP and (len(batch) == 1 or budget[0] < 2)):
+        resolved(batch, action)
+        return None
+    if action is not SendAction.DROP:
+        return action
+    budget[0] -= 2
+    half = len(batch) // 2
+    for part in (batch[:half], batch[half:]):
+        stopped = deliver(part, send, resolved, budget)
+        if stopped is not None:
+            return stopped
+    return None
 
 
 def after_response(status: int | None) -> SendAction:

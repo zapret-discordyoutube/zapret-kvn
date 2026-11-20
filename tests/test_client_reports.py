@@ -403,12 +403,15 @@ class SubscriptionMapTests(unittest.TestCase):
 class _Ingest(BaseHTTPRequestHandler):
     received: list[dict] = []
     status = 202
+    #: Optional ``batch -> status``: the ingest's own decision for one batch.
+    decide = None
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
         batch = json.loads(self.rfile.read(length))
         type(self).received.append(batch)
-        self.send_response(type(self).status)
+        decide = type(self).decide
+        self.send_response(decide(batch) if decide else type(self).status)
         self.end_headers()
         # vpnbot (schema 3 live 2026-11-19): one verdict per report in batch order, null for schema 1/2.
         verdicts = [dict(type(self).verdict) if item.get("schema") == 3 else None for item in batch["reports"]]
@@ -472,6 +475,31 @@ class ReporterTests(unittest.TestCase):
         return r.ClientReporter(Path(self.folder.name), "0.8.88", tunnel_proxy_port=lambda: tunnel_port,
                                 direct_is_direct=lambda: not tun, now_ms=lambda: NOW, opener=self._opener,
                                 enabled=True)
+
+    def test_a_pc_clock_ahead_is_corrected_by_the_ingests_date(self) -> None:
+        # vpnbot 2026-11-20: batches refused as client_report_invalid_attempted_at (now + 10 min at most). The local
+        # ingest refuses the same way against its real clock; the PC here runs three hours ahead.
+        import time
+        from datetime import datetime
+
+        def refuse_future(batch: dict) -> int:
+            latest = max(datetime.fromisoformat(item["attempted_at"].replace("Z", "+00:00")).timestamp()
+                         for item in batch["reports"])
+            return 400 if latest > time.time() + 600 else 202
+
+        _Ingest.decide = staticmethod(refuse_future)
+        try:
+            ahead = int(time.time() * 1000) + 3 * 3600 * 1000
+            reporter = r.ClientReporter(Path(self.folder.name), "0.8.88", tunnel_proxy_port=lambda: None,
+                                        now_ms=lambda: ahead, opener=self._opener, enabled=True)
+            reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True), 900,
+                              ahead - 5000, None)
+        finally:
+            _Ingest.decide = None
+        self.assertEqual(2, len(_Ingest.received))
+        sent = datetime.fromisoformat(_Ingest.received[1]["reports"][0]["attempted_at"].replace("Z", "+00:00"))
+        self.assertLess(abs(sent.timestamp() - time.time()), 120)
+        self.assertEqual(0, c.ReportQueue(Path(self.folder.name) / "queue.jsonl").size())
 
     def test_reports_off_for_test_runs_write_and_send_nothing(self) -> None:
         # The release gate runs the real controller against local test servers: ZAPRET_KVN_CLIENT_REPORTS=off.

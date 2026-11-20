@@ -54,6 +54,7 @@ from .contract import (
     NetworkToken,
     NetworkTokenCache,
     Outcome,
+    ReportClock,
     ReportQueue,
     SendAction,
     ServerRef,
@@ -61,6 +62,8 @@ from .contract import (
     ServerVerdict,
     attempt_core_code,
     batch_json,
+    date_header_ms,
+    deliver,
     domain_of,
     ingest_order,
     is_install_id,
@@ -303,6 +306,10 @@ class ClientReporter:
         self._direct_is_direct = direct_is_direct
         self._log = log
         self._now_ms = now_ms
+        #: The ingest's clock from its replies: ``attempted_at`` goes in its time (vpnbot 2026-11-20).
+        self._clock = ReportClock()
+        #: report_id → the offset it was accepted with: its completion copy keeps the same attempted_at.
+        self._sent_offsets: dict[str, int] = {}
         self._opener = opener or _build_opener
         self._lock = threading.Lock()
         self._flush_lock = threading.Lock()
@@ -663,14 +670,28 @@ class ClientReporter:
                 )
                 if not batch:
                     return
-                action = self._send(batch)
-                if action in (SendAction.REMOVE, SendAction.DROP):
-                    self._queue.remove(batch)
+                # A refused batch is split until the refused reports stand alone: the good ones are never lost.
+                stopped = deliver(batch, self._send_corrected, self._resolved)
+                if stopped is None:
                     continue
-                self._stopped_until_next = action is SendAction.KEEP_AND_STOP
+                self._stopped_until_next = stopped is SendAction.KEEP_AND_STOP
                 return
         finally:
             self._flush_lock.release()
+
+    def _resolved(self, part: list[AttemptRecord], action: SendAction) -> None:
+        self._queue.remove(part)
+        if action is SendAction.DROP:
+            self._log(f"[client-report] the ingest refused {len(part)} report(s), removed")
+
+    def _send_corrected(self, batch: list[AttemptRecord]) -> SendAction:
+        """A refusal right after the ingest's clock was first learnt is sent once more in its time."""
+        used = self._clock.applied()
+        action = self._send(batch)
+        if action is not SendAction.DROP or self._clock.applied() == used:
+            return action
+        self._log(f"[client-report] the PC clock is {-self._clock.applied() // 1000} s off the ingest: resent in its time")
+        return self._send(batch)
 
     def _send(self, batch: list[AttemptRecord]) -> SendAction:
         """Directly, then through the tunnel; up to ``TRIES_PER_PATH`` ingest names on each path. When no name
@@ -700,7 +721,10 @@ class ClientReporter:
     def _send_once(self, batch: list[AttemptRecord]) -> SendAction | None:
         install_id = self._install_id()
         for via, proxy_port in self._routes():
-            body = batch_json(install_id, self._app, batch, via).encode("utf-8")
+            offset = self._clock.applied()
+            with self._lock:
+                sent = dict(self._sent_offsets)
+            body = batch_json(install_id, self._app, batch, via, offset, sent).encode("utf-8")
             for host in self._host_order()[:TRIES_PER_PATH]:
                 status, reply = self._post(host, body, proxy_port)
                 action = after_response(status)
@@ -709,9 +733,18 @@ class ClientReporter:
                     continue
                 self._log(f"[client-report] batch {len(batch)}, {len(body)} B ({via}, {domain_of(host)}) -> HTTP {status}")
                 if action is SendAction.REMOVE:
+                    self._note_sent_offsets(batch, offset, sent)
                     self._note_verdicts(batch, parse_reply(reply, len(batch)))
                 return action
         return None
+
+    def _note_sent_offsets(self, batch: list[AttemptRecord], offset: int, sent: dict[str, int]) -> None:
+        with self._lock:
+            for record in batch:
+                if record.report_id:
+                    self._sent_offsets[record.report_id] = sent.get(record.report_id, offset)
+            while len(self._sent_offsets) > 256:
+                self._sent_offsets.pop(next(iter(self._sent_offsets)))
 
     def _note_verdicts(self, batch: list[AttemptRecord], verdicts: list[ServerVerdict | None]) -> None:
         """Keep vpnbot's verdicts by report_id and show the one of the failure on the notice."""
@@ -776,15 +809,25 @@ class ClientReporter:
         try:
             with self._opener(proxy_port is not None, proxy_port).open(request, timeout=_TIMEOUT) as response:
                 status = int(response.status)
+                self._learn_clock(response)
                 try:
                     reply = response.read(_MAX_REPLY_BYTES)
                 except OSError:
                     reply = None
                 return status, reply
         except urllib.error.HTTPError as exc:
+            self._learn_clock(exc)
             return int(exc.code), None
         except (OSError, ValueError):
             return None, None
+
+    def _learn_clock(self, response: Any) -> None:
+        headers = getattr(response, "headers", None)
+        try:
+            value = headers.get("Date") if headers is not None else None
+        except Exception:
+            value = None
+        self._clock.learn(date_header_ms(value), self._now_ms())
 
     def _refresh_token(self) -> None:
         """``GET /v1/network`` only directly: through the tunnel the ingest would see the VPN server's network."""

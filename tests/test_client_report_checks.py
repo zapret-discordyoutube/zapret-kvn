@@ -46,3 +46,58 @@ class CheckRulesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeliveryTests(unittest.TestCase):
+    """vpnbot 2026-11-20: the ingest's clock for attempted_at, and a refused batch never takes good reports along."""
+
+    def test_the_clock_is_corrected_only_when_the_offset_is_real(self) -> None:
+        from xray_fluent.client_reports import contract as c
+        clock = c.ReportClock()
+        clock.learn(1_000_000, 1_030_000)
+        self.assertEqual(0, clock.applied())
+        clock.learn(1_000_000, 1_000_000 + 3 * 3_600_000)
+        self.assertEqual(-3 * 3_600_000, clock.applied())
+        clock.learn(None, 5)
+        self.assertEqual(-3 * 3_600_000, clock.applied())
+        self.assertEqual(1_763_640_000_000, c.date_header_ms("Thu, 20 Nov 2025 12:00:00 GMT"))
+        self.assertIsNone(c.date_header_ms("not a date"))
+
+    def test_a_refused_batch_loses_only_the_refused_report(self) -> None:
+        from xray_fluent.client_reports import contract as c
+        accepted: list[int] = []
+        dropped: list[int] = []
+        requests = [0]
+
+        def send(part):
+            requests[0] += 1
+            return c.SendAction.DROP if 7 in part else c.SendAction.REMOVE
+
+        result = c.deliver(list(range(20)), send,
+                           lambda part, action: (accepted if action is c.SendAction.REMOVE else dropped).extend(part))
+        self.assertIsNone(result)
+        self.assertEqual([7], dropped)
+        self.assertEqual([i for i in range(20) if i != 7], sorted(accepted))
+        self.assertLessEqual(requests[0], 1 + c.SPLIT_BUDGET)
+
+    def test_a_split_stops_within_its_budget_and_on_no_answer(self) -> None:
+        from xray_fluent.client_reports import contract as c
+        dropped: list[int] = []
+        requests = [0]
+
+        def refuse(_part):
+            requests[0] += 1
+            return c.SendAction.DROP
+
+        c.deliver(list(range(50)), refuse, lambda part, _action: dropped.extend(part))
+        self.assertEqual(list(range(50)), sorted(dropped))
+        self.assertLessEqual(requests[0], 1 + c.SPLIT_BUDGET)
+        kept: list[int] = []
+
+        def send(part):
+            if len(part) == 4:
+                return c.SendAction.DROP
+            return c.SendAction.REMOVE if 0 in part else c.SendAction.TRY_OTHER_PATH
+
+        self.assertIs(c.SendAction.TRY_OTHER_PATH, c.deliver([0, 1, 2, 3], send, lambda part, _a: kept.extend(part)))
+        self.assertEqual([0, 1], kept)

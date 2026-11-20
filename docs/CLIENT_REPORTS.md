@@ -192,6 +192,20 @@ replaces the waiting copy. An unsent first copy gives way to its completion in t
 `report_id`). A failure with no check goes once, without `complete`. If no completion arrives in 5 minutes, the
 panel says «Проверка пути: не завершилась».
 
+
+## The ingest's clock and refused batches (vpnbot 2026-11-20)
+
+The ingest takes `attempted_at` from now − 7 days to now + 10 minutes of its own clock. A device clock running ahead
+had whole batches refused as `client_report_invalid_attempted_at` (Windows 0.8.94–0.8.99), and the app's own freshness
+check can never notice it because it uses the same clock. So the app learns the ingest's clock from the `Date` header
+of every ingest reply (`contract.ReportClock`) and, when the offset is over 60 s, sends `attempted_at` in the ingest's time; a
+refusal right after the offset was learnt is sent once more. A report already accepted keeps the offset it was
+accepted with, so its completion copy carries the very same `attempted_at`.
+
+The ingest validates a batch as a whole and names no index, so a refused batch (400, 413) is split in halves until
+the refused report stands alone (`contract.deliver`, at most 16 extra requests); only that report is dropped, never its
+neighbours.
+
 ## The notice shows vpnbot's verdict
 
 The line under the error status is vpnbot's `text` for this report, as is (the app keeps no rule and no verdict
