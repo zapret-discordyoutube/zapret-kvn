@@ -15,7 +15,7 @@ from dataclasses import dataclass
 #: The app's own health check through the tunnel (vpnbot 2026-11-20): sent on a failure with no core code where the
 #: check got no data. Off until vpnbot's «health live»: before that a report with it is refused as an unknown probe.
 HEALTH = "health"
-HEALTH_LIVE = False
+HEALTH_LIVE = True
 
 #: Every probe the contract admits, in its order.
 PROBES = (

@@ -181,7 +181,7 @@ Inside the tunnel anything is invisible to DPI as a separate probe:
   such failure without a core code, with the first copy and outside the rarity limits (it moves no extra traffic).
   `r` is `timeout` when every endpoint stayed silent, `reset` when any endpoint's flow was dropped, `unknown` when
   the failures prove nothing (local inbound refusal, a non-HTTP answer); `ms` is how long the app waited. Switch:
-  `checks.HEALTH_LIVE`, off until vpnbot's «health live» (before that vpnbot refuses the probe as unknown).
+  `checks.HEALTH_LIVE`, on since vpnbot «health live» 2026-11-20 09:26 UTC (rules version 2).
 
 ## Completion: the failure at once, the checks after (vpnbot «completion live» 2026-11-19 22:16 UTC)
 
