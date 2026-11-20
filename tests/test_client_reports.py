@@ -558,14 +558,19 @@ class ReporterTests(unittest.TestCase):
         reporter = r.ClientReporter(Path(self.folder.name), "0.8.98", tunnel_proxy_port=lambda: None, now_ms=lambda: NOW,
                                     opener=self._opener, probe=PathProbe(), no_data_probe=no_data, enabled=True)
         target = ProbeTarget("nl.node.example", 443, "www.microsoft.com", True, False)
-        with patch.object(r, "probe_relay", return_value=False) as probe:
+        from xray_fluent.client_reports import checks as k
+        live = k.PROBES if k.HEALTH_LIVE else k.PROBES + (k.HEALTH,)
+        with patch.object(r, "probe_relay", return_value="timeout") as probe, patch.object(k, "PROBES", live):
             reporter._attempt(c.ServerRef("hipnl", "vless"), "vless", c.AttemptFacts(succeeded=True),
                               900, NOW - 5000, (1234, "u", "p"), target)
         probe.assert_called_once_with(1234, "u", "p")
         self.assertEqual([(r.Relay(1234, "u", "p"), True)], no_data.calls)
         first, whole = (batch["reports"][0] for batch in _Ingest.received)
         self.assertEqual(("failed", False), (first["outcome"], first["complete"]))
-        self.assertEqual(["tunnel_a", "tunnel_b", "direct_a", "direct_b"], list(whole["checks"]))
+        # The app's own health check is a fact it already has: it goes with the first copy (vpnbot 2026-11-20).
+        self.assertEqual(["health"], list(first["checks"]))
+        self.assertEqual("timeout", first["checks"]["health"]["r"])
+        self.assertEqual(["tunnel_a", "tunnel_b", "direct_a", "direct_b", "health"], list(whole["checks"]))
         self.assertEqual((True, first["report_id"]), (whole["complete"], whole["report_id"]))
 
     def test_not_about_the_server_goes_with_the_raw_local_code_and_no_probe(self) -> None:

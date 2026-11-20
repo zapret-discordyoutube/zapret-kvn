@@ -10,7 +10,7 @@ from xray_fluent.client_reports import checks as k
 
 class CheckRulesTests(unittest.TestCase):
     def test_probe_names_and_results_follow_the_contract(self) -> None:
-        self.assertEqual(17, len(k.PROBES))
+        self.assertEqual(17 + k.HEALTH_LIVE, len(k.PROBES))
         self.assertTrue(k.is_valid_check("tcp_target", k.Check("refused", 120)))
         self.assertFalse(k.is_valid_check("tcp_target", k.Check("nxdomain", 120)))   # nxdomain only for DNS
         self.assertTrue(k.is_valid_check("dns_doh", k.Check("nxdomain", 300)))

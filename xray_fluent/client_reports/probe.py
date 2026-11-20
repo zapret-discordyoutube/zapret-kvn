@@ -33,7 +33,7 @@ import socket
 import ssl
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from ..engines.socks_probe import HTTPS_ENDPOINTS, open_socks_connection, recv_exact
@@ -434,7 +434,7 @@ def no_data_result(probe: str, exc: OSError, seconds: float) -> str:
         return k.RESET
     if isinstance(exc, ssl.SSLError):
         return k.UNKNOWN
-    connected = probe.startswith("tunnel_") or bool(getattr(exc, "after_connect", False))
+    connected = probe.startswith("tunnel_") or probe == k.HEALTH or bool(getattr(exc, "after_connect", False))
     return result_of(exc, connected=connected)
 
 
@@ -448,6 +448,27 @@ def _https_through_relay(relay: Relay, target: str, name: str, path: str, timeou
         https_answers(sock, name, path)
     finally:
         sock.close()
+
+
+def relay_health(relay: Relay, endpoints: Iterable[tuple[str, str, str]], timeout: float,
+                 clock: Callable[[], float] = time.monotonic) -> str:
+    """The app's own HTTPS check through the core's relay inbound (vpnbot «health» probe, 2026-11-20): ``answered``
+    when any endpoint answered, else the most telling failure. A reset on any endpoint proves the core dropped the
+    flow; otherwise a silent endpoint is ``timeout``; a local refusal or a non-HTTP answer proves nothing."""
+    results: list[str] = []
+    for address, name, path in endpoints:
+        started = clock()
+        try:
+            _https_through_relay(relay, address, name, path, timeout)
+            return k.ANSWERED
+        except OSError as exc:
+            results.append(no_data_result(k.HEALTH, exc, clock() - started))
+        except ValueError:
+            results.append(k.UNKNOWN)
+    for telling in (k.RESET, k.TIMEOUT):
+        if telling in results:
+            return telling
+    return k.UNKNOWN
 
 
 def _https_direct(target: str, name: str, path: str, timeout: float) -> None:

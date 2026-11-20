@@ -32,7 +32,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..engines.socks_probe import HTTPS_ENDPOINTS, probe_https
+from ..engines.socks_probe import HTTPS_ENDPOINTS
 from .contract import (
     INGEST_FEEDS,
     AttemptDetails,
@@ -74,7 +74,9 @@ from .contract import (
 from . import checks as k
 from .checks import Check, carrier_of
 
-from .probe import BlockProbe, NoDataProbe, PathFacts, ProbeTarget, Relay, literal_address, measure_flow, needs_path_check
+from .probe import (
+    BlockProbe, NoDataProbe, PathFacts, ProbeTarget, Relay, literal_address, measure_flow, needs_path_check, relay_health,
+)
 
 
 APP_NAME = "zapret-kvn"
@@ -202,15 +204,10 @@ def _hysteria_version(exe: Path) -> str:
     return ""
 
 
-def probe_relay(port: int, username: str, password: str, *, timeout: float = _PROBE_TIMEOUT) -> bool:
-    """One HTTPS request through the Xray relay SOCKS inbound; the first answering endpoint wins."""
-    for endpoint in HTTPS_ENDPOINTS:
-        try:
-            probe_https(port, username=username, password=password, endpoint=endpoint, timeout=timeout)
-            return True
-        except (OSError, ValueError):
-            continue
-    return False
+def probe_relay(port: int, username: str, password: str, *, timeout: float = _PROBE_TIMEOUT) -> str:
+    """One HTTPS request through the Xray relay SOCKS inbound; the first answering endpoint wins. The result is the
+    ``health`` probe's ``r``: ``answered`` or why no endpoint answered."""
+    return relay_health(Relay(port, username, password), HTTPS_ENDPOINTS, timeout)
 
 
 class SendStatus(str, Enum):
@@ -413,12 +410,17 @@ class ClientReporter:
     ) -> None:
         udp = str(scheme or "").lower() in UDP_SCHEMES
         no_data: Relay | None = None
+        health: Check | None = None
         if relay is not None:
             started = time.monotonic()
-            passed = probe_relay(*relay)
-            elapsed_ms += int((time.monotonic() - started) * 1000)
+            result = probe_relay(*relay)
+            waited_ms = int((time.monotonic() - started) * 1000)
+            elapsed_ms += waited_ms
+            passed = result == k.ANSWERED
             facts = AttemptFacts(succeeded=passed, traffic_failed=not passed)
             no_data = None if passed else Relay(*relay)
+            if not passed:
+                health = Check(result, min(waited_ms, k.MAX_CHECK_MS))
             self._log(f"[client-report] VLESS check through the server: {'passed' if passed else 'no answer'}")
         facts = AttemptFacts(
             cancelled=facts.cancelled, succeeded=facts.succeeded, core_code=facts.core_code,
@@ -438,6 +440,10 @@ class ClientReporter:
             return
         pending = _PendingFailure(attempt, ref, scheme, facts, elapsed_ms, attempted_at_ms, target, name)
         pending.relay = no_data
+        if health is not None and not attempt_core_code(facts):
+            # A fact the app already has (vpnbot 2026-11-20): it costs no traffic, so no rarity limit; it goes with
+            # the first copy.
+            pending.checks[k.HEALTH] = health
         self._on_failure(pending)
 
     def _on_failure(self, pending: _PendingFailure) -> None:

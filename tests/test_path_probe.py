@@ -299,6 +299,24 @@ class NoDataTests(unittest.TestCase):
         self.assertEqual("unknown", no_data_result("direct_b", socket.gaierror(11001, "not found"), 0.04))
         self.assertEqual("reset", no_data_result("tunnel_b", ssl.SSLEOFError(), 1.0))
 
+    def test_the_health_check_says_answered_or_the_most_telling_failure(self) -> None:
+        from unittest.mock import patch
+
+        from xray_fluent.client_reports import probe as p
+        endpoints = [("1.1.1.1", "a.example", "/"), ("2.2.2.2", "b.example", "/")]
+        relay = p.Relay(1234, "u", "p")
+
+        def health(*errors: BaseException | None) -> str:
+            with patch.object(p, "_https_through_relay", side_effect=list(errors)):
+                return p.relay_health(relay, endpoints, 10.0, clock=lambda: 0.0)
+
+        self.assertEqual("answered", health(TimeoutError(), None))
+        self.assertEqual("timeout", health(TimeoutError(), TimeoutError()))
+        # Through the tunnel a refusal after the local connect is the core dropping the flow.
+        self.assertEqual("reset", health(TimeoutError(), ConnectionRefusedError(10061, "refused")))
+        self.assertEqual("timeout", health(p.LocalRelayError("refused"), TimeoutError()))
+        self.assertEqual("unknown", health(p.LocalRelayError("refused"), ValueError("bad socks reply")))
+
 
 if __name__ == "__main__":
     unittest.main()
