@@ -501,6 +501,20 @@ class ReporterTests(unittest.TestCase):
         self.assertLess(abs(sent.timestamp() - time.time()), 120)
         self.assertEqual(0, c.ReportQueue(Path(self.folder.name) / "queue.jsonl").size())
 
+    def test_an_app_error_goes_as_its_own_kind_after_the_reports(self) -> None:
+        from xray_fluent.client_reports import app_errors
+
+        reporter = self._reporter()
+        reporter.on_app_error(app_errors.AppError("crash", "crash:KeyError", ("xray_fluent.a.b:3",)), NOW - 1000)
+        reporter._flush(wait=True)
+        items = [item for batch in _Ingest.received for item in batch["reports"]]
+        self.assertEqual(1, len(items))
+        item = items[0]
+        self.assertEqual(("app_error", 1, "crash", "crash:KeyError", 1, ["xray_fluent.a.b:3"]),
+                         (item["kind"], item["schema"], item["step"], item["code"], item["count"], item["frames"]))
+        self.assertNotIn("server_id", item)
+        self.assertNotIn("message", item)
+
     def test_reports_off_for_test_runs_write_and_send_nothing(self) -> None:
         # The release gate runs the real controller against local test servers: ZAPRET_KVN_CLIENT_REPORTS=off.
         self.assertFalse(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "off"}))

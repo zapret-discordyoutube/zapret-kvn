@@ -77,6 +77,7 @@ from .contract import (
 from . import checks as k
 from .checks import Check, carrier_of
 
+from .app_errors import AppError, AppErrorRecord, AppErrorStore, record_json
 from .probe import (
     BlockProbe, NoDataProbe, PathFacts, ProbeTarget, Relay, literal_address, measure_flow, needs_path_check, relay_health,
 )
@@ -84,6 +85,8 @@ from .probe import (
 
 APP_NAME = "zapret-kvn"
 PLATFORM = "windows"
+#: App errors per batch: 16 frames each keep a batch far under the ingest's body ceiling.
+APP_ERRORS_PER_BATCH = 20
 _TIMEOUT = 15.0
 _PROBE_TIMEOUT = 10.0
 _MAX_ANSWER_BYTES = 4096
@@ -310,6 +313,8 @@ class ClientReporter:
         self._clock = ReportClock()
         #: report_id → the offset it was accepted with: its completion copy keeps the same attempted_at.
         self._sent_offsets: dict[str, int] = {}
+        #: App errors not about a server (vpnbot «app_error live» 2026-11-20): counted, one send per code a day.
+        self._app_errors = AppErrorStore(Path(root) / "app-errors.json", now_ms)
         self._opener = opener or _build_opener
         self._lock = threading.Lock()
         self._flush_lock = threading.Lock()
@@ -669,6 +674,7 @@ class ClientReporter:
                     lambda records: len(batch_json(install_id, self._app, records, SENT_DIRECT).encode("utf-8")),
                 )
                 if not batch:
+                    self._flush_app_errors()
                     return
                 # A refused batch is split until the refused reports stand alone: the good ones are never lost.
                 stopped = deliver(batch, self._send_corrected, self._resolved)
@@ -684,23 +690,76 @@ class ClientReporter:
         if action is SendAction.DROP:
             self._log(f"[client-report] the ingest refused {len(part)} report(s), removed")
 
-    def _send_corrected(self, batch: list[AttemptRecord]) -> SendAction:
+    def on_app_error(self, error: AppError, at_ms: int | None = None) -> None:
+        """An app error not about any server (crash, start without a server, subscription, update, permission,
+        storage): a code and, for a crash, frames — never a message, path, address or URL. Goes with the next send.
+        Written at once (a crash may end the process); sent from a background thread."""
+        if not self._enabled:
+            return
+        try:
+            details = self._context()
+        except Exception:
+            details = AttemptDetails()
+        record = self._app_errors.add(error, self._app.version, self._tokens.current(self._now_ms()), details, at_ms)
+        if record is None:
+            return
+        self._log(f"[client-report] app error {error.code} ({error.step}), times: {record.count}")
+        self._stopped_until_next = False
+        self.flush()
+
+    def _flush_app_errors(self) -> None:
+        """App errors after the reports, through the same names, clock and split; a stop leaves them for later."""
+        while True:
+            due = self._app_errors.due(APP_ERRORS_PER_BATCH)
+            if not due:
+                return
+            stopped = deliver(due, lambda part: self._send_corrected(part, self._send_app_errors_once),
+                              self._app_errors_resolved)
+            if stopped is None:
+                continue
+            self._stopped_until_next = stopped is SendAction.KEEP_AND_STOP
+            return
+
+    def _app_errors_resolved(self, part: list[AppErrorRecord], action: SendAction) -> None:
+        self._app_errors.sent(part)
+        if action is SendAction.DROP:
+            self._log(f"[client-report] the ingest refused {len(part)} app error(s), removed")
+
+    def _send_app_errors_once(self, batch: list[AppErrorRecord]) -> SendAction | None:
+        install_id = self._install_id()
+        for via, proxy_port in self._routes():
+            offset = self._clock.applied()
+            items = [record_json(install_id, APP_NAME, PLATFORM, record, via, offset) for record in batch]
+            body = json.dumps({"reports": items}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            for host in self._host_order()[:TRIES_PER_PATH]:
+                status, _reply = self._post(host, body, proxy_port)
+                action = after_response(status)
+                if action is SendAction.TRY_OTHER_PATH:
+                    self._note_failed(host)
+                    continue
+                self._log(f"[client-report] app errors {len(batch)}, {len(body)} B ({via}, {domain_of(host)}) -> HTTP {status}")
+                return action
+        return None
+
+    def _send_corrected(self, batch: list, once: Callable[[list], SendAction | None] | None = None) -> SendAction:
         """A refusal right after the ingest's clock was first learnt is sent once more in its time."""
+        once = once or self._send_once
         used = self._clock.applied()
-        action = self._send(batch)
+        action = self._send(batch, once)
         if action is not SendAction.DROP or self._clock.applied() == used:
             return action
         self._log(f"[client-report] the PC clock is {-self._clock.applied() // 1000} s off the ingest: resent in its time")
-        return self._send(batch)
+        return self._send(batch, once)
 
-    def _send(self, batch: list[AttemptRecord]) -> SendAction:
+    def _send(self, batch: list, once: Callable[[list], SendAction | None] | None = None) -> SendAction:
         """Directly, then through the tunnel; up to ``TRIES_PER_PATH`` ingest names on each path. When no name
         answered, the feed of names is asked once and the send repeated."""
+        once = once or self._send_once
         if self._ingest.feed_due(self._now_ms(), nothing_answered=False):
             self._refresh_feed()
-        action = self._send_once(batch)
+        action = once(batch)
         if action is None and self._ingest.feed_due(self._now_ms(), nothing_answered=True) and self._refresh_feed():
-            action = self._send_once(batch)
+            action = once(batch)
         if action is None:
             self._log(f"[client-report] batch {len(batch)} not sent: no ingest name answered")
             return SendAction.TRY_OTHER_PATH

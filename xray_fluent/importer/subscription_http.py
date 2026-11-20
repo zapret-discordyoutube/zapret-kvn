@@ -101,6 +101,8 @@ class RouteFailure:
 
     via_proxy: bool
     reason: str
+    #: The transport error as a short word for an app error report (timeout, dns, tls, refused, reset, unreachable).
+    kind: str = "unreachable"
 
 
 class SubscriptionUnreachableError(SubscriptionFetchError):
@@ -598,6 +600,7 @@ def fetch_subscription(
             )
             return outcome
         if isinstance(outcome, SubscriptionServerResponseError):
+            outcome.via_proxy = via_proxy  # the route of the answer, for an app error report
             _LOG.info(
                 "subscription %s: сервер ответил %s за %.1f с: HTTP %s, %s",
                 tag, _ROUTE_NAMES[via_proxy], time.monotonic() - route_started[via_proxy],
@@ -630,13 +633,18 @@ def fetch_subscription(
             redact_host(sanitize_fetch_error(outcome), target_host),  # type: ignore[arg-type]
             type(outcome).__name__, reason,
         )
-        failures.append(RouteFailure(via_proxy, reason))
+        kind = "unreachable"
+        if isinstance(outcome, OSError):
+            from ..client_reports.app_errors import transport_of
+
+            kind = transport_of(outcome)
+        failures.append(RouteFailure(via_proxy, reason, kind))
         if pending:
             start_next()
     if held is not None:
         raise SubscriptionFetchError(_answered_message(held)) from held
     now = time.monotonic()
-    failures.extend(RouteFailure(via_proxy, no_answer(now - route_started[via_proxy])) for via_proxy in sorted(running))
+    failures.extend(RouteFailure(via_proxy, no_answer(now - route_started[via_proxy]), "timeout") for via_proxy in sorted(running))
     raise SubscriptionUnreachableError(
         tuple(failures), tunnel_untried=tunnel_untried, host=target_host, port=target_port
     )

@@ -90,6 +90,7 @@ class StateWriter(QObject):
             try:
                 self._storage.write_serialized(payload, passphrase)
             except Exception as exc:
+                _note_storage_failure("save")
                 self.failed.emit(str(exc))
             finally:
                 with self._cond:
@@ -172,6 +173,8 @@ class SubscriptionUpdateWorker(QThread):
             )
 
             tunnel_untried = isinstance(exc, SubscriptionUnreachableError) and exc.tunnel_untried
+            if not self._cancel.is_set():
+                _note_subscription_failure(self._subscription, exc)
             message = sanitize_fetch_error(exc)
             if isinstance(exc, SubscriptionUnreachableError) and exc.host and not self._cancel.is_set():
                 message = self._explain_unreachable(exc, message)
@@ -198,3 +201,43 @@ class SubscriptionUpdateWorker(QThread):
         except Exception as error:  # noqa: BLE001 — диагностика не должна ломать отчёт об отказе
             _LOG.warning("diagnosis failed: %s: %s", type(error).__name__, error)
             return fallback
+
+
+def _note_subscription_failure(subscription, exc: BaseException) -> None:
+    """A subscription that could not be fetched as an app error (vpnbot «app_error live» 2026-11-20): the HTTP class
+    or the transport error, whether it is our service's link and the route — never the URL or the host."""
+    try:
+        from ..client_reports import app_errors
+        from ..importer.subscription_http import (
+            SubscriptionServerResponseError,
+            SubscriptionUnreachableError,
+        )
+        from ..importer.subscription_parser import SubscriptionParseError
+
+        ours = bool(getattr(subscription, "service", False))
+        answer = exc if isinstance(exc, SubscriptionServerResponseError) else exc.__cause__
+        if isinstance(answer, SubscriptionServerResponseError) and answer.status is not None:
+            route = "proxy" if getattr(answer, "via_proxy", False) else "direct"
+            app_errors.note(app_errors.subscription_error_of(int(answer.status), None, ours, route))
+        elif isinstance(exc, SubscriptionUnreachableError) and exc.failures:
+            last = exc.failures[-1]
+            route = "proxy" if last.via_proxy else "direct"
+            found = app_errors.code("sub", last.kind)
+            if found:
+                app_errors.note(app_errors.AppError(app_errors.STEP_SUBSCRIPTION, found,
+                                                    subscription=app_errors.SubscriptionFact(ours, route)))
+        elif isinstance(exc, SubscriptionParseError):
+            app_errors.note(app_errors.AppError(app_errors.STEP_SUBSCRIPTION, "sub:parse",
+                                                subscription=app_errors.SubscriptionFact(ours, "direct")))
+    except Exception:
+        pass
+
+
+def _note_storage_failure(what: str) -> None:
+    """The profile store could not be read or written, as an app error (vpnbot «app_error live» 2026-11-20)."""
+    try:
+        from ..client_reports import app_errors
+
+        app_errors.note(app_errors.AppError(app_errors.STEP_STORAGE, f"storage:{what}"))
+    except Exception:
+        pass

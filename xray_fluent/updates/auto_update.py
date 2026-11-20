@@ -222,6 +222,7 @@ def resolve_startup(
     report = None
     if record.resume_pending:
         report = {"fail": record.version}
+        _note_install_failure(why)
         if why:
             report["why"] = why
         if who:
@@ -383,3 +384,15 @@ def purge_update_leftovers(
         if not item.exists():
             removed += 1
     return removed
+
+
+def _note_install_failure(why: str) -> None:
+    """A failed install as an app error once, on the first start after it (vpnbot «app_error live» 2026-11-20)."""
+    try:
+        from ..client_reports import app_errors
+
+        found = app_errors.code("update", f"install_{why or 'other'}")
+        if found:
+            app_errors.note(app_errors.AppError(app_errors.STEP_UPDATE, found))
+    except Exception:
+        pass

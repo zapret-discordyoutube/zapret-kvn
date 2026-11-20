@@ -220,6 +220,8 @@ from ..engines.singbox import (
     select_outbound as select_singbox_outbound,
     select_outbound_when_ready_steps as select_singbox_outbound_when_ready_steps,
 )
+from ..client_reports import app_errors
+from ..client_reports.app_errors import start_error_of
 from ..client_reports.contract import INGEST_SEED, AttemptDetails, AttemptFacts, ReportSettings
 from ..client_reports.probe import BlockProbe, NoDataProbe
 from ..client_reports.reporter import ClientReporter, core_versions, probe_target_for, server_ref_for
@@ -643,6 +645,8 @@ class AppController(QObject):
             context=self._client_report_context,
             server_address=lambda host: next(iter(cached_addresses(host)), None),
         )
+        # Crashes in any thread and failures deep in the importer or updater reach the reporter as app errors.
+        app_errors.set_sink(self.client_reporter.on_app_error)
         self._client_report_attempt = 0
         self.client_reporter.prefetch_token()
         self.client_reporter.flush()
@@ -2980,6 +2984,9 @@ class AppController(QObject):
                 return
             node = self._runtime_selected_node()
             if node is None:
+                # No server was chosen: not a server report but an app error (vpnbot «app_error live» 2026-11-20).
+                if not superseded and not (bool(runner.result) and runner.error is None):
+                    app_errors.note(start_error_of(runner.error))
                 return
             ref = server_ref_for(node, list(self.state.subscriptions))
             started = self._client_report_started_ms or int(time.time() * 1000)

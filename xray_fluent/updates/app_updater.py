@@ -159,6 +159,18 @@ def download_failure_code(exc: BaseException) -> str:
     return "other"
 
 
+def _note_update_failure(failure: str) -> None:
+    """A failed download or check of an update as an app error (vpnbot «app_error live» 2026-11-20): its short code."""
+    try:
+        from ..client_reports import app_errors
+
+        found = app_errors.code("update", failure or "other")
+        if found:
+            app_errors.note(app_errors.AppError(app_errors.STEP_UPDATE, found))
+    except Exception:
+        pass
+
+
 _SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
 
 
@@ -845,6 +857,7 @@ class UpdateDownloader(QThread):
         except Exception as exc:
             self.failure_permanent = isinstance(exc, (UpdateRejected, zipfile.BadZipFile))
             self.failure_code = download_failure_code(exc)
+            _note_update_failure(self.failure_code)
             if work_dir is not None:
                 shutil.rmtree(work_dir, ignore_errors=True)
             self.error.emit(str(exc) or "Не удалось подготовить обновление")

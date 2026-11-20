@@ -73,6 +73,9 @@ def connect_selected_steps(controller: AppController, allow_during_reconnect: bo
 
             if not _is_admin():
                 controller._log("[tun] NOT admin — aborting")
+                from ..client_reports import app_errors
+
+                app_errors.note(app_errors.AppError(app_errors.STEP_PERMISSION, "perm:not_admin"))
                 controller._fail_transition(
                     "Режим TUN требует прав Администратора. Запустите приложение от имени Администратора."
                 )

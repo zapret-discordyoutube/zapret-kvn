@@ -154,6 +154,7 @@ def _log_unhandled_exception(exc_type, exc_value, exc_traceback) -> None:
         )
         return
     _bootstrap_logger.exception("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
+    _note_crash(exc_type, exc_traceback)
     _show_fatal_message_box()
 
 
@@ -164,6 +165,17 @@ def _log_background_exception(args: threading.ExceptHookArgs) -> None:
         "Unhandled background exception",
         exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
     )
+    _note_crash(args.exc_type, args.exc_traceback)
+
+
+def _note_crash(exc_type, exc_traceback) -> None:
+    """The crash as an app error: its type and frames only (vpnbot «app_error live» 2026-11-20); never raises."""
+    try:
+        from xray_fluent.client_reports import app_errors
+
+        app_errors.note_crash(exc_type, exc_traceback)
+    except Exception:
+        pass
 
 
 def _install_exception_hooks() -> None:

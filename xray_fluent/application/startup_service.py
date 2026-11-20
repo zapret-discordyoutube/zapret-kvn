@@ -46,6 +46,12 @@ class StartupWorker(QThread):
             if payload is None and self.storage.passphrase:
                 self.password_needed.emit()
                 return
+            try:
+                from ..client_reports import app_errors
+
+                app_errors.note(app_errors.AppError(app_errors.STEP_STORAGE, "storage:load"))
+            except Exception:
+                pass
             self.failed.emit("Не удалось загрузить данные приложения")
             logging.getLogger("xray_fluent.bootstrap").error("Startup data preparation failed")
         finally:
