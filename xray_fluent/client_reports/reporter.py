@@ -21,6 +21,7 @@ import os
 import random
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.error
@@ -264,8 +265,16 @@ class _PendingFailure:
 REPORTS_SWITCH = "ZAPRET_KVN_CLIENT_REPORTS"
 
 
-def reports_enabled(environ: Mapping[str, str] | None = None) -> bool:
-    """Reports are on unless the process environment says ``ZAPRET_KVN_CLIENT_REPORTS=off`` (test runs only)."""
+def reports_enabled(environ: Mapping[str, str] | None = None, frozen: bool | None = None) -> bool:
+    """Reports come only from the shipped app (the frozen exe) and only unless the environment says
+    ``ZAPRET_KVN_CLIENT_REPORTS=off``.
+
+    A run from source (tests, the release gate, a developer's e2e) never sends: on 2026-11-20 two test processes
+    reached production with app errors of the dev tree (0.8.101 and 0.8.102 rows, empty core versions), because one
+    long test process gathers app errors before any reporter exists and hands them to the first real controller.
+    """
+    if not (getattr(sys, "frozen", False) if frozen is None else frozen):
+        return False
     value = (os.environ if environ is None else environ).get(REPORTS_SWITCH, "")
     return value.strip().lower() not in ("off", "0", "false", "no")
 
@@ -294,7 +303,7 @@ class ClientReporter:
         # the queue and nothing leaves for the ingest; the notice and the path check still work.
         self._enabled = reports_enabled() if enabled is None else enabled
         if not self._enabled:
-            log(f"[client-report] off ({REPORTS_SWITCH}=off): nothing is written or sent")
+            log(f"[client-report] off (a run from source or {REPORTS_SWITCH}=off): nothing is written or sent")
         self._app = AppIdentity(APP_NAME, _safe_version(app_version), PLATFORM)
         self._queue = ReportQueue(self._root / "queue.jsonl")
         # «-2»: vpnbot's v2 (2026-11-19 19:37 UTC) no longer places a v1 value in any network, so one kept by an

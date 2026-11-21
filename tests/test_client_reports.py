@@ -517,9 +517,12 @@ class ReporterTests(unittest.TestCase):
 
     def test_reports_off_for_test_runs_write_and_send_nothing(self) -> None:
         # The release gate runs the real controller against local test servers: ZAPRET_KVN_CLIENT_REPORTS=off.
-        self.assertFalse(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "off"}))
-        self.assertTrue(r.reports_enabled({}))
-        self.assertTrue(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "on"}))
+        self.assertFalse(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "off"}, frozen=True))
+        self.assertTrue(r.reports_enabled({}, frozen=True))
+        self.assertTrue(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "on"}, frozen=True))
+        # Only the shipped (frozen) app sends: a run from source never does, whatever the environment says.
+        self.assertFalse(r.reports_enabled({}, frozen=False))
+        self.assertFalse(r.reports_enabled({"ZAPRET_KVN_CLIENT_REPORTS": "on"}, frozen=False))
         # This very run is off too (tests/conftest.py for pytest, the gate's environment for unittest): a real
         # controller built by any test never sends to the production ingest.
         self.assertFalse(r.reports_enabled())
