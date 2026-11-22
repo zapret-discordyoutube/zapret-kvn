@@ -1907,6 +1907,7 @@ class AppController(QObject):
             return False
         self._amnezia_target_generation = _increment_int(getattr(self, "_amnezia_target_generation", 0))
         generation = self._transition_generation
+        manager.server_ipv6_first = self._server_ipv6_first()
         return (yield from manager.start_steps(
             sidecar.config, sidecar.relay_port, context=sidecar.context,
             session_generation=_increment_int(getattr(self, "_session_generation", 0)),

@@ -12,6 +12,7 @@ from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 from ...constants import AMNEZIA_PATH_DEFAULT
 from ...diagnostics.export import capture_runtime_config
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity, redact_runtime_log, register_server_aliases
+from ...network import server_family
 from ...network.bootstrap_dns import resolve_bootstrap
 from ...application.async_steps import (
     TransitionSteps,
@@ -38,31 +39,55 @@ def _first_peer_ipv4(config: dict) -> str | None:
     which returns the physical uplink even while a tunnel holds the default
     route. Peer addresses are resolved to IPs before the core sees them.
     """
-    try:
-        for peer in ((config or {}).get("endpoint") or {}).get("peers") or []:
-            address = str((peer or {}).get("address") or "").strip()
-            if address:
+    for peer in ((config or {}).get("endpoint") or {}).get("peers") or []:
+        # With IPv6 first the peer leads with IPv6 and carries its IPv4 as
+        # race_address; either one names the physical uplink.
+        for key in ("address", "race_address"):
+            address = str((peer or {}).get(key) or "").strip()
+            try:
                 ipaddress.IPv4Address(address)  # raises on hostname / IPv6
-                return address
-    except (ValueError, TypeError):
+            except (ValueError, TypeError):
+                continue
+            return address
         return None
     return None
+
+
+def _resolve_peer_addresses(host: str) -> list[str]:
+    """Адреса WG/AWG-сервера доверенным путём; пустой список — пусть пробует ядро."""
+
+    try:
+        addresses = list(resolve_bootstrap(host).addresses)
+    except OSError:
+        return []
+    # Логи маскируют адреса сервера так же, как его имя: учим их до старта ядра.
+    register_server_aliases(host, addresses)
+    return sorted(addresses, key=lambda value: (ipaddress.ip_address(value).version, value))
 
 
 def _resolve_peer(host: str) -> str | None:
     """Адрес WG/AWG-сервера доверенным путём; ``None`` — пусть пробует ядро."""
 
-    try:
-        addresses = resolve_bootstrap(host).addresses
-    except OSError:
-        return None
-    # Логи маскируют адреса сервера так же, как его имя: учим их до старта ядра.
-    register_server_aliases(host, addresses)
-    ordered = sorted(addresses, key=lambda value: (ipaddress.ip_address(value).version, value))
+    ordered = _resolve_peer_addresses(host)
     return ordered[0] if ordered else None
 
 
-def resolve_peers_steps(payload: dict) -> TransitionSteps:
+def peer_family_race(host: str, addresses: list[str]) -> tuple[str, str | None]:
+    """IPv6 к серверу первым для WG/AWG: адрес пира и адрес другого семейства для гонки.
+
+    Первое рукопожатие ``zapret-amnezia.exe`` шлёт на оба адреса, сервер отвечает
+    на одну копию (вторая для него повтор), и сессия остаётся на семействе, которое
+    ответило (``runtime/amnezia/family_race.go``). Первым идёт семейство из памяти
+    (``server_family.MEMORY``): то, что ответило последним, а без памяти — IPv6.
+    """
+
+    ordered = server_family.order_addresses(host, addresses, ipv6_first=True, memory=server_family.MEMORY)
+    if not ordered:
+        return "", None
+    return ordered[0], server_family.has_other_family(ordered, ordered[0])
+
+
+def resolve_peers_steps(payload: dict, *, ipv6_first: bool = False) -> TransitionSteps:
     """Заменить имена пиров адресами до запуска ядра.
 
     Ядро разрешает имя пира открытым запросом к DNS физического адаптера —
@@ -73,6 +98,7 @@ def resolve_peers_steps(payload: dict) -> TransitionSteps:
     """
 
     peers = ((payload or {}).get("endpoint") or {}).get("peers") or []
+    race_host = None
     for peer in peers:
         if not isinstance(peer, dict):
             continue
@@ -84,10 +110,19 @@ def resolve_peers_steps(payload: dict) -> TransitionSteps:
             continue
         except ValueError:
             pass
-        resolved = yield run_in_worker(lambda host=host: _resolve_peer(host))
-        if resolved:
-            peer["address"] = resolved
-    return None
+        addresses = yield run_in_worker(lambda host=host: _resolve_peer_addresses(host))
+        if not addresses:
+            continue
+        # Гонка семейств — только у единственного пира (так проверяет и ядро).
+        if ipv6_first and len(peers) == 1:
+            address, other = peer_family_race(host, addresses)
+            peer["address"] = address
+            if other:
+                peer["race_address"] = other
+                race_host = host
+        else:
+            peer["address"] = addresses[0]
+    return race_host
 
 
 def physical_network(dest_ipv4: str | None = None, *, attempts: int = 5, retry_delay: float = 0.3) -> dict:
@@ -175,6 +210,9 @@ class AmneziaManager(QObject):
         self._is_current = None
         self._health = BackgroundHealthCheck(self)
         self._pending_front_config = None
+        # IPv6 к серверу первым (controller): гонка семейств у единственного пира.
+        self.server_ipv6_first = False
+        self._race_host: str | None = None
         self.last_failure: tuple[str, str] | None = None
 
     @property
@@ -217,8 +255,12 @@ class AmneziaManager(QObject):
         self._identity = dict(session_generation=session_generation, target_generation=target_generation,
                               target_id=context.ref if context else "")
         payload = deepcopy(config)
+        self._race_host = None
         try:
-            yield from resolve_peers_steps(payload)
+            self._race_host = yield from resolve_peers_steps(payload, ipv6_first=self.server_ipv6_first)
+            if self._race_host:
+                self.log_received.emit("[amnezia][stage=address_family] first handshake goes over IPv6 and IPv4, "
+                                       "the first answer wins")
             if self._cancelled():
                 return False
             payload.update((yield from physical_network_steps(_first_peer_ipv4(payload))))
@@ -396,6 +438,8 @@ class AmneziaManager(QObject):
                     self.stats = {**{key: self.stats[key] for key in ("remote_authenticated", "https_check", "front_dns_check") if key in self.stats}, **event}
                 elif stage == "relay_ready":
                     self._relay_ready = True
+                elif stage == "address_family":
+                    self._family_answered(event.get("family"))
                 elif stage in {"core_error", "configure", "netstack", "start", "relay", "process", "bootstrap_dns", "observer"}:
                     self._failed = True
                     self._report(stage, raw)
@@ -412,6 +456,16 @@ class AmneziaManager(QObject):
             except (ValueError, KeyError, TypeError):
                 self._failed = True
                 self._report("observer", "Invalid Amnezia control event: " + redact_runtime_log(line.decode("utf-8", errors="replace")))
+
+    def _family_answered(self, family) -> None:
+        """Сервер ответил по семейству ``family`` (4 или 6): запомнить для этого имени."""
+
+        if family not in (4, 6):
+            return
+        label = "IPv6" if family == 6 else "IPv4"
+        self.log_received.emit(f"[amnezia][stage=address_family] server answered over {label}, kept for this session")
+        if self._race_host:
+            server_family.MEMORY.succeeded_family(self._race_host, family)
 
     def _process_error(self, _error) -> None:
         if not self._expected:

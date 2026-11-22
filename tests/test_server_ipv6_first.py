@@ -284,3 +284,82 @@ class HysteriaFamilyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AmneziaFamilyTests(unittest.TestCase):
+    """WG/AWG: гонка семейств в zapret-amnezia.exe, приложение даёт два адреса и помнит ответ."""
+
+    def setUp(self) -> None:
+        server_family.MEMORY.reset()
+        self.addCleanup(server_family.MEMORY.reset)
+
+    @staticmethod
+    def _lookup(host: str) -> BootstrapResolution:
+        if host == "v4only.example":
+            return BootstrapResolution(frozenset({"203.0.113.9"}), "doh")
+        return BootstrapResolution(frozenset({"2001:db8::7", "203.0.113.7"}), "doh")
+
+    def _resolve(self, peers: list[dict], *, ipv6_first: bool):
+        from xray_fluent.application.async_steps import run_steps_blocking
+        from xray_fluent.engines.amnezia import manager as amnezia_manager
+
+        payload = {"endpoint": {"peers": peers}}
+        with (
+            patch.object(amnezia_manager, "resolve_bootstrap", side_effect=self._lookup),
+            patch.object(amnezia_manager, "register_server_aliases"),
+        ):
+            race_host = run_steps_blocking(amnezia_manager.resolve_peers_steps(payload, ipv6_first=ipv6_first))
+        return race_host, payload["endpoint"]["peers"]
+
+    def test_one_peer_races_ipv6_first_with_ipv4_as_race_address(self) -> None:
+        race_host, peers = self._resolve([{"address": "wg.example", "port": 51820}], ipv6_first=True)
+        self.assertEqual(race_host, "wg.example")
+        self.assertEqual(peers[0]["address"], "2001:db8::7")
+        self.assertEqual(peers[0]["race_address"], "203.0.113.7")
+
+    def test_switch_off_keeps_ipv4_and_no_race(self) -> None:
+        race_host, peers = self._resolve([{"address": "wg.example", "port": 51820}], ipv6_first=False)
+        self.assertIsNone(race_host)
+        self.assertEqual(peers[0]["address"], "203.0.113.7")
+        self.assertNotIn("race_address", peers[0])
+
+    def test_several_peers_or_one_family_do_not_race(self) -> None:
+        race_host, peers = self._resolve(
+            [{"address": "wg.example", "port": 1}, {"address": "other.example", "port": 2}], ipv6_first=True)
+        self.assertIsNone(race_host)
+        self.assertTrue(all("race_address" not in peer for peer in peers))
+        self.assertEqual(peers[0]["address"], "203.0.113.7")
+        race_host, peers = self._resolve([{"address": "v4only.example", "port": 1}], ipv6_first=True)
+        self.assertIsNone(race_host)
+        self.assertEqual(peers[0]["address"], "203.0.113.9")
+
+    def test_the_family_that_answered_leads_next_time_until_the_network_changes(self) -> None:
+        from xray_fluent.engines.amnezia.manager import AmneziaManager
+
+        manager = AmneziaManager()
+        self.addCleanup(manager.deleteLater)
+        manager._race_host = "wg.example"
+        manager._family_answered(4)
+        manager._family_answered("6")  # not a family number: ignored
+        _host, peers = self._resolve([{"address": "wg.example", "port": 51820}], ipv6_first=True)
+        self.assertEqual(peers[0]["address"], "203.0.113.7")
+        self.assertEqual(peers[0]["race_address"], "2001:db8::7")
+        server_family.MEMORY.reset()  # network change
+        _host, peers = self._resolve([{"address": "wg.example", "port": 51820}], ipv6_first=True)
+        self.assertEqual(peers[0]["address"], "2001:db8::7")
+
+    def test_physical_uplink_is_found_through_the_ipv4_race_address(self) -> None:
+        from xray_fluent.engines.amnezia.manager import _first_peer_ipv4
+
+        config = {"endpoint": {"peers": [{"address": "2001:db8::7", "race_address": "203.0.113.7"}]}}
+        self.assertEqual(_first_peer_ipv4(config), "203.0.113.7")
+        self.assertIsNone(_first_peer_ipv4({"endpoint": {"peers": [{"address": "2001:db8::7"}]}}))
+        self.assertEqual(_first_peer_ipv4({"endpoint": {"peers": [{"address": "203.0.113.5"}]}}), "203.0.113.5")
+
+    def test_succeeded_family_ignores_unknown_families(self) -> None:
+        memory = FamilyMemory()
+        memory.succeeded_family("wg.example", 5)
+        memory.succeeded_family("", 4)
+        self.assertTrue(memory.prefer_ipv6("wg.example", True))
+        memory.succeeded_family("wg.example", 4)
+        self.assertFalse(memory.prefer_ipv6("wg.example", True))

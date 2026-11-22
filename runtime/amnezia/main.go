@@ -110,7 +110,14 @@ func run() error {
 		Verbosef: func(format string, args ...any) { j.emit("core", fmt.Sprintf(format, args...), nil) },
 		Errorf:   func(format string, args ...any) { j.emit("core_error", fmt.Sprintf(format, args...), nil) },
 	}
-	core := device.NewDevice(tun, newProtectedBind(c), logger)
+	// Only the family is reported, never the address: logs leave the device.
+	core := device.NewDevice(tun, newProtectedBind(c, func(address netip.AddrPort) {
+		family := 4
+		if address.Addr().Is6() {
+			family = 6
+		}
+		j.emit("address_family", "server answered; keeping this family for the session", map[string]any{"family": family})
+	}), logger)
 	defer core.Close()
 	core.DisableSomeRoamingForBrokenMobileSemantics()
 	if err := core.IpcSet(ipc); err != nil {

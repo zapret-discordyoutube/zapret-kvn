@@ -138,8 +138,12 @@ class FamilyMemory:
         return entry is not None and entry.worked == 6
 
     def succeeded(self, name: str, address: str) -> None:
-        family = _family(address)
-        if not name or not family:
+        self.succeeded_family(name, _family(address))
+
+    def succeeded_family(self, name: str, family: int) -> None:
+        """Сервер ответил по семейству ``family`` (4 или 6), адрес не известен (WG/AWG)."""
+
+        if not name or family not in (4, 6):
             return
         with self._lock:
             self._store(name, _Entry(worked=family))

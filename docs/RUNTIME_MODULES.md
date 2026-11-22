@@ -21,7 +21,8 @@ A server's IPv4 address is often blocked by address while its IPv6 address still
 - Core patch `core-patches/address-family-memory.patch` (same `common/familymemory` as Android 0020): the family that last worked for a server name starts first; cleared on a network change and after 30 minutes.
 - Hysteria2 (`hysteria.exe` with a pinned address): IPv6 pinned first when the start verifies the server; no authentication within 4 s (or all probes failing earlier) restarts the attempt pinned to IPv4 and remembers the IPv6 failure in `server_family.MEMORY` (reset on a network change).
 - Latency probes: one family per temporary core (Xray `UseIP` used to pick at random among both families), with IPv6 first the native race (Xray `happyEyeballs`, sing-box `prefer_ipv6`); the Hysteria probe pins IPv6 only once IPv6 has worked for that server.
-- Not changed: Amnezia (WG/AWG), slot helper processes, Xray standalone mode (Go's own RFC 6555 dial with the system resolver order).
+- Amnezia (WG/AWG, `zapret-amnezia.exe`, one peer): the app resolves the peer and passes the preferred family as `address` (from `server_family.MEMORY`, IPv6 when nothing is remembered) and the other family as `race_address`. The helper's bind (`runtime/amnezia/family_race.go`, same code as Android patch 0021) sends the first handshake to both; the server answers one copy (the second is a replay for it) and the bind keeps that family for the session. Unanswered retries alternate families, so a family that loses only the replies cannot win every time. The helper reports only the family (`address_family` event, never the address) and the app remembers it. No added delay and no restart, unlike the Hysteria2 fallback.
+- Not changed: slot helper processes, Xray standalone mode (Go's own RFC 6555 dial with the system resolver order).
 
 ## Errors
 

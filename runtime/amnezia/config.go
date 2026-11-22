@@ -15,8 +15,12 @@ import (
 )
 
 type peerConfig struct {
-	Address      string          `json:"address"`
-	Port         uint16          `json:"port"`
+	Address string `json:"address"`
+	Port    uint16 `json:"port"`
+	// RaceAddress is the server's address of the other family (the app's
+	// "IPv6 to the server first"): the first handshake goes to both and the
+	// family that answers is kept (family_race.go). One peer only.
+	RaceAddress  string          `json:"race_address,omitempty"`
 	PublicKey    string          `json:"public_key"`
 	PreSharedKey string          `json:"pre_shared_key,omitempty"`
 	AllowedIPs   []string        `json:"allowed_ips"`
@@ -197,6 +201,12 @@ func (c config) validate() ([]netip.Addr, string, error) {
 		address, err := netip.ParseAddr(peer.Address)
 		if err != nil || address.IsUnspecified() || address.IsMulticast() || peer.Port == 0 {
 			return nil, "", fmt.Errorf("peer endpoint must be a resolved unicast IP and nonzero port")
+		}
+		if peer.RaceAddress != "" {
+			race, err := netip.ParseAddr(peer.RaceAddress)
+			if err != nil || race.IsUnspecified() || race.IsMulticast() || race.Unmap().Is4() == address.Unmap().Is4() || len(c.Endpoint.Peers) != 1 {
+				return nil, "", fmt.Errorf("race_address must be a unicast IP of the other family for the only peer")
+			}
 		}
 		fmt.Fprintf(&ipc, "public_key=%s\nendpoint=%s\n", key, netip.AddrPortFrom(address, peer.Port))
 		if peer.PreSharedKey != "" {
