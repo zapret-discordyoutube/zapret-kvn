@@ -924,7 +924,21 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
         self.assertNotIn("warning-private-key", state_text)
         self.assertNotIn("log-secret", logs_text)
 
-    def test_qimage_is_passed_directly_and_only_http_is_accepted(self) -> None:
+    def test_a_real_qr_screenshot_decodes_with_the_real_library(self) -> None:
+        # 0.8.103 app errors crash:TypeError: zxing-cpp 3 takes only buffers, and the old fake accepted a QImage.
+        try:
+            import zxingcpp
+        except ImportError:
+            self.skipTest("zxing-cpp is not installed")
+        code = zxingcpp.create_barcode("https://sub.example/list", zxingcpp.BarcodeFormat.QRCode)
+        pixels = memoryview(zxingcpp.write_barcode_to_image(code, scale=4))
+        height, width = pixels.shape
+        gray = QImage(bytes(pixels), width, height, width, QImage.Format.Format_Grayscale8).copy()
+        for fmt in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32_Premultiplied, QImage.Format.Format_RGB888):
+            with self.subTest(fmt=fmt.name):
+                self.assertEqual(decode_subscription_qr(gray.convertToFormat(fmt)), "https://sub.example/list")
+
+    def test_only_subscription_links_are_accepted(self) -> None:
         image = QImage(2, 2, QImage.Format.Format_RGB32)
         received = []
 
@@ -935,10 +949,13 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
         fake_module = SimpleNamespace(
             read_barcode=read_barcode,
             BarcodeFormat=SimpleNamespace(QRCode=object()),
+            ImageFormat=SimpleNamespace(Lum=object()),
+            ImageView=lambda buffer, width, height, fmt, stride: ("view", len(buffer), width, height, stride),
         )
         with patch.dict(sys.modules, {"zxingcpp": fake_module}):
             self.assertEqual(decode_subscription_qr(image), "https://sub.example/list")
-        self.assertIs(received[0], image)
+        self.assertEqual(received[0][0], "view")
+        self.assertEqual(received[0][2:4], (2, 2))
 
         fake_module.read_barcode = lambda *_args, **_kwargs: SimpleNamespace(
             text="happ://add/https://sub.example/list"
@@ -953,7 +970,6 @@ class SubscriptionStateAndQrTests(unittest.TestCase):
         with patch.dict(sys.modules, {"zxingcpp": fake_module}):
             with self.assertRaises(QrDecodeError):
                 decode_subscription_qr(image)
-
 
 if __name__ == "__main__":
     unittest.main()
