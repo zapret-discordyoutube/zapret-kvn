@@ -149,6 +149,7 @@ func TestProtectedBindRacesBothFamiliesAndKeepsTheOneThatAnswers(t *testing.T) {
 	}
 	var locked []netip.AddrPort
 	bind := newProtectedBind(c, func(address netip.AddrPort) { locked = append(locked, address) })
+	bind.protect = loopbackOnly
 	receivers, _, err := bind.Open(0)
 	if err != nil {
 		t.Fatal(err)
@@ -243,3 +244,7 @@ func TestRaceAddressMustBeTheOtherFamilyOfTheOnlyPeer(t *testing.T) {
 		t.Fatal("no race without race_address")
 	}
 }
+
+// loopbackOnly skips the physical-interface binding in race tests: on Windows
+// it needs a real adapter index, and the race itself does not depend on it.
+func loopbackOnly(*protectedBind) error { return nil }

@@ -16,10 +16,14 @@ type protectedBind struct {
 	race      *familyRace
 	raceEnds  map[netip.AddrPort]conn.Endpoint
 	raceReady bool
+	// protect binds the sockets to the physical interface (protectBind).
+	// Loopback tests of the race replace it: interface binding is Windows
+	// policy, not part of the race.
+	protect func(*protectedBind) error
 }
 
 func newProtectedBind(c config, onLock func(netip.AddrPort)) *protectedBind {
-	b := &protectedBind{StdNetBind: conn.NewStdNetBind().(*conn.StdNetBind), index: c.InterfaceIndex}
+	b := &protectedBind{StdNetBind: conn.NewStdNetBind().(*conn.StdNetBind), index: c.InterfaceIndex, protect: protectBind}
 	for _, peer := range c.Endpoint.Peers {
 		ip := netip.MustParseAddr(peer.Address).Unmap()
 		b.allow4 = b.allow4 || ip.Is4()
@@ -72,7 +76,7 @@ func (b *protectedBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	if err = protectBind(b); err != nil {
+	if err = b.protect(b); err != nil {
 		b.StdNetBind.Close()
 		return nil, 0, err
 	}

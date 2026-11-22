@@ -69,6 +69,7 @@ func raceEnginePair(t *testing.T, preferred string) (server *netstack.Net, clien
 		kept = append(kept, address)
 		access.Unlock()
 	})
+	bind.protect = loopbackOnly
 	clientTun, clientStack, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("10.78.0.2")}, nil, 1280)
 	if err != nil {
 		t.Fatal(err)
