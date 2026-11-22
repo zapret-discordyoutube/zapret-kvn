@@ -253,6 +253,7 @@ def plan_singbox_runtime(
     preferred_protect_password: str = "",
     pool_nodes: list[Node] | None = None,
     share_lan: bool = False,
+    server_ipv6_first: bool = False,
 ) -> SingboxRuntimePlan:
     runtime_config = deepcopy(document.payload)
     strip_singbox_proxy_inbounds(runtime_config)
@@ -282,6 +283,7 @@ def plan_singbox_runtime(
         http_port=selection.http_port,
         clash_api_port=clash_api_port,
         pool_nodes=pool_nodes,
+        server_ipv6_first=server_ipv6_first,
     )
 
 
@@ -294,6 +296,7 @@ def plan_singbox_proxy_runtime(
     preferred_protect_port: int = 0,
     preferred_protect_password: str = "",
     pool_nodes: list[Node] | None = None,
+    server_ipv6_first: bool = False,
 ) -> SingboxRuntimePlan:
     """Build the app-owned SOCKS/HTTP runtime from a raw sing-box profile."""
     runtime_config = deepcopy(document.payload)
@@ -318,6 +321,7 @@ def plan_singbox_proxy_runtime(
         http_port=selection.http_port,
         clash_api_port=clash_api_port,
         pool_nodes=pool_nodes,
+        server_ipv6_first=server_ipv6_first,
     )
 
 
@@ -335,6 +339,7 @@ def _plan_runtime_outbound(
     http_port: int = 0,
     clash_api_port: int = 0,
     pool_nodes: list[Node] | None = None,
+    server_ipv6_first: bool = False,
 ) -> SingboxRuntimePlan:
 
     outbounds = runtime_config.get("outbounds")
@@ -431,6 +436,7 @@ def _plan_runtime_outbound(
             http_port=http_port,
             clash_api_port=clash_api_port,
             pool_nodes=pool_nodes,
+            server_ipv6_first=server_ipv6_first,
         )
 
     native_proxy = build_singbox_outbound(node, tag="proxy")
@@ -448,7 +454,8 @@ def _plan_runtime_outbound(
             continue
         selector_tags[pooled.id] = f"{SINGBOX_PROVIDER_TAG}/{tag}"
         provider_outbounds.append(pooled_outbound)
-        _ensure_proxy_server_bootstrap_contract(runtime_config, pooled_outbound, pooled.server)
+        _ensure_proxy_server_bootstrap_contract(runtime_config, pooled_outbound, pooled.server,
+                                                ipv6_first=server_ipv6_first)
 
     if node.id in selector_tags and provider_outbounds:
         assert isinstance(outbounds, list)
@@ -495,7 +502,8 @@ def _plan_runtime_outbound(
 
     assert isinstance(outbounds, list)
     outbounds[proxy_index] = native_proxy
-    _ensure_proxy_server_bootstrap_contract(runtime_config, native_proxy, node.server)
+    _ensure_proxy_server_bootstrap_contract(runtime_config, native_proxy, node.server,
+                                            ipv6_first=server_ipv6_first)
     _validate_runtime_dns_contract(runtime_config)
     return SingboxRuntimePlan(
         outcome="native_singbox",
@@ -680,6 +688,7 @@ def _plan_hybrid_runtime(
     http_port: int = 0,
     clash_api_port: int = 0,
     pool_nodes: list[Node] | None = None,
+    server_ipv6_first: bool = False,
 ) -> SingboxRuntimePlan:
     try:
         relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(
@@ -751,6 +760,7 @@ def _plan_hybrid_runtime(
     _ensure_hybrid_server_bootstrap(
         runtime_config,
         [node.server, *(str(getattr(pooled, "server", "") or "") for pooled in pool_nodes or [])],
+        ipv6_first=server_ipv6_first,
     )
     _validate_runtime_dns_contract(runtime_config)
 
@@ -917,6 +927,7 @@ def _is_domain_name(value: str) -> bool:
 _APP_BOOTSTRAP_LKG_TAG = "app-bootstrap-lkg"
 _APP_NODE_BOOTSTRAP_TAG = "app-node-bootstrap"
 _TRUSTED_BOOTSTRAP_TAG = "direct-doh"
+_SERVER_IPV6_FIRST_STRATEGY = "prefer_ipv6"
 
 
 def _server_bootstrap_resolver(payload: dict[str, Any], server: str) -> str:
@@ -966,19 +977,30 @@ def _ensure_proxy_server_bootstrap_contract(
     payload: dict[str, Any],
     proxy_outbound: dict[str, Any],
     preferred_server: str,
+    *,
+    ipv6_first: bool = False,
 ) -> None:
     server = str(preferred_server or proxy_outbound.get("server") or "").strip()
+    endpoint = False
     if not server:
         # Endpoint-конфиги (wireguard) не имеют top-level `server` — адрес живёт в peers[0].
         peers = proxy_outbound.get("peers")
         if isinstance(peers, list) and peers and isinstance(peers[0], dict):
             server = str(peers[0].get("address") or "").strip()
+            endpoint = True
     if not _is_domain_name(server):
         return
 
     # Domain-based proxy servers must resolve through bootstrap-dns, otherwise
     # proxy-dns can recurse into the proxy outbound before the tunnel is ready.
-    proxy_outbound["domain_resolver"] = _server_bootstrap_resolver(payload, server)
+    resolver = _server_bootstrap_resolver(payload, server)
+    if ipv6_first and not endpoint:
+        # IPv6 к серверу первым: гонка самого sing-box (IPv6, через 300 мс IPv4,
+        # сразу IPv4 при отказе IPv6) и память семейства (патч address-family-memory).
+        # WG-endpoint берёт один адрес без отката — ему не включаем.
+        proxy_outbound["domain_resolver"] = {"server": resolver, "strategy": _SERVER_IPV6_FIRST_STRATEGY}
+    else:
+        proxy_outbound["domain_resolver"] = resolver
 
     route = _ensure_dict(payload, "route")
     rules = _ensure_list(route, "rules")
@@ -1003,7 +1025,7 @@ def _ensure_proxy_server_bootstrap_contract(
     rules.insert(insert_index, direct_rule)
 
 
-def _ensure_hybrid_server_bootstrap(payload: dict[str, Any], servers: Any) -> None:
+def _ensure_hybrid_server_bootstrap(payload: dict[str, Any], servers: Any, *, ipv6_first: bool = False) -> None:
     """Дать гибридному пути тот же запас адреса сервера, что и нативному узлу.
 
     В гибридном режиме имя сервера приходит от Xray через protect-inbound и
@@ -1022,26 +1044,40 @@ def _ensure_hybrid_server_bootstrap(payload: dict[str, Any], servers: Any) -> No
         rule for rule in rules
         if not (isinstance(rule, dict) and rule.get("action") == "resolve" and rule.get("inbound") == protect)
     ]
-    domains: list[str] = []
+    by_resolver: dict[str, list[str]] = {}
     for raw in servers:
         server = str(raw or "").strip()
-        if not _is_domain_name(server) or server in domains:
+        if not _is_domain_name(server) or any(server in names for names in by_resolver.values()):
             continue
-        if _server_bootstrap_resolver(payload, server) == _APP_NODE_BOOTSTRAP_TAG:
-            domains.append(server)
-    if not domains:
-        return
+        by_resolver.setdefault(_server_bootstrap_resolver(payload, server), []).append(server)
     position = next(
         (index for index, rule in enumerate(rules)
          if isinstance(rule, dict) and rule.get("inbound") == protect and rule.get("outbound") == "direct"),
         0,
     )
-    rules.insert(position, {
-        "inbound": protect,
-        "domain": domains,
-        "action": "resolve",
-        "server": _APP_NODE_BOOTSTRAP_TAG,
-    })
+    generated: list[dict[str, Any]] = []
+    for resolver, domains in by_resolver.items():
+        if ipv6_first:
+            # IPv6 к серверу первым, только TCP: resolve отдаёт direct-outbound адреса
+            # IPv6 впереди, и его гонка (память семейства) берёт IPv6 с быстрым откатом.
+            # UDP открывает один сокет без отката, ему порядок прежний (правило ниже).
+            # Правило resolve не последнее: следующее resolve переписало бы адреса,
+            # поэтому прежнее правило для этих имён сужено до UDP.
+            generated.append({
+                "inbound": protect,
+                "network": ["tcp"],
+                "domain": domains,
+                "action": "resolve",
+                "server": resolver,
+                "strategy": _SERVER_IPV6_FIRST_STRATEGY,
+            })
+        if resolver == _APP_NODE_BOOTSTRAP_TAG:
+            rule: dict[str, Any] = {"inbound": protect}
+            if ipv6_first:
+                rule["network"] = ["udp"]
+            rule.update({"domain": domains, "action": "resolve", "server": _APP_NODE_BOOTSTRAP_TAG})
+            generated.append(rule)
+    rules[position:position] = generated
 
 
 def _ensure_hybrid_desync_routes(payload: dict[str, Any], targets: list[tuple[list[str], dict[str, Any]]]) -> None:
@@ -1473,6 +1509,7 @@ def attach_service_slots(
     assignments: dict[str, Node | None],
     *,
     main_node_id: str | None,
+    server_ipv6_first: bool = False,
 ) -> SingboxRuntimePlan:
     """Service slots on the runtime copy (docs/SERVICE_SLOTS.md, "Phase 3 plan"); nothing when no slot is ticked.
 
@@ -1500,7 +1537,7 @@ def attach_service_slots(
 
     def native(node: Node, tag: str) -> dict[str, Any]:
         outbound = build_singbox_outbound(node, tag=tag)
-        _ensure_proxy_server_bootstrap_contract(config, outbound, node.server)
+        _ensure_proxy_server_bootstrap_contract(config, outbound, node.server, ipv6_first=server_ipv6_first)
         return outbound
 
     plans = plan_slots(

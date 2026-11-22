@@ -254,6 +254,12 @@ class SettingsPage(ScrollablePage):
             parent=network_group,
         )
 
+        self.server_ipv6_card = SwitchSettingCard(
+            FIF.GLOBE, "IPv6 к серверу первым",
+            "Если у сети есть IPv6, подключаться к серверу сначала по нему и быстро переходить на IPv4, когда он не отвечает",
+            parent=network_group,
+        )
+
         self.lan_proxy_card = SwitchSettingCard(
             FIF.SHARE, "Прокси для устройств в локальной сети",
             "PS5, телевизор и другие устройства без своего VPN выходят через этот ПК",
@@ -262,6 +268,7 @@ class SettingsPage(ScrollablePage):
 
         network_group.addSettingCard(self.proxy_bypass_lan_card)
         network_group.addSettingCard(self.reconnect_card)
+        network_group.addSettingCard(self.server_ipv6_card)
         network_group.addSettingCard(self.lan_proxy_card)
         root.addWidget(network_group)
 
@@ -630,6 +637,7 @@ class SettingsPage(ScrollablePage):
         self.subscriptions_startup_check_card.checkedChanged.connect(self._auto_save)
         self.subscriptions_interval_card.spin.valueChanged.connect(self._auto_save)
         self.reconnect_card.checkedChanged.connect(self._auto_save)
+        self.server_ipv6_card.checkedChanged.connect(self._auto_save)
         self.check_updates_card.checkedChanged.connect(self._auto_save)
         self.allow_updates_card.checkedChanged.connect(self._auto_save)
         self.share_updates_lan_card.checkedChanged.connect(self._auto_save)
@@ -701,6 +709,7 @@ class SettingsPage(ScrollablePage):
             clamp_subscriptions_check_interval(settings.subscriptions_check_interval_min)
         )
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)
+        self.server_ipv6_card.setChecked(settings.server_ipv6_first)
         self.check_updates_card.setChecked(settings.check_updates)
         self.allow_updates_card.setChecked(settings.allow_updates)
         self.share_updates_lan_card.setChecked(settings.share_updates_lan)
@@ -865,6 +874,7 @@ class SettingsPage(ScrollablePage):
         data.subscriptions_check_on_startup = self.subscriptions_startup_check_card.isChecked()
         data.subscriptions_check_interval_min = int(self.subscriptions_interval_card.spin.value())
         data.reconnect_on_network_change = self.reconnect_card.isChecked()
+        data.server_ipv6_first = self.server_ipv6_card.isChecked()
         data.check_updates = self.check_updates_card.isChecked()
         data.allow_updates = self.allow_updates_card.isChecked()
         data.share_updates_lan = self.share_updates_lan_card.isChecked()

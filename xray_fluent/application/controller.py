@@ -273,6 +273,7 @@ from ..importer.subscription_parser import validate_filter_patterns
 from ..network.bootstrap_dns import cached_addresses
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
+from ..network import server_family
 from ..network.physical_route import (
     has_network,
     is_physical_fingerprint,
@@ -722,6 +723,7 @@ class AppController(QObject):
     def load(self, state=None, history=None) -> bool:
         try:
             self.state = state if state is not None else self.storage.load()
+            server_family.configure(self.state.settings.server_ipv6_first)
             self._traffic_history = history if history is not None else TrafficHistoryStorage()
             self._traffic_history.set_writer(self._traffic_writer)
         except PassphraseRequired:
@@ -1242,6 +1244,7 @@ class AppController(QObject):
             preferred_protect_password=preferred_protect_password,
             pool_nodes=masking_runtime.masked_nodes(self._pool_candidate_nodes(node), masking),
             share_lan=bool(self.state.settings.lan_proxy_enabled),
+            server_ipv6_first=self._server_ipv6_first(),
         ), node)
 
     # ── Service slots: the main-page card (docs/SERVICE_SLOTS.md, phase 5) ──
@@ -1388,7 +1391,8 @@ class AppController(QObject):
             failed=getattr(self, "_slot_failed", None),
             host_keys=_slot_host_keys,
         )
-        plan = attach_service_slots(plan, {a.slot_id: a.node for a in assignments}, main_node_id=main_id)
+        plan = attach_service_slots(plan, {a.slot_id: a.node for a in assignments}, main_node_id=main_id,
+                                    server_ipv6_first=self._server_ipv6_first())
         # The reason is logged once, when the helpers start (this plan is also built for transition signatures).
         reasons = {a.slot_id: a.reason for a in assignments if a.reason}
         plan.slot_plans = tuple(
@@ -1453,7 +1457,14 @@ class AppController(QObject):
             preferred_protect_port=preferred_protect_port,
             preferred_protect_password=preferred_protect_password,
             pool_nodes=masking_runtime.masked_nodes(self._pool_candidate_nodes(node), masking),
+            server_ipv6_first=self._server_ipv6_first(),
         ), node)
+
+    def _server_ipv6_first(self) -> bool:
+        """IPv6 к серверу первым: настройка включена и у основного подключения есть IPv6."""
+        enabled = bool(getattr(self.state.settings, "server_ipv6_first", True))
+        server_family.configure(enabled)
+        return server_family.server_ipv6_first(enabled)
 
     def _singbox_plan_facts(self, node: Node | None, *, tun: bool) -> SingboxPlanFacts | None:
         """Selector tags / provider / used_selected_node for signatures, cached.
@@ -1689,6 +1700,7 @@ class AppController(QObject):
                     getattr(self, "_hysteria_process_generation", 0)
                 )
                 self._hysteria_active_generation = self._hysteria_process_generation
+                target_manager.server_ipv6_first = self._server_ipv6_first()
                 if not (yield from target_manager.start_steps(
                     plan.hysteria_sidecar.config,
                     plan.hysteria_sidecar.relay_port,
@@ -1921,6 +1933,7 @@ class AppController(QObject):
         generation = self._hysteria_process_generation
         replacement = HysteriaManager(self)
         self._bind_hysteria_manager(replacement)
+        replacement.server_ipv6_first = self._server_ipv6_first()
         self._hysteria_contract.advance(
             HysteriaRuntimeState.STARTING_SIDECAR,
             generation=self._hysteria_contract.session.session_generation,
@@ -4418,6 +4431,7 @@ class AppController(QObject):
     def update_settings(self, settings: AppSettings) -> None:
         settings.proxy_engine = "singbox"
         settings.tun_engine = "singbox"
+        server_family.configure(settings.server_ipv6_first)
         old_settings = self.state.settings
         old_launch = old_settings.launch_on_startup
         old_tun = old_settings.tun_mode
@@ -4929,6 +4943,8 @@ class AppController(QObject):
         if tunnel_addresses and (new in tunnel_addresses or old in tunnel_addresses):
             self._log("[network] ignoring change caused by the tunnel's own address")
             return
+        # Другая сеть может не иметь семейства, которое работало на прежней.
+        server_family.MEMORY.reset()
         if (self.connected and self._desired_connected
                 and not self._transition_active and not self._disconnecting
                 and self.state.settings.reconnect_on_network_change):

@@ -1,0 +1,631 @@
+diff --git a/common/dialer/resolve.go b/common/dialer/resolve.go
+index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..f59fc908124ac71745ff69df1622f71b890eafaf 100644
+--- a/common/dialer/resolve.go
++++ b/common/dialer/resolve.go
+@@ -3,10 +3,12 @@ package dialer
+ import (
+ 	"context"
+ 	"net"
++	"net/netip"
+ 	"sync"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/familymemory"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing/common/bufio"
+@@ -105,12 +107,33 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
+ 		return nil, err
+ 	}
+ 	if d.parallel {
+-		return N.DialParallel(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, d.fallbackDelay)
++		if d.queryOptions.Strategy == C.DomainStrategyPreferIPv6 {
++			return dialRemembered(ctx, d.dialer, network, destination, addresses, d.fallbackDelay)
++		}
++		return N.DialParallel(ctx, d.dialer, network, destination, addresses, false, d.fallbackDelay)
+ 	} else {
+ 		return N.DialSerial(ctx, d.dialer, network, destination, addresses)
+ 	}
+ }
+ 
++// dialRemembered is the IPv6-first race of a server name: sing-box's own
++// DialParallel, started on the family that last worked for this name.
++func dialRemembered(ctx context.Context, dialer N.Dialer, network string, destination M.Socksaddr, addresses []netip.Addr, fallbackDelay time.Duration) (net.Conn, error) {
++	preferIPv6 := familymemory.Default.PreferIPv6(destination.Fqdn, true)
++	conn, err := N.DialParallel(ctx, dialer, network, destination, addresses, preferIPv6, fallbackDelay)
++	if err == nil {
++		RememberSucceeded(destination.Fqdn, conn)
++	}
++	return conn, err
++}
++
++// RememberSucceeded records the family of a connected server socket.
++func RememberSucceeded(name string, conn net.Conn) {
++	if remote := conn.RemoteAddr(); remote != nil {
++		familymemory.Default.Succeeded(name, M.SocksaddrFromNet(remote).Addr)
++	}
++}
++
+ func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+ 	err := d.initialize()
+ 	if err != nil {
+@@ -124,6 +147,10 @@ func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksadd
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if d.queryOptions.Strategy == C.DomainStrategyPreferIPv6 {
++		// One socket, no race: IPv4 stays first unless IPv6 worked for this name.
++		addresses = familymemory.Default.OrderPacket(ctx, destination.Fqdn, addresses, true)
++	}
+ 	conn, destinationAddress, err := N.ListenSerial(ctx, d.dialer, destination, addresses)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/common/dialer/zapret_family_test.go b/common/dialer/zapret_family_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee8f37070c3de78f052685068914c4bebe0abe24
+--- /dev/null
++++ b/common/dialer/zapret_family_test.go
+@@ -0,0 +1,100 @@
++package dialer
++
++import (
++	"context"
++	"net"
++	"net/netip"
++	"sync"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/common/familymemory"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++// familyStubDialer refuses one family at once (like a server whose IPv6
++// answers with RST) and connects the other over an in-memory pipe.
++type familyStubDialer struct {
++	refuse6 bool
++	access  sync.Mutex
++	dialed  []netip.Addr
++}
++
++type remoteConn struct {
++	net.Conn
++	remote net.Addr
++}
++
++func (c remoteConn) RemoteAddr() net.Addr { return c.remote }
++
++func (d *familyStubDialer) DialContext(_ context.Context, _ string, destination M.Socksaddr) (net.Conn, error) {
++	d.access.Lock()
++	d.dialed = append(d.dialed, destination.Addr)
++	d.access.Unlock()
++	if destination.Addr.Is6() == d.refuse6 {
++		return nil, syscall.ECONNREFUSED
++	}
++	client, server := net.Pipe()
++	go server.Close()
++	return remoteConn{Conn: client, remote: destination.TCPAddr()}, nil
++}
++
++func (d *familyStubDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, syscall.EAFNOSUPPORT
++}
++
++func (d *familyStubDialer) first() netip.Addr {
++	d.access.Lock()
++	defer d.access.Unlock()
++	return d.dialed[0]
++}
++
++func TestRememberedRaceStartsOnTheFamilyThatWorked(t *testing.T) {
++	familymemory.Default.Reset()
++	t.Cleanup(familymemory.Default.Reset)
++	v4, v6 := netip.MustParseAddr("192.0.2.20"), netip.MustParseAddr("2001:db8::20")
++	destination := M.ParseSocksaddrHostPort("race.example", 443)
++
++	refusing := &familyStubDialer{refuse6: true}
++	conn, err := dialRemembered(context.Background(), refusing, "tcp", destination, []netip.Addr{v4, v6}, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	conn.Close()
++	if refusing.first() != v6 {
++		t.Fatalf("an unknown server must be tried on IPv6 first, dialed %v", refusing.dialed)
++	}
++	if familymemory.Default.PreferIPv6("race.example", true) {
++		t.Fatal("IPv4 won the race, it must be remembered")
++	}
++
++	next := &familyStubDialer{refuse6: true}
++	conn, err = dialRemembered(context.Background(), next, "tcp", destination, []netip.Addr{v4, v6}, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	conn.Close()
++	if next.first() != v4 {
++		t.Fatalf("the next connection must start on the remembered IPv4, dialed %v", next.dialed)
++	}
++}
++
++func TestRememberedRaceUsesIPv6WhenIPv4IsBlocked(t *testing.T) {
++	familymemory.Default.Reset()
++	t.Cleanup(familymemory.Default.Reset)
++	v4, v6 := netip.MustParseAddr("192.0.2.21"), netip.MustParseAddr("2001:db8::21")
++	destination := M.ParseSocksaddrHostPort("blocked4.example", 443)
++	blocked4 := &familyStubDialer{refuse6: false}
++	conn, err := dialRemembered(context.Background(), blocked4, "tcp", destination, []netip.Addr{v4, v6}, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := M.SocksaddrFromNet(conn.RemoteAddr()).Addr; got != v6 {
++		t.Fatalf("IPv6 must carry the connection, got %s", got)
++	}
++	conn.Close()
++	if !familymemory.Default.PreferIPv6("blocked4.example", false) {
++		t.Fatal("IPv6 won, it must be remembered")
++	}
++}
+diff --git a/common/familymemory/memory.go b/common/familymemory/memory.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d727db1ed0e3aa3b48645c2c5ed7905f277e1eed
+--- /dev/null
++++ b/common/familymemory/memory.go
+@@ -0,0 +1,209 @@
++// Package familymemory remembers, per VPN server name, which IP address
++// family last carried a working connection and which one last failed.
++//
++// Zapret KVN prefers IPv6 for the outer connection to a VPN server (an IPv4
++// address is often blocked by address while the IPv6 one is not). The race
++// itself belongs to the existing dialers: sing-box's DialParallel for TCP and
++// the official Hysteria client's own reconnect for QUIC. This package only
++// decides the order, so a family that just failed is not tried first again on
++// every new connection, and an IPv6 path that never answers costs its delay
++// once per TTL instead of once per connection.
++//
++// The memory is in-process only, keyed by the server name the dialer
++// resolved, and is forgotten on a network change (Reset) or after TTL.
++package familymemory
++
++import (
++	"context"
++	"net/netip"
++	"sync"
++	"time"
++)
++
++// DefaultTTL is how long a remembered outcome steers the order.
++const DefaultTTL = 30 * time.Minute
++
++const maxEntries = 256
++
++type family uint8
++
++const (
++	familyNone family = 0
++	family4    family = 4
++	family6    family = 6
++)
++
++func familyOf(address netip.Addr) family {
++	address = address.Unmap()
++	switch {
++	case address.Is4():
++		return family4
++	case address.Is6():
++		return family6
++	default:
++		return familyNone
++	}
++}
++
++type entry struct {
++	worked family
++	failed family
++	at     time.Time
++}
++
++// Memory is safe for concurrent use.
++type Memory struct {
++	access  sync.Mutex
++	ttl     time.Duration
++	now     func() time.Time
++	entries map[string]entry
++}
++
++// New returns an empty memory. now may be nil (time.Now).
++func New(ttl time.Duration, now func() time.Time) *Memory {
++	if now == nil {
++		now = time.Now
++	}
++	return &Memory{ttl: ttl, now: now, entries: make(map[string]entry)}
++}
++
++// Default is the process-wide memory used by the protected server dialers.
++var Default = New(DefaultTTL, nil)
++
++func (m *Memory) fresh(name string) (entry, bool) {
++	current, loaded := m.entries[name]
++	if !loaded {
++		return entry{}, false
++	}
++	if m.now().Sub(current.at) > m.ttl {
++		delete(m.entries, name)
++		return entry{}, false
++	}
++	return current, true
++}
++
++func (m *Memory) store(name string, value entry) {
++	if _, loaded := m.entries[name]; !loaded && len(m.entries) >= maxEntries {
++		var oldestName string
++		var oldest time.Time
++		for key, item := range m.entries {
++			if oldestName == "" || item.at.Before(oldest) {
++				oldestName, oldest = key, item.at
++			}
++		}
++		delete(m.entries, oldestName)
++	}
++	value.at = m.now()
++	m.entries[name] = value
++}
++
++// PreferIPv6 tells a racing dialer which family to start first for name.
++// preferIPv6 is the resolver's own preference; it is returned unchanged when
++// nothing fresh is remembered.
++func (m *Memory) PreferIPv6(name string, preferIPv6 bool) bool {
++	m.access.Lock()
++	defer m.access.Unlock()
++	current, loaded := m.fresh(name)
++	if !loaded {
++		return preferIPv6
++	}
++	switch {
++	case current.worked != familyNone:
++		return current.worked == family6
++	case current.failed == family6:
++		return false
++	case current.failed == family4:
++		return true
++	default:
++		return preferIPv6
++	}
++}
++
++// Order returns addresses with the family to try first in front, keeping the
++// resolver's order inside each family. The input slice is not modified.
++func (m *Memory) Order(name string, addresses []netip.Addr, preferIPv6 bool) []netip.Addr {
++	return orderFamilies(addresses, m.PreferIPv6(name, preferIPv6))
++}
++
++// OrderPacket orders the addresses of a UDP socket that is opened once, with
++// no race. A caller that reports outcomes (WithOutcomeReports) follows Order,
++// so a failed family is replaced on its next connect. A caller that does not
++// report has no way back from a dead family, so it keeps IPv4 first unless
++// this name has already worked over IPv6.
++func (m *Memory) OrderPacket(ctx context.Context, name string, addresses []netip.Addr, preferIPv6 bool) []netip.Addr {
++	if ReportsOutcome(ctx) {
++		return m.Order(name, addresses, preferIPv6)
++	}
++	m.access.Lock()
++	current, loaded := m.fresh(name)
++	m.access.Unlock()
++	return orderFamilies(addresses, loaded && current.worked == family6)
++}
++
++// Succeeded records that a connection to address carried traffic.
++func (m *Memory) Succeeded(name string, address netip.Addr) {
++	value := familyOf(address)
++	if name == "" || value == familyNone {
++		return
++	}
++	m.access.Lock()
++	defer m.access.Unlock()
++	m.store(name, entry{worked: value})
++}
++
++// Failed records that a connection to address did not complete.
++func (m *Memory) Failed(name string, address netip.Addr) {
++	value := familyOf(address)
++	if name == "" || value == familyNone {
++		return
++	}
++	m.access.Lock()
++	defer m.access.Unlock()
++	current, _ := m.fresh(name)
++	if current.worked == value {
++		current.worked = familyNone
++	}
++	current.failed = value
++	m.store(name, current)
++}
++
++// Reset forgets every outcome; called when the underlying network changes.
++func (m *Memory) Reset() {
++	m.access.Lock()
++	defer m.access.Unlock()
++	clear(m.entries)
++}
++
++func orderFamilies(addresses []netip.Addr, ipv6First bool) []netip.Addr {
++	ordered := make([]netip.Addr, 0, len(addresses))
++	first, second := family4, family6
++	if ipv6First {
++		first, second = family6, family4
++	}
++	for _, wanted := range []family{first, second} {
++		for _, address := range addresses {
++			if familyOf(address) == wanted {
++				ordered = append(ordered, address)
++			}
++		}
++	}
++	for _, address := range addresses {
++		if familyOf(address) == familyNone {
++			ordered = append(ordered, address)
++		}
++	}
++	return ordered
++}
++
++type outcomeReportsKey struct{}
++
++// WithOutcomeReports marks a dial whose caller calls Succeeded/Failed itself.
++func WithOutcomeReports(ctx context.Context) context.Context {
++	return context.WithValue(ctx, outcomeReportsKey{}, true)
++}
++
++// ReportsOutcome reports whether ctx was marked by WithOutcomeReports.
++func ReportsOutcome(ctx context.Context) bool {
++	reports, _ := ctx.Value(outcomeReportsKey{}).(bool)
++	return reports
++}
+diff --git a/common/familymemory/memory_test.go b/common/familymemory/memory_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6ad16a47bd274a13efd99ad4d1ee04c4ff09eba
+--- /dev/null
++++ b/common/familymemory/memory_test.go
+@@ -0,0 +1,174 @@
++package familymemory
++
++import (
++	"context"
++	"fmt"
++	"net/netip"
++	"sync"
++	"testing"
++	"time"
++)
++
++var (
++	v4 = netip.MustParseAddr("194.87.115.138")
++	v6 = netip.MustParseAddr("2a03:6f02::175a")
++)
++
++type clock struct{ at time.Time }
++
++func (c *clock) now() time.Time { return c.at }
++
++func newTestMemory() (*Memory, *clock) {
++	c := &clock{at: time.Unix(1_800_000_000, 0)}
++	return New(time.Minute, c.now), c
++}
++
++func TestUnknownNameKeepsResolverPreference(t *testing.T) {
++	m, _ := newTestMemory()
++	if !m.PreferIPv6("node.example", true) || m.PreferIPv6("node.example", false) {
++		t.Fatal("an unknown name must keep the resolver preference")
++	}
++}
++
++func TestIPv4WinAfterIPv6PreferenceStartsIPv4First(t *testing.T) {
++	m, _ := newTestMemory()
++	m.Succeeded("node.example", v4)
++	if m.PreferIPv6("node.example", true) {
++		t.Fatal("IPv4 carried the last connection, it must be tried first")
++	}
++	m.Succeeded("node.example", v6)
++	if !m.PreferIPv6("node.example", true) {
++		t.Fatal("IPv6 carried the last connection, it must be tried first")
++	}
++}
++
++func TestFailureFlipsOrderUntilTTL(t *testing.T) {
++	m, c := newTestMemory()
++	m.Failed("node.example", v6)
++	got := m.Order("node.example", []netip.Addr{v6, v4}, true)
++	if got[0] != v4 || got[1] != v6 {
++		t.Fatalf("after an IPv6 failure IPv4 goes first, got %v", got)
++	}
++	c.at = c.at.Add(2 * time.Minute)
++	got = m.Order("node.example", []netip.Addr{v6, v4}, true)
++	if got[0] != v6 {
++		t.Fatalf("an expired failure must not steer the order, got %v", got)
++	}
++}
++
++func TestFailureOfWorkingFamilyForgetsIt(t *testing.T) {
++	m, _ := newTestMemory()
++	m.Succeeded("node.example", v6)
++	m.Failed("node.example", v6)
++	if m.PreferIPv6("node.example", true) {
++		t.Fatal("the family that worked and then failed must not stay first")
++	}
++	m.Failed("node.example", v4)
++	if !m.PreferIPv6("node.example", true) {
++		t.Fatal("after IPv4 failed too, the next try returns to IPv6")
++	}
++}
++
++func TestMappedIPv4CountsAsIPv4(t *testing.T) {
++	m, _ := newTestMemory()
++	m.Succeeded("node.example", netip.AddrFrom16(v4.As16()))
++	if m.PreferIPv6("node.example", true) {
++		t.Fatal("::ffff:a.b.c.d is IPv4")
++	}
++}
++
++func TestPacketWithoutReportsKeepsIPv4FirstUntilIPv6Worked(t *testing.T) {
++	m, _ := newTestMemory()
++	ctx := context.Background()
++	got := m.OrderPacket(ctx, "node.example", []netip.Addr{v6, v4}, true)
++	if got[0] != v4 {
++		t.Fatalf("a socket with no way back must not start on unproven IPv6, got %v", got)
++	}
++	m.Succeeded("node.example", v6)
++	got = m.OrderPacket(ctx, "node.example", []netip.Addr{v6, v4}, true)
++	if got[0] != v6 {
++		t.Fatalf("IPv6 proven for this name may be used, got %v", got)
++	}
++}
++
++func TestPacketWithReportsTriesIPv6First(t *testing.T) {
++	m, _ := newTestMemory()
++	ctx := WithOutcomeReports(context.Background())
++	if !ReportsOutcome(ctx) || ReportsOutcome(context.Background()) {
++		t.Fatal("outcome marker")
++	}
++	got := m.OrderPacket(ctx, "node.example", []netip.Addr{v4, v6}, true)
++	if got[0] != v6 {
++		t.Fatalf("a reporting caller starts on IPv6, got %v", got)
++	}
++	m.Failed("node.example", v6)
++	got = m.OrderPacket(ctx, "node.example", []netip.Addr{v4, v6}, true)
++	if got[0] != v4 {
++		t.Fatalf("its next connect replaces the failed family, got %v", got)
++	}
++}
++
++func TestOrderKeepsResolverOrderInsideFamilyAndDoesNotMutate(t *testing.T) {
++	m, _ := newTestMemory()
++	a4, b6 := netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("2001:db8::2")
++	input := []netip.Addr{v4, b6, a4, v6}
++	got := m.Order("node.example", input, true)
++	want := []netip.Addr{b6, v6, v4, a4}
++	if fmt.Sprint(got) != fmt.Sprint(want) {
++		t.Fatalf("got %v want %v", got, want)
++	}
++	if input[0] != v4 || input[1] != b6 {
++		t.Fatal("input slice was modified")
++	}
++}
++
++func TestResetAndEmptyName(t *testing.T) {
++	m, _ := newTestMemory()
++	m.Succeeded("", v4)
++	m.Failed("", v6)
++	m.Succeeded("node.example", v4)
++	m.Reset()
++	if !m.PreferIPv6("node.example", true) || len(m.entries) != 0 {
++		t.Fatal("Reset must forget every name, empty names are never stored")
++	}
++}
++
++func TestEntriesAreBounded(t *testing.T) {
++	m, c := newTestMemory()
++	for index := 0; index < maxEntries+10; index++ {
++		c.at = c.at.Add(time.Millisecond)
++		m.Succeeded(fmt.Sprintf("node-%d.example", index), v4)
++	}
++	if len(m.entries) != maxEntries {
++		t.Fatalf("entries=%d", len(m.entries))
++	}
++	if _, kept := m.entries["node-0.example"]; kept {
++		t.Fatal("the oldest entry must be dropped first")
++	}
++}
++
++func TestConcurrentUse(t *testing.T) {
++	m := New(time.Minute, nil)
++	var group sync.WaitGroup
++	for worker := 0; worker < 8; worker++ {
++		group.Add(1)
++		go func(worker int) {
++			defer group.Done()
++			name := fmt.Sprintf("node-%d.example", worker%3)
++			for index := 0; index < 500; index++ {
++				switch index % 4 {
++				case 0:
++					m.Succeeded(name, v6)
++				case 1:
++					m.Failed(name, v4)
++				case 2:
++					_ = m.Order(name, []netip.Addr{v4, v6}, true)
++				default:
++					_ = m.OrderPacket(context.Background(), name, []netip.Addr{v4, v6}, true)
++				}
++			}
++			m.Reset()
++		}(worker)
++	}
++	group.Wait()
++}
+diff --git a/protocol/direct/outbound.go b/protocol/direct/outbound.go
+index af8826b892c22a8322ab96fb9876edb805d672ba..4664c5fe82234c5d03c7fa015c714eacda638bcf 100644
+--- a/protocol/direct/outbound.go
++++ b/protocol/direct/outbound.go
+@@ -10,6 +10,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
+ 	"github.com/sagernet/sing-box/common/dialer"
++	"github.com/sagernet/sing-box/common/familymemory"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+@@ -223,7 +224,23 @@ func (h *Outbound) DialParallel(ctx context.Context, network string, destination
+ 	case N.NetworkUDP:
+ 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+ 	}
+-	return dialer.DialParallelNetwork(ctx, h.dialer, network, destination, destinationAddresses, len(destinationAddresses) > 0 && destinationAddresses[0].Is6(), nil, nil, nil, h.fallbackDelay)
++	return h.dialParallelRemembered(ctx, network, destination, destinationAddresses, nil, nil, nil, h.fallbackDelay)
++}
++
++// dialParallelRemembered races the families like upstream (IPv6 first when the
++// resolver put it first) and, for a name resolved IPv6-first, starts on the
++// family that last worked for it and remembers the winner (common/familymemory).
++func (h *Outbound) dialParallelRemembered(ctx context.Context, network string, destination M.Socksaddr, destinationAddresses []netip.Addr, networkStrategy *C.NetworkStrategy, networkType []C.InterfaceType, fallbackNetworkType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, error) {
++	preferIPv6 := len(destinationAddresses) > 0 && destinationAddresses[0].Is6()
++	remembered := preferIPv6 && destination.IsDomain()
++	if remembered {
++		preferIPv6 = familymemory.Default.PreferIPv6(destination.Fqdn, true)
++	}
++	conn, err := dialer.DialParallelNetwork(ctx, h.dialer, network, destination, destinationAddresses, preferIPv6, networkStrategy, networkType, fallbackNetworkType, fallbackDelay)
++	if err == nil && remembered {
++		dialer.RememberSucceeded(destination.Fqdn, conn)
++	}
++	return conn, err
+ }
+ 
+ func (h *Outbound) DialParallelNetwork(ctx context.Context, network string, destination M.Socksaddr, destinationAddresses []netip.Addr, networkStrategy *C.NetworkStrategy, networkType []C.InterfaceType, fallbackNetworkType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, error) {
+@@ -240,7 +257,7 @@ func (h *Outbound) DialParallelNetwork(ctx context.Context, network string, dest
+ 	case N.NetworkUDP:
+ 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+ 	}
+-	return dialer.DialParallelNetwork(ctx, h.dialer, network, destination, destinationAddresses, len(destinationAddresses) > 0 && destinationAddresses[0].Is6(), networkStrategy, networkType, fallbackNetworkType, fallbackDelay)
++	return h.dialParallelRemembered(ctx, network, destination, destinationAddresses, networkStrategy, networkType, fallbackNetworkType, fallbackDelay)
+ }
+ 
+ func (h *Outbound) ListenSerialNetworkPacket(ctx context.Context, destination M.Socksaddr, destinationAddresses []netip.Addr, networkStrategy *C.NetworkStrategy, networkType []C.InterfaceType, fallbackNetworkType []C.InterfaceType, fallbackDelay time.Duration) (net.PacketConn, netip.Addr, error) {
+diff --git a/route/network.go b/route/network.go
+index a9dacbf4f12b8d43daa401bcc6a52966f6fec67d..c14f9e37d2315529ad371973b86e5ec7bb131654 100644
+--- a/route/network.go
++++ b/route/network.go
+@@ -13,6 +13,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/familymemory"
+ 	"github.com/sagernet/sing-box/common/settings"
+ 	"github.com/sagernet/sing-box/common/taskmonitor"
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -453,6 +454,8 @@ func (r *NetworkManager) UpdateWIFIState(ctx context.Context) {
+ }
+ 
+ func (r *NetworkManager) ResetNetwork(ctx context.Context) {
++	// A new network may lack the family that worked on the previous one.
++	familymemory.Default.Reset()
+ 	if r.connectionManager != nil {
+ 		r.connectionManager.CloseAll()
+ 	}

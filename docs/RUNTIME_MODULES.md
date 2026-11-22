@@ -12,6 +12,17 @@ Protocol adapters retain the original imported URI. Xray needs native JSON, so i
 
 Legacy Windows Xray-front and tun2socks selections migrate to sing-box. Existing raw Xray configuration files are retained, not translated or overwritten. Auto connect is disabled during that migration: users must review their sing-box rules before explicitly reconnecting. Existing sing-box users keep auto connect.
 
+## IPv6 to the VPN server first (owner decision 2026-11-22)
+
+A server's IPv4 address is often blocked by address while its IPv6 address still works. With the setting «IPv6 к серверу первым» (Settings → network, on by default) and a native global IPv6 address on the PC's uplink (`xray_fluent/network/server_family.py`, adapter data only, no probe), each core gets IPv6 first in its own native way:
+
+- sing-box native outbounds: `domain_resolver: {server, strategy: prefer_ipv6}` (`_ensure_proxy_server_bootstrap_contract`); sing-box races IPv6, then IPv4 after 300 ms or at once on failure. WG endpoints are unchanged.
+- Xray (hybrid, dialed by sing-box through the protect inbound): app `resolve` rules on the protect inbound with `network: tcp` and `strategy: prefer_ipv6` for every server name; the direct outbound races the families. UDP keeps its previous order (one socket, no way back).
+- Core patch `core-patches/address-family-memory.patch` (same `common/familymemory` as Android 0020): the family that last worked for a server name starts first; cleared on a network change and after 30 minutes.
+- Hysteria2 (`hysteria.exe` with a pinned address): IPv6 pinned first when the start verifies the server; no authentication within 4 s (or all probes failing earlier) restarts the attempt pinned to IPv4 and remembers the IPv6 failure in `server_family.MEMORY` (reset on a network change).
+- Latency probes: one family per temporary core (Xray `UseIP` used to pick at random among both families), with IPv6 first the native race (Xray `happyEyeballs`, sing-box `prefer_ipv6`); the Hysteria probe pins IPv6 only once IPv6 has worked for that server.
+- Not changed: Amnezia (WG/AWG), slot helper processes, Xray standalone mode (Go's own RFC 6555 dial with the system resolver order).
+
 ## Errors
 
 `xray_fluent/diagnostics/runtime-errors.json` and Android's `app/src/main/resources/runtime-errors.json` are the same catalog. An error is evidence first: component, operation stage, original message, session generation and a target identity only when the producer can prove it. The catalog supplies classification, never replacement prose. Unknown messages remain visible.

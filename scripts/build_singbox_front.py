@@ -22,6 +22,9 @@ BROWSER_FETCH_PATCH = "browser-fetch.patch"
 # «Маскировка», пакеты-обманки: движок common/kvndesync (тот же, что Android 0017) и опция
 # маршрута `kvn_desync` для сокета VPN-сервера (беспорядок, разрез); обманка — штатный tls_spoof.
 KVN_DESYNC_PATCH = "kvn-desync.patch"
+# IPv6 к серверу первым: память семейства адресов (common/familymemory, тот же код, что
+# Android 0020) для гонки sing-box и прямого outbound, сброс при смене сети.
+ADDRESS_FAMILY_PATCH = "address-family-memory.patch"
 # Signs that upstream already stopped scanning the whole connection table per
 # lookup (sing dev 4ca3bebe: keyed TCP owner lookup; any table cache/single-flight).
 UPSTREAM_OWNER_LOOKUP_MARKERS = ("FindSocketOwner", "nsiGetTCPConnection", "singleflight")
@@ -132,6 +135,9 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     desync_patch = manifest.parent / KVN_DESYNC_PATCH
     apply_exact_patch(source, desync_patch, what="маршрутные опции", port_hint=(
         f"перенесите патч {desync_patch.name} на новую версию sing-box"))
+    family_patch = manifest.parent / ADDRESS_FAMILY_PATCH
+    apply_exact_patch(source, family_patch, what="набор адресов сервера", port_hint=(
+        f"перенесите патч {family_patch.name} на новую версию sing-box"))
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
     # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
@@ -151,6 +157,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, '-ldflags=-checklinkname=0',
                     './common/kvndesync', './route/rule', '-count=1'],
                    cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
+    subprocess.run([go, 'test', '-mod=readonly', './common/familymemory', './common/dialer', '-count=1'],
+                   cwd=source, check=True)
     for tags_variant in ("", "with_low_memory"):
         subprocess.run([go, "test", "-mod=readonly", "-tags", tags_variant,
                         "github.com/sagernet/sing/common/network", "-run", "^TestZapret", "-count=1"],
@@ -171,7 +179,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                   "dns_warning_patch_sha256": sha256(dns_patch),
                   "process_lookup_patch_sha256": sha256(process_patch),
                   "browser_fetch_patch_sha256": sha256(browser_patch),
-                  "kvn_desync_patch_sha256": sha256(desync_patch)}
+                  "kvn_desync_patch_sha256": sha256(desync_patch),
+                  "address_family_patch_sha256": sha256(family_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
 

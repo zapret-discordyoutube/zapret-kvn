@@ -586,6 +586,7 @@ class AppSettings:
     masking: dict[str, Any] = field(default_factory=dict)
     launch_on_startup: bool = False
     reconnect_on_network_change: bool = True
+    server_ipv6_first: bool = True  # к VPN-серверу сначала по IPv6 (если у сети есть IPv6), быстрый откат на IPv4
     xray_path: str = ""
     log_level: str = "warning"
     check_updates: bool = True
@@ -680,6 +681,7 @@ class AppSettings:
             "masking": dict(self.masking),
             "launch_on_startup": self.launch_on_startup,
             "reconnect_on_network_change": self.reconnect_on_network_change,
+            "server_ipv6_first": self.server_ipv6_first,
             "xray_path": self.xray_path,
             "log_level": self.log_level,
             "check_updates": self.check_updates,
@@ -760,6 +762,7 @@ class AppSettings:
             masking=dict(data["masking"]) if isinstance(data.get("masking"), dict) else {},
             launch_on_startup=bool(data.get("launch_on_startup", False)),
             reconnect_on_network_change=bool(data.get("reconnect_on_network_change", True)),
+            server_ipv6_first=bool(data.get("server_ipv6_first", True)),
             xray_path=str(data.get("xray_path") or ""),
             log_level=str(data.get("log_level") or "warning"),
             check_updates=bool(data.get("check_updates", True)),

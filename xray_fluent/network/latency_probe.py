@@ -52,6 +52,7 @@ from ..constants import (
 from ..engines.hysteria.config_adapter import pin_server_address
 from ..engines.singbox.config_builder import build_singbox_outbound, is_singbox_endpoint_node
 from ..profiles.models import Node
+from . import server_family
 from .bootstrap_dns import BootstrapNameNotFound, resolve_bootstrap
 from .speed_test_worker import (
     SPEED_TEST_USER_AGENT,
@@ -130,11 +131,12 @@ def _no_system_lookup(_host: str) -> set[str]:
     return set()
 
 
-def server_addresses(host: str, resolve=resolve_bootstrap) -> list[str] | None:
+def server_addresses(host: str, resolve=resolve_bootstrap, *, ipv6_first: bool = False) -> list[str] | None:
     """IP сервера своим DoH или из кеша; ``None`` — не узнать без открытого DNS.
 
     ``BootstrapNameNotFound`` пробрасывается: доверенный резолвер подтвердил,
-    что имени нет.
+    что имени нет. Порядок — ``server_family.order_addresses``: IPv4 первым,
+    с «IPv6 к серверу первым» — IPv6 первым (память семейств та же, что у подключения).
     """
 
     try:
@@ -148,25 +150,53 @@ def server_addresses(host: str, resolve=resolve_bootstrap) -> list[str] | None:
     except OSError:
         return None
     addresses = sorted(resolution.addresses, key=lambda value: (ipaddress.ip_address(value).version, value))
+    addresses = server_family.order_addresses(host, addresses, ipv6_first=ipv6_first, memory=server_family.MEMORY)
     return addresses or None
+
+
+def _family_of(value: str) -> int:
+    try:
+        return ipaddress.ip_address(value).version
+    except ValueError:
+        return 0
+
+
+def _first_family(addresses: list[str]) -> list[str]:
+    """Только адреса первого семейства: одно ядро без гонки — одно семейство."""
+
+    family = _family_of(addresses[0]) if addresses else 0
+    return [value for value in addresses if _family_of(value) == family] or list(addresses)
 
 
 # ── конфиги временных ядер ───────────────────────────────────────────────
 
 
-def _xray_config(node: Node, port: int, host: str, addresses: list[str]) -> dict:
+def _xray_config(node: Node, port: int, host: str, addresses: list[str], ipv6_first: bool = False) -> dict:
     config = build_speed_test_config(node, port)
     if host not in addresses:
+        dual = len({_family_of(value) for value in addresses}) > 1
+        # Без гонки UseIP выбирает адрес наугад из обоих семейств: на сети без
+        # IPv6 половина замеров сервера с AAAA уходила в никуда. Поэтому одно
+        # семейство, а с «IPv6 первым» — родная гонка Xray (happyEyeballs).
+        race = ipv6_first and dual
+        pinned = list(addresses) if race else _first_family(addresses)
         # Адрес сервера — из hosts встроенного DNS Xray, а не от системы.
-        config["dns"] = {"hosts": {host: addresses}}
+        config["dns"] = {"hosts": {host: pinned}}
         outbound = config["outbounds"][0]
         stream = outbound.setdefault("streamSettings", {})
         sockopt = stream.setdefault("sockopt", {})
         sockopt["domainStrategy"] = "UseIP"
+        if race:
+            sockopt["happyEyeballs"] = {
+                "prioritizeIPv6": _family_of(addresses[0]) == 6,
+                "tryDelayMs": 250,
+                "interleave": 1,
+                "maxConcurrentTry": 2,
+            }
     return config
 
 
-def _singbox_config(node: Node, port: int, host: str, addresses: list[str]) -> dict:
+def _singbox_config(node: Node, port: int, host: str, addresses: list[str], ipv6_first: bool = False) -> dict:
     config: dict = {
         "log": {"level": "panic"},
         "inbounds": [{"type": "http", "tag": "probe-in", "listen": PROXY_HOST, "listen_port": int(port)}],
@@ -180,14 +210,22 @@ def _singbox_config(node: Node, port: int, host: str, addresses: list[str]) -> d
         config["outbounds"] = [build_singbox_outbound(node, tag="proxy")]
     if host not in addresses:
         config["dns"] = {"servers": [{"type": "hosts", "tag": "probe-hosts", "predefined": {host: addresses}}]}
-        config["route"]["default_domain_resolver"] = "probe-hosts"
+        if ipv6_first and _family_of(addresses[0]) == 6:
+            # Та же гонка sing-box, что у подключения: IPv6, через 300 мс IPv4.
+            config["route"]["default_domain_resolver"] = {"server": "probe-hosts", "strategy": "prefer_ipv6"}
+        else:
+            config["route"]["default_domain_resolver"] = "probe-hosts"
     return config
 
 
-def _hysteria_config(node: Node, port: int, host: str, addresses: list[str]) -> dict:
+def _hysteria_config(node: Node, port: int, host: str, addresses: list[str], ipv6_first: bool = False) -> dict:
     config = build_hysteria_speed_test_config(node, port)
     if host not in addresses:
-        config = pin_server_address(config, addresses[0])
+        # Один закреплённый адрес без отката: IPv6 — только если он уже работал с этим сервером.
+        ordered = server_family.order_addresses(
+            host, addresses, ipv6_first=ipv6_first, memory=server_family.MEMORY, proven_only=True,
+        )
+        config = pin_server_address(config, ordered[0])
     return config
 
 
@@ -199,14 +237,16 @@ class _Launch:
     cwd: str | None
 
 
-def _launch(node: Node, port: int, host: str, addresses: list[str], paths: CorePaths) -> _Launch | None:
+def _launch(
+    node: Node, port: int, host: str, addresses: list[str], paths: CorePaths, ipv6_first: bool = False,
+) -> _Launch | None:
     core = protocol_core(node)
     if core is ProtocolCore.XRAY:
         if not Path(paths.xray).is_file():
             return None
         exe = str(prepare_speed_test_xray(Path(paths.xray), SPEED_TEST_XRAY_PATH))
         return _Launch(
-            _xray_config(node, port, host, addresses), [exe, "run", "-c"],
+            _xray_config(node, port, host, addresses, ipv6_first), [exe, "run", "-c"],
             _speed_test_env(Path(paths.xray)), None,
         )
     if core is ProtocolCore.HYSTERIA:
@@ -214,7 +254,7 @@ def _launch(node: Node, port: int, host: str, addresses: list[str], paths: CoreP
             return None
         exe = str(prepare_speed_test_xray(Path(paths.hysteria), SPEED_TEST_HYSTERIA_PATH))
         return _Launch(
-            _hysteria_config(node, port, host, addresses),
+            _hysteria_config(node, port, host, addresses, ipv6_first),
             [exe, "--disable-update-check", "--log-level", "error", "client", "--config"],
             None, str(Path(paths.hysteria).parent),
         )
@@ -223,7 +263,7 @@ def _launch(node: Node, port: int, host: str, addresses: list[str], paths: CoreP
             return None
         exe = str(prepare_speed_test_xray(Path(paths.singbox), SPEED_TEST_SINGBOX_PATH))
         return _Launch(
-            _singbox_config(node, port, host, addresses), [exe, "run", "--disable-color", "-c"],
+            _singbox_config(node, port, host, addresses, ipv6_first), [exe, "run", "--disable-color", "-c"],
             None, str(Path(paths.singbox).parent),
         )
     return None  # AmneziaWG: своего прокси-режима у ядра нет
@@ -370,11 +410,12 @@ def _probe_once(
     host = str(node.server or "").strip().strip("[]")
     if not host or not node.port:
         return ProbeResult(UNMEASURED, reason="у сервера нет адреса")
+    ipv6_first = server_family.probe_ipv6_first()
     if resolve is None:
         addresses = [host]  # ядро разрешит имя само
     else:
         try:
-            addresses = server_addresses(host, resolve)
+            addresses = server_addresses(host, resolve, ipv6_first=ipv6_first)
         except BootstrapNameNotFound:
             return ProbeResult(NO_ANSWER, reason=_NAME_MISSING)
         if not addresses:
@@ -382,7 +423,7 @@ def _probe_once(
 
     port = _pick_port(PROXY_HOST, PROBE_HTTP_PORT)
     try:
-        launch = _launch(node, port, host, addresses, paths or CorePaths())
+        launch = _launch(node, port, host, addresses, paths or CorePaths(), ipv6_first)
     except (ValueError, KeyError, TypeError) as exc:
         return ProbeResult(UNMEASURED, reason=f"конфиг ядра не собрать: {exc}")
     if launch is None:

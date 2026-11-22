@@ -28,6 +28,7 @@ from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 from ..health_check import BackgroundHealthCheck
 from ..sidecar import wait_for_loopback_relay_steps
 from ...network.bootstrap_dns import resolve_bootstrap
+from ...network import server_family
 from .config_adapter import pin_server_address, server_host
 from .runtime_contract import (
     SECURITY_FAILURES,
@@ -49,6 +50,10 @@ _TUNNEL_CHECK_WAVES = 2
 # start_steps(): the in-flight attempt saw a Chrome-parrot TLS rejection and
 # must be repeated once with disableChromeParrot (no nested start()).
 _RETRY_WITHOUT_CHROME_PARROT = object()
+_RETRY_OTHER_FAMILY = object()
+# Сколько ждать авторизации сервера на закреплённом IPv6, прежде чем перезапустить
+# ту же попытку на IPv4 (QUIC-рукопожатие на живом пути занимает доли секунды).
+_IPV6_FAMILY_WINDOW_S = 4.0
 
 
 def _still_wanted(should_continue: Callable[[], bool] | None) -> bool:
@@ -119,6 +124,10 @@ class HysteriaManager(QObject):
         self._attempt_started_at = 0.0
         self._remote_authenticated = False
         self.stats: dict[str, Any] = {}
+        # IPv6 к серверу первым (настройка и IPv6 у сети; задаёт controller перед запуском).
+        self.server_ipv6_first = False
+        self._family_pin: tuple[str, str, tuple[str, ...]] | None = None
+        self._family_retry_address: str | None = None
         self._health = BackgroundHealthCheck(self)
         # Ошибка транспорта в логе работающего туннеля — повод для проверки,
         # а не приговор серверу: failure уходит, только если проверка провалена.
@@ -215,6 +224,18 @@ class HysteriaManager(QObject):
                 should_continue=should_continue,
                 compatibility_retry=_compatibility_retry,
             )
+            while started is _RETRY_OTHER_FAMILY:
+                started = yield from self._start_attempt_steps(
+                    config,
+                    relay_port,
+                    context=context,
+                    process_generation=process_generation,
+                    allow_parallel=allow_parallel,
+                    verify_remote=verify_remote,
+                    should_continue=should_continue,
+                    compatibility_retry=_compatibility_retry,
+                )
+            self._family_retry_address = None
             while started is _RETRY_WITHOUT_CHROME_PARROT:
                 retry_config = self._chrome_fallback_config()
                 if retry_config is None:
@@ -244,7 +265,7 @@ class HysteriaManager(QObject):
         finally:
             self._start_depth -= 1
 
-    def _trusted_server_address_steps(self, config: dict[str, Any]) -> TransitionSteps:
+    def _trusted_server_address_steps(self, config: dict[str, Any], *, verify_remote: bool = True) -> TransitionSteps:
         """Адрес сервера — из доверенного DoH приложения, а не от DNS провайдера.
 
         Официальный клиент разрешает имя сервера системным резолвером; на сети,
@@ -268,10 +289,18 @@ class HysteriaManager(QObject):
             return config
         if resolution.source == "system" or not resolution.addresses:
             return config
-        address = sorted(
-            resolution.addresses, key=lambda value: (ipaddress.ip_address(value).version, value),
-        )[0]
-        self._emit_log(f"server address from trusted DNS ({resolution.source})", stage="resolve")
+        # IPv6 первым — только при проверке сервера после запуска: она видит, что
+        # IPv6 не ответил, и перезапускает попытку на IPv4. Без неё закреплённый
+        # IPv6 остался бы без отката, и порядок прежний (IPv4 первым).
+        ordered = server_family.order_addresses(
+            host, resolution.addresses,
+            ipv6_first=self.server_ipv6_first and verify_remote,
+            memory=server_family.MEMORY,
+        )
+        address = self._family_retry_address if self._family_retry_address in ordered else ordered[0]
+        self._family_pin = (host, address, tuple(ordered))
+        family = "IPv6" if ":" in address else "IPv4"
+        self._emit_log(f"server address from trusted DNS ({resolution.source}), {family}", stage="resolve")
         return pin_server_address(config, address)
 
     def _start_attempt_steps(
@@ -351,7 +380,8 @@ class HysteriaManager(QObject):
                 yield sleep_ms(500)
             if attempt_generation != self._compatibility_generation or not _still_wanted(should_continue):
                 return False
-        config = yield from self._trusted_server_address_steps(config)
+        self._family_pin = None
+        config = yield from self._trusted_server_address_steps(config, verify_remote=verify_remote)
         if attempt_generation != self._compatibility_generation or not _still_wanted(should_continue):
             return False
         self._cleanup_config()
@@ -424,14 +454,27 @@ class HysteriaManager(QObject):
         socks = socks if isinstance(socks, dict) else {}
         readiness_generation = self._compatibility_generation
         if verify_remote:
+            fallback_address = self._ipv6_fallback_address()
             remote_ready = yield from self._wait_until_remote_ready_steps(
                 relay_port,
                 username=str(socks.get("username") or ""),
                 password=str(socks.get("password") or ""),
                 should_continue=should_continue,
+                family_window=_IPV6_FAMILY_WINDOW_S if fallback_address else None,
             )
             if self._chrome_fallback_pending and readiness_generation == self._compatibility_generation:
                 return _RETRY_WITHOUT_CHROME_PARROT
+            if remote_ready is _RETRY_OTHER_FAMILY and fallback_address:
+                host, address, _ordered = self._family_pin or ("", "", ())
+                server_family.MEMORY.failed(host, address)
+                self._family_retry_address = fallback_address
+                self._emit_log(
+                    f"server did not answer over IPv6 in {_IPV6_FAMILY_WINDOW_S:g} s, retrying over IPv4",
+                    stage="address_family",
+                )
+                self._starting = False
+                yield from self.stop_steps(expected=True, _preserve_compatibility=True)
+                return _RETRY_OTHER_FAMILY
             if not remote_ready:
                 if readiness_generation != self._compatibility_generation:
                     return False
@@ -458,12 +501,23 @@ class HysteriaManager(QObject):
                 stage="functional_ready",
             )
 
+        if self._family_pin is not None and verify_remote:
+            server_family.MEMORY.succeeded(self._family_pin[0], self._family_pin[1])
         # Hysteria has parsed the config by the time its SOCKS listener is
         # ready. Do not leave the URI/passwords on disk for the whole session.
         self._cleanup_config()
         self._starting = False
         self._mark_running()
         return True
+
+    def _ipv6_fallback_address(self) -> str | None:
+        """IPv4 того же сервера, если попытка закрепила IPv6 и есть куда откатиться."""
+        if self._family_pin is None or self._family_retry_address is not None:
+            return None
+        _host, address, ordered = self._family_pin
+        if ":" not in address:
+            return None
+        return server_family.has_other_family(ordered, address)
 
     def _begin_attempt(
         self,
@@ -568,10 +622,17 @@ class HysteriaManager(QObject):
         password: str,
         timeout: float = 15.0,
         should_continue: Callable[[], bool] | None = None,
+        family_window: float | None = None,
     ) -> TransitionSteps:
-        """Prove HTTPS egress without making one external provider authoritative."""
+        """Prove HTTPS egress without making one external provider authoritative.
+
+        ``family_window``: the server is pinned on IPv6 and has an IPv4 address;
+        without the server's authentication in this many seconds the attempt
+        returns ``_RETRY_OTHER_FAMILY`` instead of waiting out ``timeout``.
+        """
 
         deadline = time.monotonic() + timeout
+        family_deadline = time.monotonic() + family_window if family_window else None
         generation = self._compatibility_generation
         failures: dict[str, str] = {}
         attempts = 0
@@ -614,6 +675,9 @@ class HysteriaManager(QObject):
                 if self._remote_authenticated:
                     self._monitor_health(executor, futures, failures, generation)
                     return True
+                if family_deadline is not None and time.monotonic() >= family_deadline:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return _RETRY_OTHER_FAMILY
                 completed = [future for future in futures if future.done()]
                 for future in completed:
                     endpoint = futures.pop(future)
@@ -642,6 +706,9 @@ class HysteriaManager(QObject):
                 )
                 return True
             yield sleep_ms(100)
+        if family_deadline is not None and not self._remote_authenticated and not abandoned():
+            # IPv6 failed fast (no route, refused): every probe ended before the window.
+            return _RETRY_OTHER_FAMILY
         if failures:
             summary = "; ".join(
                 f"{host}={detail}" for host, detail in sorted(failures.items())
