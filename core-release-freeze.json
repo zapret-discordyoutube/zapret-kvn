@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "releases": {
-    "windows": "0.8.105",
-    "android": "v0.6.50"
+    "windows": "0.8.106",
+    "android": "v0.6.51"
   },
-  "checked_at_utc": "2026-11-22T16:57:24.591189+00:00",
+  "checked_at_utc": "2026-11-22T18:13:33.845893+00:00",
   "amnezia": {
     "id": "amnezia",
     "repository": "amnezia-vpn/amneziawg-go",
@@ -43,8 +43,8 @@
       "runtime/amnezia/go.sum": "f0500c449e0dd06ea7c291bb99994b7c194899bf3173e2c8b18a814e949ebed1"
     },
     "android": {
-      "core.properties": "42ed62229c79689abc4aaa5d4074506d478d1b0e504884da428e8e5f94c3a070",
-      "core-patches/series.sha256": "00adeefcb787d9d1bbb8a3e3fcb32c70ed85f61893ae07e2b2b80ee1af700a54",
+      "core.properties": "810c895ec6583f50ac936cc8bcfd5c8f77ebe19adf0f53770f57ee917e29f0fa",
+      "core-patches/series.sha256": "ad67e1f231883e5aa5e4ee05296c05d8ebbdc7810b51c1d453c13e925743a185",
       "core-patches/0005-official-amnezia-wg-unified.patch": "29b64e439388638f4237cd1ddaa23782adef63f15b51435c7d77e6a6144fd709"
     }
   }
