@@ -216,7 +216,7 @@ frames (`Class.method:line` / `module.function:line`, innermost first, at most 1
 address or a URL; vpnbot groups crashes itself. A subscription failure says only whether the link is our service's
 (`ours`) and which way it was fetched (`route`). The same error while unsent adds to its count; one code is sent at most
 once a day per app version (`app_errors.AppErrorStore`), so a broken install does not flood. Errors during an attempt on a chosen server
-(LOCAL_*, NETWORK_LOST) stay in the server's report. Sources: an uncaught exception in the main or any thread (`sys.excepthook`, `threading.excepthook`); a start that failed before a server was chosen; a subscription fetch that failed (`sub:http_4xx|http_5xx|timeout|dns|tls|refused|reset|unreachable|parse`); a failed update (`update:<code>` of the updater); TUN without administrator rights (`perm:not_admin`); a profile store that could not be read or written (`storage:load|save`).
+(LOCAL_*, NETWORK_LOST) stay in the server's report. Sources: an uncaught exception in the main or any thread (`sys.excepthook`, `threading.excepthook`); a start that failed before a server was chosen; a subscription fetch that failed (`sub:http_4xx|http_5xx|timeout|dns|tls|refused|reset|unreachable|parse`); a failed update (`update:<code>` of the updater); the program's exe replaced while it runs (`update:exe_replaced`, docs/RUNTIME_MODULES.md); TUN without administrator rights (`perm:not_admin`); a profile store that could not be read or written (`storage:load|save`).
 
 ## The notice shows vpnbot's verdict
 

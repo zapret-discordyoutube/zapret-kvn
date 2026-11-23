@@ -178,6 +178,28 @@ def _note_crash(exc_type, exc_traceback) -> None:
         pass
 
 
+def _on_exe_replaced() -> None:
+    _bootstrap_logger.warning("[update] The program file was replaced while running; modules keep loading from the original")
+    try:
+        from xray_fluent.client_reports import app_errors
+        from xray_fluent.platform.frozen_archive import APP_ERROR
+
+        app_errors.note(app_errors.AppError(app_errors.STEP_UPDATE, APP_ERROR))
+    except Exception:
+        pass
+
+
+def _pin_module_archive() -> None:
+    """Lazy imports read this build's exe even after it is replaced (xray_fluent/platform/frozen_archive.py)."""
+    try:
+        from xray_fluent.platform import frozen_archive
+
+        if frozen_archive.install(_on_exe_replaced):
+            _bootstrap_logger.info("Module archive pinned to the running exe")
+    except Exception:
+        _bootstrap_logger.exception("Failed to pin the module archive")
+
+
 def _install_exception_hooks() -> None:
     sys.excepthook = _log_unhandled_exception
     threading.excepthook = _log_background_exception
@@ -362,6 +384,7 @@ def main() -> int:
 
     _setup_bootstrap_logging()
     _install_exception_hooks()
+    _pin_module_archive()
     _enforce_frozen()
 
     parser = argparse.ArgumentParser(description="zapret kvn")
