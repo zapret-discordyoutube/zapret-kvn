@@ -50,8 +50,10 @@ def _spin_until(condition, timeout_s: float) -> bool:
     return condition()
 
 
-@unittest.skipUnless(_RUNNABLE, "needs Windows, QApplication and the bundled sing-box core")
-class WarpEntryE2E(unittest.TestCase):
+class _WarpE2EBase(unittest.TestCase):
+    # True: the account points the tunnel at an address nothing answers, like a network that drops the WARP UDP ports.
+    BLOCKED = False
+
     @classmethod
     def setUpClass(cls) -> None:
         from xray_fluent.application import runtime_services
@@ -64,6 +66,13 @@ class WarpEntryE2E(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix="zkvn-e2e-warp-"))
         cls.account = cls.tmp / "warp-entry-profile.json"
         cls.registration = warp_registration.ensure_account(cls.account)  # the real API
+        if cls.BLOCKED:
+            import json
+
+            document = json.loads(cls.account.read_text(encoding="utf-8"))
+            for peer in document["peers"]:
+                peer["endpoint"] = {"v4": "192.0.2.1:2408", "v6": "", "host": "192.0.2.1:2408", "ports": [2408]}
+            cls.account.write_text(json.dumps(document), encoding="utf-8")
         cls.patchers = [
             patch.object(runtime_services, "start_metrics_worker", lambda controller: None),
             patch("xray_fluent.application.server_bypass.ServerBypass.learn_pool_addresses", lambda self: False),
@@ -98,6 +107,8 @@ class WarpEntryE2E(unittest.TestCase):
         cls.node = node
         cls.logs: list[str] = []
         controller.log_line.connect(cls.logs.append)
+        cls.statuses: list[tuple[str, str]] = []
+        controller.status.connect(lambda level, message: cls.statuses.append((level, message)))
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -117,6 +128,9 @@ class WarpEntryE2E(unittest.TestCase):
     def _seen(self, text: str) -> bool:
         return any(text in line for line in self.logs)
 
+
+@unittest.skipUnless(_RUNNABLE, "needs Windows, QApplication and the bundled sing-box core")
+class WarpEntryE2E(_WarpE2EBase):
     def test_the_account_was_registered_by_the_app_over_the_real_api(self) -> None:
         self.assertTrue(self.registration.ok, str(self.registration))
         self.assertTrue(self.account.is_file())
@@ -164,6 +178,43 @@ class WarpEntryE2E(unittest.TestCase):
             "no reply of the host came back through the hop in 110 s\n" + evidence(),
         )
         self.assertFalse(self._seen("endpoint not initialized"), evidence())
+
+
+@unittest.skipUnless(_RUNNABLE, "needs Windows, QApplication and the bundled sing-box core")
+class WarpEntryBlockedE2E(_WarpE2EBase):
+    BLOCKED = True
+
+    def test_a_tunnel_that_never_comes_up_is_named_to_the_user(self) -> None:
+        from xray_fluent.application.selection_source import SelectionSource
+        from xray_fluent.network.warp_hop_health import TUNNEL_DOWN
+
+        c = self.controller
+        c.set_selected_node(self.node.id, source=SelectionSource.NODES_MENU)
+        if not c._desired_connected:
+            c.toggle_connection()
+        self.assertTrue(_spin_until(lambda: c._active_session is not None and c.connected, 60), "\n".join(self.logs[-40:]))
+        session = c._active_session
+        import threading
+        import urllib.request
+
+        def browse() -> None:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{session.http_port}"})
+            )
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and not any(TUNNEL_DOWN == m for _, m in self.statuses):
+                try:
+                    opener.open("http://example.com/", timeout=10).read(16)
+                except Exception:  # noqa: BLE001 - nothing can answer here
+                    pass
+                time.sleep(0.5)
+
+        threading.Thread(target=browse, daemon=True).start()
+        self.assertTrue(
+            _spin_until(lambda: any(TUNNEL_DOWN == m for _, m in self.statuses), 70),
+            "the user was not told that the tunnel does not come up\n" + "\n".join(self.logs[-40:]),
+        )
+        self.assertTrue(self._seen("[warp-entry] Вход через WARP не поднимается"), "the message is not in the log")
 
 
 if __name__ == "__main__":

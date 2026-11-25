@@ -275,6 +275,7 @@ from ..network.bootstrap_dns import resolve_bootstrap
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
 from ..network import entry_hop, server_family, warp_registration
+from ..network.warp_hop_health import HopHealth
 from ..network.physical_route import (
     has_network,
     is_physical_fingerprint,
@@ -412,6 +413,9 @@ def _slot_host_keys(node: Node) -> frozenset[str]:
     return keys
 
 
+# How long after the connect the app writes what the core said about the WARP hop (one line).
+_WARP_SUMMARY_MS = 40_000
+
 class AppController(QObject):
     runtime_errors_changed = pyqtSignal(object)
     # Снимок реестра после каждой операции системного прокси (очередь WinAPI
@@ -473,6 +477,10 @@ class AppController(QObject):
         # the account is registered through the VPN once it is up (see _ensure_warp_account_steps).
         self._warp_hop_suspended = False
         self._warp_register_via_vpn = False
+        self._warp_health: HopHealth | None = None
+        self._warp_summary_timer = QTimer(self)
+        self._warp_summary_timer.setSingleShot(True)
+        self._warp_summary_timer.timeout.connect(self._log_warp_health_summary)
         self.connection_changed.connect(self._on_connection_changed_for_warp)
         # slot id -> servers whose helper did not start this app run: the next launch picks another one.
         self._slot_failed: dict[str, set[str]] = {}
@@ -1490,20 +1498,31 @@ class AppController(QObject):
         this one connection, said so in the message), and the account is registered through the VPN as soon as it is
         up; the next start then enters through the hop."""
         self._warp_hop_suspended = False
+        self._warp_health = None
+        self._warp_summary_timer.stop()
         profile = self._warp_entry_profile()
         if not profile:
             return
+        # What the core says about the hop is counted from here to the summary line (warp_hop_health.py).
+        self._warp_health = HopHealth()
+        self._warp_summary_timer.start(_WARP_SUMMARY_MS)
         if warp_registration.account_file_ready(profile):
             # One line per connect while the setting is on: its absence in a report means the setting was off at connect.
             self._log("[warp-entry] вход через WARP включён, аккаунт WARP готов")
             return
+        started = time.monotonic()
         outcome = yield run_in_worker(
             lambda: warp_registration.ensure_account(profile, addresses=lambda: list(resolve_bootstrap(warp_registration.API_HOST).addresses))
         )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         if outcome.ok:
-            self._log(f"[warp-entry] аккаунт WARP зарегистрирован, путь: {outcome.route}")
+            self._log(f"[warp-entry] аккаунт WARP зарегистрирован, путь: {outcome.route}, {elapsed_ms} мс")
             return
-        self._log(f"[warp-entry] аккаунт WARP не зарегистрировать напрямую ({outcome.route}: {outcome.detail})")
+        self._log(
+            f"[warp-entry] аккаунт WARP не зарегистрировать напрямую ({outcome.route}: {outcome.detail}), {elapsed_ms} мс"
+        )
+        self._warp_health = None
+        self._warp_summary_timer.stop()
         self._warp_hop_suspended = True
         self._warp_register_via_vpn = True
         self.status.emit(
@@ -1512,6 +1531,11 @@ class AppController(QObject):
             "без входа через WARP, адрес сервера на этот раз виден провайдеру. После подключения аккаунт будет "
             "зарегистрирован через VPN, и вход через WARP включится сам.",
         )
+
+    def _log_warp_health_summary(self) -> None:
+        health = self._warp_health
+        if health is not None and (self.connected or self._desired_connected):
+            self._log(health.summary(_WARP_SUMMARY_MS // 1000))
 
     def _on_connection_changed_for_warp(self, connected: bool) -> None:
         if connected and self._warp_register_via_vpn:
@@ -4759,6 +4783,11 @@ class AppController(QObject):
         self._on_core_log("xray", line)
 
     def _on_core_log(self, engine: str, line: str) -> None:
+        if engine == "sing-box" and self._warp_health is not None:
+            notice = self._warp_health.observe(line)
+            if notice:
+                self._log(f"[warp-entry] {notice}")
+                self.status.emit("warning-long", notice)
         if "DNS_FALLBACK server=" in line:
             self._report_dns_fallback(line)
         health_log = engine == "hysteria" and re.match(
