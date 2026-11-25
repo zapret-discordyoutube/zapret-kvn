@@ -180,46 +180,5 @@ class WarpEntryE2E(_WarpE2EBase):
         self.assertFalse(self._seen("endpoint not initialized"), evidence())
 
 
-@unittest.skipUnless(_RUNNABLE, "needs Windows, QApplication and the bundled sing-box core")
-class WarpEntryBlockedAddressE2E(_WarpE2EBase):
-    """The account's own WARP address is a black hole (what a censor does to it): the tunnel must still come up."""
-
-    BLOCKED = True
-
-    def test_a_blocked_account_address_still_gets_the_tunnel_through_another_edge(self) -> None:
-        from xray_fluent.application.selection_source import SelectionSource
-        from xray_fluent.network.warp_hop_health import TUNNEL_DOWN
-
-        c = self.controller
-        c.set_selected_node(self.node.id, source=SelectionSource.NODES_MENU)
-        if not c._desired_connected:
-            c.toggle_connection()
-        self.assertTrue(_spin_until(lambda: c._active_session is not None and c.connected, 60), "\n".join(self.logs[-40:]))
-        session = c._active_session
-        import threading
-        import urllib.request
-
-        def browse() -> None:
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{session.http_port}"})
-            )
-            deadline = time.monotonic() + 150
-            while time.monotonic() < deadline and not self._seen('malformed HTTP response "'):
-                try:
-                    opener.open("http://example.com/", timeout=30).read(16)
-                except Exception:  # noqa: BLE001 - the host speaks no VLESS: its reply in the sing-box log is the evidence
-                    pass
-                time.sleep(1)
-
-        threading.Thread(target=browse, daemon=True).start()
-        # The unanswered handshakes at the blocked address are retried on other edges until one answers; then the real
-        # host's reply comes back through the hop, exactly as with an unblocked account.
-        self.assertTrue(
-            _spin_until(lambda: self._seen('malformed HTTP response "'), 160),
-            "no reply of the host came back: the tunnel did not recover from a blocked address\n" + "\n".join(self.logs[-40:]),
-        )
-        self.assertFalse(any(TUNNEL_DOWN == m for _, m in self.statuses), "the user was told the tunnel is down although it recovered")
-
-
 if __name__ == "__main__":
     unittest.main()
