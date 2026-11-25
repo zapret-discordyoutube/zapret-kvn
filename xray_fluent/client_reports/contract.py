@@ -65,6 +65,8 @@ _HOST_NAME = re.compile(r"[A-Za-z0-9.-]{1,253}")
 _PSEUDO = re.compile(r"(\d+\.\d+\.\d+)-0\.\d{14}-([0-9a-f]{12})")
 NETWORK_TYPES = frozenset({"wifi", "cellular", "ethernet", "other"})
 MODES = frozenset({"tun", "proxy"})
+MAX_WARP_RETRIES = 100
+SETTING_KEYS = ("mode", "dns", "masking", "quic_blocked", "ipv6", "warp_entry")
 VERSION_KEYS = frozenset({"os", "xray", "hysteria", "singbox", "amnezia"})
 MAX_FOREIGN_NAME = 64
 
@@ -140,6 +142,8 @@ class ReportSettings:
     masking: str | None = None
     quic_blocked: bool | None = None
     ipv6: bool | None = None
+    #: The «Вход через Cloudflare WARP» hop was on at this connect (kept out until vpnbot admits it: k.WARP_LIVE).
+    warp_entry: bool | None = None
 
     def cleaned(self) -> ReportSettings | None:
         result = ReportSettings(
@@ -148,6 +152,7 @@ class ReportSettings:
             masking=self.masking if self.masking and _SETTING.fullmatch(self.masking) else None,
             quic_blocked=self.quic_blocked if isinstance(self.quic_blocked, bool) else None,
             ipv6=self.ipv6 if isinstance(self.ipv6, bool) else None,
+            warp_entry=self.warp_entry if k.WARP_LIVE and isinstance(self.warp_entry, bool) else None,
         )
         return None if result == ReportSettings() else result
 
@@ -163,6 +168,8 @@ class AttemptDetails:
     network_type: str | None = None
     settings: ReportSettings | None = None
     versions: tuple[tuple[str, str], ...] = ()
+    #: WARP hop: handshake retries on other addresses since the connect (k.WARP_LIVE gates it).
+    warp_retries: int | None = None
 
     def cleaned(self) -> AttemptDetails:
         ip = (self.server_ip or "").strip().strip("[]")
@@ -179,6 +186,9 @@ class AttemptDetails:
                 (key, value) for key, value in self.versions
                 if key in VERSION_KEYS and isinstance(value, str) and _VERSION_VALUE.fullmatch(value)
             )),
+            warp_retries=(self.warp_retries if k.WARP_LIVE and isinstance(self.warp_retries, int)
+                          and not isinstance(self.warp_retries, bool) and 0 <= self.warp_retries <= MAX_WARP_RETRIES
+                          else None),
         )
 
 
@@ -353,12 +363,12 @@ def batch_json(install_id: str, app: AppIdentity, records: list[AttemptRecord], 
 def _details_json(details: AttemptDetails) -> dict[str, object]:
     """The optional schema 2 fields: only known values (absent = unknown)."""
     out: dict[str, object] = {}
-    for key in ("server_ip", "port", "transport", "security", "network_type"):
+    for key in ("server_ip", "port", "transport", "security", "network_type", "warp_retries"):
         value = getattr(details, key)
         if value is not None:
             out[key] = value
     if details.settings is not None:
-        settings = {key: getattr(details.settings, key) for key in ("mode", "dns", "masking", "quic_blocked", "ipv6")}
+        settings = {key: getattr(details.settings, key) for key in SETTING_KEYS}
         out["settings"] = {key: value for key, value in settings.items() if value is not None}
     if details.versions:
         out["versions"] = dict(details.versions)
@@ -371,7 +381,8 @@ def _details_from(data: dict) -> AttemptDetails:
     return AttemptDetails(
         server_ip=data.get("server_ip"), port=data.get("port"), transport=data.get("transport"),
         security=data.get("security"), network_type=data.get("network_type"),
-        settings=ReportSettings(**{key: settings.get(key) for key in ("mode", "dns", "masking", "quic_blocked", "ipv6")})
+        warp_retries=data.get("warp_retries"),
+        settings=ReportSettings(**{key: settings.get(key) for key in SETTING_KEYS})
         if settings else None,
         versions=tuple((str(key), value) for key, value in versions.items()),
     ).cleaned()

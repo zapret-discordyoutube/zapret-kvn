@@ -17,12 +17,21 @@ from dataclasses import dataclass
 HEALTH = "health"
 HEALTH_LIVE = True
 
+#: The WARP entry hop's start (owner 2026-11-25: «make more logs and put them in the database»): the app's own account
+#: registration and whether the hop's tunnel came up. Agreed with the WARP chat; vpnbot must admit the two names (and
+#: settings.warp_entry, details warp_retries) first: until its «live» message everything WARP stays out of the report,
+#: because a report with an unknown probe is refused whole.
+WARP_REGISTER = "warp_register"
+WARP_TUNNEL = "warp_tunnel"
+WARP_PROBES = (WARP_REGISTER, WARP_TUNNEL)
+WARP_LIVE = False
+
 #: Every probe the contract admits, in its order.
 PROBES = (
     "control_front", "control_neutral", "dns_system", "dns_doh", "tcp_preflight", "tcp_target", "tcp_443",
     "tls_real", "tls_neutral", "tls_front", "quic_neutral", "quic_target", "tunnel_a", "tunnel_b", "direct_a",
     "direct_b", "flow",
-) + ((HEALTH,) if HEALTH_LIVE else ())
+) + ((HEALTH,) if HEALTH_LIVE else ()) + (WARP_PROBES if WARP_LIVE else ())
 #: Probes that move data: only they may carry ``b``.
 FLOW_PROBES = frozenset({"tunnel_a", "tunnel_b", "direct_a", "direct_b", "flow"})
 DNS_PROBES = frozenset({"dns_system", "dns_doh"})
@@ -90,6 +99,21 @@ def check_json(check: Check) -> dict[str, object]:
     if check.same is not None:
         item["same"] = bool(check.same)
     return item
+
+
+def warp_checks(facts: object | None) -> dict[str, Check]:
+    """The WARP hop's probes from the app's own facts (``WarpFacts`` of the controller; read by name so this module
+    never imports the network layer). Empty until vpnbot admits them (WARP_LIVE), when the hop was off, and for a
+    step that did not run (None: the account already existed, nothing was asked)."""
+    if not WARP_LIVE or facts is None or getattr(facts, "enabled", False) is not True:
+        return {}
+    found: dict[str, Check] = {}
+    for probe, step in ((WARP_REGISTER, getattr(facts, "register", None)), (WARP_TUNNEL, getattr(facts, "tunnel", None))):
+        if isinstance(step, tuple) and len(step) == 2 and isinstance(step[1], int) and not isinstance(step[1], bool):
+            check = Check(str(step[0]), clamp_ms(step[1]))
+            if is_valid_check(probe, check):
+                found[probe] = check
+    return found
 
 
 def clamp_ms(value: float) -> int:

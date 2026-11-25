@@ -38,6 +38,7 @@ from .contract import (
     INGEST_FEEDS,
     AttemptDetails,
     ForeignServer,
+    ReportSettings,
     short_version,
     new_report_id,
     FAILED_FOR_MS,
@@ -258,6 +259,8 @@ class _PendingFailure:
         self.relay: Relay | None = None
         self.checks: dict[str, Check] = {}
         self.probed_address: str | None = None
+        #: The WARP hop's facts of this connect (WarpFacts or None): settings.warp_entry and warp_retries.
+        self.warp: object | None = None
         self.record: AttemptRecord | None = None
         self.status = SendStatus.NOT_OURS if ref is None and target is None else SendStatus.AVAILABLE
 
@@ -356,6 +359,7 @@ class ClientReporter:
         target: ProbeTarget | None = None,
         attempt: int = 0,
         name: str = "",
+        warp: object | None = None,
     ) -> None:
         """One finished attempt; ``relay`` asks for the VLESS probe before the verdict. A report is written only for
         a server of the service; the path check and the notice work for any server."""
@@ -363,7 +367,7 @@ class ClientReporter:
             if facts.succeeded:
                 self._clear_failure()
             return
-        self._spawn(lambda: self._attempt(ref, scheme, facts, elapsed_ms, attempted_at_ms, relay, target, attempt, name))
+        self._spawn(lambda: self._attempt(ref, scheme, facts, elapsed_ms, attempted_at_ms, relay, target, attempt, name, warp))
 
     def begin_attempt(self, attempt: int) -> None:
         """A new connection attempt: the previous failure leaves the notice."""
@@ -428,6 +432,7 @@ class ClientReporter:
         target: ProbeTarget | None = None,
         attempt: int = 0,
         name: str = "",
+        warp: object | None = None,
     ) -> None:
         udp = str(scheme or "").lower() in UDP_SCHEMES
         no_data: Relay | None = None
@@ -449,18 +454,21 @@ class ClientReporter:
             tcp_preflight_failed=facts.tcp_preflight_failed, udp_transport=udp,
         )
         if facts.cancelled or facts.succeeded:
-            found: dict[str, Check] = {}
+            found: dict[str, Check] = dict(k.warp_checks(warp)) if facts.succeeded else {}
             if facts.succeeded:
                 flow = self._check_flow(target)
                 if flow is not None:
                     found["flow"] = flow
                 self._clear_failure()
             if ref is not None:
-                self._write(ref, outcome_of(facts), elapsed_ms, attempted_at_ms, self._details(target, None),
+                self._write(ref, outcome_of(facts), elapsed_ms, attempted_at_ms, self._details(target, None, warp),
                             carrier=self._carrier(target, scheme), core_code="", found=found)
             return
         pending = _PendingFailure(attempt, ref, scheme, facts, elapsed_ms, attempted_at_ms, target, name)
         pending.relay = no_data
+        # The hop's own start (facts the app already has, no traffic): goes with the first copy of the failure.
+        pending.checks.update(k.warp_checks(warp))
+        pending.warp = warp
         if health is not None and not attempt_core_code(facts):
             # A fact the app already has (vpnbot 2026-11-20): it costs no traffic, so no rarity limit; it goes with
             # the first copy.
@@ -525,7 +533,7 @@ class ClientReporter:
             return None
         return self._write(
             pending.ref, Outcome.FAILED, pending.elapsed_ms, pending.attempted_at_ms,
-            self._details(pending.target, pending.probed_address), foreign=foreign, flush=flush,
+            self._details(pending.target, pending.probed_address, pending.warp), foreign=foreign, flush=flush,
             carrier=self._carrier(pending.target, pending.scheme), core_code=attempt_core_code(pending.facts),
             found=pending.checks, complete=complete, report_id=report_id,
         )
@@ -586,12 +594,21 @@ class ClientReporter:
             return None
         return ForeignServer.of(target.host, target.protocol or pending.scheme, pending.name)
 
-    def _details(self, target: ProbeTarget | None, probed_address: str | None) -> AttemptDetails:
-        """The report's details: the common part from ``context`` and this server's address, port, transport."""
+    def _details(self, target: ProbeTarget | None, probed_address: str | None, warp: object | None = None) -> AttemptDetails:
+        """The report's details: the common part from ``context`` and this server's address, port, transport; the
+        WARP hop's on/off and handshake retries from the facts taken at the end of the connect."""
         try:
             base = self._context()
         except Exception:
             base = AttemptDetails()
+        if k.WARP_LIVE and warp is not None and isinstance(getattr(warp, "enabled", None), bool):
+            from dataclasses import replace as _replace
+
+            retries = getattr(warp, "retries", None)
+            base = _replace(
+                base, warp_retries=retries if warp.enabled else None,
+                settings=_replace(base.settings or ReportSettings(), warp_entry=warp.enabled),
+            )
         if target is None:
             return base.cleaned()
         from dataclasses import replace

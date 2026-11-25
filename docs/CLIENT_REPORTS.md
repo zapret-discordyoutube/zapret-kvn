@@ -97,6 +97,17 @@ fetch, `_learn_missing_server_ids`; Android: `ServerIdBackfill`, the body is dro
   `NETWORK_LOST` out of the server's verdict.
 - A transition superseded by a newer request is `cancelled`.
 
+## The WARP entry hop (prepared 2026-11-25, off until vpnbot admits it)
+
+Owner: «make more logs and put them in the database» for «Вход через Cloudflare WARP». Agreed shape (the WARP chat feeds
+the facts, this module owns the contract): `settings.warp_entry` (bool), two probes appended after `health`:
+`warp_register` (the app's own account registration, `{r, ms}`; absent when the account file already existed) and
+`warp_tunnel` (the hop's tunnel after the connect: answered/timeout, ms = connect time), and the details integer
+`warp_retries` (handshake retries on other addresses). The facts come from `AppController.warp_report_facts()`, taken at
+the end of the connect transition, so they describe the first seconds of the hop. No address, no key. `checks.WARP_LIVE`
+is False: vpnbot refuses a whole report with an unknown probe, so nothing of this is written or sent until its «live»
+message; then the flag becomes True (also in the Android module, same names) and a release carries it.
+
 ## How it is sent
 
 `xray_fluent/client_reports/`: `contract.py` holds every decision (contract, header, classifier,

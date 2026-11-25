@@ -863,9 +863,27 @@ class ControllerHookTests(unittest.TestCase):
             _logger=SimpleNamespace(info=lambda _line: None),
             _client_report_attempt=5,
             amnezia=SimpleNamespace(last_failure=None),
+            warp_report_facts=lambda: None,
         )
+        fake._client_report_warp_facts = lambda: AppController._client_report_warp_facts(fake)
         fake._client_report_failure_code = lambda scheme: AppController._client_report_failure_code(fake, scheme)
         return AppController._report_transition_attempt, fake, calls
+
+    def test_the_hops_facts_of_this_connect_go_with_the_attempt(self) -> None:
+        from xray_fluent.network.warp_hop_health import WarpFacts
+
+        hook, fake, calls = self._controller("hysteria2")
+        facts = WarpFacts(True, ("answered", 410), 1, ("answered", 1900))
+        fake.warp_report_facts = lambda: facts
+        hook(fake, "connect", SimpleNamespace(result=True, error=None), False)
+        (_args, kwargs), = calls
+        self.assertIs(facts, kwargs["warp"])
+        # Reading the facts failing must not lose the report.
+        calls.clear()
+        fake.warp_report_facts = lambda: 1 / 0
+        hook(fake, "connect", SimpleNamespace(result=True, error=None), False)
+        (_args, kwargs), = calls
+        self.assertIsNone(kwargs["warp"])
 
     def test_vless_success_asks_for_the_relay_probe(self) -> None:
         hook, fake, calls = self._controller("vless", relay_port=1234)

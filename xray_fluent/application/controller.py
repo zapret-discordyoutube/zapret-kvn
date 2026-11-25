@@ -3145,9 +3145,18 @@ class AppController(QObject):
             self.client_reporter.on_attempt(
                 ref, scheme, facts, elapsed_ms=elapsed, attempted_at_ms=started, relay=relay,
                 target=probe_target_for(node), attempt=self._client_report_attempt, name=str(node.name or ""),
+                warp=self._client_report_warp_facts(),
             )
         except Exception as exc:  # a report never breaks a transition
             self._logger.info(f"[client-report] skipped: {type(exc).__name__}")
+
+    def _client_report_warp_facts(self) -> WarpFacts | None:
+        """The WARP hop's facts for the report; a failure to read them never loses the report."""
+        try:
+            return self.warp_report_facts()
+        except Exception as exc:
+            self._logger.info(f"[client-report] WARP facts skipped: {type(exc).__name__}")
+            return None
 
     def _client_report_context(self) -> AttemptDetails:
         """What is the same for all attempts now (client_reports schema 2); no addresses."""
