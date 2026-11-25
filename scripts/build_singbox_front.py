@@ -177,7 +177,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                    cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
     subprocess.run([go, 'test', '-mod=readonly', './common/familymemory', './common/dialer', '-count=1'],
                    cwd=source, check=True)
-    subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, './protocol/warp', '-count=1'],
+    # protocol/warp links tfo-go on Windows, whose linkname needs the release's -checklinkname=0 (release/LDFLAGS).
+    subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, '-ldflags=-checklinkname=0', './protocol/warp', '-count=1'],
                    cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
     for tags_variant in ("", "with_low_memory"):
         subprocess.run([go, "test", "-mod=readonly", "-tags", tags_variant,

@@ -262,12 +262,13 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..70c83d7a574763c88df050290ca6ec1660a40480
 --- /dev/null
 +++ b/protocol/warp/profile_cache_test.go
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,69 @@
 +package warp
 +
 +import (
 +	"os"
 +	"path/filepath"
++	"runtime"
 +	"testing"
 +
 +	"github.com/sagernet/sing-box/common/cloudflare"
@@ -303,8 +304,12 @@ index 0000000000000000000000000000000000000000..70c83d7a574763c88df050290ca6ec16
 +		t.Fatal(err)
 +	}
 +	info, err := os.Stat(path)
-+	if err != nil || info.Mode().Perm() != 0o600 {
-+		t.Fatalf("profile file must be 0600, got %v, %v", info, err)
++	if err != nil {
++		t.Fatal(err)
++	}
++	// POSIX modes do not exist on Windows, where the file is protected by the ACL of the app's data folder
++	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
++		t.Fatalf("profile file must be 0600, got %v", info.Mode().Perm())
 +	}
 +	config, err := loadCachedConfig(path)
 +	if err != nil || config == nil || config.PrivateKey != "key" || config.Interface.Addresses.V4 != "172.16.0.2" {
