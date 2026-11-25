@@ -271,9 +271,10 @@ from ..importer.subscription_http import (
 )
 from ..importer.subscription_parser import validate_filter_patterns
 from ..network.bootstrap_dns import cached_addresses
+from ..network.bootstrap_dns import resolve_bootstrap
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
-from ..network import entry_hop, server_family
+from ..network import entry_hop, server_family, warp_registration
 from ..network.physical_route import (
     has_network,
     is_physical_fingerprint,
@@ -468,6 +469,11 @@ class AppController(QObject):
             masking=lambda: masking_runtime.settings_of(self.state.settings),
             helpers_allowed=lambda: bool(self.state.settings.tun_mode) or not self._warp_entry_profile(),
         )
+        # WARP entry: the account could not be registered over the direct routes, so this launch runs without the hop and
+        # the account is registered through the VPN once it is up (see _ensure_warp_account_steps).
+        self._warp_hop_suspended = False
+        self._warp_register_via_vpn = False
+        self.connection_changed.connect(self._on_connection_changed_for_warp)
         # slot id -> servers whose helper did not start this app run: the next launch picks another one.
         self._slot_failed: dict[str, set[str]] = {}
         self.amnezia = self._new_amnezia_manager()
@@ -1471,9 +1477,67 @@ class AppController(QObject):
 
     def _warp_entry_profile(self) -> str:
         """Вход через Cloudflare WARP: путь к файлу аккаунта WARP в папке данных приложения, пусто = выключено."""
-        if not bool(getattr(self.state.settings, "warp_entry_hop", False)):
+        if not bool(getattr(self.state.settings, "warp_entry_hop", False)) or self._warp_hop_suspended:
             return ""
         return str(DATA_DIR / "warp-entry-profile.json")
+
+    def _ensure_warp_account_steps(self) -> TransitionSteps:
+        """WARP entry: before planning, make sure the account file exists (owner decision 2026-11-25).
+
+        The core registers an account itself on a first start, but a provider may reset that request (field report of
+        2026-11-25).  So the app registers it first, over several routes (`network/warp_registration.py`).  When every
+        direct route fails this launch runs WITHOUT the hop (the VPN server's address is visible to the provider for
+        this one connection, said so in the message), and the account is registered through the VPN as soon as it is
+        up; the next start then enters through the hop."""
+        self._warp_hop_suspended = False
+        profile = self._warp_entry_profile()
+        if not profile or warp_registration.account_file_ready(profile):
+            return
+        outcome = yield run_in_worker(
+            lambda: warp_registration.ensure_account(profile, addresses=lambda: list(resolve_bootstrap(warp_registration.API_HOST).addresses))
+        )
+        if outcome.ok:
+            self._log(f"[warp-entry] аккаунт WARP зарегистрирован, путь: {outcome.route}")
+            return
+        self._log(f"[warp-entry] аккаунт WARP не зарегистрировать напрямую ({outcome.route}: {outcome.detail})")
+        self._warp_hop_suspended = True
+        self._warp_register_via_vpn = True
+        self.status.emit(
+            "warning-long",
+            "Не удалось зарегистрировать аккаунт WARP напрямую: провайдер блокирует запрос. Это подключение идёт "
+            "без входа через WARP, адрес сервера на этот раз виден провайдеру. После подключения аккаунт будет "
+            "зарегистрирован через VPN, и вход через WARP включится сам.",
+        )
+
+    def _on_connection_changed_for_warp(self, connected: bool) -> None:
+        if connected and self._warp_register_via_vpn:
+            self._warp_register_via_vpn = False
+            runner = TransitionRunner(self._register_warp_via_vpn_steps(), is_current=lambda: True, parent=self)
+            self._warp_runner = runner
+            runner.start()
+
+    def _register_warp_via_vpn_steps(self) -> TransitionSteps:
+        session = self._active_session
+        port = int(getattr(session, "http_port", 0) or 0)
+        profile = str(DATA_DIR / "warp-entry-profile.json")
+        if port <= 0:
+            self._log("[warp-entry] нет локального порта HTTP, аккаунт WARP через VPN не зарегистрировать")
+            return False
+        outcome = yield run_in_worker(
+            lambda: warp_registration.ensure_account(profile, proxy_url=f"http://127.0.0.1:{port}", timeout=20.0)
+        )
+        if not outcome.ok:
+            self._log(f"[warp-entry] аккаунт WARP через VPN не зарегистрирован ({outcome.detail})")
+            self.status.emit(
+                "warning-long",
+                "Аккаунт WARP не удалось зарегистрировать и через VPN: подключение работает без входа через WARP. "
+                "Попытка повторится при следующем подключении.",
+            )
+            return False
+        self._log("[warp-entry] аккаунт WARP зарегистрирован через VPN, перезапускаю подключение со входом через WARP")
+        self._warp_hop_suspended = False
+        self.status.emit("info", "Аккаунт WARP зарегистрирован: подключение перезапустится со входом через WARP.")
+        return self._reconnect("warp-account-registered")
 
     def _server_ipv6_first(self) -> bool:
         """IPv6 к серверу первым: настройка включена и у основного подключения есть IPv6."""

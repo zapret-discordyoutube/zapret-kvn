@@ -83,6 +83,7 @@ def start_proxy_steps(
     prev_active_core: str,
 ) -> TransitionSteps:
     controller._active_core = "singbox"
+    yield from controller._ensure_warp_account_steps()
     try:
         plan = controller._plan_proxy_runtime_singbox(node)
     except ValueError as exc:
@@ -147,6 +148,7 @@ def start_tun_steps(
     prev_active_core: str,
 ) -> TransitionSteps:
     controller._active_core = "singbox"
+    yield from controller._ensure_warp_account_steps()
     try:
         plan = controller._plan_runtime_singbox(node)
     except ValueError as exc:
