@@ -1491,7 +1491,11 @@ class AppController(QObject):
         up; the next start then enters through the hop."""
         self._warp_hop_suspended = False
         profile = self._warp_entry_profile()
-        if not profile or warp_registration.account_file_ready(profile):
+        if not profile:
+            return
+        if warp_registration.account_file_ready(profile):
+            # One line per connect while the setting is on: its absence in a report means the setting was off at connect.
+            self._log("[warp-entry] вход через WARP включён, аккаунт WARP готов")
             return
         outcome = yield run_in_worker(
             lambda: warp_registration.ensure_account(profile, addresses=lambda: list(resolve_bootstrap(warp_registration.API_HOST).addresses))
