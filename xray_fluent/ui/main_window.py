@@ -59,6 +59,7 @@ from .about_page import AboutPage
 from .about_us.page import AboutUsPage
 from .history_page import HistoryPage
 from .page_warmup import HiddenPageWarmup
+from ..platform.windows.win32_errors import is_win32_error
 from .window_presence import WindowPresence, is_native_minimize_command, is_native_restore_command
 from .window_reveal import cloak_until_painted, is_system_show_event
 from .theme import apply_theme, stop_system_theme_listener, sync_system_theme_listener
@@ -111,6 +112,10 @@ def _runtime_identity_log_line() -> str:
     )
 
 
+# The first refused window message call is logged once per process.
+_native_event_error_logged = False
+
+
 class MainWindow(FluentWindow):
     def __init__(self, defer_init: bool = False):
         super().__init__()
@@ -120,6 +125,9 @@ class MainWindow(FluentWindow):
         self._tray_notified = False
         self._state_loaded = False
         self._initialized = False
+        # initialize() has built every page: startup results may touch them.
+        self._window_built = False
+        self._build_waits = 0
         self._startup_loader = None
         self._metadata_worker = None
         self._startup_started = time.perf_counter()
@@ -225,6 +233,7 @@ class MainWindow(FluentWindow):
             if action:
                 action.setEnabled(False)
         self.configs_page.created.connect(self._load_config_editor_documents)
+        self._window_built = True
         if load_state:
             from ..application.startup_service import StartupLoader
             self._startup_loader = StartupLoader(self)
@@ -234,8 +243,26 @@ class MainWindow(FluentWindow):
             self._startup_loader.failed.connect(self._startup_failed)
             QTimer.singleShot(0, self._startup_loader.start)
 
+    def _when_built(self, retry) -> bool:
+        """True when the pages exist. A startup result that comes earlier (field 0.8.108:
+        ``failed`` reached a window without ``dashboard_page``, AttributeError) is delivered
+        again from the event loop once initialize() has finished, at most for 10 s."""
+        if self._window_built:
+            return True
+        self._build_waits += 1
+        log = logging.getLogger("xray_fluent.bootstrap")
+        if self._build_waits == 1:
+            log.info("[startup] Startup result came before the window was built; delivered after it")
+        if self._build_waits <= 200:
+            QTimer.singleShot(50, retry)
+        elif self._build_waits == 201:
+            log.error("[startup] The window was not built within 10 s; startup result dropped")
+        return False
+
     def _ask_startup_password(self):
         if self._quitting:
+            return
+        if not self._when_built(self._ask_startup_password):
             return
         dialog = PasswordDialog("Зашифрованные данные", self)
         if dialog.exec() != int(QDialog.DialogCode.Accepted):
@@ -246,6 +273,8 @@ class MainWindow(FluentWindow):
     def _startup_failed(self, message):
         if self._quitting:
             return
+        if not self._when_built(lambda: self._startup_failed(message)):
+            return
         self.dashboard_page.set_initializing(False)
         self.dashboard_page.set_runtime_status("error", message)
         self.dashboard_page.set_transition_busy(True)
@@ -253,6 +282,8 @@ class MainWindow(FluentWindow):
 
     def complete_initialization(self, state, history):
         if self._quitting or self._geometry_persistence_ready:
+            return
+        if not self._when_built(lambda: self.complete_initialization(state, history)):
             return
         if self._startup_loader is not None:
             self.controller.storage.passphrase = self._startup_loader.storage.passphrase
@@ -752,7 +783,21 @@ class MainWindow(FluentWindow):
             # Windows сжимает память свёрнутого окна сразу после этой команды:
             # защита ставится до того, а не после.
             self._window_presence.away_intent()
-        return super().nativeEvent(event_type, message)
+        try:
+            return super().nativeEvent(event_type, message)
+        except Exception as exc:
+            # qframelesswindow asks win32api.GetCursorPos() on every WM_NCHITTEST; Windows refuses
+            # it while the cursor belongs to another desktop (lock screen, UAC prompt): pywintypes.error
+            # (field crash:error at nativeEvent:755). That one message falls back to Qt's own handling.
+            if not is_win32_error(exc):
+                raise
+            global _native_event_error_logged
+            if not _native_event_error_logged:
+                _native_event_error_logged = True
+                logging.getLogger("xray_fluent.bootstrap").info(
+                    "[window] Windows refused a window message call (%s); handled by Qt", type(exc).__name__
+                )
+            return False, 0
 
     def changeEvent(self, event):
         super().changeEvent(event)

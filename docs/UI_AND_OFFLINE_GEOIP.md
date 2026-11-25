@@ -93,6 +93,12 @@ Splash удалён. `StartupLoader` читает состояние в рабо
 вызовов из GeoIP, отмену загрузки и проверку сборочных хешей. Проверка Mica и
 фактического времени запуска Windows EXE выполняется после ручной сборки.
 
+Field crashes found by field check #5 (2026-11-25), each with a test in `tests/test_main_window_field_crashes.py` or `tests/test_update_release_watch.py`:
+
+- A startup result (`failed`, `loaded`, `password_needed`) can reach the window before `initialize()` has built its pages. In 0.8.108 a load failure raised `AttributeError` in `_startup_failed` (no `dashboard_page`). How it arrived early is not proven: a queued signal delivered from a nested Windows message loop during `initialize()` fits. `MainWindow._when_built` now re-delivers such a result from the event loop every 50 ms, for at most 10 s, and logs `[startup] Startup result came before the window was built; delivered after it`.
+- qframelesswindow calls `win32api.GetCursorPos()` for every `WM_NCHITTEST`. Windows refuses that call while the cursor is on another desktop (lock screen, UAC prompt) and pywin32 raises `pywintypes.error` (`crash:error` at `nativeEvent:755`, 0.8.107-0.8.108). `MainWindow.nativeEvent` now hands that one message to Qt (`False, 0`) and logs `[window] Windows refused a window message call` once. Every other exception still reaches the crash hook.
+- The update listener (`release_watch.failure_pause_s`) caps its backoff exponent. Before, `60.0 * 2 ** 1024` raised `OverflowError` after about two days without the server and the listener thread died (0.8.103). Android's `ReleaseWaitClient` already capped the shift.
+
 ## DNS и первое подключение
 
 Штатные JSON-шаблоны sing-box используют native fallback: DoH через VPN →

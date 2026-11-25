@@ -157,6 +157,18 @@ class ReleaseWatcherTests(unittest.TestCase):
         self.assertEqual(harness.pauses[:3], [60.0, 120.0, 180.0])
         self.assertIs(harness.watcher.reachable, False)
 
+    def test_days_without_the_server_keep_the_listener_alive(self) -> None:
+        # 0.8.103 in the field: after ~1025 failures in a row (two days without the server)
+        # 60.0 * 2 ** 1024 raised OverflowError and the listener thread died.
+        harness = _Harness([OSError("нет")] * 1100)
+
+        harness.watcher.run()
+
+        self.assertEqual(len(harness.pauses), 1101)
+        self.assertEqual(set(harness.pauses[2:]), {180.0})
+        self.assertEqual(release_watch.failure_pause_s(10**6), 180.0)
+        self.assertEqual(release_watch.failure_pause_s(0), 60.0)
+
     def test_quick_empty_answer_is_followed_by_a_pause(self) -> None:
         harness = _Harness([_quiet(), (0.3, _quiet())])
 

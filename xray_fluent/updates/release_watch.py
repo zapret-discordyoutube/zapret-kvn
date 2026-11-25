@@ -86,6 +86,15 @@ FOREGROUND_OWN = screen.FOREGROUND_OWN
 screen_state = screen.screen_state
 
 
+def failure_pause_s(failures: int) -> float:
+    """Пауза после ``failures`` неудачных вопросов подряд: 60 с, 120 с, затем 180 с.
+
+    Степень ограничена: без этого ``60.0 * 2 ** 1024`` после двух суток без
+    сервера бросал OverflowError и поток слушателя умирал (вылет 0.8.103).
+    """
+    return min(FIRST_FAILURE_PAUSE_S * 2 ** min(max(failures - 1, 0), 8), MAX_FAILURE_PAUSE_S)
+
+
 def fullscreen_app_active() -> bool:
     """На экране игра, видео или презентация во весь экран — сейчас или недавно.
 
@@ -234,7 +243,7 @@ class ReleaseWatcher:
                 failures += 1
                 if failures == 1:
                     _log.info("[update] Очередь обновлений на сервере недоступна (%s): программа проверяет сама", exc)
-                if self._pause(min(FIRST_FAILURE_PAUSE_S * 2 ** (failures - 1), MAX_FAILURE_PAUSE_S)):
+                if self._pause(failure_pause_s(failures)):
                     return
                 continue
             failures = 0
