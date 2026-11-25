@@ -7,7 +7,6 @@ import unittest
 from xray_fluent.constants import HYSTERIA_PATH_DEFAULT
 from xray_fluent.engines.singbox.runtime_planner import (
     _APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG,
-    apply_warp_entry,
     parse_singbox_document,
     plan_singbox_runtime,
 )
@@ -78,12 +77,21 @@ class WarpEntryPlannerTests(unittest.TestCase):
                 direct_rules = [r for r in rules(built) if r.get("outbound") == "direct"]
                 self.assertFalse(any(WARP_ENTRY_TAG in str(r) for r in direct_rules))
 
-    def test_slot_helpers_are_refused_instead_of_exposing_the_server(self) -> None:
-        built = plan(SS, profile="")
-        built.slot_plans = ("youtube",)
-        with self.assertRaises(ValueError) as caught:
-            apply_warp_entry(built, PROFILE)
-        self.assertIn("WARP", str(caught.exception))
+    def test_only_remote_servers_dial_through_the_hop_in_every_built_plan(self) -> None:
+        # Regression of 0.8.110: the loopback relays to the Hysteria/Xray helpers were chained through the hop too.
+        for link in (HY2, VLESS, SS):
+            with self.subTest(link[:4]):
+                for outbound in plan(link).singbox_config["outbounds"]:
+                    if outbound.get("detour") == WARP_ENTRY_TAG:
+                        self.assertNotIn(outbound.get("server"), ("127.0.0.1", "::1", "localhost"), outbound.get("tag"))
+
+    def test_registration_resolves_outside_the_tunnel_in_every_built_plan(self) -> None:
+        # Regression of 0.8.110, seen on a real run: without a resolver the registration lookup went through the proxied
+        # DNS that waits for the hop, and the hop never came up.
+        for link in (HY2, VLESS, SS):
+            with self.subTest(link[:4]):
+                api = next(o for o in plan(link).singbox_config["outbounds"] if o.get("tag") == WARP_ENTRY_API_TAG)
+                self.assertEqual("bootstrap-dns", api["domain_resolver"])
 
 
 if __name__ == "__main__":

@@ -289,7 +289,7 @@ def plan_singbox_runtime(
         pool_nodes=pool_nodes,
         server_ipv6_first=server_ipv6_first,
     )
-    return apply_warp_entry(plan, warp_entry_profile) if warp_entry_profile else plan
+    return apply_warp_entry(plan, warp_entry_profile, tun=True) if warp_entry_profile else plan
 
 
 def plan_singbox_proxy_runtime(
@@ -329,31 +329,59 @@ def plan_singbox_proxy_runtime(
         pool_nodes=pool_nodes,
         server_ipv6_first=server_ipv6_first,
     )
-    return apply_warp_entry(plan, warp_entry_profile) if warp_entry_profile else plan
+    return apply_warp_entry(plan, warp_entry_profile, tun=False) if warp_entry_profile else plan
 
 
 WARP_ENTRY_UNSUPPORTED = (
-    "Вход через WARP пока не работает с серверами WireGuard/AmneziaWG и с раздельными серверами: "
-    "их соединения идут мимо sing-box и открыли бы адрес сервера провайдеру. Выключите вход через WARP "
-    "или выберите другой сервер."
+    "Вход через WARP пока не работает с серверами WireGuard/AmneziaWG: их соединения идут мимо sing-box "
+    "и открыли бы адрес сервера провайдеру. Выключите вход через WARP или выберите другой сервер."
+)
+WARP_ENTRY_NEEDS_TUN = (
+    "В режиме «Прокси» Hysteria2 и отдельные серверы для сервисов подключаются к серверу мимо sing-box и открыли бы "
+    "его адрес провайдеру: вход через WARP для них работает в режиме VPN (TUN). Включите режим VPN, выключите вход "
+    "через WARP или выберите другой сервер."
 )
 
 
-def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str) -> SingboxRuntimePlan:
+def _slot_helper_paths(plan: SingboxRuntimePlan) -> list[str]:
+    from ...constants import slot_helper_exe
+
+    return [
+        str(slot_helper_exe(slot.helper.core.value, slot.slot_id).resolve())
+        for slot in plan.slot_plans
+        if getattr(slot, "helper", None) is not None
+    ]
+
+
+def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str, *, tun: bool) -> SingboxRuntimePlan:
     """WARP as the entry hop to our server (owner decision 2026-11-25), see `warp_entry.py`.
 
-    Native outbounds get a `detour`; the Hysteria process rule and the Xray protect-inbound rule lead into the hop.
-    Connections that bypass sing-box (WireGuard/AmneziaWG helper, slot helpers) cannot enter through it: refusing is
-    better than silently showing the server address to the provider.  The hop is checked to be an entry only.
+    Native outbounds (also the pool's, which live in the provider file) get a `detour`; the Xray protect-inbound rule
+    leads into the hop.  The Hysteria and slot helpers dial their server with their own UDP/TCP sockets: under the TUN
+    those are captured and their `process_path` rules point to the hop; in the proxy mode nothing captures them, so
+    entering is impossible and refusing is better than silently showing the server address to the provider.  The
+    WireGuard/AmneziaWG helper binds its socket to the physical interface and is refused for the same reason.
+    Safe to run again after the slots were attached: the hop is rebuilt from scratch each time.
     """
-    if plan.outcome == "amnezia_sidecar" or plan.amnezia_sidecar is not None or plan.slot_plans:
+    if plan.outcome == "amnezia_sidecar" or plan.amnezia_sidecar is not None:
         raise ValueError(WARP_ENTRY_UNSUPPORTED)
-    paths = [str(HYSTERIA_PATH_DEFAULT.resolve())] if plan.hysteria_sidecar is not None else []
+    paths = ([str(HYSTERIA_PATH_DEFAULT.resolve())] if plan.hysteria_sidecar is not None else []) + _slot_helper_paths(plan)
+    if paths and not tun:
+        raise ValueError(WARP_ENTRY_NEEDS_TUN)
     inbounds = [_APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG] if plan.xray_sidecar is not None else []
+    pool = plan.provider_payload.get("outbounds") if isinstance(plan.provider_payload, dict) else None
+    # The account registration and the server names must resolve OUTSIDE the tunnel: the default DNS goes through the
+    # proxy, which waits for the hop, which waits for the registration (found on a real run: the lookup of the
+    # registration host timed out and the hop never came up).
+    dns = plan.singbox_config.get("dns")
+    tags = {str(item.get("tag")) for item in (dns.get("servers") if isinstance(dns, dict) else None) or [] if isinstance(item, dict)}
     result = apply_entry_hop(
-        plan.singbox_config, profile_path, sidecar_process_paths=paths, sidecar_inbounds=inbounds,
+        plan.singbox_config, profile_path, sidecar_process_paths=paths, sidecar_inbounds=inbounds, pool_outbounds=pool,
+        resolver="bootstrap-dns" if "bootstrap-dns" in tags else None,
     )
-    misuse = warp_entry_violations(plan.singbox_config, sidecar_process_paths=paths, sidecar_inbounds=inbounds)
+    misuse = warp_entry_violations(
+        plan.singbox_config, sidecar_process_paths=paths, sidecar_inbounds=inbounds, pool_outbounds=pool,
+    )
     if misuse:
         raise ValueError(f"WARP может быть только входом к серверу, найдено другое использование: {misuse[0]}.")
     plan.warp_entry = result

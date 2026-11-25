@@ -40,8 +40,9 @@ WARP_ENTRY_MTU = 1330
 # Types without a server of their own: nothing to lead through the hop.  `warp` is the hop itself.
 _LOCAL_TYPES = frozenset({"direct", "block", "dns", "selector", "urltest", "warp"})
 
-# The planner's sidecar rules carry only these keys; a rule with anything more is not ours.
-_SIDECAR_RULE_KEYS = frozenset({"process_path", "inbound", "outbound"})
+# The planner's sidecar rules carry only these keys (the slot helpers' rule also says `action: route`); a rule with
+# anything more is not ours.
+_SIDECAR_RULE_KEYS = frozenset({"process_path", "inbound", "outbound", "action"})
 
 
 @dataclass(frozen=True)
@@ -61,8 +62,12 @@ def apply_entry_hop(
     resolver: str | None = None,
     sidecar_process_paths: Iterable[str] = (),
     sidecar_inbounds: Iterable[str] = (),
+    pool_outbounds: list[Any] | None = None,
 ) -> EntryHopResult:
     """Lead servers through the hop; add the hop endpoint only if something enters through it.
+
+    `pool_outbounds` are the native servers of the connection pool: they live in the provider file, not in the config's
+    `outbounds`, and dial their servers just the same, so they are chained in place too.
 
     `resolver` resolves server NAMES outside the tunnel: a detoured outbound hands the name to the hop, whose DNS final
     rule goes through the very servers waiting for the address.  A resolver the config already sets is kept.
@@ -75,10 +80,11 @@ def apply_entry_hop(
     chained = 0
     outbounds = _as_list(payload.get("outbounds"))
     outbounds[:] = [o for o in outbounds if not (isinstance(o, dict) and o.get("tag") == WARP_ENTRY_API_TAG)]
-    for index, outbound in enumerate(outbounds):
-        if isinstance(outbound, dict) and _dials_server(outbound):
-            outbounds[index] = _chain(outbound, resolver)
-            chained += 1
+    for group in (outbounds, pool_outbounds if pool_outbounds is not None else []):
+        for index, outbound in enumerate(group):
+            if isinstance(outbound, dict) and _dials_server(outbound):
+                group[index] = _chain(outbound, resolver)
+                chained += 1
 
     rerouted = 0
     route = payload.get("route")
@@ -111,6 +117,7 @@ def violations(
     *,
     sidecar_process_paths: Iterable[str] = (),
     sidecar_inbounds: Iterable[str] = (),
+    pool_outbounds: list[Any] | None = None,
 ) -> list[str]:
     """Places where the hop's tag is used as anything but an entry.  Empty means it is an entry only."""
     paths = _normalized(sidecar_process_paths)
@@ -142,6 +149,8 @@ def violations(
             _walk_route(value, key, paths, inbounds, found, walk)
         else:
             walk(value, key, False, False)
+    if pool_outbounds is not None:
+        walk(pool_outbounds, "pool", True, False)
     return found
 
 
@@ -162,7 +171,7 @@ def _walk_route(route: Any, path: str, paths: set[str], inbounds: set[str], foun
 
 def _is_sidecar_rule(rule: dict[str, Any], paths: set[str], inbounds: set[str]) -> bool:
     """Exactly the planner's shape: only `process_path` / `inbound` / `outbound`, and every value is one of ours."""
-    if not set(rule) <= _SIDECAR_RULE_KEYS:
+    if not set(rule) <= _SIDECAR_RULE_KEYS or rule.get("action", "route") != "route":
         return False
     rule_paths = _string_list(rule.get("process_path"))
     rule_inbounds = _string_list(rule.get("inbound"))
@@ -174,6 +183,10 @@ def _is_sidecar_rule(rule: dict[str, Any], paths: set[str], inbounds: set[str]) 
 def _dials_server(outbound: dict[str, Any]) -> bool:
     kind = outbound.get("type")
     if not isinstance(kind, str) or kind in _LOCAL_TYPES or "server" not in outbound:
+        return False
+    if _is_loopback(str(outbound.get("server", ""))):
+        # The relay to a local helper process (Hysteria, Xray, Amnezia, slots): it is not a server of its own, the
+        # helper behind it is the one that dials out.  Led through the hop it would knock on loopback on the far side.
         return False
     detour = outbound.get("detour")
     # Another detour means this is not the first link of its chain; our own tag is not "another".
@@ -190,6 +203,16 @@ def _chain(outbound: dict[str, Any], resolver: str | None) -> dict[str, Any]:
 
 def _is_hop(endpoint: Any) -> bool:
     return isinstance(endpoint, dict) and endpoint.get("tag") == WARP_ENTRY_TAG
+
+
+def _is_loopback(value: str) -> bool:
+    host = value.strip().strip("[]").split("%", 1)[0].lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _is_ip_literal(value: str) -> bool:

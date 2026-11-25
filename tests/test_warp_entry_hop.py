@@ -69,6 +69,17 @@ class WarpEntryHopTests(unittest.TestCase):
         for tag in ("proxy", "direct"):
             self.assertNotIn("detour", by_tag(outbounds, tag))
 
+    def test_relays_to_local_helper_processes_never_enter_the_hop(self) -> None:
+        # Real plans lead the sing-box front to Xray/Hysteria/Amnezia helpers through a loopback SOCKS outbound; the
+        # helper behind it dials out.  A detour there would send the relay traffic to loopback on the far side of WARP.
+        payload = config()
+        for tag, host in (("relay-v4", "127.0.0.1"), ("relay-v6", "::1"), ("relay-name", "localhost"), ("relay-net", "127.8.9.10")):
+            payload["outbounds"].append({"type": "socks", "tag": tag, "server": host, "server_port": 11808})
+        result = apply(payload)
+        self.assertEqual(2, result.chained)
+        for tag in ("relay-v4", "relay-v6", "relay-name", "relay-net"):
+            self.assertNotIn("detour", by_tag(payload["outbounds"], tag), tag)
+
     def test_server_names_resolve_outside_the_hop_and_literals_and_user_choices_stay(self) -> None:
         payload = config()
         by_tag(payload["outbounds"], "ss")["domain_resolver"] = "mine"

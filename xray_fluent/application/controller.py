@@ -302,7 +302,7 @@ from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistory
 from .server_bypass import ServerBypass
 from .zapret_conflict import ZapretConflictCheck, foreign_crash_hint
 from ..engines.zapret.manager import ZapretManager
-from ..engines.singbox.runtime_planner import WARP_ENTRY_UNSUPPORTED, attach_service_slots
+from ..engines.singbox.runtime_planner import apply_warp_entry, attach_service_slots
 from ..constants import HYSTERIA_PATH_DEFAULT as _SLOT_HYSTERIA_SOURCE, XRAY_PATH_DEFAULT as _SLOT_XRAY_DEFAULT
 from ..profiles.path_utils import resolve_configured_path as _resolve_core_path
 from ..slots.assigner import assign_slots, default_host_keys, off_machines, slot_capable
@@ -1247,7 +1247,7 @@ class AppController(QObject):
             share_lan=bool(self.state.settings.lan_proxy_enabled),
             server_ipv6_first=self._server_ipv6_first(),
             warp_entry_profile=self._warp_entry_profile(),
-        ), node)
+        ), node, tun=True)
 
     # ── Service slots: the main-page card (docs/SERVICE_SLOTS.md, phase 5) ──
 
@@ -1378,15 +1378,12 @@ class AppController(QObject):
     def _on_slot_helper_failed(self, slot_id: str, node_id: str) -> None:
         self._slot_failed.setdefault(slot_id, set()).add(node_id)
 
-    def _attach_slot_plans(self, plan: SingboxRuntimePlan, node: Node | None) -> SingboxRuntimePlan:
+    def _attach_slot_plans(self, plan: SingboxRuntimePlan, node: Node | None, *, tun: bool) -> SingboxRuntimePlan:
         """Service slots the user ticked (their selectors are in the active JSON): pick each slot's server and plan
         how it is reached. Nothing when no slot is ticked."""
         slot_ids = slot_selector_ids(plan.singbox_config)
         if not slot_ids:
             return plan
-        if plan.warp_entry is not None:
-            # Slot helpers dial their servers outside sing-box and would not enter through WARP.
-            raise ValueError(WARP_ENTRY_UNSUPPORTED)
         main_id = node.id if node is not None else None
         assignments = assign_slots(
             slot_ids,
@@ -1404,7 +1401,9 @@ class AppController(QObject):
             replace(slot, note="; ".join(x for x in (slot.note, reasons.get(slot.slot_id, "")) if x))
             for slot in plan.slot_plans
         )
-        return plan
+        # The slots add servers and helpers of their own: lead them through the hop too (or refuse, see the planner).
+        profile = self._warp_entry_profile()
+        return apply_warp_entry(plan, profile, tun=tun) if profile else plan
 
     def _log_masking(self, node: Node | None) -> None:
         """Одна строка за подключение: что маскировка сделала с выбранным сервером."""
@@ -1464,7 +1463,7 @@ class AppController(QObject):
             pool_nodes=masking_runtime.masked_nodes(self._pool_candidate_nodes(node), masking),
             server_ipv6_first=self._server_ipv6_first(),
             warp_entry_profile=self._warp_entry_profile(),
-        ), node)
+        ), node, tun=False)
 
     def _warp_entry_profile(self) -> str:
         """Вход через Cloudflare WARP: путь к файлу аккаунта WARP в папке данных приложения, пусто = выключено."""
