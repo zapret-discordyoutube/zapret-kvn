@@ -375,9 +375,17 @@ def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str, *, tun: bool) 
     # registration host timed out and the hop never came up).
     dns = plan.singbox_config.get("dns")
     tags = {str(item.get("tag")) for item in (dns.get("servers") if isinstance(dns, dict) else None) or [] if isinstance(item, dict)}
+    from ...masking.desync import server_hosts
+
+    helper_names = [
+        host
+        for outbound in ((plan.xray_sidecar.config or {}).get("outbounds") or [] if plan.xray_sidecar is not None else [])
+        if isinstance(outbound, dict)
+        for host in server_hosts(outbound)
+    ]
     result = apply_entry_hop(
         plan.singbox_config, profile_path, sidecar_process_paths=paths, sidecar_inbounds=inbounds, pool_outbounds=pool,
-        resolver="bootstrap-dns" if "bootstrap-dns" in tags else None,
+        resolver="bootstrap-dns" if "bootstrap-dns" in tags else None, helper_server_names=helper_names,
     )
     misuse = warp_entry_violations(
         plan.singbox_config, sidecar_process_paths=paths, sidecar_inbounds=inbounds, pool_outbounds=pool,

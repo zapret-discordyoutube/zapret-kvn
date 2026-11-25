@@ -63,8 +63,14 @@ def apply_entry_hop(
     sidecar_process_paths: Iterable[str] = (),
     sidecar_inbounds: Iterable[str] = (),
     pool_outbounds: list[Any] | None = None,
+    helper_server_names: Iterable[str] = (),
 ) -> EntryHopResult:
     """Lead servers through the hop; add the hop endpoint only if something enters through it.
+
+    `helper_server_names` are the server names a sidecar (Xray) asks the hop to dial.  The hop's WireGuard endpoint
+    resolves a domain destination itself through the router's DNS rules, and the template's rules end at the proxied DNS,
+    which waits for the very connection being opened (field report 2026-11-26: `lookup <server>: context deadline
+    exceeded`).  With a `resolver` every server name the hop dials therefore gets a DNS rule to that direct resolver.
 
     `pool_outbounds` are the native servers of the connection pool: they live in the provider file, not in the config's
     `outbounds`, and dial their servers just the same, so they are chained in place too.
@@ -93,6 +99,15 @@ def apply_entry_hop(
             rule["outbound"] = WARP_ENTRY_TAG
             rerouted += 1
 
+    if chained + rerouted and resolver:
+        names = {
+            str(o.get("server")).strip().lower()
+            for group in (outbounds, pool_outbounds if pool_outbounds is not None else [])
+            for o in group
+            if isinstance(o, dict) and o.get("detour") == WARP_ENTRY_TAG and _is_name(str(o.get("server", "")))
+        }
+        names |= {str(n).strip().lower() for n in helper_server_names if _is_name(str(n))}
+        _pin_names_to_resolver(payload, sorted(names), resolver)
     if chained + rerouted:
         api: dict[str, Any] = {"type": "direct", "tag": WARP_ENTRY_API_TAG}
         if resolver:
@@ -199,6 +214,31 @@ def _chain(outbound: dict[str, Any], resolver: str | None) -> dict[str, Any]:
     if resolver and "domain_resolver" not in updated and not _is_ip_literal(str(updated.get("server", ""))):
         updated["domain_resolver"] = resolver
     return updated
+
+
+def _is_name(value: str) -> bool:
+    host = value.strip().strip("[]")
+    return bool(host) and not _is_ip_literal(host) and not _is_loopback(host)
+
+
+def _pin_names_to_resolver(payload: dict[str, Any], names: list[str], resolver: str) -> None:
+    """One DNS rule at the top: these names resolve through `resolver`, outside the tunnel.  Rebuilt on every call."""
+    dns = payload.get("dns")
+    if not isinstance(dns, dict):
+        return
+    rules = dns.setdefault("rules", [])
+    if not isinstance(rules, list):
+        return
+    wanted = set(names)
+    rules[:] = [
+        r for r in rules
+        if not (
+            isinstance(r, dict) and set(r) == {"domain", "action", "server"} and r.get("server") == resolver
+            and isinstance(r.get("domain"), list) and set(r["domain"]) <= wanted
+        )
+    ]
+    if names:
+        rules.insert(0, {"domain": names, "action": "route", "server": resolver})
 
 
 def _is_hop(endpoint: Any) -> bool:

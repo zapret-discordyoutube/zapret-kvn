@@ -6,6 +6,7 @@ import unittest
 
 from xray_fluent.constants import HYSTERIA_PATH_DEFAULT
 from xray_fluent.engines.singbox.runtime_planner import (
+    apply_warp_entry,
     _APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG,
     parse_singbox_document,
     plan_singbox_runtime,
@@ -92,6 +93,19 @@ class WarpEntryPlannerTests(unittest.TestCase):
             with self.subTest(link[:4]):
                 api = next(o for o in plan(link).singbox_config["outbounds"] if o.get("tag") == WARP_ENTRY_API_TAG)
                 self.assertEqual("bootstrap-dns", api["domain_resolver"])
+
+    def test_server_names_the_hop_dials_resolve_outside_the_tunnel(self) -> None:
+        # Regression of 0.8.113, seen on the owner's machine: the hop's WireGuard endpoint resolves a domain destination
+        # through the router's DNS rules, which end at the proxied DNS that waits for the very connection being opened.
+        named = "vless://11111111-1111-1111-1111-111111111111@one.one.one.one:443?security=tls&sni=one.one.one.one&type=tcp#n"
+        for link, name in ((named, "one.one.one.one"), ("ss://YWVzLTEyOC1nY206cGFzcw@ss.example.com:8388#ss", "ss.example.com")):
+            with self.subTest(name):
+                built = plan(link)
+                first = built.singbox_config["dns"]["rules"][0]
+                self.assertEqual({"domain": [name], "action": "route", "server": "bootstrap-dns"}, first)
+                again = apply_warp_entry(built, PROFILE, tun=False)
+                matching = [r for r in again.singbox_config["dns"]["rules"] if r.get("domain") == [name]]
+                self.assertEqual(1, len(matching), "a second pass keeps one rule")
 
 
 if __name__ == "__main__":
