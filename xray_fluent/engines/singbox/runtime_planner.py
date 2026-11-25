@@ -1573,6 +1573,7 @@ def attach_service_slots(
     *,
     main_node_id: str | None,
     server_ipv6_first: bool = False,
+    helpers_allowed: bool = True,
 ) -> SingboxRuntimePlan:
     """Service slots on the runtime copy (docs/SERVICE_SLOTS.md, "Phase 3 plan"); nothing when no slot is ticked.
 
@@ -1612,6 +1613,7 @@ def attach_service_slots(
         allocate_port=allocate,
         credentials=lambda prefix: generate_local_proxy_credentials(prefix=prefix),
         build_native_outbound=native,
+        helpers_allowed=helpers_allowed,
     )
     ensure_helper_direct_routes(config, plans, lambda core, slot_id: str(slot_helper_exe(core.value, slot_id).resolve()))
     plan.slot_plans = tuple(plans)

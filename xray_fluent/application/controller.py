@@ -466,6 +466,7 @@ class AppController(QObject):
             ) or _SLOT_XRAY_DEFAULT,
             on_helper_failed=self._on_slot_helper_failed,
             masking=lambda: masking_runtime.settings_of(self.state.settings),
+            helpers_allowed=lambda: bool(self.state.settings.tun_mode) or not self._warp_entry_profile(),
         )
         # slot id -> servers whose helper did not start this app run: the next launch picks another one.
         self._slot_failed: dict[str, set[str]] = {}
@@ -1393,8 +1394,11 @@ class AppController(QObject):
             failed=getattr(self, "_slot_failed", None),
             host_keys=_slot_host_keys,
         )
+        # WARP entry without the TUN: nothing captures a helper's own sockets, so a slot with a helper follows the main
+        # server (through the hop) instead of refusing the whole connection.
         plan = attach_service_slots(plan, {a.slot_id: a.node for a in assignments}, main_node_id=main_id,
-                                    server_ipv6_first=self._server_ipv6_first())
+                                    server_ipv6_first=self._server_ipv6_first(),
+                                    helpers_allowed=tun or not self._warp_entry_profile())
         # The reason is logged once, when the helpers start (this plan is also built for transition signatures).
         reasons = {a.slot_id: a.reason for a in assignments if a.reason}
         plan.slot_plans = tuple(

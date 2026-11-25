@@ -25,6 +25,8 @@ from .config_writer import DNS_PREFIX, PROXY_TAG, SELECTOR_PREFIX
 RELAY_PREFIX = "zapret-slot-relay-"
 OUT_PREFIX = "zapret-slot-out-"
 LOOPBACK = "127.0.0.1"
+# The helper would dial its server outside sing-box and show the address to the provider (WARP entry, proxy mode).
+SLOT_HELPER_FOLLOWS_MAIN = "вход через WARP: в режиме «Прокси» сервер этого сервиса идёт мимо sing-box, сервис использует основной сервер"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +85,7 @@ def plan_slots(
     allocate_port: Callable[[], int],
     credentials: Callable[[str], tuple[str, str]],
     build_native_outbound: Callable[[Node, str], dict[str, Any]],
+    helpers_allowed: bool = True,
 ) -> list[SlotRuntimePlan]:
     """Edits [runtime_config] in place and returns one plan per slot selector found in it.
 
@@ -105,7 +108,7 @@ def plan_slots(
             "password": relay.password,
             "inet4_bind_address": LOOPBACK,
         })
-        plan = replace(_plan_one(slot_id, node, main_node_id, provider_tags, relay, build_native_outbound, outbounds), relay=relay)
+        plan = replace(_plan_one(slot_id, node, main_node_id, provider_tags, relay, build_native_outbound, outbounds, helpers_allowed), relay=relay)
         members = [PROXY_TAG, relay.tag]
         if plan.member_tag not in members and not plan.member_tag.startswith(f"{provider_tag}/"):
             members.append(plan.member_tag)
@@ -131,6 +134,7 @@ def _plan_one(
     relay: SlotRelay,
     build_native_outbound: Callable[[Node, str], dict[str, Any]],
     outbounds: list[Any],
+    helpers_allowed: bool = True,
 ) -> SlotRuntimePlan:
     if node is None or node.id == main_node_id:
         return SlotRuntimePlan(slot_id, PROXY_TAG, server_id=node.id if node else None)
@@ -147,6 +151,8 @@ def _plan_one(
         _replace_or_append(outbounds, native)
         return SlotRuntimePlan(slot_id, tag, server_id=node.id)
     if core in (ProtocolCore.HYSTERIA, ProtocolCore.XRAY):
+        if not helpers_allowed:
+            return SlotRuntimePlan(slot_id, PROXY_TAG, note=SLOT_HELPER_FOLLOWS_MAIN, server_id=node.id)
         return SlotRuntimePlan(slot_id, relay.tag, relay.helper(core, node), server_id=node.id)
     return SlotRuntimePlan(slot_id, PROXY_TAG, note="серверы AWG для отдельных сервисов пока не поддерживаются", server_id=node.id)
 

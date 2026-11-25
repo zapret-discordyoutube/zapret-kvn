@@ -85,8 +85,11 @@ class SlotRuntimeService(QObject):
         xray_source: Callable[[], Path],
         on_helper_failed: Callable[[str, str], None] | None = None,
         masking: Callable[[], MaskingSettings] | None = None,
+        helpers_allowed: Callable[[], bool] | None = None,
     ):
         super().__init__(parent)
+        # False while the WARP entry is on without the TUN: a helper would dial its server outside sing-box.
+        self._helpers_allowed = helpers_allowed or (lambda: True)
         self._log = log
         self._hysteria_source = hysteria_source
         self._xray_source = xray_source
@@ -125,7 +128,7 @@ class SlotRuntimeService(QObject):
         sing-box-core server of the launch provider."""
         core = protocol_core(node)
         if core in (ProtocolCore.HYSTERIA, ProtocolCore.XRAY):
-            return True
+            return self._helpers_allowed()
         return core is ProtocolCore.SINGBOX and node.id in self._provider_tags
 
     def move(self, slot_id: str, node: Node | None) -> bool:
