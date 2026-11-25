@@ -74,6 +74,8 @@ ALLOWED: dict[str, set[str]] = {
     "network/network_monitor.py": {"socket"},
     # Проверки серверов — правила шлюза: пинг по кнопке по одному с паузой,
     # скорость по кнопке с паузой и кандидат умной замены в бюджете шлюза.
+    # Registers the WARP entry hop's Cloudflare account (api.cloudflareclient.com), the TLS ClientHello cut by hand.
+    "network/warp_registration.py": {"create_connection"},
     "network/ping_worker.py": {"create_connection"},
     # Пинг: тёплый запрос через временное ядро проверяемого сервера (HTTP
     # CONNECT к локальному прокси) — внутри туннеля, по кнопке, по одному.

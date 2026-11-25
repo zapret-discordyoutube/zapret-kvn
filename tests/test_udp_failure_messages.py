@@ -293,6 +293,7 @@ class StartFailureReportsThroughTheOutcomeTests(unittest.TestCase):
         controller._plan_proxy_runtime_singbox.return_value = plan
         controller._plan_runtime_singbox.return_value = plan
         controller._start_singbox_runtime_plan.return_value = False
+        controller._ensure_warp_account_steps.return_value = ()  # the WARP entry is off here: nothing to register
         return bridge_controller(controller), node
 
     def test_failed_start_reports_a_step_message_and_publishes_nothing(self) -> None:
