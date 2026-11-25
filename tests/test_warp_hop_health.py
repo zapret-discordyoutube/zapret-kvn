@@ -60,3 +60,27 @@ class HopHealthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WarpFactsTests(unittest.TestCase):
+    """The facts the connect report reads: the words of the report contract's probe vocabulary."""
+
+    def test_registration_endings_use_the_contract_vocabulary(self) -> None:
+        from xray_fluent.network.warp_hop_health import registration_result
+
+        # the real detail strings the registration module produced: the owner's reset, and the module's own failures
+        self.assertEqual("answered", registration_result(True, "registered"))
+        self.assertEqual("reset", registration_result(False, "ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host"))
+        self.assertEqual("timeout", registration_result(False, "TimeoutError: timed out"))
+        self.assertEqual("refused", registration_result(False, "ConnectionRefusedError: [WinError 10061] refused"))
+        self.assertEqual("unknown", registration_result(False, "ValueError: API answered 429"))
+
+    def test_the_tunnel_result_follows_what_the_core_said(self) -> None:
+        from xray_fluent.network.warp_hop_health import tunnel_result
+
+        calm, blocked = HopHealth(), HopHealth()
+        calm.observe(RETRY_2408)
+        for line in (NOT_READY, NOT_READY):
+            blocked.observe(line)
+        self.assertEqual("answered", tunnel_result(calm))
+        self.assertEqual("timeout", tunnel_result(blocked))

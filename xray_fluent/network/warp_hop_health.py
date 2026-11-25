@@ -78,3 +78,37 @@ class HopHealth:
             f"(порты {ports}), отказов «endpoint not initialized»={self.not_initialized}, "
             f"таймаутов поиска адреса={self.lookup_timeouts}, ошибок регистрации={self.registration_errors}"
         )
+
+
+@dataclass(frozen=True)
+class WarpFacts:
+    """What the connect report needs to know about the WARP hop (read-only, the reports module wires to this).
+
+    `register` and `tunnel` are `(result, ms)` with `result` one of answered/timeout/reset/refused/unknown (the probe
+    vocabulary of the report contract), or None when nothing ran or the hop was off: then no probe is sent at all."""
+
+    enabled: bool
+    register: tuple[str, int] | None
+    retries: int | None
+    tunnel: tuple[str, int] | None
+
+
+def registration_result(ok: bool, detail: str) -> str:
+    """The probe vocabulary word for how the app's own account registration ended."""
+    if ok:
+        return "answered"
+    lowered = detail.lower()
+    if "reset" in lowered or "forcibly closed" in lowered or "eof" in lowered:
+        return "reset"
+    if "refused" in lowered:
+        return "refused"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    return "unknown"
+
+
+def tunnel_result(health: HopHealth) -> str:
+    """The first seconds of the tunnel: refusals or unanswered handshakes mean it is not coming up."""
+    if health.not_initialized > 0 or health.handshake_retries >= RETRY_LIMIT:
+        return "timeout"
+    return "answered"

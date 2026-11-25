@@ -275,7 +275,7 @@ from ..network.bootstrap_dns import resolve_bootstrap
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
 from ..network import entry_hop, server_family, warp_registration
-from ..network.warp_hop_health import HopHealth
+from ..network.warp_hop_health import HopHealth, WarpFacts, registration_result, tunnel_result
 from ..network.physical_route import (
     has_network,
     is_physical_fingerprint,
@@ -478,6 +478,8 @@ class AppController(QObject):
         self._warp_hop_suspended = False
         self._warp_register_via_vpn = False
         self._warp_health: HopHealth | None = None
+        self._warp_connect_started = 0.0
+        self._warp_register: tuple[str, int] | None = None
         self._warp_summary_timer = QTimer(self)
         self._warp_summary_timer.setSingleShot(True)
         self._warp_summary_timer.timeout.connect(self._log_warp_health_summary)
@@ -1499,10 +1501,12 @@ class AppController(QObject):
         up; the next start then enters through the hop."""
         self._warp_hop_suspended = False
         self._warp_health = None
+        self._warp_register = None
         self._warp_summary_timer.stop()
         profile = self._warp_entry_profile()
         if not profile:
             return
+        self._warp_connect_started = time.monotonic()
         # What the core says about the hop is counted from here to the summary line (warp_hop_health.py).
         self._warp_health = HopHealth()
         self._warp_summary_timer.start(_WARP_SUMMARY_MS)
@@ -1515,6 +1519,7 @@ class AppController(QObject):
             lambda: warp_registration.ensure_account(profile, addresses=lambda: list(resolve_bootstrap(warp_registration.API_HOST).addresses))
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        self._warp_register = (registration_result(outcome.ok, outcome.detail), elapsed_ms)
         if outcome.ok:
             self._log(f"[warp-entry] аккаунт WARP зарегистрирован, путь: {outcome.route}, {elapsed_ms} мс")
             return
@@ -1531,6 +1536,17 @@ class AppController(QObject):
             "без входа через WARP, адрес сервера на этот раз виден провайдеру. После подключения аккаунт будет "
             "зарегистрирован через VPN, и вход через WARP включится сам.",
         )
+
+    def warp_report_facts(self) -> WarpFacts:
+        """The WARP hop facts of the current connect for the connect report (read-only; see `WarpFacts`)."""
+        health = self._warp_health
+        if health is None:
+            # Off at the connect, or the launch runs without it (registration failed): nothing to report as a probe.
+            return WarpFacts(enabled=bool(getattr(self.state.settings, "warp_entry_hop", False)) and not self._warp_hop_suspended,
+                             register=self._warp_register, retries=None, tunnel=None)
+        elapsed_ms = int((time.monotonic() - self._warp_connect_started) * 1000)
+        return WarpFacts(enabled=True, register=self._warp_register, retries=health.handshake_retries,
+                         tunnel=(tunnel_result(health), elapsed_ms))
 
     def _log_warp_health_summary(self) -> None:
         health = self._warp_health
