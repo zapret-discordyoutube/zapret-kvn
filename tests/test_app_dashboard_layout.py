@@ -36,6 +36,34 @@ def _routing_card_position(page: DashboardPage) -> tuple[int, int, int, int]:
     return grid.getItemPosition(index)
 
 
+class DashboardWarpOfferTest(unittest.TestCase):
+    """A server that does not open offers the WARP entry, with a button that leads to its switch (owner 2026-11-26)."""
+
+    def test_offer_shows_in_error_only_while_the_entry_is_off(self) -> None:
+        page = DashboardPage()
+        page.set_warp_offer(True)
+        self.assertTrue(page.warp_btn.isHidden())                    # not in an error
+        page.set_runtime_status("error", "Сервер не отвечает")
+        page._do_refresh_dashboard()
+        self.assertFalse(page.warp_btn.isHidden())
+        self.assertFalse(page.warp_hint_label.isHidden())
+        page.set_warp_offer(False)                                   # the entry is on: nothing to offer
+        page._do_refresh_dashboard()
+        self.assertTrue(page.warp_btn.isHidden())
+        self.assertTrue(page.warp_hint_label.isHidden())
+        page.set_warp_offer(True)
+        page.set_runtime_status("running", "")
+        page._do_refresh_dashboard()
+        self.assertTrue(page.warp_btn.isHidden())
+
+    def test_the_button_asks_the_window_for_the_switch(self) -> None:
+        page = DashboardPage()
+        asked = []
+        page.warp_requested.connect(lambda: asked.append(True))
+        page.warp_btn.click()
+        self.assertEqual([True], asked)
+
+
 class DashboardFailureReportTest(unittest.TestCase):
     """Path check and «Отправить отчёт» beside a connection error (owner decision 2026-11-19)."""
 

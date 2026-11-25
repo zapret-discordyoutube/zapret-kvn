@@ -44,12 +44,14 @@ class HopHealthTests(unittest.TestCase):
 
     def test_repeated_handshake_failures_alone_tell_the_user(self) -> None:
         health = HopHealth()
-        notices = [health.observe(line) for line in (RETRY_2408, RETRY_500, RETRY_2408)]
-        self.assertEqual(TUNNEL_DOWN, notices[-1])
+        notices = [health.observe(line) for line in (RETRY_2408, RETRY_500, RETRY_2408, RETRY_500)]
+        self.assertEqual([None, None, None, TUNNEL_DOWN], notices)
 
     def test_a_slow_start_is_not_a_warning(self) -> None:
         health = HopHealth()
         self.assertIsNone(health.observe(RETRY_2408))
+        self.assertIsNone(health.observe(RETRY_500))
+        self.assertIsNone(health.observe(RETRY_2408))     # three unanswered handshakes: the fourth candidate is still to come
         self.assertIsNone(health.observe(NOT_READY))
 
     def test_stuck_address_lookups_get_their_own_message(self) -> None:

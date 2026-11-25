@@ -120,6 +120,17 @@ class WarpEntryHopTests(unittest.TestCase):
         self.assertEqual("direct", api["type"])
         self.assertEqual("dns-direct", api["domain_resolver"])
 
+    def test_hop_endpoint_carries_client_side_noise_built_by_the_masking_module(self) -> None:
+        # The same chain the app's WireGuard masking builds for the preset domain; only client-side Amnezia options.
+        from xray_fluent.masking.wireguard import dns_chain, validate_chain
+
+        payload = config()
+        apply(payload)
+        noise = by_tag(payload["endpoints"], WARP_ENTRY_TAG)["amnezia"]
+        self.assertEqual(dns_chain("yandex.ru"), noise["i1"])
+        self.assertIsNone(validate_chain(noise["i1"])[1])
+        self.assertEqual({"jc", "jmin", "jmax", "i1"}, set(noise))
+
     def test_nothing_to_enter_means_no_hop_and_no_registration(self) -> None:
         payload = {"outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": []}}
         result = apply(payload)

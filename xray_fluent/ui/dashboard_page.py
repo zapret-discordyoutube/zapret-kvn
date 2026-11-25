@@ -156,6 +156,7 @@ class DashboardPage(StackedSection):
     logs_requested = pyqtSignal()
     #: «Отправить отчёт» at a failed connection (client_reports.reporter.ClientReporter.force_report).
     report_requested = pyqtSignal()
+    warp_requested = pyqtSignal()
     toggle_connection_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)
     tun_toggled = pyqtSignal(bool)
@@ -288,6 +289,18 @@ class DashboardPage(StackedSection):
         self.diagnosis_label = BodyLabel("", self._hero_text)
         self.diagnosis_label.setWordWrap(True)
         self.diagnosis_label.hide()
+        # When a server does not open and the WARP entry is off: offer it and take the user to its switch.
+        self._warp_offer = False
+        self.warp_hint_label = BodyLabel(
+            "Сервер не открывается? Попробуйте вход через WARP: соединение пойдёт к Cloudflare, а уже оттуда к "
+            "серверу, поэтому провайдер не увидит адрес сервера.",
+            self._hero_text,
+        )
+        self.warp_hint_label.setWordWrap(True)
+        self.warp_hint_label.hide()
+        self.warp_btn = PushButton(FIF.GLOBE, "Включить вход через WARP", self._hero_text)
+        self.warp_btn.clicked.connect(self.warp_requested)
+        self.warp_btn.hide()
         self.report_btn = PushButton(FIF.SEND, "Отправить отчёт", self._hero_text)
         self.report_btn.clicked.connect(self.report_requested)
         self.report_btn.hide()
@@ -301,6 +314,8 @@ class DashboardPage(StackedSection):
         text.addWidget(self.connection_status_label)
         text.addSpacing(4)
         text.addWidget(self.diagnosis_label)
+        text.addWidget(self.warp_hint_label)
+        text.addWidget(self.warp_btn, 0, Qt.AlignmentFlag.AlignLeft)
         text.addWidget(self.logs_btn, 0, Qt.AlignmentFlag.AlignLeft)
         text.addWidget(self.report_btn, 0, Qt.AlignmentFlag.AlignLeft)
         text.addWidget(self.report_status_label)
@@ -633,9 +648,10 @@ class DashboardPage(StackedSection):
         )
         align = Qt.AlignmentFlag.AlignHCenter if stacked else Qt.AlignmentFlag.AlignLeft
         for label in (self.connection_state_label, self.connection_uptime_label, self.connection_status_label,
-                      self.diagnosis_label, self.report_status_label):
+                      self.diagnosis_label, self.report_status_label, self.warp_hint_label):
             label.setAlignment(align | Qt.AlignmentFlag.AlignVCenter)
         self._hero_text_layout.setAlignment(self.logs_btn, align)
+        self._hero_text_layout.setAlignment(self.warp_btn, align)
         self._hero_text_layout.setAlignment(self.report_btn, align)
 
     def _update_adaptive_grid(self) -> None:
@@ -754,6 +770,12 @@ class DashboardPage(StackedSection):
         note = {"sent": "Отчёт отправлен", "queued": "Отчёт в очереди, отправим при первой связи"}.get(status or "", "")
         self.report_status_label.setText(note)
         self.report_status_label.setVisible(bool(note))
+
+    def set_warp_offer(self, offered: bool) -> None:
+        """The WARP entry is off, so a failed connect may offer it (the button leads to its switch)."""
+        if offered != self._warp_offer:
+            self._warp_offer = offered
+            self._refresh_dashboard()
 
     def set_runtime_status(self, phase: str, message: str) -> None:
         normalized = (phase or "idle").strip().lower()
@@ -906,6 +928,9 @@ class DashboardPage(StackedSection):
         self.connection_status_label.setText(status)
         self.connection_status_label.setVisible(bool(status))
         self.logs_btn.setVisible(self._connection_phase == "error")
+        offer = self._connection_phase == "error" and self._warp_offer
+        self.warp_hint_label.setVisible(offer)
+        self.warp_btn.setVisible(offer)
         self._refresh_failure_report()
         orb_state = self._orb_state()
         self.connection_orb.set_state(orb_state)

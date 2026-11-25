@@ -25,7 +25,7 @@ app = _existing or QApplication([])
 from dataclasses import fields
 
 from xray_fluent.profiles.models import AppSettings
-from xray_fluent.ui.tour import TOUR_STEPS, TourOverlay, TourStep, active_tour
+from xray_fluent.ui.tour import TOUR_STEPS, WARP_HINT_STEP, TourOverlay, TourStep, active_tour
 from xray_fluent.ui.tour.overlay import (
     CARD_GAP,
     CARD_MARGIN,
@@ -36,6 +36,9 @@ from xray_fluent.ui.tour.overlay import (
 from xray_fluent.ui.tour.steps import on_page
 
 UI_DIR = Path(__file__).resolve().parents[1] / "xray_fluent" / "ui"
+
+#: The tour and the one-step WARP hint from the dashboard point at real widgets of real pages.
+ANCHORED_STEPS = TOUR_STEPS + (WARP_HINT_STEP,)
 
 #: Где объявлен первый атрибут пути ``on_page`` для каждой страницы.
 PAGE_SOURCES = {
@@ -101,7 +104,7 @@ class StepsTests(unittest.TestCase):
 
     def test_pages_are_main_window_pages(self) -> None:
         source = (UI_DIR / "main_window.py").read_text(encoding="utf-8")
-        for step in TOUR_STEPS:
+        for step in ANCHORED_STEPS:
             if step.page is None:
                 continue
             self.assertIn(step.page, PAGE_SOURCES, step.key)
@@ -122,7 +125,7 @@ class StepsTests(unittest.TestCase):
         sections = (UI_DIR / "singbox" / "sections.py").read_text(encoding="utf-8")
         lists = (UI_DIR / "singbox" / "lists.py").read_text(encoding="utf-8")
         checked = 0
-        for step in TOUR_STEPS:
+        for step in ANCHORED_STEPS:
             if step.target is None or step.target.__closure__ is None:
                 continue
             cells = [cell.cell_contents for cell in step.target.__closure__]
@@ -511,7 +514,7 @@ class TourAutostartTests(unittest.TestCase):
         MainWindow = _main_window_class()
         names = (
             "_start_tour", "_open_tour_step", "_prewarm_tour_step", "_on_tour_finished", "_mark_tour_done",
-            "_tour_autostart_wanted", "_schedule_tour_autostart", "_try_autostart_tour",
+            "_tour_autostart_wanted", "_schedule_tour_autostart", "_try_autostart_tour", "_show_warp_offer",
         )
         attrs = {name: getattr(MainWindow, name) for name in names}
         attrs["isActiveWindow"] = lambda self: self.active
@@ -533,6 +536,7 @@ class TourAutostartTests(unittest.TestCase):
         self.window.stackedWidget = Mock()
         self.window.stackedWidget.isAnimationEnabled.return_value = True
         self.window.dashboard_page = QWidget(self.window)
+        self.window.settings_page = QWidget(self.window)
         self.window.show()
 
     def tearDown(self) -> None:
@@ -597,6 +601,21 @@ class TourAutostartTests(unittest.TestCase):
                 active_tour(self.window).finish("interrupted")
                 _spin(10)
 
+    def test_the_warp_offer_runs_a_one_step_hint_and_marks_nothing(self) -> None:
+        """«Включить вход через WARP» с карточки подключения: подсветка переключателя, общая экскурсия не тронута."""
+        self.window._show_warp_offer()
+        tour = active_tour(self.window)
+        self.assertIsNotNone(tour)
+        self.assertEqual("warp_hint", tour.step.key)
+        self.assertEqual(1, len(tour._steps))
+        self.assertFalse(self.window._tour_started_this_session)       # the autostart is not used up
+        self.window.switchTo.reset_mock()
+        tour.finish("done")
+        _spin(10)
+        self.assertFalse(self.settings.tour_done)                      # the hint is not the tour
+        self.window.switchTo.assert_not_called()                       # the user stays by the switch
+        self.assertIsNotNone(self._autostart())                        # and the real tour still starts later
+
     def test_schedule_is_not_duplicated(self) -> None:
         self.window._schedule_tour_autostart()
         self.assertTrue(self.window._tour_autostart_timer.isActive())
@@ -621,8 +640,8 @@ class RealStepsFitTests(unittest.TestCase):
         overlay = TourOverlay(window, TOUR_STEPS)
         try:
             available = window.height() - 2 * CARD_MARGIN
-            for index, step in enumerate(TOUR_STEPS):
-                overlay.card.set_step(step, index, len(TOUR_STEPS))
+            for index, step in enumerate(ANCHORED_STEPS):
+                overlay.card.set_step(step, index, len(ANCHORED_STEPS))
                 width = 560 if step.hero else 440
                 self.assertLessEqual(overlay.card.height_for(width), available, step.key)
                 self.assertTrue(overlay.card.article_link.isVisibleTo(overlay.card), step.key)

@@ -63,7 +63,7 @@ from ..platform.windows.win32_errors import is_win32_error
 from .window_presence import WindowPresence, is_native_minimize_command, is_native_restore_command
 from .window_reveal import cloak_until_painted, is_system_show_event
 from .theme import apply_theme, stop_system_theme_listener, sync_system_theme_listener
-from .tour import TOUR_STEPS, TourOverlay, TourStep, active_tour
+from .tour import TOUR_STEPS, WARP_HINT_STEP, TourOverlay, TourStep, active_tour
 from .sharing_page import SharingPage
 from .updates_page import UpdatesPage
 from .zapret_page import ZapretPage
@@ -578,6 +578,11 @@ class MainWindow(FluentWindow):
     def _connect_signals(self) -> None:
         self.dashboard_page.logs_requested.connect(lambda: self.switchTo(self.logs_page))
         self.dashboard_page.report_requested.connect(self.controller.client_reporter.force_report)
+        self.dashboard_page.warp_requested.connect(self._show_warp_offer)
+        self.controller.settings_changed.connect(
+            lambda settings: self.dashboard_page.set_warp_offer(not settings.warp_entry_hop)
+        )
+        self.dashboard_page.set_warp_offer(not self.controller.state.settings.warp_entry_hop)
         self.controller.failure_report_changed.connect(self.dashboard_page.set_failure_report)
         self.dashboard_page.mode_changed.connect(self._set_mode_only)
         self.dashboard_page.toggle_connection_requested.connect(self.controller.toggle_connection)
@@ -1634,11 +1639,17 @@ class MainWindow(FluentWindow):
 
     # ── Обучающая экскурсия ─────────────────────────────────────
 
-    def _start_tour(self) -> None:
+    def _show_warp_offer(self) -> None:
+        """«Включить вход через WARP» с карточки подключения: страница настроек и подсвеченный переключатель."""
+        self._start_tour(steps=(WARP_HINT_STEP,), hint=True)
+
+    def _start_tour(self, steps: tuple[TourStep, ...] = TOUR_STEPS, *, hint: bool = False) -> None:
         if active_tour(self) is not None:
             return
-        self._tour_started_this_session = True
-        overlay = TourOverlay(self, TOUR_STEPS)
+        self._tour_is_hint = hint
+        if not hint:
+            self._tour_started_this_session = True
+        overlay = TourOverlay(self, steps)
         overlay.step_opening.connect(self._open_tour_step)
         overlay.step_upcoming.connect(self._prewarm_tour_step)
         overlay.finished.connect(self._on_tour_finished)
@@ -1680,6 +1691,10 @@ class MainWindow(FluentWindow):
         # «Пройдена» — только по решению человека: дошёл до конца или закрыл
         # сам. Окно ушло в трей или приложение прервало экскурсию — покажем
         # её снова при следующем запуске.
+        if getattr(self, "_tour_is_hint", False):
+            # The one-step hint leaves the user on the settings page next to the switch and marks nothing.
+            self._tour_is_hint = False
+            return
         if reason in ("done", "skipped"):
             self._mark_tour_done()
         if reason == "done":

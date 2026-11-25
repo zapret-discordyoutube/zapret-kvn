@@ -22,7 +22,9 @@ _REGISTRATION = re.compile(r"endpoint/warp\[" + HOP + r"\]: Post ")
 
 #: Enough evidence to tell the user: the tunnel is not coming up (not just slow).
 NOT_READY_LIMIT = 5
-RETRY_LIMIT = 3
+#: The start recovery (core patch warp-entry-recovery) tries four candidates, 4 s each: only after four unanswered
+#: handshakes is the tunnel given up (a start that needs two or three retries is slow, not blocked).
+RETRY_LIMIT = 4
 LOOKUP_LIMIT = 3
 
 TUNNEL_DOWN = (

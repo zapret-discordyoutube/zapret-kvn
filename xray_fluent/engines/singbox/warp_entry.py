@@ -37,6 +37,19 @@ WARP_ENTRY_API_TAG = "kvn-warp-api"
 # default 1280.  1330 fits it and stays under 1500 with WireGuard's 80 bytes of IPv6 overhead.
 WARP_ENTRY_MTU = 1330
 
+# Noise before the handshake (owner request 2026-11-26: WARP must work where it is blocked, "like WARP generators"): a few
+# junk datagrams and a first packet shaped like a DNS query to a Russian domain (the same chain the app's WireGuard
+# masking builds, `masking/wireguard.dns_chain`).  The initiator alone sends them, so Cloudflare's plain WireGuard server
+# ignores them and still answers the handshake (checked against the real WARP on win10 2026-11-26: plain, junk only and
+# junk with this I1 all answered); a censor that looks for the WireGuard handshake as the first packet of the flow does
+# not see it first.  Only the client-side Amnezia options are used: H1-H4 and S1-S4 would have to equal the server's.
+WARP_ENTRY_NOISE = {
+    "jc": 3,
+    "jmin": 10,
+    "jmax": 30,
+    "i1": "<r 2><b 0x010000010000000000000679616e6465780272750000010001>",
+}
+
 # Types without a server of their own: nothing to lead through the hop.  `warp` is the hop itself.
 _LOCAL_TYPES = frozenset({"direct", "block", "dns", "selector", "urltest", "warp"})
 
@@ -119,6 +132,7 @@ def apply_entry_hop(
                 "type": "warp",
                 "tag": WARP_ENTRY_TAG,
                 "mtu": WARP_ENTRY_MTU,
+                "amnezia": dict(WARP_ENTRY_NOISE),
                 "profile": {"cache_path": profile_path, "detour": WARP_ENTRY_API_TAG},
             }
         )
