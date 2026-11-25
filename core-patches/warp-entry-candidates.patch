@@ -1,0 +1,355 @@
+diff --git a/protocol/warp/edge_memory.go b/protocol/warp/edge_memory.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b12fc07f66d2c42b304b6f3125db87f8b4f858f
+--- /dev/null
++++ b/protocol/warp/edge_memory.go
+@@ -0,0 +1,94 @@
++package warp
++
++import (
++	"net"
++	"net/netip"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++)
++
++// The edge that answered last is kept next to the account file and tried first at the next start: on a network that blocks
++// the account's own address the walk through alternateEdges then happens once, not at every connect. It is a hint, not a
++// choice: the list is still verified, and a remembered edge that stops answering falls back to the standard order.
++
++// edgeMemoryPath is where the remembered edge lives ("" when there is no account file to sit next to).
++func edgeMemoryPath(cachePath string) string {
++	if cachePath == "" {
++		return ""
++	}
++	return cachePath + ".edge"
++}
++
++// loadEdgeMemory reads "address:port"; anything unreadable or not a literal IP with a port is no memory at all.
++func loadEdgeMemory(path string) (candidate, bool) {
++	if path == "" {
++		return candidate{}, false
++	}
++	content, err := os.ReadFile(path)
++	if err != nil {
++		return candidate{}, false
++	}
++	host, portText, err := net.SplitHostPort(strings.TrimSpace(string(content)))
++	if err != nil {
++		return candidate{}, false
++	}
++	if _, err = netip.ParseAddr(host); err != nil {
++		return candidate{}, false
++	}
++	port, err := strconv.ParseUint(portText, 10, 16)
++	if err != nil || port == 0 {
++		return candidate{}, false
++	}
++	return candidate{host, uint16(port)}, true
++}
++
++// saveEdgeMemory keeps the edge atomically with mode 0600; a failure only loses the hint.
++func saveEdgeMemory(path string, edge candidate) error {
++	if path == "" {
++		return nil
++	}
++	temporary, err := os.CreateTemp(filepath.Dir(path), ".warp-edge-*")
++	if err != nil {
++		return err
++	}
++	defer os.Remove(temporary.Name())
++	if err = temporary.Chmod(0o600); err != nil {
++		temporary.Close()
++		return err
++	}
++	if _, err = temporary.WriteString(net.JoinHostPort(edge.address, strconv.Itoa(int(edge.port))) + "\n"); err != nil {
++		temporary.Close()
++		return err
++	}
++	if err = temporary.Close(); err != nil {
++		return err
++	}
++	return os.Rename(temporary.Name(), path)
++}
++
++// forgetEdge removes the hint (the account's own address answered: nothing to remember).
++func forgetEdge(path string) {
++	if path != "" {
++		_ = os.Remove(path)
++	}
++}
++
++// withRemembered puts the remembered edge first and drops its later duplicate; the rest keep their order.
++func withRemembered(list []candidate, remembered candidate, ok bool) []candidate {
++	if !ok {
++		return list
++	}
++	out := make([]candidate, 0, len(list)+1)
++	out = append(out, remembered)
++	dropped := false
++	for _, c := range list {
++		if c == remembered && !dropped {
++			dropped = true
++			continue
++		}
++		out = append(out, c)
++	}
++	return out
++}
+diff --git a/protocol/warp/edge_memory_test.go b/protocol/warp/edge_memory_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..81ffc61a754ba9fa813025fc1943d8ba272e02e5
+--- /dev/null
++++ b/protocol/warp/edge_memory_test.go
+@@ -0,0 +1,73 @@
++package warp
++
++import (
++	"os"
++	"path/filepath"
++	"reflect"
++	"runtime"
++	"testing"
++)
++
++func TestEdgeMemoryRoundTripIsPrivateAndForgettable(t *testing.T) {
++	path := edgeMemoryPath(filepath.Join(t.TempDir(), "warp-profile.json"))
++	if _, ok := loadEdgeMemory(path); ok {
++		t.Fatal("a missing file is no memory")
++	}
++	want := candidate{"188.114.99.1", 4500}
++	if err := saveEdgeMemory(path, want); err != nil {
++		t.Fatal(err)
++	}
++	got, ok := loadEdgeMemory(path)
++	if !ok || got != want {
++		t.Fatalf("got %v %v, want %v", got, ok, want)
++	}
++	// Windows has no POSIX modes: the account file test skips the same assertion
++	if info, err := os.Stat(path); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
++		t.Fatalf("the hint must be private: %v %v", info, err)
++	}
++	forgetEdge(path)
++	if _, ok := loadEdgeMemory(path); ok {
++		t.Fatal("a forgotten edge is no memory")
++	}
++}
++
++func TestEdgeMemoryRefusesAnythingThatIsNotALiteralAddressWithAPort(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "edge")
++	for _, content := range []string{"", "garbage", "engage.cloudflareclient.com:2408", "188.114.97.1", "188.114.97.1:0", "188.114.97.1:99999"} {
++		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
++			t.Fatal(err)
++		}
++		if got, ok := loadEdgeMemory(path); ok {
++			t.Fatalf("%q was accepted as %v", content, got)
++		}
++	}
++	if edgeMemoryPath("") != "" {
++		t.Fatal("no account file, no memory file")
++	}
++}
++
++func TestRememberedEdgeGoesFirstWithoutDuplicatesOrLoss(t *testing.T) {
++	list := peerCandidates(accountPeer(), "", 0)
++	remembered := candidate{"188.114.99.1", 4500}
++	got := withRemembered(list, remembered, true)
++	if got[0] != remembered || len(got) != len(list) {
++		t.Fatalf("got %v", got)
++	}
++	count := 0
++	for _, c := range got {
++		if c == remembered {
++			count++
++		}
++	}
++	if count != 1 {
++		t.Fatalf("the remembered edge appears %d times in %v", count, got)
++	}
++	unknown := candidate{"203.0.113.5", 2408}
++	got = withRemembered(list, unknown, true)
++	if got[0] != unknown || len(got) != len(list)+1 || !reflect.DeepEqual(got[1:], list) {
++		t.Fatalf("got %v", got)
++	}
++	if !reflect.DeepEqual(withRemembered(list, remembered, false), list) {
++		t.Fatal("no memory leaves the list as it is")
++	}
++}
+diff --git a/protocol/warp/endpoint.go b/protocol/warp/endpoint.go
+index 2d0bff07d8864c3661f16a69136f426661ef86c3..40a30db1c8cc999c04d767130a73efbd1208c32c 100644
+--- a/protocol/warp/endpoint.go
++++ b/protocol/warp/endpoint.go
+@@ -104,6 +104,15 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		}
+ 		peer := config.Peers[0]
+ 		candidates := peerCandidates(peer, options.Address, options.Port)
++		// An explicit address is the user's choice and is never rotated or replaced by a remembered edge.
++		edgePath := ""
++		if options.Address == "" {
++			edgePath = edgeMemoryPath(options.Profile.CachePath)
++			if remembered, ok := loadEdgeMemory(edgePath); ok {
++				logger.InfoContext(ctx, "WARP: trying the edge that answered last time first (", remembered.address, ":", remembered.port, ")")
++				candidates = withRemembered(candidates, remembered, ok)
++			}
++		}
+ 		var amnezia *option.WireGuardAmnezia
+ 		if options.Amnezia != nil {
+ 			amnezia = &option.WireGuardAmnezia{
+@@ -161,7 +170,19 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 				},
+ 			)
+ 		}
+-		endpoint.endpoint, err = endpoint.startVerified(scope, candidates, build)
++		endpoint.endpoint, err = endpoint.startVerified(scope, candidates, build, func(index int, current candidate) {
++			if edgePath == "" {
++				return
++			}
++			// An answer from the first candidate when nothing was remembered: the standard order works, keep no hint.
++			if index == 0 && len(candidates) > 0 && current == peerCandidates(peer, "", 0)[0] {
++				forgetEdge(edgePath)
++				return
++			}
++			if err := saveEdgeMemory(edgePath, current); err != nil {
++				logger.WarnContext(ctx, "cannot keep the WARP edge that answered: ", err)
++			}
++		})
+ 		if err != nil {
+ 			logger.ErrorContext(ctx, err)
+ 			return
+diff --git a/protocol/warp/recovery.go b/protocol/warp/recovery.go
+index 1b4e70ae14bf03d8457d302d4f7a166cd5899263..1411f1a03638de6c3a435b5803cf42b68b147834 100644
+--- a/protocol/warp/recovery.go
++++ b/protocol/warp/recovery.go
+@@ -15,9 +15,10 @@ import (
+ const (
+ 	defaultWarpPort = 2408
+ 	// startAttempts bounds the start-up recovery: after the last candidate the endpoint is kept as it is.
+-	startAttempts = 4
+-	// probeTimeout is how long a started tunnel gets to carry one TCP connection before it counts as stalled.
+-	probeTimeout = 4 * time.Second
++	startAttempts = 8
++	// probeTimeout is how long a started tunnel gets to carry one TCP connection before it counts as stalled. A healthy
++	// tunnel answers within a second; a blocked one never does, so the wait is short to walk the whole list in ~25 s.
++	probeTimeout = 3 * time.Second
+ )
+ 
+ // probeDestination is a Cloudflare address reached inside the tunnel; only the handshake matters, nothing is sent.
+@@ -32,13 +33,26 @@ type candidate struct {
+ // purpose: the last resort must not depend on DNS (a raw profile or the app's own DNS may not resolve names yet).
+ const fallbackAddress = "162.159.192.1"
+ 
++// alternateEdges are other WARP edge addresses and ports, tried after the account's own address (a censor blocks by
++// address and by port, so the next candidates change both, like the WARP config generators do). Real Cloudflare WARP
++// answered the handshake on every one of these addresses and ports from a Windows VM on 2026-11-26 (162.159.192.1 and
++// 188.114.96-99.1 on 2408, 500, 4500, 1701, 854, 934); 162.159.193.1 and 204.1 are not WARP edges and are not listed.
++// All are literal IPs: no attempt may need DNS.
++var alternateEdges = []candidate{
++	{"188.114.97.1", 2408},
++	{fallbackAddress, 500},
++	{"188.114.99.1", 4500},
++	{"188.114.96.1", 1701},
++	{"188.114.98.1", 854},
++}
++
+ // peerCandidates is the short list of places to dial the WARP peer, best first. All are literal IPs when the profile has an
+ // assigned address, so no attempt needs name resolution.
+ //
+ // Field tests (host, Android emulator, Windows VM, 2026-11-25) showed that roughly one start in four never gets a
+ // handshake answer for the same account: it depends on the connection's source port, and a stalled socket stays stalled
+ // however long it retries. A rebuilt endpoint gets a fresh socket, so the account's own address is tried again (also on
+-// its second port), and only the last attempt uses another address of the same block. An explicit address from the
++// its second port), and then other WARP edge addresses and ports (alternateEdges). An explicit address from the
+ // options is the user's choice and is never rotated.
+ func peerCandidates(peer cloudflare.Peer, address string, port uint16) []candidate {
+ 	assigned, assignedPort := defaultPeerEndpoint(peer)
+@@ -62,12 +76,11 @@ func peerCandidates(peer cloudflare.Peer, address string, port uint16) []candida
+ 			base = host
+ 		}
+ 	}
+-	return []candidate{
++	return append([]candidate{
+ 		{base, first},
+ 		{base, second},
+ 		{base, first},
+-		{fallbackAddress, first},
+-	}
++	}, alternateEdges...)
+ }
+ 
+ // startVerified starts the endpoint for the first candidate and, while more candidates remain, checks that the tunnel
+@@ -77,6 +90,7 @@ func (w *Endpoint) startVerified(
+ 	scope *adapter.Scope,
+ 	candidates []candidate,
+ 	build func(address string, port uint16) (adapter.Endpoint, error),
++	answered func(index int, current candidate),
+ ) (adapter.Endpoint, error) {
+ 	for index, current := range candidates {
+ 		last := index == len(candidates)-1
+@@ -99,6 +113,9 @@ func (w *Endpoint) startVerified(
+ 			if index > 0 {
+ 				w.logger.InfoContext(w.ctx, "WARP tunnel answered at ", current.address, ":", current.port, " (attempt ", index+1, ")")
+ 			}
++			if answered != nil {
++				answered(index, current)
++			}
+ 			return inner, nil
+ 		}
+ 		w.logger.WarnContext(w.ctx, "WARP handshake did not answer at ", current.address, ":", current.port, ", trying the next address")
+diff --git a/protocol/warp/recovery_test.go b/protocol/warp/recovery_test.go
+index 9e7820174f1f4264262a04cf9821af00b542a2c1..a26edb2bd7cdc7f16a0c2fe38014b7e84ecbadcb 100644
+--- a/protocol/warp/recovery_test.go
++++ b/protocol/warp/recovery_test.go
+@@ -17,13 +17,17 @@ func accountPeer() cloudflare.Peer {
+ 	return peer
+ }
+ 
+-func TestPeerCandidatesAreFourLiteralAddressesAndTheAccountsOwnComesFirst(t *testing.T) {
++func TestPeerCandidatesStartWithTheAccountsOwnAddressThenOtherWarpEdges(t *testing.T) {
+ 	got := peerCandidates(accountPeer(), "", 0)
+ 	want := []candidate{
+ 		{"162.159.192.8", 2408},
+ 		{"162.159.192.8", 500},
+ 		{"162.159.192.8", 2408}, // a fresh socket on the same address: the stall depends on the source port
+-		{fallbackAddress, 2408},
++		{"188.114.97.1", 2408},
++		{fallbackAddress, 500},
++		{"188.114.99.1", 4500},
++		{"188.114.96.1", 1701},
++		{"188.114.98.1", 854},
+ 	}
+ 	if !reflect.DeepEqual(got, want) {
+ 		t.Fatalf("got %v, want %v", got, want)
+@@ -31,10 +35,16 @@ func TestPeerCandidatesAreFourLiteralAddressesAndTheAccountsOwnComesFirst(t *tes
+ 	if len(got) != startAttempts {
+ 		t.Fatalf("want %d attempts, got %v", startAttempts, got)
+ 	}
++	// the censor blocks by address and by port: the alternates must change both
++	addresses, ports := map[string]bool{}, map[uint16]bool{}
+ 	for _, c := range got {
+ 		if _, err := netip.ParseAddr(c.address); err != nil {
+ 			t.Fatalf("candidate %q is not a literal IP: no attempt may need DNS", c.address)
+ 		}
++		addresses[c.address], ports[c.port] = true, true
++	}
++	if len(addresses) < 5 || len(ports) < 5 {
++		t.Fatalf("too little variety: %d addresses, %d ports in %v", len(addresses), len(ports), got)
+ 	}
+ }
+ 
+@@ -50,12 +60,12 @@ func TestExplicitAddressIsTheUsersChoiceAndNeverRotated(t *testing.T) {
+ 	}
+ }
+ 
+-func TestProfileWithoutV4StartsFromTheHostNameAndEndsOnTheFallbackIP(t *testing.T) {
++func TestProfileWithoutV4StartsFromTheHostNameAndEndsOnLiteralEdges(t *testing.T) {
+ 	peer := cloudflare.Peer{}
+ 	peer.Endpoint.Host = "engage.cloudflareclient.com:2408"
+ 	peer.Endpoint.Ports = []int{2408}
+ 	got := peerCandidates(peer, "", 0)
+-	if len(got) != startAttempts || got[0].address != "engage.cloudflareclient.com" || got[len(got)-1].address != fallbackAddress {
++	if len(got) != startAttempts || got[0].address != "engage.cloudflareclient.com" || got[len(got)-1].address != alternateEdges[len(alternateEdges)-1].address {
+ 		t.Fatalf("got %v", got)
+ 	}
+ }

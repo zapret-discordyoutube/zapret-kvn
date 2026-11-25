@@ -179,5 +179,50 @@ class WarpInterfaceUpdatePatchTests(unittest.TestCase):
         self.assertLess(text.index("apply_exact_patch(source, interface_patch"), text.index("prepare(source, stage"))
 
 
+CANDIDATES = ROOT / "core-patches/warp-entry-candidates.patch"
+ANDROID_CANDIDATES = ROOT.parent / "android/core-patches/0025-warp-candidates.patch"
+CANDIDATES_FILES = [
+    "protocol/warp/edge_memory.go",
+    "protocol/warp/edge_memory_test.go",
+    "protocol/warp/endpoint.go",
+    "protocol/warp/recovery.go",
+    "protocol/warp/recovery_test.go",
+]
+
+
+class WarpCandidatesPatchTests(unittest.TestCase):
+    """Eight start candidates and the edge memory (owner 2026-11-26): the same code as Android 0025."""
+
+    def test_patch_touches_only_the_warp_package_files(self) -> None:
+        text = CANDIDATES.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(sorted(touched), sorted(CANDIDATES_FILES))
+        # full-index lines: apply_exact_patch refuses a patch that does not name the exact blobs it changes
+        self.assertEqual(len(re.findall(r"^index [0-9a-f]{40}\.\.[0-9a-f]{40}", text, re.MULTILINE)), len(touched))
+
+    def test_new_go_files_are_the_same_as_android(self) -> None:
+        if not ANDROID_CANDIDATES.is_file():
+            self.skipTest("android repository is not next to windows")
+        android = ANDROID_CANDIDATES.read_text(encoding="utf-8")
+        windows = CANDIDATES.read_text(encoding="utf-8")
+        for name in ("protocol/warp/edge_memory.go", "protocol/warp/edge_memory_test.go"):
+            self.assertEqual(_new_file(windows, name), _new_file(android, name), name)
+
+    def test_the_candidates_are_real_literal_edges_that_real_warp_answered(self) -> None:
+        text = CANDIDATES.read_text(encoding="utf-8")
+        for edge in ("188.114.97.1", "188.114.99.1", "188.114.96.1", "188.114.98.1"):
+            self.assertIn(edge, text)
+        # 162.159.193.1 and 204.1 did not answer the real handshake on any port (win10 sweep, 2026-11-26)
+        for notedge in ('{"162.159.193.1"', '{"162.159.204.1"'):
+            self.assertNotIn(notedge, text)
+
+    def test_builder_applies_the_patch_after_the_interface_patch_and_records_it(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_CANDIDATES_PATCH = "warp-entry-candidates.patch"', text)
+        self.assertIn('"warp_candidates_patch_sha256"', text)
+        self.assertLess(text.index("apply_exact_patch(source, interface_patch"), text.index("apply_exact_patch(source, candidates_patch"))
+        self.assertLess(text.index("apply_exact_patch(source, candidates_patch"), text.index("prepare(source, stage"))
+
+
 if __name__ == "__main__":
     unittest.main()
