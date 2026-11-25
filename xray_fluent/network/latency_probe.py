@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import entry_hop
 from ..application.protocol_core import ProtocolCore, protocol_core
 from ..constants import (
     HYSTERIA_PATH_DEFAULT,
@@ -272,6 +273,8 @@ def _launch(
 def unmeasurable_reason(node: Node) -> str:
     """Почему сервер не проверить через ядро; пусто — проверить можно."""
 
+    if entry_hop.active():
+        return entry_hop.REFUSAL
     core = protocol_core(node)
     if core is ProtocolCore.AMNEZIA:
         return "AmneziaWG проверяется только подключением"

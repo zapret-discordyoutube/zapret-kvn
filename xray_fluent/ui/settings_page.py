@@ -260,6 +260,12 @@ class SettingsPage(ScrollablePage):
             parent=network_group,
         )
 
+        self.warp_entry_card = SwitchSettingCard(
+            FIF.GLOBE, "Вход через Cloudflare WARP",
+            "Сначала WARP, потом ваш сервер: провайдер видит только Cloudflare. Не работает с WireGuard и раздельными серверами",
+            parent=network_group,
+        )
+
         self.lan_proxy_card = SwitchSettingCard(
             FIF.SHARE, "Прокси для устройств в локальной сети",
             "PS5, телевизор и другие устройства без своего VPN выходят через этот ПК",
@@ -269,6 +275,7 @@ class SettingsPage(ScrollablePage):
         network_group.addSettingCard(self.proxy_bypass_lan_card)
         network_group.addSettingCard(self.reconnect_card)
         network_group.addSettingCard(self.server_ipv6_card)
+        network_group.addSettingCard(self.warp_entry_card)
         network_group.addSettingCard(self.lan_proxy_card)
         root.addWidget(network_group)
 
@@ -638,6 +645,7 @@ class SettingsPage(ScrollablePage):
         self.subscriptions_interval_card.spin.valueChanged.connect(self._auto_save)
         self.reconnect_card.checkedChanged.connect(self._auto_save)
         self.server_ipv6_card.checkedChanged.connect(self._auto_save)
+        self.warp_entry_card.checkedChanged.connect(self._auto_save)
         self.check_updates_card.checkedChanged.connect(self._auto_save)
         self.allow_updates_card.checkedChanged.connect(self._auto_save)
         self.share_updates_lan_card.checkedChanged.connect(self._auto_save)
@@ -710,6 +718,7 @@ class SettingsPage(ScrollablePage):
         )
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)
         self.server_ipv6_card.setChecked(settings.server_ipv6_first)
+        self.warp_entry_card.setChecked(settings.warp_entry_hop)
         self.check_updates_card.setChecked(settings.check_updates)
         self.allow_updates_card.setChecked(settings.allow_updates)
         self.share_updates_lan_card.setChecked(settings.share_updates_lan)
@@ -875,6 +884,7 @@ class SettingsPage(ScrollablePage):
         data.subscriptions_check_interval_min = int(self.subscriptions_interval_card.spin.value())
         data.reconnect_on_network_change = self.reconnect_card.isChecked()
         data.server_ipv6_first = self.server_ipv6_card.isChecked()
+        data.warp_entry_hop = self.warp_entry_card.isChecked()
         data.check_updates = self.check_updates_card.isChecked()
         data.allow_updates = self.allow_updates_card.isChecked()
         data.share_updates_lan = self.share_updates_lan_card.isChecked()

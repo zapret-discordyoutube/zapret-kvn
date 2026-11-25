@@ -96,6 +96,7 @@ def start_proxy_steps(
     controller._set_connection_status("starting", f"Запуск прокси: {session_label}{suffix}...", level="info")
     _notify_proxy_port_change(controller, plan)
     controller._log(f"[proxy] sing-box planner outcome: {plan.outcome} from {plan.source_path}")
+    _log_warp_entry(controller, plan)
     _log_unenforced_tls_pin(controller, node)
 
     controller._xray_api_port = 0
@@ -160,6 +161,7 @@ def start_tun_steps(
     start_message = f"Запуск VPN: {session_label}{_runtime_suffix(plan)}..."
     controller._set_connection_status("starting", start_message, level="info")
     controller._log(f"[tun] sing-box planner outcome: {plan.outcome} from {plan.source_path}")
+    _log_warp_entry(controller, plan)
     _log_unenforced_tls_pin(controller, node)
     if plan.used_selected_node and node is not None:
         if plan.is_hybrid:
@@ -185,6 +187,15 @@ def start_tun_steps(
         return None
 
     return SingboxStartResult(plan=plan, session_label=session_label)
+
+
+def _log_warp_entry(controller: AppController, plan) -> None:
+    """The line that shows the WARP entry hop acted (None = the setting is off)."""
+    hop = getattr(plan, "warp_entry", None)
+    if hop is not None:
+        controller._log(
+            f"[warp-entry] вход через WARP: серверов через вход={hop.chained}, правил помощников={hop.rerouted}"
+        )
 
 
 def _abort_security_recovery_steps(controller: AppController, recovery: bool, replacement=None) -> TransitionSteps:

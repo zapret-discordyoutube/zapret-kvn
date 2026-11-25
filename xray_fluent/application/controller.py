@@ -273,7 +273,7 @@ from ..importer.subscription_parser import validate_filter_patterns
 from ..network.bootstrap_dns import cached_addresses
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
-from ..network import server_family
+from ..network import entry_hop, server_family
 from ..network.physical_route import (
     has_network,
     is_physical_fingerprint,
@@ -302,7 +302,7 @@ from ..diagnostics.traffic_history import TrafficHistoryFileSink, TrafficHistory
 from .server_bypass import ServerBypass
 from .zapret_conflict import ZapretConflictCheck, foreign_crash_hint
 from ..engines.zapret.manager import ZapretManager
-from ..engines.singbox.runtime_planner import attach_service_slots
+from ..engines.singbox.runtime_planner import WARP_ENTRY_UNSUPPORTED, attach_service_slots
 from ..constants import HYSTERIA_PATH_DEFAULT as _SLOT_HYSTERIA_SOURCE, XRAY_PATH_DEFAULT as _SLOT_XRAY_DEFAULT
 from ..profiles.path_utils import resolve_configured_path as _resolve_core_path
 from ..slots.assigner import assign_slots, default_host_keys, off_machines, slot_capable
@@ -724,6 +724,7 @@ class AppController(QObject):
         try:
             self.state = state if state is not None else self.storage.load()
             server_family.configure(self.state.settings.server_ipv6_first)
+            entry_hop.configure(self.state.settings.warp_entry_hop)
             self._traffic_history = history if history is not None else TrafficHistoryStorage()
             self._traffic_history.set_writer(self._traffic_writer)
         except PassphraseRequired:
@@ -1245,6 +1246,7 @@ class AppController(QObject):
             pool_nodes=masking_runtime.masked_nodes(self._pool_candidate_nodes(node), masking),
             share_lan=bool(self.state.settings.lan_proxy_enabled),
             server_ipv6_first=self._server_ipv6_first(),
+            warp_entry_profile=self._warp_entry_profile(),
         ), node)
 
     # ── Service slots: the main-page card (docs/SERVICE_SLOTS.md, phase 5) ──
@@ -1382,6 +1384,9 @@ class AppController(QObject):
         slot_ids = slot_selector_ids(plan.singbox_config)
         if not slot_ids:
             return plan
+        if plan.warp_entry is not None:
+            # Slot helpers dial their servers outside sing-box and would not enter through WARP.
+            raise ValueError(WARP_ENTRY_UNSUPPORTED)
         main_id = node.id if node is not None else None
         assignments = assign_slots(
             slot_ids,
@@ -1458,7 +1463,14 @@ class AppController(QObject):
             preferred_protect_password=preferred_protect_password,
             pool_nodes=masking_runtime.masked_nodes(self._pool_candidate_nodes(node), masking),
             server_ipv6_first=self._server_ipv6_first(),
+            warp_entry_profile=self._warp_entry_profile(),
         ), node)
+
+    def _warp_entry_profile(self) -> str:
+        """Вход через Cloudflare WARP: путь к файлу аккаунта WARP в папке данных приложения, пусто = выключено."""
+        if not bool(getattr(self.state.settings, "warp_entry_hop", False)):
+            return ""
+        return str(DATA_DIR / "warp-entry-profile.json")
 
     def _server_ipv6_first(self) -> bool:
         """IPv6 к серверу первым: настройка включена и у основного подключения есть IPv6."""
@@ -4433,6 +4445,7 @@ class AppController(QObject):
         settings.proxy_engine = "singbox"
         settings.tun_engine = "singbox"
         server_family.configure(settings.server_ipv6_first)
+        entry_hop.configure(settings.warp_entry_hop)
         old_settings = self.state.settings
         old_launch = old_settings.launch_on_startup
         old_tun = old_settings.tun_mode

@@ -1,0 +1,329 @@
+diff --git a/option/cloudflare.go b/option/cloudflare.go
+index d6ce716558d229563f4da445197ffa178947a4d5..40f8418030b49608574069a55bc15ff1c26b9a7c 100644
+--- a/option/cloudflare.go
++++ b/option/cloudflare.go
+@@ -6,5 +6,8 @@ type CloudflareProfile struct {
+ 	PrivateKey string `json:"private_key,omitempty"`
+ 	LicenseKey string `json:"license_key,omitempty"`
+ 	Recreate   bool   `json:"recreate,omitempty"`
+-	Detour     string `json:"detour,omitempty"`
++	// CachePath is a private JSON file that keeps the registered account (it holds the private key, mode 0600),
++	// so a restart reuses it instead of registering a new device. Independent of experimental.cache_file.
++	CachePath string `json:"cache_path,omitempty"`
++	Detour    string `json:"detour,omitempty"`
+ }
+diff --git a/option/warp.go b/option/warp.go
+index b60f9b9bcb0a3ffad201c6aeabf295777528c246..931998be0c6fda4ea0a9d40a28089a711fdd7f9b 100644
+--- a/option/warp.go
++++ b/option/warp.go
+@@ -15,6 +15,9 @@ type WARPEndpointOptions struct {
+ 	Profile                     CloudflareProfile  `json:"profile,omitempty"`
+ 	Address                     string             `json:"address,omitempty"`
+ 	Port                        uint16             `json:"port,omitempty"`
++	// MTU of the tunnel, 1280 to 1420; 0 keeps 1280. A larger value lets full-size QUIC datagrams of a server
++	// reached through this endpoint (Hysteria2 sends 1252 byte payloads) fit over IPv6 as well.
++	MTU uint32 `json:"mtu,omitempty"`
+ 	DialerOptions
+ }
+ 
+diff --git a/protocol/warp/endpoint.go b/protocol/warp/endpoint.go
+index dc7fda1b7363cf22e82f390e7fe3ffded94e94d2..acf57b2816331d8d03f28d7bdf54a2a9b9c40899 100644
+--- a/protocol/warp/endpoint.go
++++ b/protocol/warp/endpoint.go
+@@ -3,10 +3,8 @@ package warp
+ import (
+ 	"context"
+ 	"encoding/json"
+-	"math/rand"
+ 	"net"
+ 	"net/netip"
+-	"strings"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -47,6 +45,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	if options.Profile.Detour != "" {
+ 		dependencies = append(dependencies, options.Profile.Detour)
+ 	}
++	tunnelMTU, err := tunnelMTU(options.MTU)
++	if err != nil {
++		return nil, err
++	}
+ 	endpoint := &Endpoint{
+ 		Adapter: endpoint.NewAdapter(C.TypeWARP, tag, []string{N.NetworkTCP, N.NetworkUDP}, dependencies),
+ 		ctx:     ctx,
+@@ -68,12 +70,25 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 				}
+ 			}
+ 		}
++		if config == nil && options.Profile.CachePath != "" && !options.Profile.Recreate {
++			config, err = loadCachedConfig(options.Profile.CachePath)
++			if err != nil {
++				// a damaged file is replaced by a new registration below
++				logger.WarnContext(ctx, "ignoring unreadable WARP profile cache: ", err)
++				config = nil
++			}
++		}
+ 		if config == nil {
+ 			config, err = endpoint.createConfig()
+ 			if err != nil {
+ 				logger.ErrorContext(ctx, err)
+ 				return
+ 			}
++			if options.Profile.CachePath != "" {
++				if err = saveCachedConfig(options.Profile.CachePath, config); err != nil {
++					logger.WarnContext(ctx, "cannot keep the WARP profile: ", err)
++				}
++			}
+ 			if cacheFile != nil && cacheFile.StoreWARPConfig() {
+ 				content, err := json.Marshal(config)
+ 				if err != nil {
+@@ -88,8 +103,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 			}
+ 		}
+ 		peer := config.Peers[0]
+-		peerAddress := strings.Split(peer.Endpoint.Host, ":")[0]
+-		peerPort := uint16(peer.Endpoint.Ports[rand.Intn(len(peer.Endpoint.Ports))])
++		peerAddress, peerPort := defaultPeerEndpoint(peer)
+ 		if options.Address != "" {
+ 			peerAddress = options.Address
+ 			if options.Port != 0 {
+@@ -148,7 +162,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 						PersistentKeepaliveInterval: options.PersistentKeepaliveInterval,
+ 					},
+ 				},
+-				MTU: 1280,
++				MTU: tunnelMTU,
+ 			},
+ 		)
+ 		if err != nil {
+diff --git a/protocol/warp/peer_endpoint.go b/protocol/warp/peer_endpoint.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fe35f90932389ab5e405857f80c57a5413cc624
+--- /dev/null
++++ b/protocol/warp/peer_endpoint.go
+@@ -0,0 +1,33 @@
++package warp
++
++import (
++	"math/rand"
++	"net"
++	"net/netip"
++	"strings"
++
++	"github.com/sagernet/sing-box/common/cloudflare"
++)
++
++// defaultPeerEndpoint is where the peer is dialed when the options give no address.
++//
++// The address is the one Cloudflare assigned to the account (endpoint.v4), a fixed IP, not the host name: the name
++// resolves to a different edge address on each start and some of them did not answer for an account in field tests,
++// so a start succeeded or stalled at random. The port is the first one Cloudflare lists (2408, the standard WARP
++// port), not a random pick from the list. A profile without a usable v4 falls back to the host name and a random port.
++func defaultPeerEndpoint(peer cloudflare.Peer) (string, uint16) {
++	port := uint16(0)
++	if len(peer.Endpoint.Ports) > 0 {
++		port = uint16(peer.Endpoint.Ports[0])
++	}
++	if host, _, err := net.SplitHostPort(peer.Endpoint.V4); err == nil {
++		if addr, err := netip.ParseAddr(host); err == nil && addr.Is4() && port != 0 {
++			return host, port
++		}
++	}
++	address := strings.Split(peer.Endpoint.Host, ":")[0]
++	if len(peer.Endpoint.Ports) > 0 {
++		port = uint16(peer.Endpoint.Ports[rand.Intn(len(peer.Endpoint.Ports))])
++	}
++	return address, port
++}
+diff --git a/protocol/warp/peer_endpoint_test.go b/protocol/warp/peer_endpoint_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d4e59768e4dc3b584095eddb499a469fe03542f
+--- /dev/null
++++ b/protocol/warp/peer_endpoint_test.go
+@@ -0,0 +1,34 @@
++package warp
++
++import (
++	"testing"
++
++	"github.com/sagernet/sing-box/common/cloudflare"
++)
++
++func peerWith(v4, host string, ports ...int) cloudflare.Peer {
++	peer := cloudflare.Peer{}
++	peer.Endpoint.V4 = v4
++	peer.Endpoint.Host = host
++	peer.Endpoint.Ports = ports
++	return peer
++}
++
++func TestDefaultPeerEndpointUsesAssignedAddressAndFirstPort(t *testing.T) {
++	address, port := defaultPeerEndpoint(peerWith("162.159.192.8:0", "engage.cloudflareclient.com:2408", 2408, 500, 1701, 4500))
++	if address != "162.159.192.8" || port != 2408 {
++		t.Fatalf("got %s:%d", address, port)
++	}
++}
++
++func TestDefaultPeerEndpointFallsBackToHostAndAnyListedPort(t *testing.T) {
++	for _, v4 := range []string{"", "not-an-address:0", "[2606:4700:d0::1]:0", "162.159.192.8"} {
++		address, port := defaultPeerEndpoint(peerWith(v4, "engage.cloudflareclient.com:2408", 2408, 500))
++		if address != "engage.cloudflareclient.com" || (port != 2408 && port != 500) {
++			t.Fatalf("v4=%q: got %s:%d", v4, address, port)
++		}
++	}
++	if _, port := defaultPeerEndpoint(peerWith("162.159.192.8:0", "h:1")); port != 0 {
++		t.Fatalf("no listed port must stay 0 (the caller's address override sets it), got %d", port)
++	}
++}
+diff --git a/protocol/warp/profile_cache.go b/protocol/warp/profile_cache.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..441a4d34da5775bbd55c20ea9a52c15ac4e7265f
+--- /dev/null
++++ b/protocol/warp/profile_cache.go
+@@ -0,0 +1,75 @@
++package warp
++
++import (
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++const (
++	minTunnelMTU     = 1280
++	maxTunnelMTU     = 1420
++	defaultTunnelMTU = minTunnelMTU
++)
++
++// tunnelMTU is the MTU of the WARP tunnel: the configured value, 1280 when unset.
++func tunnelMTU(configured uint32) (uint32, error) {
++	if configured == 0 {
++		return defaultTunnelMTU, nil
++	}
++	if configured < minTunnelMTU || configured > maxTunnelMTU {
++		return 0, E.New("WARP mtu must be between ", minTunnelMTU, " and ", maxTunnelMTU, ", got ", configured)
++	}
++	return configured, nil
++}
++
++// loadCachedConfig reads the account kept by saveCachedConfig; a missing file is not an error (nil, nil).
++func loadCachedConfig(path string) (*Config, error) {
++	content, err := os.ReadFile(path)
++	if err != nil {
++		if errors.Is(err, os.ErrNotExist) {
++			return nil, nil
++		}
++		return nil, err
++	}
++	var config Config
++	if err = json.Unmarshal(content, &config); err != nil {
++		return nil, err
++	}
++	if config.PrivateKey == "" || len(config.Peers) == 0 || config.Interface.Addresses.V4 == "" {
++		return nil, E.New("incomplete WARP profile")
++	}
++	return &config, nil
++}
++
++// saveCachedConfig writes the account atomically with mode 0600 (it holds the private key).
++func saveCachedConfig(path string, config *Config) error {
++	content, err := json.Marshal(config)
++	if err != nil {
++		return err
++	}
++	directory := filepath.Dir(path)
++	if err = os.MkdirAll(directory, 0o700); err != nil {
++		return err
++	}
++	temporary, err := os.CreateTemp(directory, ".warp-profile-*")
++	if err != nil {
++		return err
++	}
++	defer os.Remove(temporary.Name())
++	if err = temporary.Chmod(0o600); err != nil {
++		temporary.Close()
++		return err
++	}
++	if _, err = temporary.Write(content); err != nil {
++		temporary.Close()
++		return err
++	}
++	if err = temporary.Close(); err != nil {
++		return err
++	}
++	return os.Rename(temporary.Name(), path)
++}
+diff --git a/protocol/warp/profile_cache_test.go b/protocol/warp/profile_cache_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..70c83d7a574763c88df050290ca6ec1660a40480
+--- /dev/null
++++ b/protocol/warp/profile_cache_test.go
+@@ -0,0 +1,64 @@
++package warp
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/sagernet/sing-box/common/cloudflare"
++)
++
++func sampleConfig() *Config {
++	config := &Config{PrivateKey: "key"}
++	config.Interface.Addresses.V4 = "172.16.0.2"
++	config.Interface.Addresses.V6 = "2606:4700:110::1"
++	config.Peers = append(config.Peers, cloudflare.Peer{PublicKey: "peer"})
++	return config
++}
++
++func TestTunnelMTU(t *testing.T) {
++	for _, test := range []struct {
++		in      uint32
++		want    uint32
++		wantErr bool
++	}{{0, 1280, false}, {1280, 1280, false}, {1330, 1330, false}, {1420, 1420, false}, {1279, 0, true}, {1421, 0, true}} {
++		got, err := tunnelMTU(test.in)
++		if (err != nil) != test.wantErr || got != test.want {
++			t.Errorf("tunnelMTU(%d) = %d, %v", test.in, got, err)
++		}
++	}
++}
++
++func TestProfileCacheRoundTripAndPrivacy(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "nested", "warp.json")
++	if config, err := loadCachedConfig(path); config != nil || err != nil {
++		t.Fatalf("missing file must be (nil, nil), got %v, %v", config, err)
++	}
++	if err := saveCachedConfig(path, sampleConfig()); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(path)
++	if err != nil || info.Mode().Perm() != 0o600 {
++		t.Fatalf("profile file must be 0600, got %v, %v", info, err)
++	}
++	config, err := loadCachedConfig(path)
++	if err != nil || config == nil || config.PrivateKey != "key" || config.Interface.Addresses.V4 != "172.16.0.2" {
++		t.Fatalf("round trip failed: %v, %v", config, err)
++	}
++	entries, _ := os.ReadDir(filepath.Dir(path))
++	if len(entries) != 1 {
++		t.Fatalf("temporary files left behind: %v", entries)
++	}
++}
++
++func TestProfileCacheRejectsDamagedFile(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "warp.json")
++	for _, content := range []string{"not json", `{"private_key":"k"}`} {
++		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
++			t.Fatal(err)
++		}
++		if config, err := loadCachedConfig(path); err == nil || config != nil {
++			t.Errorf("%q must be rejected, got %v", content, config)
++		}
++	}
++}

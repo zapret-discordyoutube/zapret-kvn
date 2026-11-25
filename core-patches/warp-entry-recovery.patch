@@ -1,0 +1,322 @@
+diff --git a/protocol/warp/endpoint.go b/protocol/warp/endpoint.go
+index acf57b2816331d8d03f28d7bdf54a2a9b9c40899..2d0bff07d8864c3661f16a69136f426661ef86c3 100644
+--- a/protocol/warp/endpoint.go
++++ b/protocol/warp/endpoint.go
+@@ -103,13 +103,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 			}
+ 		}
+ 		peer := config.Peers[0]
+-		peerAddress, peerPort := defaultPeerEndpoint(peer)
+-		if options.Address != "" {
+-			peerAddress = options.Address
+-			if options.Port != 0 {
+-				peerPort = options.Port
+-			}
+-		}
++		candidates := peerCandidates(peer, options.Address, options.Port)
+ 		var amnezia *option.WireGuardAmnezia
+ 		if options.Amnezia != nil {
+ 			amnezia = &option.WireGuardAmnezia{
+@@ -129,53 +123,49 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 				MaxHandshakeAttempts:   options.Amnezia.MaxHandshakeAttempts,
+ 			}
+ 		}
+-		endpoint.endpoint, err = wireguard.NewEndpoint(
+-			ctx,
+-			router,
+-			logger,
+-			tag,
+-			option.WireGuardEndpointOptions{
+-				System:                     options.System,
+-				Name:                       options.Name,
+-				ListenPort:                 options.ListenPort,
+-				UDPTimeout:                 options.UDPTimeout,
+-				Workers:                    options.Workers,
+-				PreallocatedBuffersPerPool: options.PreallocatedBuffersPerPool,
+-				DisablePauses:              options.DisablePauses,
+-				Amnezia:                    amnezia,
+-				DialerOptions:              options.DialerOptions,
++		build := func(peerAddress string, peerPort uint16) (adapter.Endpoint, error) {
++			return wireguard.NewEndpoint(
++				ctx,
++				router,
++				logger,
++				tag,
++				option.WireGuardEndpointOptions{
++					System:                     options.System,
++					Name:                       options.Name,
++					ListenPort:                 options.ListenPort,
++					UDPTimeout:                 options.UDPTimeout,
++					Workers:                    options.Workers,
++					PreallocatedBuffersPerPool: options.PreallocatedBuffersPerPool,
++					DisablePauses:              options.DisablePauses,
++					Amnezia:                    amnezia,
++					DialerOptions:              options.DialerOptions,
+ 
+-				Address: badoption.Listable[netip.Prefix]{
+-					netip.MustParsePrefix(config.Interface.Addresses.V4 + "/32"),
+-					netip.MustParsePrefix(config.Interface.Addresses.V6 + "/128"),
+-				},
+-				PrivateKey: config.PrivateKey,
+-				Peers: []option.WireGuardPeer{
+-					{
+-						Address:   peerAddress,
+-						Port:      peerPort,
+-						PublicKey: peer.PublicKey,
+-						AllowedIPs: badoption.Listable[netip.Prefix]{
+-							netip.MustParsePrefix("0.0.0.0/0"),
+-							netip.MustParsePrefix("::/0"),
++					Address: badoption.Listable[netip.Prefix]{
++						netip.MustParsePrefix(config.Interface.Addresses.V4 + "/32"),
++						netip.MustParsePrefix(config.Interface.Addresses.V6 + "/128"),
++					},
++					PrivateKey: config.PrivateKey,
++					Peers: []option.WireGuardPeer{
++						{
++							Address:   peerAddress,
++							Port:      peerPort,
++							PublicKey: peer.PublicKey,
++							AllowedIPs: badoption.Listable[netip.Prefix]{
++								netip.MustParsePrefix("0.0.0.0/0"),
++								netip.MustParsePrefix("::/0"),
++							},
++							PersistentKeepaliveInterval: options.PersistentKeepaliveInterval,
+ 						},
+-						PersistentKeepaliveInterval: options.PersistentKeepaliveInterval,
+ 					},
++					MTU: tunnelMTU,
+ 				},
+-				MTU: tunnelMTU,
+-			},
+-		)
++			)
++		}
++		endpoint.endpoint, err = endpoint.startVerified(scope, candidates, build)
+ 		if err != nil {
+ 			logger.ErrorContext(ctx, err)
+ 			return
+ 		}
+-		for _, stage := range []adapter.StartStage{adapter.StartStateInitialize, adapter.StartStateStart, adapter.StartStatePostStart} {
+-			err = scope.Start("endpoint/"+endpoint.endpoint.Type()+"["+endpoint.endpoint.Tag()+"]", endpoint.endpoint, stage)
+-			if err != nil {
+-				logger.ErrorContext(ctx, err)
+-				return
+-			}
+-		}
+ 	}
+ 	return endpoint, nil
+ }
+diff --git a/protocol/warp/recovery.go b/protocol/warp/recovery.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b4e70ae14bf03d8457d302d4f7a166cd5899263
+--- /dev/null
++++ b/protocol/warp/recovery.go
+@@ -0,0 +1,132 @@
++package warp
++
++import (
++	"context"
++	"net"
++	"net/netip"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/cloudflare"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++const (
++	defaultWarpPort = 2408
++	// startAttempts bounds the start-up recovery: after the last candidate the endpoint is kept as it is.
++	startAttempts = 4
++	// probeTimeout is how long a started tunnel gets to carry one TCP connection before it counts as stalled.
++	probeTimeout = 4 * time.Second
++)
++
++// probeDestination is a Cloudflare address reached inside the tunnel; only the handshake matters, nothing is sent.
++var probeDestination = M.ParseSocksaddrHostPort("1.1.1.1", 443)
++
++type candidate struct {
++	address string
++	port    uint16
++}
++
++// fallbackAddress is a WARP edge address of the 162.159.192.0/24 block, which serves every account. It is a literal IP on
++// purpose: the last resort must not depend on DNS (a raw profile or the app's own DNS may not resolve names yet).
++const fallbackAddress = "162.159.192.1"
++
++// peerCandidates is the short list of places to dial the WARP peer, best first. All are literal IPs when the profile has an
++// assigned address, so no attempt needs name resolution.
++//
++// Field tests (host, Android emulator, Windows VM, 2026-11-25) showed that roughly one start in four never gets a
++// handshake answer for the same account: it depends on the connection's source port, and a stalled socket stays stalled
++// however long it retries. A rebuilt endpoint gets a fresh socket, so the account's own address is tried again (also on
++// its second port), and only the last attempt uses another address of the same block. An explicit address from the
++// options is the user's choice and is never rotated.
++func peerCandidates(peer cloudflare.Peer, address string, port uint16) []candidate {
++	assigned, assignedPort := defaultPeerEndpoint(peer)
++	if address != "" {
++		if port != 0 {
++			assignedPort = port
++		}
++		return []candidate{{address, assignedPort}}
++	}
++	first := assignedPort
++	if first == 0 {
++		first = defaultWarpPort
++	}
++	second := first
++	if len(peer.Endpoint.Ports) > 1 {
++		second = uint16(peer.Endpoint.Ports[1])
++	}
++	base := assigned
++	if host, _, err := net.SplitHostPort(peer.Endpoint.V4); err == nil {
++		if parsed, err := netip.ParseAddr(host); err == nil && parsed.Is4() {
++			base = host
++		}
++	}
++	return []candidate{
++		{base, first},
++		{base, second},
++		{base, first},
++		{fallbackAddress, first},
++	}
++}
++
++// startVerified starts the endpoint for the first candidate and, while more candidates remain, checks that the tunnel
++// really carries a connection. A stalled one is closed and the next candidate gets a fresh endpoint (and so a fresh
++// source port). Bounded: nothing runs after the last candidate, no timers stay behind.
++func (w *Endpoint) startVerified(
++	scope *adapter.Scope,
++	candidates []candidate,
++	build func(address string, port uint16) (adapter.Endpoint, error),
++) (adapter.Endpoint, error) {
++	for index, current := range candidates {
++		last := index == len(candidates)-1
++		inner, err := build(current.address, current.port)
++		if err != nil {
++			return nil, err
++		}
++		if err = w.startStages(scope, inner); err != nil {
++			_ = scope.Remove(inner)
++			if last {
++				return nil, err
++			}
++			w.logger.WarnContext(w.ctx, "WARP endpoint did not start at ", current.address, ":", current.port, ": ", err)
++			continue
++		}
++		if last || len(candidates) == 1 {
++			return inner, nil
++		}
++		if w.carriesConnection(inner) {
++			if index > 0 {
++				w.logger.InfoContext(w.ctx, "WARP tunnel answered at ", current.address, ":", current.port, " (attempt ", index+1, ")")
++			}
++			return inner, nil
++		}
++		w.logger.WarnContext(w.ctx, "WARP handshake did not answer at ", current.address, ":", current.port, ", trying the next address")
++		if err = scope.Remove(inner); err != nil {
++			w.logger.WarnContext(w.ctx, "closing the stalled WARP endpoint: ", err)
++		}
++	}
++	return nil, E.New("no WARP candidate to start")
++}
++
++func (w *Endpoint) startStages(scope *adapter.Scope, inner adapter.Endpoint) error {
++	for _, stage := range []adapter.StartStage{adapter.StartStateInitialize, adapter.StartStateStart, adapter.StartStatePostStart} {
++		err := scope.Start("endpoint/"+inner.Type()+"["+inner.Tag()+"]", inner, stage)
++		if err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// carriesConnection reports whether one TCP connection to the probe destination opens through the tunnel in time.
++func (w *Endpoint) carriesConnection(inner adapter.Endpoint) bool {
++	ctx, cancel := context.WithTimeout(w.ctx, probeTimeout)
++	defer cancel()
++	connection, err := inner.DialContext(ctx, "tcp", probeDestination)
++	if err != nil {
++		return false
++	}
++	_ = connection.Close()
++	return true
++}
+diff --git a/protocol/warp/recovery_test.go b/protocol/warp/recovery_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e7820174f1f4264262a04cf9821af00b542a2c1
+--- /dev/null
++++ b/protocol/warp/recovery_test.go
+@@ -0,0 +1,70 @@
++package warp
++
++import (
++	"net/netip"
++	"reflect"
++	"testing"
++
++	"github.com/sagernet/sing-box/common/cloudflare"
++)
++
++func accountPeer() cloudflare.Peer {
++	peer := cloudflare.Peer{}
++	peer.Endpoint.V4 = "162.159.192.8:0"
++	peer.Endpoint.V6 = "[2606:4700:d0::a29f:c008]:0"
++	peer.Endpoint.Host = "engage.cloudflareclient.com:2408"
++	peer.Endpoint.Ports = []int{2408, 500, 1701, 4500}
++	return peer
++}
++
++func TestPeerCandidatesAreFourLiteralAddressesAndTheAccountsOwnComesFirst(t *testing.T) {
++	got := peerCandidates(accountPeer(), "", 0)
++	want := []candidate{
++		{"162.159.192.8", 2408},
++		{"162.159.192.8", 500},
++		{"162.159.192.8", 2408}, // a fresh socket on the same address: the stall depends on the source port
++		{fallbackAddress, 2408},
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("got %v, want %v", got, want)
++	}
++	if len(got) != startAttempts {
++		t.Fatalf("want %d attempts, got %v", startAttempts, got)
++	}
++	for _, c := range got {
++		if _, err := netip.ParseAddr(c.address); err != nil {
++			t.Fatalf("candidate %q is not a literal IP: no attempt may need DNS", c.address)
++		}
++	}
++}
++
++func TestExplicitAddressIsTheUsersChoiceAndNeverRotated(t *testing.T) {
++	got := peerCandidates(accountPeer(), "198.51.100.7", 4500)
++	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 4500}}) {
++		t.Fatalf("got %v", got)
++	}
++	// without an explicit port the account's first port is used, as before
++	got = peerCandidates(accountPeer(), "198.51.100.7", 0)
++	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 2408}}) {
++		t.Fatalf("got %v", got)
++	}
++}
++
++func TestProfileWithoutV4StartsFromTheHostNameAndEndsOnTheFallbackIP(t *testing.T) {
++	peer := cloudflare.Peer{}
++	peer.Endpoint.Host = "engage.cloudflareclient.com:2408"
++	peer.Endpoint.Ports = []int{2408}
++	got := peerCandidates(peer, "", 0)
++	if len(got) != startAttempts || got[0].address != "engage.cloudflareclient.com" || got[len(got)-1].address != fallbackAddress {
++		t.Fatalf("got %v", got)
++	}
++}
++
++func TestNoListedPortUsesTheStandardWarpPort(t *testing.T) {
++	peer := cloudflare.Peer{}
++	peer.Endpoint.V4 = "162.159.192.8:0"
++	got := peerCandidates(peer, "", 0)
++	if len(got) == 0 || got[0].port != defaultWarpPort || got[0].address != "162.159.192.8" {
++		t.Fatalf("got %v", got)
++	}
++}

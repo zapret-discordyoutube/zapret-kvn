@@ -26,6 +26,7 @@ from ..constants import (
     SPEED_TEST_URLS_BY_COUNTRY,
     SPEED_TEST_XRAY_PATH,
 )
+from . import entry_hop
 from ..engines.hysteria.config_adapter import build_uri_client_config
 from ..engines.hysteria.runtime_contract import classify_hysteria_uri
 from ..importer.link_parser import xray_core_tls_problem
@@ -367,6 +368,8 @@ def should_skip_speed_test(node: Node) -> tuple[bool, str]:
     для нод в формате xray, официальный клиент для Hysteria2.  Остальные
     native sing-box ноды (включая endpoint-ноды WireGuard/AWG) пропускаются.
     """
+    if entry_hop.active():
+        return True, entry_hop.REFUSAL
     outbound = node.outbound if isinstance(node.outbound, dict) else {}
     if not (outbound.get("type") and not outbound.get("protocol")):
         # Временный xray не принимает allowInsecure без пина сертификата.

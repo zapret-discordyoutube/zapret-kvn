@@ -1,0 +1,183 @@
+"""Core patch warp-entry-profile (WARP as the entry hop, owner decision 2026-11-25) reaches the release sing-box.exe.
+
+The patch gives the `warp` endpoint a tunnel `mtu`, a private account file `profile.cache_path`, and the account's assigned
+address as the default peer.  It is the same code as Android core patch 0022; only the context lines of endpoint.go differ,
+because Android applies patch 0005 first.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
+PATCH = ROOT / "core-patches/warp-entry-profile.patch"
+BUILDER = ROOT / "scripts/build_singbox_front.py"
+ANDROID_PATCH = ROOT.parent / "android/core-patches/0022-warp-mtu-and-profile-cache.patch"
+
+EDITED = ["option/cloudflare.go", "option/warp.go", "protocol/warp/endpoint.go"]
+ADDED = [
+    "protocol/warp/peer_endpoint.go",
+    "protocol/warp/peer_endpoint_test.go",
+    "protocol/warp/profile_cache.go",
+    "protocol/warp/profile_cache_test.go",
+]
+
+
+def _new_file(text: str, name: str) -> str:
+    match = re.search(rf"^diff --git a/{re.escape(name)} b/.*?(?=^diff --git |\Z)", text, re.MULTILINE | re.DOTALL)
+    assert match, name
+    return "\n".join(line[1:] for line in match.group(0).splitlines() if line.startswith("+") and not line.startswith("+++"))
+
+
+class WarpEntryPatchTests(unittest.TestCase):
+    def test_patch_edits_only_the_warp_endpoint_and_its_options(self) -> None:
+        text = PATCH.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(sorted(set(touched) - set(ADDED)), EDITED)
+        self.assertEqual(sorted(set(touched) & set(ADDED)), ADDED)
+        self.assertEqual(len(re.findall(r"^new file mode", text, re.MULTILINE)), len(ADDED))
+        # apply_exact_patch needs full 40-character index lines
+        self.assertEqual(len(re.findall(r"^index [0-9a-f]{40}\.\.[0-9a-f]{40}", text, re.MULTILINE)), len(touched))
+
+    def test_new_go_files_are_the_same_as_android(self) -> None:
+        if not ANDROID_PATCH.is_file():
+            self.skipTest("android repository is not next to windows")
+        android = ANDROID_PATCH.read_text(encoding="utf-8")
+        windows = PATCH.read_text(encoding="utf-8")
+        for name in ADDED:
+            self.assertEqual(_new_file(windows, name), _new_file(android, name), name)
+
+    def test_profile_file_is_private_and_mtu_is_bounded(self) -> None:
+        text = PATCH.read_text(encoding="utf-8")
+        self.assertIn("0o600", text)
+        self.assertIn("minTunnelMTU     = 1280", text)
+        self.assertIn("maxTunnelMTU     = 1420", text)
+
+    def test_builder_applies_tests_and_records_the_patch(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_ENTRY_PATCH = "warp-entry-profile.patch"', text)
+        self.assertIn("apply_exact_patch(source, warp_patch", text)
+        self.assertIn("'./protocol/warp'", text)
+        self.assertIn('"warp_entry_patch_sha256"', text)
+        # before the sing dependency is replaced, like the other source patches
+        self.assertLess(text.index("apply_exact_patch(source, warp_patch"), text.index("prepare(source, stage"))
+
+    def test_patch_applies_to_the_pinned_source_after_the_other_patches(self) -> None:
+        from test_kvn_desync_patch import _pinned_source
+
+        source = _pinned_source()
+        if source is None or shutil.which("git") is None:
+            self.skipTest("pinned sing-box module is not in the Go module cache")
+        from build_singbox_front import apply_exact_patch, apply_process_lookup_patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory) / "source"
+            shutil.copytree(source, tree)
+            for path in tree.rglob("*"):
+                path.chmod(0o755 if path.is_dir() else 0o644)
+            patches = ROOT / "core-patches"
+            for name in ("singbox-dns-fallback-warning.patch", "browser-fetch.patch"):
+                subprocess.run(["git", "apply", str(patches / name)], cwd=tree, check=True)
+            apply_process_lookup_patch(tree, patches / "singbox-process-lookup-cache.patch")
+            apply_exact_patch(tree, patches / "kvn-desync.patch", what="маршрутные опции", port_hint="тест")
+            apply_exact_patch(tree, patches / "address-family-memory.patch", what="набор адресов сервера", port_hint="тест")
+            apply_exact_patch(tree, PATCH, what="endpoint WARP", port_hint="тест")
+            self.assertTrue((tree / "protocol/warp/profile_cache.go").is_file())
+            self.assertIn("tunnelMTU", (tree / "protocol/warp/endpoint.go").read_text(encoding="utf-8"))
+
+
+RECOVERY = ROOT / "core-patches/warp-entry-recovery.patch"
+ANDROID_RECOVERY = ROOT.parent / "android/core-patches/0023-warp-start-recovery.patch"
+RECOVERY_ADDED = ["protocol/warp/recovery.go", "protocol/warp/recovery_test.go"]
+
+
+class WarpRecoveryPatchTests(unittest.TestCase):
+    def test_patch_edits_only_the_warp_endpoint_and_adds_the_recovery(self) -> None:
+        text = RECOVERY.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(sorted(touched), sorted(["protocol/warp/endpoint.go", *RECOVERY_ADDED]))
+        self.assertEqual(len(re.findall(r"^index [0-9a-f]{40}\.\.[0-9a-f]{40}", text, re.MULTILINE)), len(touched))
+
+    def test_new_go_files_are_the_same_as_android(self) -> None:
+        if not ANDROID_RECOVERY.is_file():
+            self.skipTest("android repository is not next to windows")
+        android = ANDROID_RECOVERY.read_text(encoding="utf-8")
+        windows = RECOVERY.read_text(encoding="utf-8")
+        for name in RECOVERY_ADDED:
+            self.assertEqual(_new_file(windows, name), _new_file(android, name), name)
+
+    def test_recovery_is_bounded_and_keeps_the_users_explicit_address(self) -> None:
+        text = RECOVERY.read_text(encoding="utf-8")
+        self.assertIn("startAttempts = 4", text)
+        self.assertIn("probeTimeout = 4 * time.Second", text)
+        self.assertIn("is the user's choice and is never rotated", text)
+        self.assertIn('fallbackAddress = "162.159.192.1"', text)
+
+    def test_builder_applies_the_recovery_after_the_profile_patch_and_records_it(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_RECOVERY_PATCH = "warp-entry-recovery.patch"', text)
+        self.assertIn('"warp_recovery_patch_sha256"', text)
+        self.assertLess(text.index("apply_exact_patch(source, warp_patch"), text.index("apply_exact_patch(source, recovery_patch"))
+        self.assertLess(text.index("apply_exact_patch(source, recovery_patch"), text.index("prepare(source, stage"))
+
+    def test_patch_applies_after_the_profile_patch(self) -> None:
+        from test_kvn_desync_patch import _pinned_source
+
+        source = _pinned_source()
+        if source is None or shutil.which("git") is None:
+            self.skipTest("pinned sing-box module is not in the Go module cache")
+        from build_singbox_front import apply_exact_patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory) / "source"
+            shutil.copytree(source, tree)
+            for path in tree.rglob("*"):
+                path.chmod(0o755 if path.is_dir() else 0o644)
+            apply_exact_patch(tree, PATCH, what="endpoint WARP", port_hint="тест")
+            apply_exact_patch(tree, RECOVERY, what="старт endpoint WARP", port_hint="тест")
+            self.assertIn("startVerified", (tree / "protocol/warp/endpoint.go").read_text(encoding="utf-8"))
+
+
+INTERFACE = ROOT / "core-patches/warp-entry-interface-update.patch"
+ANDROID_INTERFACE = ROOT.parent / "android/core-patches/0024-warp-forward-interface-update.patch"
+INTERFACE_ADDED = ["protocol/warp/interface_update.go", "protocol/warp/interface_update_test.go"]
+
+
+class WarpInterfaceUpdatePatchTests(unittest.TestCase):
+    def test_patch_only_adds_the_forwarding_and_its_test(self) -> None:
+        text = INTERFACE.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(sorted(touched), sorted(INTERFACE_ADDED))
+        self.assertEqual(len(re.findall(r"^new file mode", text, re.MULTILINE)), len(INTERFACE_ADDED))
+        self.assertEqual(len(re.findall(r"^index [0-9a-f]{40}\.\.[0-9a-f]{40}", text, re.MULTILINE)), len(touched))
+
+    def test_new_go_files_are_the_same_as_android(self) -> None:
+        if not ANDROID_INTERFACE.is_file():
+            self.skipTest("android repository is not next to windows")
+        android = ANDROID_INTERFACE.read_text(encoding="utf-8")
+        windows = INTERFACE.read_text(encoding="utf-8")
+        for name in INTERFACE_ADDED:
+            self.assertEqual(_new_file(windows, name), _new_file(android, name), name)
+
+    def test_forwarding_waits_for_the_started_inner_endpoint(self) -> None:
+        text = INTERFACE.read_text(encoding="utf-8")
+        self.assertIn("func (w *Endpoint) InterfaceUpdated(ctx context.Context)", text)
+        self.assertIn("case <-w.await:", text)
+
+    def test_builder_applies_the_patch_after_the_recovery_and_records_it(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_INTERFACE_PATCH = "warp-entry-interface-update.patch"', text)
+        self.assertIn('"warp_interface_patch_sha256"', text)
+        self.assertLess(text.index("apply_exact_patch(source, recovery_patch"), text.index("apply_exact_patch(source, interface_patch"))
+        self.assertLess(text.index("apply_exact_patch(source, interface_patch"), text.index("prepare(source, stage"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -25,6 +25,15 @@ KVN_DESYNC_PATCH = "kvn-desync.patch"
 # IPv6 к серверу первым: память семейства адресов (common/familymemory, тот же код, что
 # Android 0020) для гонки sing-box и прямого outbound, сброс при смене сети.
 ADDRESS_FAMILY_PATCH = "address-family-memory.patch"
+# Вход через Cloudflare WARP (решение владельца 2026-11-25): endpoint `warp` получает `mtu` и закрытый файл аккаунта
+# `profile.cache_path` (тот же код, что Android 0022), по умолчанию ходит на выданный аккаунту адрес.
+WARP_ENTRY_PATCH = "warp-entry-profile.patch"
+# Старт endpoint WARP с проверкой: если туннель не ответил (около четверти запусков аккаунта молчат, пока не сменится
+# порт отправителя), endpoint пересобирается с новым сокетом и другим адресом аккаунта (тот же код, что Android 0023).
+WARP_RECOVERY_PATCH = "warp-entry-recovery.patch"
+# Смена сети доходит до WireGuard внутри endpoint WARP: обёртка передаёт InterfaceUpdated внутреннему endpoint (тот же код,
+# что Android 0024), иначе после перехода Wi-Fi/мобильная сеть сокет туннеля остаётся на старой сети.
+WARP_INTERFACE_PATCH = "warp-entry-interface-update.patch"
 # Signs that upstream already stopped scanning the whole connection table per
 # lookup (sing dev 4ca3bebe: keyed TCP owner lookup; any table cache/single-flight).
 UPSTREAM_OWNER_LOOKUP_MARKERS = ("FindSocketOwner", "nsiGetTCPConnection", "singleflight")
@@ -138,6 +147,15 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     family_patch = manifest.parent / ADDRESS_FAMILY_PATCH
     apply_exact_patch(source, family_patch, what="набор адресов сервера", port_hint=(
         f"перенесите патч {family_patch.name} на новую версию sing-box"))
+    warp_patch = manifest.parent / WARP_ENTRY_PATCH
+    apply_exact_patch(source, warp_patch, what="endpoint WARP", port_hint=(
+        f"перенесите патч {warp_patch.name} на новую версию sing-box"))
+    recovery_patch = manifest.parent / WARP_RECOVERY_PATCH
+    apply_exact_patch(source, recovery_patch, what="старт endpoint WARP", port_hint=(
+        f"перенесите патч {recovery_patch.name} на новую версию sing-box"))
+    interface_patch = manifest.parent / WARP_INTERFACE_PATCH
+    apply_exact_patch(source, interface_patch, what="уведомление endpoint WARP о смене сети", port_hint=(
+        f"перенесите патч {interface_patch.name} на новую версию sing-box"))
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
     # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
@@ -159,6 +177,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                    cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
     subprocess.run([go, 'test', '-mod=readonly', './common/familymemory', './common/dialer', '-count=1'],
                    cwd=source, check=True)
+    subprocess.run([go, 'test', '-mod=readonly', '-tags', tags, './protocol/warp', '-count=1'],
+                   cwd=source, check=True, env={**os.environ, "CGO_ENABLED": "0"})
     for tags_variant in ("", "with_low_memory"):
         subprocess.run([go, "test", "-mod=readonly", "-tags", tags_variant,
                         "github.com/sagernet/sing/common/network", "-run", "^TestZapret", "-count=1"],
@@ -180,7 +200,10 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                   "process_lookup_patch_sha256": sha256(process_patch),
                   "browser_fetch_patch_sha256": sha256(browser_patch),
                   "kvn_desync_patch_sha256": sha256(desync_patch),
-                  "address_family_patch_sha256": sha256(family_patch)}
+                  "address_family_patch_sha256": sha256(family_patch),
+                  "warp_entry_patch_sha256": sha256(warp_patch),
+                  "warp_recovery_patch_sha256": sha256(recovery_patch),
+                  "warp_interface_patch_sha256": sha256(interface_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
 

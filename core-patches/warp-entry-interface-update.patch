@@ -1,0 +1,76 @@
+diff --git a/protocol/warp/interface_update.go b/protocol/warp/interface_update.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6860942e8edd7669f717c76c7dbdc970d1cef597
+--- /dev/null
++++ b/protocol/warp/interface_update.go
+@@ -0,0 +1,25 @@
++package warp
++
++import (
++	"context"
++
++	"github.com/sagernet/sing-box/adapter"
++)
++
++// InterfaceUpdated forwards a network change to the inner WireGuard endpoint.
++//
++// The network manager tells every registered endpoint that implements adapter.InterfaceUpdateListener when the default
++// network changes (Wi-Fi to mobile data and back). The WireGuard endpoint rebinds its UDP socket then; without this the
++// wrapper, which is the registered endpoint, swallowed the notification and the tunnel kept a socket on the old network.
++// Before the inner endpoint exists (registration or start still running) there is nothing to rebind, and it binds to the
++// current network when it starts.
++func (w *Endpoint) InterfaceUpdated(ctx context.Context) {
++	select {
++	case <-w.await: // closed after w.endpoint is set, so reading it is safe
++	default:
++		return
++	}
++	if listener, isListener := w.endpoint.(adapter.InterfaceUpdateListener); isListener {
++		listener.InterfaceUpdated(ctx)
++	}
++}
+diff --git a/protocol/warp/interface_update_test.go b/protocol/warp/interface_update_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce39aea3b6799132ad2016552c79ad098ad5eb69
+--- /dev/null
++++ b/protocol/warp/interface_update_test.go
+@@ -0,0 +1,39 @@
++package warp
++
++import (
++	"context"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++)
++
++type interfaceListenerEndpoint struct {
++	adapter.Endpoint
++	updates int
++}
++
++func (e *interfaceListenerEndpoint) InterfaceUpdated(context.Context) { e.updates++ }
++
++func TestInterfaceUpdateIsForwardedToTheStartedInnerEndpoint(t *testing.T) {
++	inner := &interfaceListenerEndpoint{}
++	started := make(chan struct{})
++	close(started)
++	wrapper := &Endpoint{await: started, endpoint: inner}
++	wrapper.InterfaceUpdated(context.Background())
++	wrapper.InterfaceUpdated(context.Background())
++	if inner.updates != 2 {
++		t.Fatalf("the inner endpoint got %d updates, want 2", inner.updates)
++	}
++}
++
++func TestInterfaceUpdateBeforeTheInnerEndpointExistsIsIgnored(t *testing.T) {
++	wrapper := &Endpoint{await: make(chan struct{})}
++	wrapper.InterfaceUpdated(context.Background()) // must neither block nor panic
++}
++
++func TestInterfaceUpdateWithAnInnerEndpointThatCannotRebindIsIgnored(t *testing.T) {
++	started := make(chan struct{})
++	close(started)
++	wrapper := &Endpoint{await: started} // nil inner endpoint: registration failed
++	wrapper.InterfaceUpdated(context.Background())
++}

@@ -35,6 +35,7 @@ from ...application.outbound_pool_service import (
     xray_pool_exclusion,
 )
 from ..hysteria.runtime_contract import classify_hysteria_uri
+from .warp_entry import EntryHopResult, apply_entry_hop, violations as warp_entry_violations
 from ...application.protocol_core import ProtocolCore, protocol_core
 from ...profiles.models import Node
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity
@@ -138,6 +139,8 @@ class SingboxRuntimePlan:
     hybrid_relay_selected_tag: str = ""
     # Service slots (docs/SERVICE_SLOTS.md): how each ticked slot reaches its server; the controller starts the helpers.
     slot_plans: tuple[Any, ...] = ()
+    # What the WARP entry hop did (None = off): the controller logs it.
+    warp_entry: EntryHopResult | None = None
 
     @property
     def is_hybrid(self) -> bool:
@@ -254,6 +257,7 @@ def plan_singbox_runtime(
     pool_nodes: list[Node] | None = None,
     share_lan: bool = False,
     server_ipv6_first: bool = False,
+    warp_entry_profile: str = "",
 ) -> SingboxRuntimePlan:
     runtime_config = deepcopy(document.payload)
     strip_singbox_proxy_inbounds(runtime_config)
@@ -270,7 +274,7 @@ def plan_singbox_runtime(
     clash_api_port = _ensure_singbox_metrics_contract(runtime_config)
     _ensure_singbox_tun_runtime_contract(runtime_config)
 
-    return _plan_runtime_outbound(
+    plan = _plan_runtime_outbound(
         document,
         runtime_config=runtime_config,
         node=node,
@@ -285,6 +289,7 @@ def plan_singbox_runtime(
         pool_nodes=pool_nodes,
         server_ipv6_first=server_ipv6_first,
     )
+    return apply_warp_entry(plan, warp_entry_profile) if warp_entry_profile else plan
 
 
 def plan_singbox_proxy_runtime(
@@ -297,6 +302,7 @@ def plan_singbox_proxy_runtime(
     preferred_protect_password: str = "",
     pool_nodes: list[Node] | None = None,
     server_ipv6_first: bool = False,
+    warp_entry_profile: str = "",
 ) -> SingboxRuntimePlan:
     """Build the app-owned SOCKS/HTTP runtime from a raw sing-box profile."""
     runtime_config = deepcopy(document.payload)
@@ -308,7 +314,7 @@ def plan_singbox_proxy_runtime(
     )
     clash_api_port = _ensure_singbox_metrics_contract(runtime_config)
 
-    return _plan_runtime_outbound(
+    plan = _plan_runtime_outbound(
         document,
         runtime_config=runtime_config,
         node=node,
@@ -323,6 +329,35 @@ def plan_singbox_proxy_runtime(
         pool_nodes=pool_nodes,
         server_ipv6_first=server_ipv6_first,
     )
+    return apply_warp_entry(plan, warp_entry_profile) if warp_entry_profile else plan
+
+
+WARP_ENTRY_UNSUPPORTED = (
+    "Вход через WARP пока не работает с серверами WireGuard/AmneziaWG и с раздельными серверами: "
+    "их соединения идут мимо sing-box и открыли бы адрес сервера провайдеру. Выключите вход через WARP "
+    "или выберите другой сервер."
+)
+
+
+def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str) -> SingboxRuntimePlan:
+    """WARP as the entry hop to our server (owner decision 2026-11-25), see `warp_entry.py`.
+
+    Native outbounds get a `detour`; the Hysteria process rule and the Xray protect-inbound rule lead into the hop.
+    Connections that bypass sing-box (WireGuard/AmneziaWG helper, slot helpers) cannot enter through it: refusing is
+    better than silently showing the server address to the provider.  The hop is checked to be an entry only.
+    """
+    if plan.outcome == "amnezia_sidecar" or plan.amnezia_sidecar is not None or plan.slot_plans:
+        raise ValueError(WARP_ENTRY_UNSUPPORTED)
+    paths = [str(HYSTERIA_PATH_DEFAULT.resolve())] if plan.hysteria_sidecar is not None else []
+    inbounds = [_APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG] if plan.xray_sidecar is not None else []
+    result = apply_entry_hop(
+        plan.singbox_config, profile_path, sidecar_process_paths=paths, sidecar_inbounds=inbounds,
+    )
+    misuse = warp_entry_violations(plan.singbox_config, sidecar_process_paths=paths, sidecar_inbounds=inbounds)
+    if misuse:
+        raise ValueError(f"WARP может быть только входом к серверу, найдено другое использование: {misuse[0]}.")
+    plan.warp_entry = result
+    return plan
 
 
 def _plan_runtime_outbound(
