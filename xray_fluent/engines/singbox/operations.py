@@ -199,7 +199,7 @@ def start_tun_steps(
 def _log_plan_time(controller: AppController, plan, started: float) -> None:
     """How long the runtime plan took (owner request 2026-11-26: "improve the logs", a slow start must say where it went)."""
     hop = getattr(plan, "warp_entry", None)
-    outbounds = len(plan.singbox_config.get("outbounds") or [])
+    outbounds = len((getattr(plan, "singbox_config", None) or {}).get("outbounds") or [])
     controller._log(
         f"[perf] план runtime: {int((time.monotonic() - started) * 1000)} мс, outbound'ов {outbounds}, "
         f"вход через WARP {'да' if hop is not None else 'нет'}"
