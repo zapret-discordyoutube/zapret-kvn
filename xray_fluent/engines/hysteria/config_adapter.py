@@ -245,3 +245,37 @@ def pin_server_address(config: dict[str, Any], address: str) -> dict[str, Any]:
     pinned.setdefault("tls", {}).setdefault("sni", host)
     pinned["server"] = replace_server_host(str(config["server"]), address)
     return pinned
+
+
+def server_endpoint(config: dict[str, Any]) -> tuple[str, int] | None:
+    """The server's name or address and its FIRST port (a port-hopping list keeps only its first port)."""
+
+    parts = urlsplit(str(config.get("server") or ""))
+    host = parts.hostname or ""
+    if not host:
+        return None
+    hostport = parts.netloc.rpartition("@")[2]
+    ports = hostport[hostport.index("]") + 1:] if hostport.startswith("[") else hostport.partition(":")[1] + hostport.partition(":")[2]
+    first = ports.lstrip(":").replace("-", ",").split(",")[0].strip() if ports else ""
+    try:
+        return host, int(first) if first else 443
+    except ValueError:
+        return None
+
+
+def relay_server_config(config: dict[str, Any], relay_host: str, relay_port: int) -> dict[str, Any]:
+    """Copy of the config whose server is a local UDP relay; the server's name stays in the TLS SNI.
+
+    Used when the connection enters through the WARP hop in the proxy mode: nothing captures the client's own UDP socket
+    there, so it talks to a loopback `direct` inbound of sing-box, which carries the datagrams to the real server through
+    the hop.  Certificate checks and pinning are unchanged (the SNI is the real name)."""
+
+    host = server_host(config)
+    relayed = deepcopy(config)
+    if not host:
+        return relayed
+    relayed.setdefault("tls", {}).setdefault("sni", host)
+    parts = urlsplit(str(config["server"]))
+    userinfo, at, _hostport = parts.netloc.rpartition("@")
+    relayed["server"] = urlunsplit((parts.scheme, f"{userinfo}{at}{relay_host}:{relay_port}", parts.path, parts.query, parts.fragment))
+    return relayed

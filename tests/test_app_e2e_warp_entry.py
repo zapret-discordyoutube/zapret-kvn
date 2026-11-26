@@ -253,23 +253,28 @@ class WarpEntryE2E(_WarpE2EBase):
         self.assertFalse(self._seen("endpoint not initialized"), self._evidence())
 
 
-@unittest.skipUnless(_RUNNABLE, _SKIP)
+@unittest.skipUnless(
+    _RUNNABLE and os.environ.get("KVN_E2E_HYSTERIA_UDP") == "1",
+    _SKIP + " and KVN_E2E_HYSTERIA_UDP=1: only where the test person's Hysteria2 servers answer over UDP at all "
+    "(from the win10 VM none does, with or without the hop)",
+)
 class WarpEntryHysteriaProxyModeE2E(_WarpE2EBase):
-    """Hysteria2 dials its server from its own process: in the proxy mode nothing captures that, so the app says so."""
+    """Hysteria2 dials its server from its own UDP socket: in the proxy mode it talks to a loopback relay of sing-box."""
 
     SCHEMES = ("hysteria2",)
 
-    def test_a_hysteria_server_is_refused_in_the_proxy_mode_with_the_reason(self) -> None:
-        from xray_fluent.application.selection_source import SelectionSource
-        from xray_fluent.engines.singbox.runtime_planner import WARP_ENTRY_NEEDS_TUN
+    def test_a_real_hysteria_server_brings_a_real_page_through_the_hop_in_the_proxy_mode(self) -> None:
+        self._a_real_page_comes_back()
 
-        c = self.controller
-        c.set_selected_node(self.nodes[0].id, source=SelectionSource.NODES_MENU)
-        if not c._desired_connected:
-            c.toggle_connection()
-        told = lambda: any(WARP_ENTRY_NEEDS_TUN in message for _, message in self.statuses)  # noqa: E731
-        self.assertTrue(_spin_until(told, 60), "the user was not told why the server cannot enter through WARP\n" + self._evidence())
-        self.assertFalse(c.connected, "a Hysteria2 server must not connect around the WARP hop in the proxy mode")
+
+@unittest.skipUnless(_RUNNABLE, _SKIP)
+class WarpEntryAmneziaE2E(_WarpE2EBase):
+    """The real AmneziaWG server of the test person: the helper talks to a loopback relay of sing-box (both modes)."""
+
+    SCHEMES = ("awg",)
+
+    def test_the_real_amnezia_server_brings_a_real_page_through_the_hop(self) -> None:
+        self._a_real_page_comes_back()
 
 
 @unittest.skipUnless(_RUNNABLE and os.environ.get("KVN_E2E_TUN") == "1", _SKIP + " and KVN_E2E_TUN=1 (it changes the routes)")
@@ -280,6 +285,17 @@ class WarpEntryHysteriaTunE2E(_WarpE2EBase):
     TUN = True
 
     def test_a_real_hysteria_server_brings_a_real_page_through_the_hop(self) -> None:
+        self._a_real_page_comes_back()
+
+
+@unittest.skipUnless(_RUNNABLE and os.environ.get("KVN_E2E_TUN") == "1", _SKIP + " and KVN_E2E_TUN=1 (it changes the routes)")
+class WarpEntryAmneziaTunE2E(_WarpE2EBase):
+    """The same relay under the TUN."""
+
+    SCHEMES = ("awg",)
+    TUN = True
+
+    def test_the_real_amnezia_server_brings_a_real_page_through_the_hop_under_the_tun(self) -> None:
         self._a_real_page_comes_back()
 
 

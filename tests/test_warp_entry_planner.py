@@ -18,9 +18,10 @@ from xray_fluent.engines.singbox.runtime_planner import (
     apply_warp_entry,
     _APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG,
     parse_singbox_document,
+    plan_singbox_proxy_runtime,
     plan_singbox_runtime,
 )
-from xray_fluent.engines.singbox.warp_entry import WARP_ENTRY_API_TAG, WARP_ENTRY_TAG, violations
+from xray_fluent.engines.singbox.warp_entry import WARP_ENTRY_API_TAG, WARP_ENTRY_MTU, WARP_ENTRY_TAG, violations
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = ROOT / "data" / "templates" / "sing-box" / "default.json"
@@ -140,11 +141,46 @@ class RealServersEnterThroughTheHopTests(unittest.TestCase):
                 built = plan(node)
                 self.assertFalse([r for r in built.singbox_config["dns"]["rules"] if r.get("domain") == [node.server]])
 
-    def test_amnezia_server_is_refused_with_the_known_reason(self) -> None:
-        # Unproven path, stated as such: the AWG helper dials from its own process, so the hop cannot carry it yet.
-        with self.assertRaises(ValueError) as caught:
-            plan(nodes_of("awg")[0])
-        self.assertIn("WireGuard/AmneziaWG", str(caught.exception))
+    def test_amnezia_server_enters_through_a_loopback_relay_in_both_modes(self) -> None:
+        # The AWG helper binds its socket to the physical interface, so it talks to a loopback UDP inbound of sing-box
+        # that carries the datagrams to the real server through the hop (owner request 2026-11-26).
+        document = parse_singbox_document(TEMPLATE_PATH, TEMPLATE_PATH.read_text(encoding="utf-8"))
+        node = nodes_of("awg")[0]
+        for label, built in (
+            ("tun", plan(node)),
+            ("proxy", plan_singbox_proxy_runtime(document, node, warp_entry_profile=PROFILE)),
+        ):
+            with self.subTest(label):
+                relay = next(i for i in built.singbox_config["inbounds"] if str(i.get("tag", "")).startswith("__app_warp_udp_amnezia"))
+                self.assertEqual("udp", relay["network"])
+                self.assertEqual("127.0.0.1", relay["listen"])
+                rule = next(r for r in rules(built) if r.get("inbound") == [relay["tag"]])
+                self.assertEqual(WARP_ENTRY_TAG, rule["outbound"])
+                config = built.amnezia_sidecar.config
+                peer = config["endpoint"]["peers"][0]
+                self.assertEqual(("127.0.0.1", relay["listen_port"]), (peer["address"], peer["port"]))
+                self.assertTrue(config["unbound"], "the helper must not bind to the physical interface")
+                self.assertEqual("udp", relay["network"])
+                self.assertTrue(relay["override_address"] and relay["override_port"])
+                self.assertLessEqual(config["endpoint"]["mtu"], WARP_ENTRY_MTU - 80)
+                self.assertFalse([a for a in config["endpoint"]["address"] if ":" in a], "IPv4 tunnel through the hop")
+                self.assertEqual([], violations(built.singbox_config, sidecar_process_paths=[], sidecar_inbounds=[relay["tag"]]))
+                again = apply_warp_entry(built, PROFILE, tun=label == "tun")
+                self.assertEqual(1, sum(1 for i in again.singbox_config["inbounds"] if i.get("tag") == relay["tag"]), "a second pass keeps one relay")
+
+    def test_hysteria_server_enters_through_a_loopback_relay_in_the_proxy_mode(self) -> None:
+        document = parse_singbox_document(TEMPLATE_PATH, TEMPLATE_PATH.read_text(encoding="utf-8"))
+        for node in nodes_of("hysteria2"):
+            with self.subTest("hysteria2"):
+                built = plan_singbox_proxy_runtime(document, node, warp_entry_profile=PROFILE)
+                relay = next(i for i in built.singbox_config["inbounds"] if str(i.get("tag", "")).startswith("__app_warp_udp_hysteria"))
+                server = built.hysteria_sidecar.config["server"]
+                self.assertIn(f"127.0.0.1:{relay['listen_port']}", server)
+                self.assertTrue(built.hysteria_sidecar.config["tls"]["sni"], "the real name stays in the TLS SNI")
+                self.assertTrue(relay["override_address"] and relay["override_port"])
+                rule = next(r for r in rules(built) if r.get("inbound") == [relay["tag"]])
+                self.assertEqual(WARP_ENTRY_TAG, rule["outbound"])
+                self.assertEqual([], violations(built.singbox_config, sidecar_process_paths=[], sidecar_inbounds=[relay["tag"]]))
 
 
 if __name__ == "__main__":

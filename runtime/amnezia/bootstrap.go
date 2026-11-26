@@ -22,6 +22,9 @@ func bootstrapPeers(c *config) error {
 		if _, err := netip.ParseAddr(peer.Address); err == nil {
 			continue
 		}
+		if c.Unbound {
+			return fmt.Errorf("peer[%d] must be an address when the socket is not bound to the physical interface", index)
+		}
 		if len(c.BootstrapDNS) == 0 {
 			return fmt.Errorf("peer[%d] bootstrap: physical network has no DNS server", index)
 		}

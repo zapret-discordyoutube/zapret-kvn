@@ -37,16 +37,20 @@ type endpointConfig struct {
 }
 
 type config struct {
-	Endpoint          endpointConfig `json:"endpoint"`
-	Listen            string         `json:"listen"`
-	DNSAddress        string         `json:"dns_address,omitempty"`
-	BootstrapDNS      []string       `json:"bootstrap_dns,omitempty"`
-	Username          string         `json:"username"`
-	Password          string         `json:"password"`
-	InterfaceIndex    uint32         `json:"interface_index"`
-	SessionGeneration uint64         `json:"session_generation"`
-	TargetGeneration  uint64         `json:"target_generation"`
-	TargetRef         string         `json:"target_ref"`
+	Endpoint       endpointConfig `json:"endpoint"`
+	Listen         string         `json:"listen"`
+	DNSAddress     string         `json:"dns_address,omitempty"`
+	BootstrapDNS   []string       `json:"bootstrap_dns,omitempty"`
+	Username       string         `json:"username"`
+	Password       string         `json:"password"`
+	InterfaceIndex uint32         `json:"interface_index"`
+	// Unbound leaves the UDP socket on the default route instead of binding it to the physical interface. Used only
+	// when the app enters the server through the WARP hop under the TUN: the socket must reach sing-box through the
+	// TUN, where the router sends this process into the hop. Peers must then be addresses (the app resolves names).
+	Unbound           bool   `json:"unbound,omitempty"`
+	SessionGeneration uint64 `json:"session_generation"`
+	TargetGeneration  uint64 `json:"target_generation"`
+	TargetRef         string `json:"target_ref"`
 }
 
 func keyHex(value string) (string, error) {

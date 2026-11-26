@@ -11,6 +11,7 @@ import (
 type protectedBind struct {
 	*conn.StdNetBind
 	index          uint32
+	unbound        bool
 	allow4, allow6 bool
 	// race is set when the only peer has addresses of both families.
 	race      *familyRace
@@ -23,7 +24,7 @@ type protectedBind struct {
 }
 
 func newProtectedBind(c config, onLock func(netip.AddrPort)) *protectedBind {
-	b := &protectedBind{StdNetBind: conn.NewStdNetBind().(*conn.StdNetBind), index: c.InterfaceIndex, protect: protectBind}
+	b := &protectedBind{StdNetBind: conn.NewStdNetBind().(*conn.StdNetBind), index: c.InterfaceIndex, unbound: c.Unbound, protect: protectBind}
 	for _, peer := range c.Endpoint.Peers {
 		ip := netip.MustParseAddr(peer.Address).Unmap()
 		b.allow4 = b.allow4 || ip.Is4()
@@ -76,9 +77,12 @@ func (b *protectedBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	if err = b.protect(b); err != nil {
-		b.StdNetBind.Close()
-		return nil, 0, err
+	// Entering through the hop (unbound): the socket stays on the default route, which is the TUN.
+	if !b.unbound {
+		if err = b.protect(b); err != nil {
+			b.StdNetBind.Close()
+			return nil, 0, err
+		}
 	}
 	if b.raceReady {
 		b.race.restart()

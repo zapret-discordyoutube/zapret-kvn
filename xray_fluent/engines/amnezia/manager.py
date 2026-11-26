@@ -263,7 +263,17 @@ class AmneziaManager(QObject):
                                        "the first answer wins")
             if self._cancelled():
                 return False
-            payload.update((yield from physical_network_steps(_first_peer_ipv4(payload))))
+            if payload.get("unbound"):
+                # Entering through the WARP hop (under the TUN): the socket stays on the default route, which is the TUN,
+                # so there is no physical interface to bind and no physical DNS; the helper needs the peers as addresses.
+                for peer in ((payload.get("endpoint") or {}).get("peers") or []):
+                    try:
+                        ipaddress.ip_address(str((peer or {}).get("address") or "").strip())
+                    except ValueError:
+                        raise OSError("the server name did not resolve, so it cannot enter through the WARP hop") from None
+                payload.update(interface_index=0, bootstrap_dns=[])
+            else:
+                payload.update((yield from physical_network_steps(_first_peer_ipv4(payload))))
             if self._cancelled():
                 return False
             payload.update(session_generation=session_generation, target_generation=target_generation,

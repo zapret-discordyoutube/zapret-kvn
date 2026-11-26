@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import ipaddress
 from ipaddress import ip_address
@@ -36,13 +36,13 @@ from ...application.outbound_pool_service import (
     xray_pool_exclusion,
 )
 from ..hysteria.runtime_contract import classify_hysteria_uri
-from .warp_entry import EntryHopResult, apply_entry_hop, violations as warp_entry_violations
+from .warp_entry import WARP_ENTRY_MTU, EntryHopResult, apply_entry_hop, violations as warp_entry_violations
 from ...application.protocol_core import ProtocolCore, protocol_core
 from ...profiles.models import Node
 from ...diagnostics.runtime_logging import RuntimeNodeIdentity
 from ...network.bootstrap_dns import cached_addresses
 from ...masking import desync as desync_rules
-from ..hysteria.config_adapter import build_uri_client_config
+from ..hysteria.config_adapter import build_uri_client_config, relay_server_config, server_endpoint
 from .config_builder import build_singbox_outbound, is_singbox_endpoint_node
 
 
@@ -108,6 +108,16 @@ class SingboxHysteriaSidecarPlan:
     context: RuntimeNodeIdentity
 
 
+@dataclass(frozen=True, slots=True)
+class UdpRelay:
+    """A loopback UDP port of sing-box that carries one helper's datagrams to its server through the WARP hop."""
+
+    tag: str
+    port: int
+    host: str
+    server_port: int
+
+
 @dataclass(slots=True)
 class SingboxAmneziaSidecarPlan:
     relay_port: int
@@ -142,6 +152,8 @@ class SingboxRuntimePlan:
     slot_plans: tuple[Any, ...] = ()
     # What the WARP entry hop did (None = off): the controller logs it.
     warp_entry: EntryHopResult | None = None
+    #: Loopback UDP relays of the WARP hop for the helpers that dial with their own socket (see `_udp_relays`).
+    warp_udp_relays: list["UdpRelay"] = field(default_factory=list)
     #: How long the hop pass (chaining, rules, guard) took, for the start log (owner request 2026-11-26).
     warp_entry_millis: int = 0
 
@@ -336,14 +348,88 @@ def plan_singbox_proxy_runtime(
 
 
 WARP_ENTRY_UNSUPPORTED = (
-    "Вход через WARP пока не работает с серверами WireGuard/AmneziaWG: их соединения идут мимо sing-box "
-    "и открыли бы адрес сервера провайдеру. Выключите вход через WARP или выберите другой сервер."
+    "Вход через WARP: не удалось определить адрес сервера WireGuard/AmneziaWG. Выключите вход через WARP или "
+    "выберите другой сервер."
 )
 WARP_ENTRY_NEEDS_TUN = (
-    "В режиме «Прокси» Hysteria2 и отдельные серверы для сервисов подключаются к серверу мимо sing-box и открыли бы "
-    "его адрес провайдеру: вход через WARP для них работает в режиме VPN (TUN). Включите режим VPN, выключите вход "
-    "через WARP или выберите другой сервер."
+    "В режиме «Прокси» отдельные серверы для сервисов подключаются к серверу мимо sing-box и открыли бы его адрес "
+    "провайдеру: вход через WARP для них работает в режиме VPN (TUN). Включите режим VPN, выключите вход через WARP "
+    "или выберите другой сервер."
 )
+
+
+WARP_UDP_RELAY_PREFIX = "__app_warp_udp_"
+#: An AWG packet adds 60 bytes (IPv4) to the inner MTU and must fit the hop (MTU 1330), so the tunnel through the hop is
+#: IPv4 only (an IPv6 tunnel address needs an inner MTU of 1280).
+WARP_ENTRY_AMNEZIA_INNER_MTU = WARP_ENTRY_MTU - 80
+
+
+def _free_udp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind((PROXY_HOST, 0))
+        return int(probe.getsockname()[1])
+
+
+def _udp_relays(plan: SingboxRuntimePlan, *, tun: bool) -> list[UdpRelay]:
+    """Loopback UDP relays for the helpers that dial their server with their own UDP socket (owner request 2026-11-26:
+    "so that everything works with Hysteria, AWG and the rest", in the proxy mode too).
+
+    Under the TUN a Hysteria helper's socket is captured and its process rule leads into the hop; in the proxy mode
+    nothing captures it, and the AmneziaWG helper binds its socket to the physical interface in every mode.  Both talk to a
+    loopback `direct` inbound of sing-box instead, which carries the datagrams to the real server through the hop; the
+    helper's config is rewritten to point at it.  The server's name stays where certificates need it (the Hysteria SNI,
+    the AWG keys).  A second pass over the same plan reuses what the first one made."""
+    if plan.warp_udp_relays:
+        return plan.warp_udp_relays
+    relays: list[UdpRelay] = []
+    hysteria = plan.hysteria_sidecar
+    if hysteria is not None and not tun:
+        endpoint = server_endpoint(hysteria.config)
+        if endpoint is None:
+            raise ValueError("Вход через WARP: не удалось определить адрес сервера Hysteria2. Выключите вход через WARP или выберите другой сервер.")
+        port = _free_udp_port()
+        relays.append(UdpRelay(WARP_UDP_RELAY_PREFIX + "hysteria", port, endpoint[0], endpoint[1]))
+        hysteria.config = relay_server_config(hysteria.config, PROXY_HOST, port)
+    amnezia = plan.amnezia_sidecar
+    if amnezia is not None:
+        endpoint_config = amnezia.config.get("endpoint")
+        peers = [peer for peer in (endpoint_config or {}).get("peers") or [] if isinstance(peer, dict)]
+        if not peers or any(not peer.get("address") or not peer.get("port") for peer in peers):
+            raise ValueError(WARP_ENTRY_UNSUPPORTED)
+        for index, peer in enumerate(peers):
+            port = _free_udp_port()
+            relays.append(UdpRelay(f"{WARP_UDP_RELAY_PREFIX}amnezia_{index}", port, str(peer["address"]), int(peer["port"])))
+            peer["address"], peer["port"] = PROXY_HOST, port
+            peer.pop("race_address", None)
+        # The helper's socket stays on the default route (loopback), not bound to the physical interface; the tunnel is
+        # IPv4 only and its inner MTU fits the hop.
+        amnezia.config["unbound"] = True
+        endpoint_config["mtu"] = min(int(endpoint_config.get("mtu") or WARP_ENTRY_AMNEZIA_INNER_MTU), WARP_ENTRY_AMNEZIA_INNER_MTU)
+        addresses = [a for a in endpoint_config.get("address") or [] if ":" not in str(a)]
+        if addresses:
+            endpoint_config["address"] = addresses
+    plan.warp_udp_relays = relays
+    return relays
+
+
+def _install_udp_relays(payload: dict[str, Any], relays: list[UdpRelay]) -> None:
+    """The relays' inbounds and their `direct` rules ahead of the user's routing (the hop re-points the rules)."""
+    inbounds = [i for i in _ensure_list(payload, "inbounds") if not (isinstance(i, dict) and str(i.get("tag", "")).startswith(WARP_UDP_RELAY_PREFIX))]
+    payload["inbounds"] = inbounds
+    route = _ensure_dict(payload, "route")
+    rules = [
+        r for r in _ensure_list(route, "rules")
+        if not (isinstance(r, dict) and isinstance(r.get("inbound"), list) and any(str(t).startswith(WARP_UDP_RELAY_PREFIX) for t in r["inbound"]))
+    ]
+    for relay in relays:
+        inbounds.append(
+            {
+                "type": "direct", "tag": relay.tag, "listen": PROXY_HOST, "listen_port": relay.port, "network": "udp",
+                "override_address": relay.host, "override_port": relay.server_port,
+            }
+        )
+        rules.insert(0, {"inbound": [relay.tag], "outbound": "direct"})
+    route["rules"] = rules
 
 
 def _slot_helper_paths(plan: SingboxRuntimePlan) -> list[str]:
@@ -361,18 +447,21 @@ def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str, *, tun: bool) 
 
     Native outbounds (also the pool's, which live in the provider file) get a `detour`; the Xray protect-inbound rule
     leads into the hop.  The Hysteria and slot helpers dial their server with their own UDP/TCP sockets: under the TUN
-    those are captured and their `process_path` rules point to the hop; in the proxy mode nothing captures them, so
-    entering is impossible and refusing is better than silently showing the server address to the provider.  The
-    WireGuard/AmneziaWG helper binds its socket to the physical interface and is refused for the same reason.
+    those are captured and their `process_path` rules point to the hop; in the proxy mode nothing captures them, so the
+    main Hysteria helper and the WireGuard/AmneziaWG helper (which binds its socket to the physical interface in every
+    mode) talk to loopback UDP relays of sing-box instead (`_udp_relays`).  The slot helpers of separate servers cannot
+    be relayed (a slot moves to another server while connected): in the proxy mode they follow the main server.
     Safe to run again after the slots were attached: the hop is rebuilt from scratch each time.
     """
-    if plan.outcome == "amnezia_sidecar" or plan.amnezia_sidecar is not None:
-        raise ValueError(WARP_ENTRY_UNSUPPORTED)
-    paths = ([str(HYSTERIA_PATH_DEFAULT.resolve())] if plan.hysteria_sidecar is not None else []) + _slot_helper_paths(plan)
+    paths = ([str(HYSTERIA_PATH_DEFAULT.resolve())] if plan.hysteria_sidecar is not None and tun else []) + _slot_helper_paths(plan)
     if paths and not tun:
         raise ValueError(WARP_ENTRY_NEEDS_TUN)
     pass_started = time.monotonic()
     inbounds = [_APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG] if plan.xray_sidecar is not None else []
+    # The helpers that dial with their own UDP socket talk to a loopback relay of sing-box (see `_udp_relays`).
+    relays = _udp_relays(plan, tun=tun)
+    _install_udp_relays(plan.singbox_config, relays)
+    inbounds += [relay.tag for relay in relays]
     pool = plan.provider_payload.get("outbounds") if isinstance(plan.provider_payload, dict) else None
     # The account registration and the server names must resolve OUTSIDE the tunnel: the default DNS goes through the
     # proxy, which waits for the hop, which waits for the registration (found on a real run: the lookup of the
@@ -386,7 +475,7 @@ def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str, *, tun: bool) 
         for outbound in ((plan.xray_sidecar.config or {}).get("outbounds") or [] if plan.xray_sidecar is not None else [])
         if isinstance(outbound, dict)
         for host in server_hosts(outbound)
-    ]
+    ] + [relay.host for relay in relays]
     result = apply_entry_hop(
         plan.singbox_config, profile_path, sidecar_process_paths=paths, sidecar_inbounds=inbounds, pool_outbounds=pool,
         resolver="bootstrap-dns" if "bootstrap-dns" in tags else None, helper_server_names=helper_names,

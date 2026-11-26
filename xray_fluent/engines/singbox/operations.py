@@ -330,7 +330,9 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
         old_plan = getattr(controller, "_active_singbox_plan", None)
         old_hysteria = controller.hysteria
         old_amnezia = getattr(controller, "amnezia", None)
-        if getattr(plan, "amnezia_sidecar", None) is not None:
+        # A helper that enters through the WARP hop needs the new front to be up (its UDP goes to the relay of the front):
+        # it is started by the front's own start, after it, never prepared beside the old one.
+        if getattr(plan, "amnezia_sidecar", None) is not None and not (getattr(plan.amnezia_sidecar, "config", None) or {}).get("unbound"):
             replacement_amnezia = yield from controller._prepare_amnezia_replacement_steps(plan)
             if replacement_amnezia is None:
                 controller._fail_transition("Новый сервер WG/AWG не прошёл проверку.")

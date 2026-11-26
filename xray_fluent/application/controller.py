@@ -1777,7 +1777,9 @@ class AppController(QObject):
             if request_cancelled():
                 return False
         should_continue = lambda: not request_cancelled()  # noqa: E731
-        if getattr(plan, "amnezia_sidecar", None) is not None:
+        # Entering through the WARP hop: the helper's UDP goes through the TUN, so it starts AFTER the front (below).
+        unbound_amnezia = getattr(plan, "amnezia_sidecar", None) is not None and bool((getattr(plan.amnezia_sidecar, "config", None) or {}).get("unbound"))
+        if getattr(plan, "amnezia_sidecar", None) is not None and not unbound_amnezia:
             target_amnezia = owned_amnezia
             if prepared_amnezia is not None:
                 if not target_amnezia.is_running:
@@ -1937,6 +1939,17 @@ class AppController(QObject):
             if not singbox_start_tag or (yield from self._apply_core_outbound_tag_steps(
                 "singbox", singbox_start_tag, startup=True
             )):
+                if unbound_amnezia:
+                    self._log("[amnezia] вход через WARP: помощник WG/AWG запускается после sing-box, его UDP идёт через TUN")
+                    if not (yield from self._start_amnezia_manager_steps(owned_amnezia, plan)):
+                        if not request_cancelled():
+                            self._fail_sidecar(owned_amnezia, runtime_node)
+                        yield from self.singbox.stop_steps()
+                        break
+                    if request_cancelled():
+                        yield from owned_amnezia.stop_steps()
+                        yield from self.singbox.stop_steps()
+                        break
                 if getattr(plan, "amnezia_sidecar", None) is not None:
                     if not owned_amnezia.verify_front_dns(plan.amnezia_sidecar.config) or request_cancelled():
                         yield from self.singbox.stop_steps()
