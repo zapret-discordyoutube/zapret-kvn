@@ -79,7 +79,14 @@ class _WarpE2EBase(unittest.TestCase):
 
         cls.tmp = Path(tempfile.mkdtemp(prefix="zkvn-e2e-warp-"))
         cls.account = cls.tmp / "warp-entry-profile.json"
+        # An account registered by an earlier run may be reused (KVN_E2E_ACCOUNT): the registration API answers 429 when
+        # one address registers many devices, which a series of single-server runs would do.
+        reused = os.environ.get("KVN_E2E_ACCOUNT", "")
+        if reused and Path(reused).is_file():
+            shutil.copyfile(reused, cls.account)
         cls.registration = warp_registration.ensure_account(cls.account)  # the real API
+        if reused and not Path(reused).is_file() and cls.account.is_file() and not cls.BLOCKED:
+            shutil.copyfile(cls.account, reused)
         if cls.BLOCKED:
             import json
 

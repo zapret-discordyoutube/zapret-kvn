@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -85,7 +86,9 @@ def start_proxy_steps(
     controller._active_core = "singbox"
     yield from controller._ensure_warp_account_steps()
     try:
+        planned_at = time.monotonic()
         plan = controller._plan_proxy_runtime_singbox(node)
+        _log_plan_time(controller, plan, planned_at)
     except ValueError as exc:
         controller._active_core = prev_active_core
         controller._fail_transition(str(exc))
@@ -150,7 +153,9 @@ def start_tun_steps(
     controller._active_core = "singbox"
     yield from controller._ensure_warp_account_steps()
     try:
+        planned_at = time.monotonic()
         plan = controller._plan_runtime_singbox(node)
+        _log_plan_time(controller, plan, planned_at)
     except ValueError as exc:
         controller._active_core = prev_active_core
         controller._fail_transition(str(exc))
@@ -189,6 +194,16 @@ def start_tun_steps(
         return None
 
     return SingboxStartResult(plan=plan, session_label=session_label)
+
+
+def _log_plan_time(controller: AppController, plan, started: float) -> None:
+    """How long the runtime plan took (owner request 2026-11-26: "improve the logs", a slow start must say where it went)."""
+    hop = getattr(plan, "warp_entry", None)
+    outbounds = len(plan.singbox_config.get("outbounds") or [])
+    controller._log(
+        f"[perf] план runtime: {int((time.monotonic() - started) * 1000)} мс, outbound'ов {outbounds}, "
+        f"вход через WARP {'да' if hop is not None else 'нет'}"
+    )
 
 
 def _log_warp_entry(controller: AppController, plan) -> None:
