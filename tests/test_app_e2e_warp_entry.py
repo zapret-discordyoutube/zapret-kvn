@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest.mock import patch
@@ -61,8 +62,8 @@ def _spin_until(condition, timeout_s: float) -> bool:
 
 
 class _WarpE2EBase(unittest.TestCase):
-    #: The protocol of the test person's servers this class connects to.
-    SCHEME = "vless"
+    #: The protocols of the test person's servers this class imports (the first one is the main server's).
+    SCHEMES = ("vless",)
     # True: the account points the tunnel at an address nothing answers, like a network that drops the WARP UDP ports.
     BLOCKED = False
     # True: the VPN (TUN) mode, which captures the helpers' own sockets; it changes the routes of the machine.
@@ -111,7 +112,7 @@ class _WarpE2EBase(unittest.TestCase):
         controller._start_metrics_worker = lambda: None  # type: ignore[method-assign]
         controller.proxy = _FakeWinProxy()
         state = AppState()
-        nodes = real_subscription.nodes_of(cls.SCHEME)
+        nodes = [node for scheme in cls.SCHEMES for node in real_subscription.nodes_of(scheme)]
         for order, node in enumerate(nodes):
             node.sort_order = order
         state.nodes = list(nodes)
@@ -143,6 +144,7 @@ class _WarpE2EBase(unittest.TestCase):
                 controller._desired_connected = False
                 controller._request_transition("e2e teardown")
                 _spin_until(lambda: not controller._transition_active, 30)
+            controller.slot_runtime.stop()
             for manager in (controller.singbox, controller.xray, controller.hysteria, controller.amnezia):
                 manager.stop()
         finally:
@@ -160,7 +162,7 @@ class _WarpE2EBase(unittest.TestCase):
         lines = [
             re.sub(r"^\[sing-box\]\[[^\]]*\]\s*", "[sing-box] ", line)  # the prefix carries the server's display name
             for line in self.logs[-300:]
-            if "warp" in line.lower() or "protect" in line.lower()
+            if "warp" in line.lower() or "protect" in line.lower() or "[slots]" in line
         ]
         return "\n".join(re.sub(r"[0-9a-fA-F:.]{7,}|[\w-]+(\.[\w-]+){2,}", "<x>", line) for line in lines[-25:])
 
@@ -216,7 +218,7 @@ class _WarpE2EBase(unittest.TestCase):
 
 @unittest.skipUnless(_RUNNABLE, _SKIP)
 class WarpEntryE2E(_WarpE2EBase):
-    SCHEME = "vless"
+    SCHEMES = ("vless",)
 
     def test_the_account_was_registered_by_the_app_over_the_real_api(self) -> None:
         self.assertTrue(self.registration.ok, str(self.registration))
@@ -231,7 +233,7 @@ class WarpEntryE2E(_WarpE2EBase):
 class WarpEntryHysteriaProxyModeE2E(_WarpE2EBase):
     """Hysteria2 dials its server from its own process: in the proxy mode nothing captures that, so the app says so."""
 
-    SCHEME = "hysteria2"
+    SCHEMES = ("hysteria2",)
 
     def test_a_hysteria_server_is_refused_in_the_proxy_mode_with_the_reason(self) -> None:
         from xray_fluent.application.selection_source import SelectionSource
@@ -250,18 +252,72 @@ class WarpEntryHysteriaProxyModeE2E(_WarpE2EBase):
 class WarpEntryHysteriaTunE2E(_WarpE2EBase):
     """In the VPN mode the TUN captures hysteria.exe's own UDP socket and its process rule leads into the hop."""
 
-    SCHEME = "hysteria2"
+    SCHEMES = ("hysteria2",)
     TUN = True
 
     def test_a_real_hysteria_server_brings_a_real_page_through_the_hop(self) -> None:
         self._a_real_page_comes_back()
 
 
+@unittest.skipUnless(_RUNNABLE and os.environ.get("KVN_E2E_TUN") == "1", _SKIP + " and KVN_E2E_TUN=1 (it changes the routes)")
+class WarpEntrySlotsTunE2E(_WarpE2EBase):
+    """A service slot has its own helper process and its own server; under the TUN that helper enters through the hop too."""
+
+    SCHEMES = ("hysteria2", "vless")
+    TUN = True
+
+    def test_a_service_slot_reaches_its_own_server_through_the_hop(self) -> None:
+        from xray_fluent.application.selection_source import SelectionSource
+
+        c = self.controller
+        c.set_selected_node(self.nodes[0].id, source=SelectionSource.NODES_MENU)
+        ok, message = c.set_service_slots({"ai"})
+        self.assertTrue(ok, message.splitlines()[0] if message else "")
+        if not c._desired_connected:
+            c.toggle_connection()
+        self.assertTrue(_spin_until(lambda: c.connected, 120), self._evidence())
+        self.assertTrue(
+            _spin_until(lambda: "ai" in c.slot_runtime.active_slots, 90),
+            "the AI slot did not come up\n" + "\n".join(line[:160] for line in self.logs if "[slots]" in line)[-1500:],
+        )
+        port = c._active_session.http_port
+        result: dict[str, int] = {}
+
+        def browse() -> None:
+            # ChatGPT is in the AI slot's domains; any HTTP answer (even a refusal page) proves the whole path.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"https": f"http://127.0.0.1:{port}"}))
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline and "status" not in result:
+                try:
+                    with opener.open("https://chatgpt.com/", timeout=25) as reply:
+                        result["status"] = reply.status
+                except urllib.error.HTTPError as error:
+                    result["status"] = error.code
+                except Exception:  # noqa: BLE001 - not up yet
+                    time.sleep(1)
+
+        worker = threading.Thread(target=browse, daemon=True)
+        worker.start()
+        _spin_until(lambda: not worker.is_alive(), 95)
+        self.assertIn("status", result, "no answer through the slot\n" + self._evidence())
+        dials = [
+            line for line in self.logs
+            if "warp[kvn-warp-entry]" in line and ("outbound connection to" in line or "outbound packet connection" in line)
+        ]
+        self.assertGreaterEqual(
+            len(dials), 2, "the main server and the slot server must both be dialled through the hop\n" + self._evidence()
+        )
+        self.assertTrue(
+            any("found process path" in line and "-slot-" in line for line in self.logs),
+            "the slot helper's own sockets were not seen by the router\n" + self._evidence(),
+        )
+
+
 @unittest.skipUnless(_RUNNABLE, _SKIP)
 class WarpEntryBlockedAddressE2E(_WarpE2EBase):
     """The account's own WARP address is a black hole (what a censor does to it): the tunnel must still come up."""
 
-    SCHEME = "vless"
+    SCHEMES = ("vless",)
     BLOCKED = True
 
     def test_a_blocked_account_address_still_gets_the_tunnel_through_another_edge(self) -> None:
