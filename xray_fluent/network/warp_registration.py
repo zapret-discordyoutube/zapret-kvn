@@ -127,6 +127,25 @@ def ensure_account(
     return last
 
 
+def routes(addresses: Callable[[], list[str]] | None = None) -> list[tuple[str, str | None, bool]]:
+    """The routes to the API in the order they are tried: (name, address or None for the system's, cut ClientHello)."""
+    found: list[str] = []
+    try:
+        found = list(addresses()) if addresses else []
+    except Exception:  # noqa: BLE001 - a resolver failure only means fewer routes
+        found = []
+    targets: list[str | None] = [None]
+    for address in [*found, *KNOWN_ADDRESSES]:
+        if address not in targets:
+            targets.append(address)
+    out: list[tuple[str, str | None, bool]] = []
+    for index, target in enumerate(targets):
+        label = "api" if index == 0 else f"api-{index}"
+        for fragmented in (False, True):
+            out.append((f"{label}{'-fragmented' if fragmented else ''}", target, fragmented))
+    return out
+
+
 def _new_key() -> tuple[str, str]:
     key = X25519PrivateKey.generate()
     private = key.private_bytes(
@@ -185,8 +204,20 @@ def _through_proxy(body: bytes, proxy_url: str, timeout: float) -> bytes:
                        attempts_per_route=1).data
 
 
-def _exchange(address: str | None, body: bytes, fragmented: bool, timeout: float) -> bytes:
-    """One HTTPS POST to the API, the ClientHello optionally cut into pieces; returns the body of the 200 answer."""
+def _exchange(
+    address: str | None,
+    body: bytes,
+    fragmented: bool,
+    timeout: float,
+    *,
+    method: str = "POST",
+    path: str = API_PATH,
+    token: str | None = None,
+) -> bytes:
+    """One HTTPS request to the API, the ClientHello optionally cut into pieces; returns the body of the 200 answer.
+
+    The registration is a POST to `/reg`; the MASQUE key of `warp_masque_account.py` is a PATCH to `/reg/<id>` with the
+    token of the device."""
     deadline = time.monotonic() + timeout * 2
     sock = socket.create_connection((address or API_HOST, API_PORT), timeout=timeout)
     try:
@@ -204,8 +235,9 @@ def _exchange(address: str | None, body: bytes, fragmented: bool, timeout: float
                 _feed(sock, incoming, deadline)
         _flush(sock, outgoing, split=False)
         request = (
-            f"POST {API_PATH} HTTP/1.1\r\nHost: {API_HOST}\r\n"
+            f"{method} {path} HTTP/1.1\r\nHost: {API_HOST}\r\n"
             + "".join(f"{key}: {value}\r\n" for key, value in HEADERS.items())
+            + (f"Authorization: Bearer {token}\r\n" if token else "")
             + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
         ).encode() + body
         tls.write(request)

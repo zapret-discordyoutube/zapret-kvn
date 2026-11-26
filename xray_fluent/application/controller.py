@@ -7,6 +7,7 @@ import logging
 import random
 import re
 import socket
+import threading
 import time
 from datetime import datetime, timezone
 import json
@@ -274,7 +275,7 @@ from ..network.bootstrap_dns import cached_addresses
 from ..network.bootstrap_dns import resolve_bootstrap
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
-from ..network import entry_hop, server_family, warp_registration
+from ..network import entry_hop, server_family, warp_masque_account, warp_registration
 from ..network.warp_hop_health import HopHealth, WarpFacts, registration_result, tunnel_result
 from ..network.physical_route import (
     has_network,
@@ -1515,6 +1516,7 @@ class AppController(QObject):
         if warp_registration.account_file_ready(profile):
             # One line per connect while the setting is on: its absence in a report means the setting was off at connect.
             self._log("[warp-entry] вход через WARP включён, аккаунт WARP готов")
+            self._register_masque_account_later(profile)
             return
         started = time.monotonic()
         if started - getattr(self, "_warp_direct_failed_at", -1e9) < _WARP_DIRECT_RETRY_S:
@@ -1531,6 +1533,7 @@ class AppController(QObject):
         self._warp_register = (registration_result(outcome.ok, outcome.detail), elapsed_ms)
         if outcome.ok:
             self._log(f"[warp-entry] аккаунт WARP зарегистрирован, путь: {outcome.route}, {elapsed_ms} мс")
+            self._register_masque_account_later(profile)
             return
         self._log(
             f"[warp-entry] аккаунт WARP не зарегистрировать напрямую ({outcome.route}: {outcome.detail}), {elapsed_ms} мс"
@@ -1545,6 +1548,33 @@ class AppController(QObject):
             "без входа через WARP, адрес сервера на этот раз виден провайдеру. После подключения аккаунт будет "
             "зарегистрирован через VPN, и вход через WARP включится сам.",
         )
+
+    def _register_masque_account_later(self, profile: str) -> None:
+        """The second account, for the MASQUE tunnel the core falls back to where WireGuard is cut (owner 2026-11-26).
+
+        Registered over the same routes as the first, on a worker thread beside the connect: it only matters if the
+        tunnel has to change, so nothing waits for it (`network/warp_masque_account.py`)."""
+        if warp_masque_account.ready(warp_masque_account.account_path(profile)) or getattr(self, "_warp_masque_running", False):
+            return
+        self._warp_masque_running = True
+
+        def work() -> None:
+            try:
+                outcome = warp_masque_account.ensure(
+                    profile, addresses=lambda: list(resolve_bootstrap(warp_registration.API_HOST).addresses)
+                )
+                if outcome.route != "skipped":
+                    self._log(
+                        f"[warp-entry] аккаунт MASQUE готов, путь: {outcome.route}, {outcome.elapsed_ms} мс"
+                        if outcome.ok
+                        else f"[warp-entry] аккаунт MASQUE не зарегистрирован ({outcome.route}: {outcome.detail}), {outcome.elapsed_ms} мс"
+                    )
+            except Exception as error:  # noqa: BLE001 - a missing fallback account must never break the connect
+                self._log(f"[warp-entry] аккаунт MASQUE: {type(error).__name__}")
+            finally:
+                self._warp_masque_running = False
+
+        threading.Thread(target=work, name="warp-masque-account", daemon=True).start()
 
     def warp_report_facts(self) -> WarpFacts:
         """The WARP hop facts of the current connect for the connect report (read-only; see `WarpFacts`)."""

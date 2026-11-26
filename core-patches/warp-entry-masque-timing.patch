@@ -1,0 +1,172 @@
+diff --git a/protocol/warp/endpoint.go b/protocol/warp/endpoint.go
+index f2261edddc52e7ff98f2d55964f6c8f6f64f3fc4..a18ef14d8ecc4ecf33fb1e81d678f5b06057aa44 100644
+--- a/protocol/warp/endpoint.go
++++ b/protocol/warp/endpoint.go
+@@ -209,11 +209,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		inner, position, err := endpoint.startVerified(scope, candidates, build, func(index int, current candidate) {
+ 			remember(current)
+ 		})
+-		endpoint.hopAccess.Lock()
+-		endpoint.endpoint, endpoint.position = inner, position
+-		endpoint.list, endpoint.build, endpoint.scope, endpoint.remember = candidates, build, scope, remember
+-		endpoint.lastSuccess = time.Now()
+-		endpoint.hopAccess.Unlock()
++		endpoint.adopt(inner, position, candidates, build, scope, remember)
+ 		if err != nil {
+ 			logger.ErrorContext(ctx, err)
+ 			return
+diff --git a/protocol/warp/recovery.go b/protocol/warp/recovery.go
+index a2f90de28f1925cda12861d20ae2abd19d0affbe..2a3b964fc87928403ddf607e828d73d3deeb01af 100644
+--- a/protocol/warp/recovery.go
++++ b/protocol/warp/recovery.go
+@@ -126,7 +126,7 @@ func (w *Endpoint) startVerified(
+ 		if last || len(candidates) == 1 {
+ 			return inner, index, nil
+ 		}
+-		if w.carriesConnection(inner, probeTimeoutFor(current)) {
++		if w.carriesConnection(inner, w.probeTimeoutFor(current)) {
+ 			if index > 0 {
+ 				w.logger.InfoContext(w.ctx, "WARP tunnel answered at ", current.describe(), " (attempt ", index+1, ")")
+ 			}
+diff --git a/protocol/warp/transport.go b/protocol/warp/transport.go
+index 99911a5e2bc6adeaddda8c5e91fbfee6c465b152..5c4b710f8b4dec556fe92aa99e47ef4728d3292c 100644
+--- a/protocol/warp/transport.go
++++ b/protocol/warp/transport.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"net"
++	"os"
+ 	"strings"
+ 	"sync/atomic"
+ 	"time"
+@@ -11,8 +12,8 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing-box/protocol/masque"
+-	"github.com/sagernet/sing/common/json/badoption"
+ 	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/common/json/badoption"
+ 	N "github.com/sagernet/sing/common/network"
+ )
+ 
+@@ -61,9 +62,11 @@ const (
+ 	// rotateCooldown keeps a hop whose every candidate failed from walking the list over and over.
+ 	rotateCooldown = 30 * time.Second
+ 	// masqueProbeTimeout, masqueReconnectDelay and masqueHandshakeTimeout bound a MASQUE candidate (see buildMasque).
+-	masqueProbeTimeout     = 7 * time.Second
+-	masqueReconnectDelay   = 2 * time.Second
+-	masqueHandshakeTimeout = 5 * time.Second
++	masqueProbeTimeout = 7 * time.Second
++	// masqueFirstProbeTimeout is the probe of a MASQUE candidate whose account is registered by the core on the way.
++	masqueFirstProbeTimeout = 20 * time.Second
++	masqueReconnectDelay    = 2 * time.Second
++	masqueHandshakeTimeout  = 5 * time.Second
+ )
+ 
+ // withMasque puts the two MASQUE candidates right after the account's own WireGuard address and its second port: WireGuard
+@@ -128,11 +131,19 @@ func (w *Endpoint) discard(scope *adapter.Scope, inner adapter.Endpoint) error {
+ 
+ // probeTimeoutFor is how long a candidate gets to carry one connection. MASQUE gets longer: its first start registers an
+ // account (two requests to Cloudflare's API) before it can dial.
+-func probeTimeoutFor(current candidate) time.Duration {
+-	if current.transport != transportWireGuard {
+-		return masqueProbeTimeout
++func (w *Endpoint) probeTimeoutFor(current candidate) time.Duration {
++	if current.transport == transportWireGuard {
++		return probeTimeout
++	}
++	// A MASQUE account that is not on disk yet is registered by the core itself, over a route a provider may slow down
++	// or reset (the app registers it over its own routes beforehand, see the apps): cancelling that request at 7 s
++	// would throw the work away every time, so it gets longer.
++	if path := masqueAccountPath(w.options.Profile.CachePath); path != "" {
++		if _, err := os.Stat(path); err == nil {
++			return masqueProbeTimeout
++		}
+ 	}
+-	return probeTimeout
++	return masqueFirstProbeTimeout
+ }
+ 
+ // masqueAccountPath is where the MASQUE account lives ("" when the WireGuard account has no file).
+@@ -242,7 +253,7 @@ func (w *Endpoint) rotate() {
+ 			w.logger.WarnContext(w.ctx, "WARP candidate ", next.describe(), " did not start: ", err)
+ 			continue
+ 		}
+-		if !w.carriesConnection(inner, probeTimeoutFor(next)) {
++		if !w.carriesConnection(inner, w.probeTimeoutFor(next)) {
+ 			_ = w.discard(w.scope, inner)
+ 			w.logger.WarnContext(w.ctx, "WARP candidate ", next.describe(), " did not answer")
+ 			continue
+@@ -293,3 +304,21 @@ func (w *Endpoint) networkChanged() {
+ 	w.failures = 0
+ 	w.coolUntil = time.Time{}
+ }
++
++// adopt installs the tunnel the start walk ended on, with everything the rotation needs later. lastSuccess stays zero: the
++// start probe passing says nothing about the tunnel carrying anything later (a network that cuts the flow after the
++// handshake passes it, field 2026-11-26), so no quiet period protects the tunnel until a real connection succeeded.
++func (w *Endpoint) adopt(
++	inner adapter.Endpoint,
++	position int,
++	list []candidate,
++	build func(candidate) (adapter.Endpoint, error),
++	scope *adapter.Scope,
++	remember func(candidate),
++) {
++	w.hopAccess.Lock()
++	defer w.hopAccess.Unlock()
++	w.endpoint, w.position = inner, position
++	w.list, w.build, w.scope, w.remember = list, build, scope, remember
++	w.lastSuccess = time.Time{}
++}
+diff --git a/protocol/warp/transport_test.go b/protocol/warp/transport_test.go
+index 12177a17ee414279cbfdda9d3ae7e793fa70bb42..14c84e736b6930ab30cf3de655a8cec8bda68eae 100644
+--- a/protocol/warp/transport_test.go
++++ b/protocol/warp/transport_test.go
+@@ -249,7 +249,6 @@ func TestANetworkChangeForgetsWhatTheOldNetworkTaught(t *testing.T) {
+ // hangingTunnel never answers a dial until its context ends, like a tunnel the network went silent on.
+ type hangingTunnel struct{ fakeTunnel }
+ 
+-
+ func (h *hangingTunnel) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	<-ctx.Done()
+ 	return nil, ctx.Err()
+@@ -292,3 +291,37 @@ func TestACancelBeforeTheSlowLimitSaysNothingAboutTheTunnel(t *testing.T) {
+ 		t.Fatalf("quick cancels counted as failures: %d", hop.failures)
+ 	}
+ }
++
++func TestTheStartProbePassingGivesNoQuietPeriod(t *testing.T) {
++	logger := log.NewNOPFactory().Logger()
++	hop := &Endpoint{ctx: context.Background(), logger: logger, await: make(chan struct{})}
++	hop.lastSuccess = time.Now() // whatever an earlier tunnel left
++	first := &fakeTunnel{name: "wireguard"}
++	list := []candidate{wireGuardCandidate("198.51.100.1", 2408), {transport: transportMasqueQUIC}}
++	hop.adopt(first, 0, list, func(candidate) (adapter.Endpoint, error) { return nil, errors.New("unused") }, adapter.NewScope(context.Background(), logger), nil)
++	if !hop.lastSuccess.IsZero() {
++		t.Fatal("a tunnel that only passed the start probe must not be protected by a quiet period")
++	}
++	if hop.active() != adapter.Endpoint(first) || len(hop.list) != 2 || hop.build == nil || hop.scope == nil {
++		t.Fatal("the hop did not take over what the start walk gave it")
++	}
++}
++
++func TestAMasqueAccountThatIsNotOnDiskGetsALongerProbe(t *testing.T) {
++	directory := t.TempDir()
++	hop := &Endpoint{}
++	hop.options.Profile.CachePath = filepath.Join(directory, "warp-entry-profile.json")
++	masque := candidate{transport: transportMasqueQUIC}
++	if got := hop.probeTimeoutFor(masque); got != masqueFirstProbeTimeout {
++		t.Fatalf("an unregistered MASQUE account needs the long probe, got %v", got)
++	}
++	if err := os.WriteFile(masqueAccountPath(hop.options.Profile.CachePath), []byte("{}"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if got := hop.probeTimeoutFor(masque); got != masqueProbeTimeout {
++		t.Fatalf("a registered account connects fast, got %v", got)
++	}
++	if got := hop.probeTimeoutFor(wireGuardCandidate("198.51.100.1", 2408)); got != probeTimeout {
++		t.Fatalf("WireGuard keeps its own probe, got %v", got)
++	}
++}

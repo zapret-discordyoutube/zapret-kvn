@@ -271,5 +271,45 @@ class WarpMasquePatchTests(unittest.TestCase):
         self.assertLess(text.index("apply_exact_patch(source, masque_patch"), text.index("prepare(source, stage"))
 
 
+MASQUE_TIMING = ROOT / "core-patches/warp-entry-masque-timing.patch"
+ANDROID_MASQUE_TIMING = ROOT.parent / "android/core-patches/0027-warp-masque-timing.patch"
+MASQUE_TIMING_FILES = [
+    "protocol/warp/endpoint.go",
+    "protocol/warp/recovery.go",
+    "protocol/warp/transport.go",
+    "protocol/warp/transport_test.go",
+]
+
+
+class WarpMasqueTimingPatchTests(unittest.TestCase):
+    """The dead tunnel is replaced without a 30 s wait and a MASQUE account still to be registered gets 20 s (Android 0027)."""
+
+    def test_patch_touches_only_the_hop_files(self) -> None:
+        text = MASQUE_TIMING.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(sorted(touched), sorted(MASQUE_TIMING_FILES))
+        self.assertEqual(len(re.findall(r"^index [0-9a-f]{40}\.\.[0-9a-f]{40}", text, re.MULTILINE)), len(touched))
+
+    def test_the_start_probe_leaves_no_quiet_period_and_the_first_account_probe_is_long(self) -> None:
+        text = MASQUE_TIMING.read_text(encoding="utf-8")
+        for marker in ("func (w *Endpoint) adopt(", "w.lastSuccess = time.Time{}", "masqueFirstProbeTimeout = 20 * time.Second"):
+            self.assertIn(marker, text)
+
+    def test_the_hunks_are_the_same_as_android(self) -> None:
+        if not ANDROID_MASQUE_TIMING.is_file():
+            self.skipTest("android repository is not next to windows")
+        android = ANDROID_MASQUE_TIMING.read_text(encoding="utf-8")
+        windows = MASQUE_TIMING.read_text(encoding="utf-8")
+        for needle in ("masqueFirstProbeTimeout", "func (w *Endpoint) adopt(", "TestTheStartProbePassingGivesNoQuietPeriod"):
+            self.assertEqual(needle in android, needle in windows, needle)
+
+    def test_builder_applies_the_patch_after_the_masque_patch_and_records_it(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_MASQUE_TIMING_PATCH = "warp-entry-masque-timing.patch"', text)
+        self.assertIn('"warp_masque_timing_patch_sha256"', text)
+        self.assertLess(text.index("apply_exact_patch(source, masque_patch"), text.index("apply_exact_patch(source, masque_timing_patch"))
+        self.assertLess(text.index("apply_exact_patch(source, masque_timing_patch"), text.index("prepare(source, stage"))
+
+
 if __name__ == "__main__":
     unittest.main()

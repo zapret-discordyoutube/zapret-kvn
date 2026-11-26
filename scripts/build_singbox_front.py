@@ -42,6 +42,10 @@ WARP_CANDIDATES_PATCH = "warp-entry-candidates.patch"
 # пакеты WireGuard и обрывает поток. После WireGuard endpoint пробует туннель MASQUE ядра (QUIC, затем HTTP/2 по TCP 443) и
 # при тишине рабочего туннеля переходит на следующего кандидата (тот же код, что Android 0026).
 WARP_MASQUE_PATCH = "warp-entry-masque.patch"
+# Поле 2026-11-26 (диагностика Android 0.6.62): замена умершего WireGuard-туннеля ждала 30 с, потому что проверка старта
+# считалась «недавним успехом», а аккаунт MASQUE ядро регистрировало само, и запрос обрывался на 7 с. Теперь тихого окна нет
+# до первого настоящего соединения, а аккаунт без файла получает 20 с (тот же код, что Android 0027).
+WARP_MASQUE_TIMING_PATCH = "warp-entry-masque-timing.patch"
 # Signs that upstream already stopped scanning the whole connection table per
 # lookup (sing dev 4ca3bebe: keyed TCP owner lookup; any table cache/single-flight).
 UPSTREAM_OWNER_LOOKUP_MARKERS = ("FindSocketOwner", "nsiGetTCPConnection", "singleflight")
@@ -170,6 +174,9 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     masque_patch = manifest.parent / WARP_MASQUE_PATCH
     apply_exact_patch(source, masque_patch, what="запасной вход MASQUE endpoint WARP", port_hint=(
         f"перенесите патч {masque_patch.name} на новую версию sing-box"))
+    masque_timing_patch = manifest.parent / WARP_MASQUE_TIMING_PATCH
+    apply_exact_patch(source, masque_timing_patch, what="время замены туннеля MASQUE", port_hint=(
+        f"перенесите патч {masque_timing_patch.name} на новую версию sing-box"))
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
     # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
@@ -220,7 +227,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                   "warp_recovery_patch_sha256": sha256(recovery_patch),
                   "warp_interface_patch_sha256": sha256(interface_patch),
                   "warp_candidates_patch_sha256": sha256(candidates_patch),
-                  "warp_masque_patch_sha256": sha256(masque_patch)}
+                  "warp_masque_patch_sha256": sha256(masque_patch),
+                  "warp_masque_timing_patch_sha256": sha256(masque_timing_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
 
