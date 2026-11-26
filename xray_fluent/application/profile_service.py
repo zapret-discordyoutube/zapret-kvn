@@ -50,7 +50,7 @@ def ensure_active_config(controller: AppController, engine: str, path: str | Pat
             template_path = controller._default_singbox_template_path_for_config(resolved)
         setter = controller._set_active_singbox_config_path
         template_setter = controller._set_active_singbox_template_path
-        default_text = controller._default_singbox_config_text()
+        default_text_of = controller._default_singbox_config_text
     else:
         resolved = controller._resolve_xray_config_path(path)
         template_path = get_active_template_path(controller, "xray")
@@ -58,7 +58,7 @@ def ensure_active_config(controller: AppController, engine: str, path: str | Pat
             template_path = controller._default_xray_template_path_for_config(resolved)
         setter = controller._set_active_xray_config_path
         template_setter = controller._set_active_xray_template_path
-        default_text = controller._default_xray_config_text()
+        default_text_of = controller._default_xray_config_text
 
     resolved.parent.mkdir(parents=True, exist_ok=True)
     if not resolved.exists():
@@ -68,6 +68,9 @@ def ensure_active_config(controller: AppController, engine: str, path: str | Pat
             _raw_config_text_cache.store(resolved, template_text)
             template_setter(template_path, emit_signal=False)
         else:
+            # Читается только когда нужен: без файла шаблона рабочий конфиг
+            # не должен ронять подключение (field 0.8.109, FileNotFoundError).
+            default_text = default_text_of()
             resolved.write_text(default_text, encoding="utf-8")
             _raw_config_text_cache.store(resolved, default_text)
     setter(resolved)

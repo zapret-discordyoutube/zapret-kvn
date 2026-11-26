@@ -44,10 +44,24 @@ class NetworkMonitor(QObject):
     def stop(self):
         self._timer.stop()
         if self._worker is not None:
-            self._worker.wait()
+            try:
+                self._worker.wait()
+            except RuntimeError:
+                self._worker = None  # C++-объект воркера уже удалён
+
+    def _worker_running(self) -> bool:
+        if self._worker is None:
+            return False
+        try:
+            return self._worker.isRunning()
+        except RuntimeError:
+            # Qt уже удалил воркер (deleteLater), а _finished ещё не обнулил ссылку:
+            # field 0.8.101/0.8.105/0.8.109, «wrapped C/C++ object has been deleted».
+            self._worker = None
+            return False
 
     def _check(self):
-        if self._worker is not None and self._worker.isRunning():
+        if self._worker_running():
             return
         self._worker = _FingerprintWorker(self._provider, self)
         self._worker.result.connect(self._apply_fingerprint)
