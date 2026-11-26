@@ -79,16 +79,22 @@ def ensure_account(
     addresses: Callable[[], list[str]] | None = None,
     proxy_url: str | None = None,
     timeout: float = 8.0,
+    budget: float = 30.0,
 ) -> Outcome:
     """Make sure the account file exists, registering a new account over the routes above.
 
-    `proxy_url` set means "register through that proxy only" (the last resort, see the module doc)."""
+    `proxy_url` set means "register through that proxy only" (the last resort, see the module doc).
+
+    `budget` is the most this call may take in all, whatever the routes do (field report 2026-11-26, Windows 0.8.121:
+    on a network that blocks the API every route ran into its own timeout, together longer than the 60 s the connect
+    allows for this step, so the connect failed outright instead of going on without the hop)."""
     if account_file_ready(path):
         return Outcome(True, "cached", "account file is there")
+    started = time.monotonic()
     private, public = _new_key()
     body = _registration_body(public)
     if proxy_url:
-        routes: list[tuple[str, Callable[[], bytes]]] = [("vpn", lambda: _through_proxy(body, proxy_url, timeout))]
+        routes: list[tuple[str, Callable[[float], bytes]]] = [("vpn", lambda t: _through_proxy(body, proxy_url, t))]
     else:
         routes = []
         found: list[str] = []
@@ -104,11 +110,16 @@ def ensure_account(
             label = "api" if index == 0 else f"api-{index}"
             for fragmented in (False, True):
                 name = f"{label}{'-fragmented' if fragmented else ''}"
-                routes.append((name, lambda t=target, f=fragmented: _exchange(t, body, f, timeout)))
+                routes.append((name, lambda limit, t=target, f=fragmented: _exchange(t, body, f, limit)))
     last = Outcome(False, "none", "no route tried")
     for name, send in routes:
+        remaining = budget - (time.monotonic() - started)
+        if remaining < 2.0:
+            last = Outcome(False, name, f"time budget of {budget:g} s is used up")
+            break
         try:
-            raw = send()
+            # A route may need two timeouts (connect, then the whole exchange): never more than what is left.
+            raw = send(min(timeout, remaining / 2))
             _write_account(path, private, raw)
             return Outcome(True, name, "registered")
         except Exception as error:  # noqa: BLE001 - every route fails in its own way; the next one is tried

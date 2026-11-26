@@ -414,6 +414,8 @@ def _slot_host_keys(node: Node) -> frozenset[str]:
 
 
 # How long after the connect the app writes what the core said about the WARP hop (one line).
+#: After a failed direct registration the next connects skip the direct routes for this long (seconds).
+_WARP_DIRECT_RETRY_S = 600.0
 _WARP_SUMMARY_MS = 40_000
 
 class AppController(QObject):
@@ -1515,9 +1517,16 @@ class AppController(QObject):
             self._log("[warp-entry] вход через WARP включён, аккаунт WARP готов")
             return
         started = time.monotonic()
-        outcome = yield run_in_worker(
-            lambda: warp_registration.ensure_account(profile, addresses=lambda: list(resolve_bootstrap(warp_registration.API_HOST).addresses))
-        )
+        if started - getattr(self, "_warp_direct_failed_at", -1e9) < _WARP_DIRECT_RETRY_S:
+            # The direct routes failed a moment ago (every one ran into its timeout): do not make this connect wait for
+            # them again, go on without the hop and register through the VPN once it is up.
+            outcome = warp_registration.Outcome(False, "skipped", "the direct routes failed a moment ago")
+        else:
+            outcome = yield run_in_worker(
+                lambda: warp_registration.ensure_account(profile, addresses=lambda: list(resolve_bootstrap(warp_registration.API_HOST).addresses))
+            )
+            if not outcome.ok:
+                self._warp_direct_failed_at = time.monotonic()
         elapsed_ms = int((time.monotonic() - started) * 1000)
         self._warp_register = (registration_result(outcome.ok, outcome.detail), elapsed_ms)
         if outcome.ok:

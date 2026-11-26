@@ -50,6 +50,22 @@ class WarpRegistrationTests(unittest.TestCase):
         self.assertEqual(32, len(base64.b64decode(public)))
         self.assertNotEqual(private, public)
 
+    def test_a_network_that_swallows_every_packet_cannot_stall_the_connect(self) -> None:
+        # Field report 2026-11-26 (Windows 0.8.121): the API was blocked, every route ran into its own timeout and the
+        # sum passed the 60 s the connect allows for this step, so the connect failed.  A black hole is a real network
+        # behaviour: 192.0.2.1 (TEST-NET-1, reserved for documentation) never answers.
+        import time
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(registration, "API_HOST", "192.0.2.1"), patch.object(
+            registration, "KNOWN_ADDRESSES", ()
+        ):
+            started = time.monotonic()
+            outcome = registration.ensure_account(Path(folder) / "account.json", timeout=8.0, budget=5.0)
+            elapsed = time.monotonic() - started
+        self.assertFalse(outcome.ok)
+        self.assertLess(elapsed, 7.0, f"the registration took {elapsed:.1f} s with a budget of 5 s")
+
 
 if __name__ == "__main__":
     unittest.main()
