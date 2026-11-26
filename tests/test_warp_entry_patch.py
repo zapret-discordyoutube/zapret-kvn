@@ -224,5 +224,52 @@ class WarpCandidatesPatchTests(unittest.TestCase):
         self.assertLess(text.index("apply_exact_patch(source, candidates_patch"), text.index("prepare(source, stage"))
 
 
+MASQUE = ROOT / "core-patches/warp-entry-masque.patch"
+ANDROID_MASQUE = ROOT.parent / "android/core-patches/0026-warp-masque-fallback.patch"
+MASQUE_FILES = [
+    "option/warp.go",
+    "protocol/masque/account_file.go",
+    "protocol/masque/outbound.go",
+    "protocol/warp/edge_memory.go",
+    "protocol/warp/edge_memory_test.go",
+    "protocol/warp/endpoint.go",
+    "protocol/warp/interface_update.go",
+    "protocol/warp/recovery.go",
+    "protocol/warp/recovery_test.go",
+    "protocol/warp/transport.go",
+    "protocol/warp/transport_test.go",
+]
+
+
+class WarpMasquePatchTests(unittest.TestCase):
+    """MASQUE as the way in where WireGuard is cut (owner 2026-11-26, mobile data): the same code as Android 0026."""
+
+    def test_patch_touches_only_the_hop_files(self) -> None:
+        text = MASQUE.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(sorted(touched), sorted(MASQUE_FILES))
+        self.assertEqual(len(re.findall(r"^index [0-9a-f]{40}\.\.[0-9a-f]{40}", text, re.MULTILINE)), len(touched))
+
+    def test_new_go_files_are_the_same_as_android(self) -> None:
+        if not ANDROID_MASQUE.is_file():
+            self.skipTest("android repository is not next to windows")
+        android = ANDROID_MASQUE.read_text(encoding="utf-8")
+        windows = MASQUE.read_text(encoding="utf-8")
+        for name in ("protocol/warp/transport.go", "protocol/warp/transport_test.go", "protocol/masque/account_file.go"):
+            self.assertEqual(_new_file(windows, name), _new_file(android, name), name)
+
+    def test_both_masque_transports_and_the_runtime_rotation_are_there(self) -> None:
+        text = MASQUE.read_text(encoding="utf-8")
+        for marker in ("transportMasqueQUIC", "transportMasqueHTTP2", "slowDial", "func (w *Endpoint) rotate()", "NoMasque"):
+            self.assertIn(marker, text)
+
+    def test_builder_applies_the_patch_after_the_candidates_patch_and_records_it(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_MASQUE_PATCH = "warp-entry-masque.patch"', text)
+        self.assertIn('"warp_masque_patch_sha256"', text)
+        self.assertLess(text.index("apply_exact_patch(source, candidates_patch"), text.index("apply_exact_patch(source, masque_patch"))
+        self.assertLess(text.index("apply_exact_patch(source, masque_patch"), text.index("prepare(source, stage"))
+
+
 if __name__ == "__main__":
     unittest.main()

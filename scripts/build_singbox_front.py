@@ -38,6 +38,10 @@ WARP_INTERFACE_PATCH = "warp-entry-interface-update.patch"
 # блокирует адрес аккаунта, а другие адреса и порты WARP работают): после адреса аккаунта идут другие края WARP, удачный
 # край хранится рядом с файлом аккаунта и пробуется первым (тот же код, что Android 0025).
 WARP_CANDIDATES_PATCH = "warp-entry-candidates.patch"
+# MASQUE как запасной вход (решение владельца 2026-11-26, «WARP не работает на мобильной сети»): оператор пропускает первые
+# пакеты WireGuard и обрывает поток. После WireGuard endpoint пробует туннель MASQUE ядра (QUIC, затем HTTP/2 по TCP 443) и
+# при тишине рабочего туннеля переходит на следующего кандидата (тот же код, что Android 0026).
+WARP_MASQUE_PATCH = "warp-entry-masque.patch"
 # Signs that upstream already stopped scanning the whole connection table per
 # lookup (sing dev 4ca3bebe: keyed TCP owner lookup; any table cache/single-flight).
 UPSTREAM_OWNER_LOOKUP_MARKERS = ("FindSocketOwner", "nsiGetTCPConnection", "singleflight")
@@ -163,6 +167,9 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     candidates_patch = manifest.parent / WARP_CANDIDATES_PATCH
     apply_exact_patch(source, candidates_patch, what="кандидаты старта endpoint WARP", port_hint=(
         f"перенесите патч {candidates_patch.name} на новую версию sing-box"))
+    masque_patch = manifest.parent / WARP_MASQUE_PATCH
+    apply_exact_patch(source, masque_patch, what="запасной вход MASQUE endpoint WARP", port_hint=(
+        f"перенесите патч {masque_patch.name} на новую версию sing-box"))
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
     # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
@@ -212,7 +219,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                   "warp_entry_patch_sha256": sha256(warp_patch),
                   "warp_recovery_patch_sha256": sha256(recovery_patch),
                   "warp_interface_patch_sha256": sha256(interface_patch),
-                  "warp_candidates_patch_sha256": sha256(candidates_patch)}
+                  "warp_candidates_patch_sha256": sha256(candidates_patch),
+                  "warp_masque_patch_sha256": sha256(masque_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
 

@@ -204,6 +204,7 @@ dev/stable. Перед повторным использованием пров�
 ## Обратная связь
 
 - [Telegram-канал](https://t.me/vpndpi) — новости и обновления
+- [Telegram-сообщество](https://t.me/vpndiscordyooutube)
 - [Сообщить о проблеме](https://script.google.com/macros/s/AKfycbzcEPk67WW6fYC0vPVm397QyDFHd4m-SrfKDBnfvG8jAD-n_HXVv8AqQnEHZ6A42oIh/exec?s=git&p=zapretdiscordyoutube/zapret-kvn/issues)
 
 ## Лицензия

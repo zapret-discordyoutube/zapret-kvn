@@ -1,0 +1,1112 @@
+diff --git a/option/warp.go b/option/warp.go
+index 931998be0c6fda4ea0a9d40a28089a711fdd7f9b..61f625b67311eb6923b2f461cf53d4babd5dc86e 100644
+--- a/option/warp.go
++++ b/option/warp.go
+@@ -18,6 +18,9 @@ type WARPEndpointOptions struct {
+ 	// MTU of the tunnel, 1280 to 1420; 0 keeps 1280. A larger value lets full-size QUIC datagrams of a server
+ 	// reached through this endpoint (Hysteria2 sends 1252 byte payloads) fit over IPv6 as well.
+ 	MTU uint32 `json:"mtu,omitempty"`
++	// NoMasque keeps the hop on WireGuard only. By default a network that cuts WireGuard is answered with Cloudflare's
++	// MASQUE tunnel (QUIC, then HTTP/2).
++	NoMasque bool `json:"no_masque,omitempty"`
+ 	DialerOptions
+ }
+ 
+diff --git a/protocol/masque/account_file.go b/protocol/masque/account_file.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..20e5ce35c77a37d37facc1f37385a012598e5448
+--- /dev/null
++++ b/protocol/masque/account_file.go
+@@ -0,0 +1,58 @@
++package masque
++
++import (
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// loadAccountFile reads the account kept by saveAccountFile; a missing file is not an error (nil, nil).
++func loadAccountFile(path string) (*Config, error) {
++	content, err := os.ReadFile(path)
++	if err != nil {
++		if errors.Is(err, os.ErrNotExist) {
++			return nil, nil
++		}
++		return nil, err
++	}
++	var config Config
++	if err = json.Unmarshal(content, &config); err != nil {
++		return nil, err
++	}
++	if config.PrivateKey == "" || config.EndpointPubKey == "" || config.IPv4 == "" {
++		return nil, E.New("incomplete MASQUE account")
++	}
++	return &config, nil
++}
++
++// saveAccountFile writes the account atomically with mode 0600 (it holds the private key and the access token).
++func saveAccountFile(path string, config *Config) error {
++	content, err := json.Marshal(config)
++	if err != nil {
++		return err
++	}
++	directory := filepath.Dir(path)
++	if err = os.MkdirAll(directory, 0o700); err != nil {
++		return err
++	}
++	temporary, err := os.CreateTemp(directory, ".masque-account-*")
++	if err != nil {
++		return err
++	}
++	defer os.Remove(temporary.Name())
++	if err = temporary.Chmod(0o600); err != nil {
++		temporary.Close()
++		return err
++	}
++	if _, err = temporary.Write(content); err != nil {
++		temporary.Close()
++		return err
++	}
++	if err = temporary.Close(); err != nil {
++		return err
++	}
++	return os.Rename(temporary.Name(), path)
++}
+diff --git a/protocol/masque/outbound.go b/protocol/masque/outbound.go
+index 3eed12f04b3d9654a19917f53576ec448b361739..744e0d09bd083b3b67593cac2ec3b02a6b07a73f 100644
+--- a/protocol/masque/outbound.go
++++ b/protocol/masque/outbound.go
+@@ -77,12 +77,25 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 				}
+ 			}
+ 		}
++		if appConfig == nil && options.Profile.CachePath != "" && !options.Profile.Recreate {
++			appConfig, err = loadAccountFile(options.Profile.CachePath)
++			if err != nil {
++				// a damaged file is replaced by a new registration below
++				logger.WarnContext(ctx, "ignoring unreadable MASQUE account file: ", err)
++				appConfig = nil
++			}
++		}
+ 		if appConfig == nil {
+ 			appConfig, err = outbound.createConfig()
+ 			if err != nil {
+ 				logger.ErrorContext(ctx, err)
+ 				return
+ 			}
++			if options.Profile.CachePath != "" {
++				if err = saveAccountFile(options.Profile.CachePath, appConfig); err != nil {
++					logger.WarnContext(ctx, "cannot keep the MASQUE account: ", err)
++				}
++			}
+ 			if cacheFile != nil && cacheFile.StoreMASQUEConfig() {
+ 				content, err := json.Marshal(appConfig)
+ 				if err != nil {
+diff --git a/protocol/warp/edge_memory.go b/protocol/warp/edge_memory.go
+index 5b12fc07f66d2c42b304b6f3125db87f8b4f858f..a0e398cee3576258463a4fea76d40f91a5928668 100644
+--- a/protocol/warp/edge_memory.go
++++ b/protocol/warp/edge_memory.go
+@@ -7,6 +7,7 @@ import (
+ 	"path/filepath"
+ 	"strconv"
+ 	"strings"
++	"time"
+ )
+ 
+ // The edge that answered last is kept next to the account file and tried first at the next start: on a network that blocks
+@@ -21,7 +22,12 @@ func edgeMemoryPath(cachePath string) string {
+ 	return cachePath + ".edge"
+ }
+ 
+-// loadEdgeMemory reads "address:port"; anything unreadable or not a literal IP with a port is no memory at all.
++// edgeMemoryLifetime is how long a remembered candidate is believed: networks change (home Wi-Fi, mobile data), and a
++// hint from yesterday's network must not decide today's first attempt.
++const edgeMemoryLifetime = 12 * time.Hour
++
++// loadEdgeMemory reads "address:port" or a MASQUE transport name; anything unreadable, stale or not a literal IP with a
++// port is no memory at all.
+ func loadEdgeMemory(path string) (candidate, bool) {
+ 	if path == "" {
+ 		return candidate{}, false
+@@ -30,6 +36,12 @@ func loadEdgeMemory(path string) (candidate, bool) {
+ 	if err != nil {
+ 		return candidate{}, false
+ 	}
++	if info, err := os.Stat(path); err != nil || time.Since(info.ModTime()) > edgeMemoryLifetime {
++		return candidate{}, false
++	}
++	if kind, ok := parseTransport(string(content)); ok {
++		return candidate{transport: kind}, true
++	}
+ 	host, portText, err := net.SplitHostPort(strings.TrimSpace(string(content)))
+ 	if err != nil {
+ 		return candidate{}, false
+@@ -41,7 +53,7 @@ func loadEdgeMemory(path string) (candidate, bool) {
+ 	if err != nil || port == 0 {
+ 		return candidate{}, false
+ 	}
+-	return candidate{host, uint16(port)}, true
++	return wireGuardCandidate(host, uint16(port)), true
+ }
+ 
+ // saveEdgeMemory keeps the edge atomically with mode 0600; a failure only loses the hint.
+@@ -58,7 +70,7 @@ func saveEdgeMemory(path string, edge candidate) error {
+ 		temporary.Close()
+ 		return err
+ 	}
+-	if _, err = temporary.WriteString(net.JoinHostPort(edge.address, strconv.Itoa(int(edge.port))) + "\n"); err != nil {
++	if _, err = temporary.WriteString(edge.describe() + "\n"); err != nil {
+ 		temporary.Close()
+ 		return err
+ 	}
+diff --git a/protocol/warp/edge_memory_test.go b/protocol/warp/edge_memory_test.go
+index 81ffc61a754ba9fa813025fc1943d8ba272e02e5..c83e74269f5b99623af75347aeed35eb821111f2 100644
+--- a/protocol/warp/edge_memory_test.go
++++ b/protocol/warp/edge_memory_test.go
+@@ -13,7 +13,7 @@ func TestEdgeMemoryRoundTripIsPrivateAndForgettable(t *testing.T) {
+ 	if _, ok := loadEdgeMemory(path); ok {
+ 		t.Fatal("a missing file is no memory")
+ 	}
+-	want := candidate{"188.114.99.1", 4500}
++	want := candidate{"188.114.99.1", 4500, transportWireGuard}
+ 	if err := saveEdgeMemory(path, want); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -48,7 +48,7 @@ func TestEdgeMemoryRefusesAnythingThatIsNotALiteralAddressWithAPort(t *testing.T
+ 
+ func TestRememberedEdgeGoesFirstWithoutDuplicatesOrLoss(t *testing.T) {
+ 	list := peerCandidates(accountPeer(), "", 0)
+-	remembered := candidate{"188.114.99.1", 4500}
++	remembered := candidate{"188.114.99.1", 4500, transportWireGuard}
+ 	got := withRemembered(list, remembered, true)
+ 	if got[0] != remembered || len(got) != len(list) {
+ 		t.Fatalf("got %v", got)
+@@ -62,7 +62,7 @@ func TestRememberedEdgeGoesFirstWithoutDuplicatesOrLoss(t *testing.T) {
+ 	if count != 1 {
+ 		t.Fatalf("the remembered edge appears %d times in %v", count, got)
+ 	}
+-	unknown := candidate{"203.0.113.5", 2408}
++	unknown := candidate{"203.0.113.5", 2408, transportWireGuard}
+ 	got = withRemembered(list, unknown, true)
+ 	if got[0] != unknown || len(got) != len(list)+1 || !reflect.DeepEqual(got[1:], list) {
+ 		t.Fatalf("got %v", got)
+diff --git a/protocol/warp/endpoint.go b/protocol/warp/endpoint.go
+index 40a30db1c8cc999c04d767130a73efbd1208c32c..f2261edddc52e7ff98f2d55964f6c8f6f64f3fc4 100644
+--- a/protocol/warp/endpoint.go
++++ b/protocol/warp/endpoint.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/json"
+ 	"net"
+ 	"net/netip"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -35,6 +36,20 @@ type Endpoint struct {
+ 	startHandler func(scope *adapter.Scope)
+ 
+ 	await chan struct{}
++
++	// The hop's live state (transport.go): the candidate list, which one carries connections now, and what the dials
++	// through it taught. hopAccess guards everything below and the endpoint field once the hop runs.
++	hopAccess   sync.Mutex
++	list        []candidate
++	position    int
++	failures    int
++	lastSuccess time.Time
++	coolUntil   time.Time
++	rotating    bool
++	demoted     map[transport]bool
++	build       func(candidate) (adapter.Endpoint, error)
++	scope       *adapter.Scope
++	remember    func(candidate)
+ }
+ 
+ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.WARPEndpointOptions) (adapter.Endpoint, error) {
+@@ -104,6 +119,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		}
+ 		peer := config.Peers[0]
+ 		candidates := peerCandidates(peer, options.Address, options.Port)
++		// MASQUE is the way in where WireGuard is cut; an explicit address is the user's choice and gets none.
++		if options.Address == "" && !options.NoMasque {
++			candidates = withMasque(candidates)
++		}
+ 		// An explicit address is the user's choice and is never rotated or replaced by a remembered edge.
+ 		edgePath := ""
+ 		if options.Address == "" {
+@@ -132,7 +151,11 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 				MaxHandshakeAttempts:   options.Amnezia.MaxHandshakeAttempts,
+ 			}
+ 		}
+-		build := func(peerAddress string, peerPort uint16) (adapter.Endpoint, error) {
++		build := func(current candidate) (adapter.Endpoint, error) {
++			if current.transport != transportWireGuard {
++				return endpoint.buildMasque(router, tag, current)
++			}
++			peerAddress, peerPort := current.address, current.port
+ 			return wireguard.NewEndpoint(
+ 				ctx,
+ 				router,
+@@ -170,19 +193,27 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 				},
+ 			)
+ 		}
+-		endpoint.endpoint, err = endpoint.startVerified(scope, candidates, build, func(index int, current candidate) {
++		remember := func(current candidate) {
+ 			if edgePath == "" {
+ 				return
+ 			}
+-			// An answer from the first candidate when nothing was remembered: the standard order works, keep no hint.
+-			if index == 0 && len(candidates) > 0 && current == peerCandidates(peer, "", 0)[0] {
++			// An answer from the standard first candidate: the standard order works, keep no hint.
++			if current == peerCandidates(peer, "", 0)[0] {
+ 				forgetEdge(edgePath)
+ 				return
+ 			}
+ 			if err := saveEdgeMemory(edgePath, current); err != nil {
+ 				logger.WarnContext(ctx, "cannot keep the WARP edge that answered: ", err)
+ 			}
++		}
++		inner, position, err := endpoint.startVerified(scope, candidates, build, func(index int, current candidate) {
++			remember(current)
+ 		})
++		endpoint.hopAccess.Lock()
++		endpoint.endpoint, endpoint.position = inner, position
++		endpoint.list, endpoint.build, endpoint.scope, endpoint.remember = candidates, build, scope, remember
++		endpoint.lastSuccess = time.Now()
++		endpoint.hopAccess.Unlock()
+ 		if err != nil {
+ 			logger.ErrorContext(ctx, err)
+ 			return
+@@ -211,14 +242,18 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination
+ 	if err := w.isEndpointInitialized(ctx); err != nil {
+ 		return nil, err
+ 	}
+-	return w.endpoint.DialContext(ctx, network, destination)
++	inner := w.active()
++	finish := w.watchDial(inner, network)
++	connection, err := inner.DialContext(ctx, network, destination)
++	finish(err)
++	return connection, err
+ }
+ 
+ func (w *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+ 	if err := w.isEndpointInitialized(ctx); err != nil {
+ 		return nil, err
+ 	}
+-	return w.endpoint.ListenPacket(ctx, destination)
++	return w.active().ListenPacket(ctx, destination)
+ }
+ 
+ func (w *Endpoint) isEndpointInitialized(ctx context.Context) error {
+@@ -227,7 +262,7 @@ func (w *Endpoint) isEndpointInitialized(ctx context.Context) error {
+ 	case <-ctx.Done():
+ 		return ctx.Err()
+ 	}
+-	if w.endpoint == nil {
++	if w.active() == nil {
+ 		return E.New("endpoint not initialized")
+ 	}
+ 	return nil
+diff --git a/protocol/warp/interface_update.go b/protocol/warp/interface_update.go
+index 6860942e8edd7669f717c76c7dbdc970d1cef597..7b3f0118b0f28f1bd4b518bedad1eeb17c058f5c 100644
+--- a/protocol/warp/interface_update.go
++++ b/protocol/warp/interface_update.go
+@@ -19,7 +19,8 @@ func (w *Endpoint) InterfaceUpdated(ctx context.Context) {
+ 	default:
+ 		return
+ 	}
+-	if listener, isListener := w.endpoint.(adapter.InterfaceUpdateListener); isListener {
++	w.networkChanged()
++	if listener, isListener := w.active().(adapter.InterfaceUpdateListener); isListener {
+ 		listener.InterfaceUpdated(ctx)
+ 	}
+ }
+diff --git a/protocol/warp/recovery.go b/protocol/warp/recovery.go
+index 1411f1a03638de6c3a435b5803cf42b68b147834..a2f90de28f1925cda12861d20ae2abd19d0affbe 100644
+--- a/protocol/warp/recovery.go
++++ b/protocol/warp/recovery.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"net"
+ 	"net/netip"
++	"strconv"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -27,6 +28,22 @@ var probeDestination = M.ParseSocksaddrHostPort("1.1.1.1", 443)
+ type candidate struct {
+ 	address string
+ 	port    uint16
++	// transport is how the candidate reaches Cloudflare: WireGuard to address:port, or MASQUE (address and port unused:
++	// the account's own MASQUE endpoint is dialed).
++	transport transport
++}
++
++// wireGuardCandidate is a WireGuard peer address.
++func wireGuardCandidate(address string, port uint16) candidate {
++	return candidate{address: address, port: port}
++}
++
++// describe is the candidate as it appears in the log.
++func (c candidate) describe() string {
++	if c.transport != transportWireGuard {
++		return c.transport.String()
++	}
++	return net.JoinHostPort(c.address, strconv.Itoa(int(c.port)))
+ }
+ 
+ // fallbackAddress is a WARP edge address of the 162.159.192.0/24 block, which serves every account. It is a literal IP on
+@@ -39,11 +56,11 @@ const fallbackAddress = "162.159.192.1"
+ // 188.114.96-99.1 on 2408, 500, 4500, 1701, 854, 934); 162.159.193.1 and 204.1 are not WARP edges and are not listed.
+ // All are literal IPs: no attempt may need DNS.
+ var alternateEdges = []candidate{
+-	{"188.114.97.1", 2408},
+-	{fallbackAddress, 500},
+-	{"188.114.99.1", 4500},
+-	{"188.114.96.1", 1701},
+-	{"188.114.98.1", 854},
++	wireGuardCandidate("188.114.97.1", 2408),
++	wireGuardCandidate(fallbackAddress, 500),
++	wireGuardCandidate("188.114.99.1", 4500),
++	wireGuardCandidate("188.114.96.1", 1701),
++	wireGuardCandidate("188.114.98.1", 854),
+ }
+ 
+ // peerCandidates is the short list of places to dial the WARP peer, best first. All are literal IPs when the profile has an
+@@ -60,7 +77,7 @@ func peerCandidates(peer cloudflare.Peer, address string, port uint16) []candida
+ 		if port != 0 {
+ 			assignedPort = port
+ 		}
+-		return []candidate{{address, assignedPort}}
++		return []candidate{wireGuardCandidate(address, assignedPort)}
+ 	}
+ 	first := assignedPort
+ 	if first == 0 {
+@@ -77,9 +94,9 @@ func peerCandidates(peer cloudflare.Peer, address string, port uint16) []candida
+ 		}
+ 	}
+ 	return append([]candidate{
+-		{base, first},
+-		{base, second},
+-		{base, first},
++		wireGuardCandidate(base, first),
++		wireGuardCandidate(base, second),
++		wireGuardCandidate(base, first),
+ 	}, alternateEdges...)
+ }
+ 
+@@ -89,41 +106,41 @@ func peerCandidates(peer cloudflare.Peer, address string, port uint16) []candida
+ func (w *Endpoint) startVerified(
+ 	scope *adapter.Scope,
+ 	candidates []candidate,
+-	build func(address string, port uint16) (adapter.Endpoint, error),
++	build func(current candidate) (adapter.Endpoint, error),
+ 	answered func(index int, current candidate),
+-) (adapter.Endpoint, error) {
++) (adapter.Endpoint, int, error) {
+ 	for index, current := range candidates {
+ 		last := index == len(candidates)-1
+-		inner, err := build(current.address, current.port)
++		inner, err := build(current)
+ 		if err != nil {
+-			return nil, err
++			return nil, 0, err
+ 		}
+ 		if err = w.startStages(scope, inner); err != nil {
+-			_ = scope.Remove(inner)
++			_ = w.discard(scope, inner)
+ 			if last {
+-				return nil, err
++				return nil, 0, err
+ 			}
+-			w.logger.WarnContext(w.ctx, "WARP endpoint did not start at ", current.address, ":", current.port, ": ", err)
++			w.logger.WarnContext(w.ctx, "WARP endpoint did not start at ", current.describe(), ": ", err)
+ 			continue
+ 		}
+ 		if last || len(candidates) == 1 {
+-			return inner, nil
++			return inner, index, nil
+ 		}
+-		if w.carriesConnection(inner) {
++		if w.carriesConnection(inner, probeTimeoutFor(current)) {
+ 			if index > 0 {
+-				w.logger.InfoContext(w.ctx, "WARP tunnel answered at ", current.address, ":", current.port, " (attempt ", index+1, ")")
++				w.logger.InfoContext(w.ctx, "WARP tunnel answered at ", current.describe(), " (attempt ", index+1, ")")
+ 			}
+ 			if answered != nil {
+ 				answered(index, current)
+ 			}
+-			return inner, nil
++			return inner, index, nil
+ 		}
+-		w.logger.WarnContext(w.ctx, "WARP handshake did not answer at ", current.address, ":", current.port, ", trying the next address")
+-		if err = scope.Remove(inner); err != nil {
++		w.logger.WarnContext(w.ctx, "WARP handshake did not answer at ", current.describe(), ", trying the next address")
++		if err = w.discard(scope, inner); err != nil {
+ 			w.logger.WarnContext(w.ctx, "closing the stalled WARP endpoint: ", err)
+ 		}
+ 	}
+-	return nil, E.New("no WARP candidate to start")
++	return nil, 0, E.New("no WARP candidate to start")
+ }
+ 
+ func (w *Endpoint) startStages(scope *adapter.Scope, inner adapter.Endpoint) error {
+@@ -137,8 +154,8 @@ func (w *Endpoint) startStages(scope *adapter.Scope, inner adapter.Endpoint) err
+ }
+ 
+ // carriesConnection reports whether one TCP connection to the probe destination opens through the tunnel in time.
+-func (w *Endpoint) carriesConnection(inner adapter.Endpoint) bool {
+-	ctx, cancel := context.WithTimeout(w.ctx, probeTimeout)
++func (w *Endpoint) carriesConnection(inner adapter.Endpoint, timeout time.Duration) bool {
++	ctx, cancel := context.WithTimeout(w.ctx, timeout)
+ 	defer cancel()
+ 	connection, err := inner.DialContext(ctx, "tcp", probeDestination)
+ 	if err != nil {
+diff --git a/protocol/warp/recovery_test.go b/protocol/warp/recovery_test.go
+index a26edb2bd7cdc7f16a0c2fe38014b7e84ecbadcb..e2fca8d8ef593b2e107573be39b9a24e713668d8 100644
+--- a/protocol/warp/recovery_test.go
++++ b/protocol/warp/recovery_test.go
+@@ -20,14 +20,14 @@ func accountPeer() cloudflare.Peer {
+ func TestPeerCandidatesStartWithTheAccountsOwnAddressThenOtherWarpEdges(t *testing.T) {
+ 	got := peerCandidates(accountPeer(), "", 0)
+ 	want := []candidate{
+-		{"162.159.192.8", 2408},
+-		{"162.159.192.8", 500},
+-		{"162.159.192.8", 2408}, // a fresh socket on the same address: the stall depends on the source port
+-		{"188.114.97.1", 2408},
+-		{fallbackAddress, 500},
+-		{"188.114.99.1", 4500},
+-		{"188.114.96.1", 1701},
+-		{"188.114.98.1", 854},
++		{"162.159.192.8", 2408, transportWireGuard},
++		{"162.159.192.8", 500, transportWireGuard},
++		{"162.159.192.8", 2408, transportWireGuard}, // a fresh socket on the same address: the stall depends on the source port
++		{"188.114.97.1", 2408, transportWireGuard},
++		{fallbackAddress, 500, transportWireGuard},
++		{"188.114.99.1", 4500, transportWireGuard},
++		{"188.114.96.1", 1701, transportWireGuard},
++		{"188.114.98.1", 854, transportWireGuard},
+ 	}
+ 	if !reflect.DeepEqual(got, want) {
+ 		t.Fatalf("got %v, want %v", got, want)
+@@ -50,12 +50,12 @@ func TestPeerCandidatesStartWithTheAccountsOwnAddressThenOtherWarpEdges(t *testi
+ 
+ func TestExplicitAddressIsTheUsersChoiceAndNeverRotated(t *testing.T) {
+ 	got := peerCandidates(accountPeer(), "198.51.100.7", 4500)
+-	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 4500}}) {
++	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 4500, transportWireGuard}}) {
+ 		t.Fatalf("got %v", got)
+ 	}
+ 	// without an explicit port the account's first port is used, as before
+ 	got = peerCandidates(accountPeer(), "198.51.100.7", 0)
+-	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 2408}}) {
++	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 2408, transportWireGuard}}) {
+ 		t.Fatalf("got %v", got)
+ 	}
+ }
+diff --git a/protocol/warp/transport.go b/protocol/warp/transport.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..99911a5e2bc6adeaddda8c5e91fbfee6c465b152
+--- /dev/null
++++ b/protocol/warp/transport.go
+@@ -0,0 +1,295 @@
++package warp
++
++import (
++	"context"
++	"errors"
++	"net"
++	"strings"
++	"sync/atomic"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing-box/protocol/masque"
++	"github.com/sagernet/sing/common/json/badoption"
++	E "github.com/sagernet/sing/common/exceptions"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// transport is how a WARP tunnel reaches Cloudflare. WireGuard is the first choice. MASQUE is Cloudflare's other tunnel
++// (HTTP/3 over QUIC on UDP 443, or HTTP/2 over TLS on TCP 443): it does not look like WireGuard, so it is the way in where a
++// network lets the first WireGuard packets through and then drops the flow (seen on mobile data, 2026-11-26: the handshake
++// was answered once, then every later datagram of the same flow went unanswered) or blocks WireGuard at all.
++type transport uint8
++
++const (
++	transportWireGuard transport = iota
++	transportMasqueQUIC
++	transportMasqueHTTP2
++)
++
++func (t transport) String() string {
++	switch t {
++	case transportMasqueQUIC:
++		return "masque-quic"
++	case transportMasqueHTTP2:
++		return "masque-http2"
++	default:
++		return "wireguard"
++	}
++}
++
++func parseTransport(text string) (transport, bool) {
++	switch strings.TrimSpace(text) {
++	case "masque-quic":
++		return transportMasqueQUIC, true
++	case "masque-http2":
++		return transportMasqueHTTP2, true
++	}
++	return transportWireGuard, false
++}
++
++const (
++	// rotateAfterFailures is how many connections in a row must time out inside the tunnel, with no success between them,
++	// before the tunnel counts as dead and the next candidate takes over. Two, not one: a single destination can be down.
++	rotateAfterFailures = 2
++	// slowDial is how long a connection may wait for the tunnel before it counts as failed. A healthy WARP tunnel opens a
++	// connection in well under a second; the longest legitimate wait (a far server) stays below this.
++	slowDial = 6 * time.Second
++	// quietAfterSuccess protects a working tunnel: a timeout this soon after a success is a bad destination, not a bad tunnel.
++	quietAfterSuccess = 30 * time.Second
++	// rotateCooldown keeps a hop whose every candidate failed from walking the list over and over.
++	rotateCooldown = 30 * time.Second
++	// masqueProbeTimeout, masqueReconnectDelay and masqueHandshakeTimeout bound a MASQUE candidate (see buildMasque).
++	masqueProbeTimeout     = 7 * time.Second
++	masqueReconnectDelay   = 2 * time.Second
++	masqueHandshakeTimeout = 5 * time.Second
++)
++
++// withMasque puts the two MASQUE candidates right after the account's own WireGuard address and its second port: WireGuard
++// stays the first choice (it is the fastest), but a network that blocks it is reached after two failed starts, not after
++// the whole list of alternate edges. An explicit address is the user's choice and gets no MASQUE.
++func withMasque(list []candidate) []candidate {
++	if len(list) < 2 {
++		return list
++	}
++	out := make([]candidate, 0, len(list)+2)
++	out = append(out, list[:2]...)
++	out = append(out, candidate{transport: transportMasqueQUIC}, candidate{transport: transportMasqueHTTP2})
++	return append(out, list[2:]...)
++}
++
++// buildMasque creates the MASQUE tunnel of one candidate. It registers (or reads) its own account, kept next to the
++// WireGuard one, and dials Cloudflare with the same dialer options as the WireGuard endpoint.
++func (w *Endpoint) buildMasque(router adapter.Router, tag string, current candidate) (adapter.Endpoint, error) {
++	profile := w.options.Profile
++	profile.PrivateKey = ""
++	profile.CachePath = masqueAccountPath(w.options.Profile.CachePath)
++	// Its own context: a tunnel that never connects keeps retrying until its context ends, and closing it waits for that.
++	// Cancelling this one (abandon) lets a failed candidate go at once without stopping the whole hop.
++	ctx, cancel := context.WithCancel(w.ctx)
++	built, err := masque.NewOutbound(ctx, router, w.logger, tag, option.MASQUEOutboundOptions{
++		DialerOptions: w.options.DialerOptions,
++		UseHTTP2:      current.transport == transportMasqueHTTP2,
++		Profile:       profile,
++		// Without a delay a network that refuses the socket at once (no route, a firewall) makes the tunnel retry in a
++		// busy loop (500 000 attempts a minute seen on a host with UDP 443 filtered).
++		ReconnectDelay:   badoption.Duration(masqueReconnectDelay),
++		HandshakeTimeout: badoption.Duration(masqueHandshakeTimeout),
++	})
++	if err != nil {
++		cancel()
++		return nil, err
++	}
++	tunnel, isEndpoint := built.(adapter.Endpoint)
++	if !isEndpoint {
++		cancel()
++		return nil, E.New("the MASQUE outbound has no lifecycle")
++	}
++	return &masqueTunnel{Endpoint: tunnel, stop: cancel}, nil
++}
++
++// masqueTunnel is a MASQUE tunnel that can be abandoned: its context is cancelled so that closing it does not wait for
++// a connection attempt that will never finish.
++type masqueTunnel struct {
++	adapter.Endpoint
++	stop context.CancelFunc
++}
++
++func (t *masqueTunnel) abandon() { t.stop() }
++
++// discard removes a candidate from the scope; a MASQUE tunnel is abandoned first so that the removal returns at once.
++func (w *Endpoint) discard(scope *adapter.Scope, inner adapter.Endpoint) error {
++	if tunnel, isMasque := inner.(*masqueTunnel); isMasque {
++		tunnel.abandon()
++	}
++	return scope.Remove(inner)
++}
++
++// probeTimeoutFor is how long a candidate gets to carry one connection. MASQUE gets longer: its first start registers an
++// account (two requests to Cloudflare's API) before it can dial.
++func probeTimeoutFor(current candidate) time.Duration {
++	if current.transport != transportWireGuard {
++		return masqueProbeTimeout
++	}
++	return probeTimeout
++}
++
++// masqueAccountPath is where the MASQUE account lives ("" when the WireGuard account has no file).
++func masqueAccountPath(cachePath string) string {
++	if cachePath == "" {
++		return ""
++	}
++	return cachePath + ".masque"
++}
++
++// isTimeout tells a connection that never completed (the tunnel is silent) from one that was refused or reset.
++func isTimeout(err error) bool {
++	if err == nil {
++		return false
++	}
++	if errors.Is(err, context.DeadlineExceeded) {
++		return true
++	}
++	var network net.Error
++	if errors.As(err, &network) && network.Timeout() {
++		return true
++	}
++	return strings.Contains(err.Error(), "i/o timeout")
++}
++
++// active is the tunnel connections go through right now (it changes when the hop rotates).
++func (w *Endpoint) active() adapter.Endpoint {
++	w.hopAccess.Lock()
++	defer w.hopAccess.Unlock()
++	return w.endpoint
++}
++
++// watchDial watches one connection through the tunnel and returns the function that reports how it ended. It is
++// event-driven: nothing runs unless the app dials, so the core holds no polling timer for this. A dial that has not
++// completed after slowDial counts as a failure at once (a silent tunnel leaves the caller waiting until its own deadline,
++// and a caller that gives up reports "canceled", which says nothing); a refusal or a cancel before that counts for
++// nothing. Enough failures in a row on a tunnel that carried nothing lately start a rotation.
++func (w *Endpoint) watchDial(inner adapter.Endpoint, network string) func(err error) {
++	if network != N.NetworkTCP {
++		return func(error) {}
++	}
++	var slow atomic.Bool
++	timer := time.AfterFunc(slowDial, func() {
++		slow.Store(true)
++		w.failed(inner)
++	})
++	return func(err error) {
++		timer.Stop()
++		switch {
++		case err == nil:
++			w.succeeded(inner)
++		case !slow.Load() && isTimeout(err):
++			w.failed(inner)
++		}
++	}
++}
++
++func (w *Endpoint) succeeded(inner adapter.Endpoint) {
++	w.hopAccess.Lock()
++	defer w.hopAccess.Unlock()
++	if inner != w.endpoint {
++		return // the answer of a tunnel that was already replaced
++	}
++	w.failures = 0
++	w.lastSuccess = time.Now()
++}
++
++func (w *Endpoint) failed(inner adapter.Endpoint) {
++	w.hopAccess.Lock()
++	defer w.hopAccess.Unlock()
++	if inner != w.endpoint {
++		return
++	}
++	w.failures++
++	if w.failures < rotateAfterFailures || w.rotating || len(w.list) < 2 || w.build == nil {
++		return
++	}
++	if time.Since(w.lastSuccess) < quietAfterSuccess || time.Now().Before(w.coolUntil) {
++		return
++	}
++	w.rotating = true
++	go w.rotate()
++}
++
++// rotate replaces a tunnel that stopped carrying connections: the next candidate is started and must carry one connection
++// before it takes over. The transport that just failed is tried last: a network that cuts WireGuard after its handshake
++// gets MASQUE next, not the same WireGuard on another port.
++func (w *Endpoint) rotate() {
++	w.hopAccess.Lock()
++	failed := w.list[w.position]
++	if w.demoted == nil {
++		w.demoted = map[transport]bool{}
++	}
++	w.demoted[failed.transport] = true
++	order := rotationOrder(w.list, w.position, w.demoted)
++	w.hopAccess.Unlock()
++	w.logger.WarnContext(w.ctx, "WARP tunnel at ", failed.describe(), " stopped carrying connections, moving to the next candidate")
++	for _, index := range order {
++		next := w.list[index]
++		inner, err := w.build(next)
++		if err != nil {
++			w.logger.WarnContext(w.ctx, "WARP candidate ", next.describe(), " did not build: ", err)
++			continue
++		}
++		if err = w.startStages(w.scope, inner); err != nil {
++			_ = w.discard(w.scope, inner)
++			w.logger.WarnContext(w.ctx, "WARP candidate ", next.describe(), " did not start: ", err)
++			continue
++		}
++		if !w.carriesConnection(inner, probeTimeoutFor(next)) {
++			_ = w.discard(w.scope, inner)
++			w.logger.WarnContext(w.ctx, "WARP candidate ", next.describe(), " did not answer")
++			continue
++		}
++		w.hopAccess.Lock()
++		old := w.endpoint
++		w.endpoint, w.position = inner, index
++		w.failures, w.lastSuccess, w.rotating = 0, time.Now(), false
++		w.hopAccess.Unlock()
++		if old != nil {
++			if err = w.discard(w.scope, old); err != nil {
++				w.logger.WarnContext(w.ctx, "closing the replaced WARP tunnel: ", err)
++			}
++		}
++		w.logger.InfoContext(w.ctx, "WARP tunnel answered at ", next.describe(), " after rotation")
++		if w.remember != nil {
++			w.remember(next)
++		}
++		return
++	}
++	w.hopAccess.Lock()
++	w.rotating, w.failures, w.coolUntil = false, 0, time.Now().Add(rotateCooldown)
++	w.hopAccess.Unlock()
++	w.logger.WarnContext(w.ctx, "no WARP candidate answered after rotation, keeping the current tunnel")
++}
++
++// rotationOrder lists the candidate positions to try after position current: the ones whose transport has not failed
++// first, in list order, then the demoted ones (a transport that failed once may work again on another source port).
++func rotationOrder(list []candidate, current int, demoted map[transport]bool) []int {
++	var fresh, rest []int
++	for step := 1; step < len(list); step++ {
++		index := (current + step) % len(list)
++		if demoted[list[index].transport] {
++			rest = append(rest, index)
++		} else {
++			fresh = append(fresh, index)
++		}
++	}
++	return append(fresh, rest...)
++}
++
++// networkChanged forgets what the old network taught: on the new one WireGuard may work, and a failure counted there says
++// nothing about this network.
++func (w *Endpoint) networkChanged() {
++	w.hopAccess.Lock()
++	defer w.hopAccess.Unlock()
++	w.demoted = map[transport]bool{}
++	w.failures = 0
++	w.coolUntil = time.Time{}
++}
+diff --git a/protocol/warp/transport_test.go b/protocol/warp/transport_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..12177a17ee414279cbfdda9d3ae7e793fa70bb42
+--- /dev/null
++++ b/protocol/warp/transport_test.go
+@@ -0,0 +1,294 @@
++package warp
++
++import (
++	"context"
++	"errors"
++	"net"
++	"os"
++	"path/filepath"
++	"reflect"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/log"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++func TestMasqueCandidatesFollowTheAccountsOwnWireGuardAddressAndItsSecondPort(t *testing.T) {
++	got := withMasque(peerCandidates(accountPeer(), "", 0))
++	if len(got) != startAttempts+2 {
++		t.Fatalf("want %d candidates, got %v", startAttempts+2, got)
++	}
++	want := []transport{
++		transportWireGuard, transportWireGuard, transportMasqueQUIC, transportMasqueHTTP2,
++		transportWireGuard, transportWireGuard, transportWireGuard, transportWireGuard, transportWireGuard, transportWireGuard,
++	}
++	for index, kind := range want {
++		if got[index].transport != kind {
++			t.Fatalf("candidate %d is %v, want %v (%v)", index, got[index].transport, kind, got)
++		}
++	}
++}
++
++func TestTransportNamesRoundTrip(t *testing.T) {
++	for _, kind := range []transport{transportMasqueQUIC, transportMasqueHTTP2} {
++		parsed, ok := parseTransport(kind.String())
++		if !ok || parsed != kind {
++			t.Fatalf("%v did not round-trip: %v %v", kind, parsed, ok)
++		}
++	}
++	if _, ok := parseTransport("wireguard"); ok {
++		t.Fatal("wireguard is not a remembered MASQUE transport")
++	}
++}
++
++func TestRotationAfterAWireGuardFailureTriesMasqueBeforeAnotherWireGuardPort(t *testing.T) {
++	list := withMasque(peerCandidates(accountPeer(), "", 0))
++	order := rotationOrder(list, 0, map[transport]bool{transportWireGuard: true})
++	if len(order) != len(list)-1 {
++		t.Fatalf("every other candidate is a next one: %v", order)
++	}
++	if list[order[0]].transport != transportMasqueQUIC || list[order[1]].transport != transportMasqueHTTP2 {
++		t.Fatalf("MASQUE must come first after a WireGuard failure: %v", order)
++	}
++	for _, index := range order[2:] {
++		if list[index].transport != transportWireGuard {
++			t.Fatalf("only the demoted WireGuard candidates are left at the end: %v", order)
++		}
++	}
++}
++
++func TestRotationAfterAMasqueFailureKeepsTheOtherTransportsFirst(t *testing.T) {
++	list := withMasque(peerCandidates(accountPeer(), "", 0))
++	order := rotationOrder(list, 2, map[transport]bool{transportMasqueQUIC: true})
++	if list[order[0]].transport == transportMasqueQUIC {
++		t.Fatalf("the failed transport goes last: %v", order)
++	}
++	if list[order[len(order)-1]].transport != transportMasqueQUIC && list[order[len(order)-1]].transport != transportWireGuard {
++		t.Fatalf("unexpected tail %v", order)
++	}
++}
++
++func TestMemoryHoldsAMasqueTransportAndExpires(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "profile.json.edge")
++	if err := saveEdgeMemory(path, candidate{transport: transportMasqueHTTP2}); err != nil {
++		t.Fatal(err)
++	}
++	got, ok := loadEdgeMemory(path)
++	if !ok || got.transport != transportMasqueHTTP2 {
++		t.Fatalf("got %v %v", got, ok)
++	}
++	old := time.Now().Add(-edgeMemoryLifetime - time.Hour)
++	if err := os.Chtimes(path, old, old); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok = loadEdgeMemory(path); ok {
++		t.Fatal("a hint from another day must not decide the first attempt")
++	}
++}
++
++func TestTimeoutsAreTunnelFailuresRefusalsAreNot(t *testing.T) {
++	if !isTimeout(context.DeadlineExceeded) || !isTimeout(&net.DNSError{IsTimeout: true}) || !isTimeout(errors.New("dial tcp: i/o timeout")) {
++		t.Fatal("a silent tunnel shows as a timeout")
++	}
++	if isTimeout(errors.New("connection refused")) || isTimeout(context.Canceled) || isTimeout(nil) {
++		t.Fatal("a refusal or a cancel says nothing about the tunnel")
++	}
++}
++
++// fakeTunnel is a tunnel whose connections either time out or open, nothing else.
++type fakeTunnel struct {
++	adapter.Endpoint
++	name   string
++	alive  atomic.Bool
++	dialed atomic.Int32
++	closed atomic.Bool
++}
++
++func (f *fakeTunnel) Type() string { return "fake" }
++func (f *fakeTunnel) Tag() string  { return f.name }
++func (f *fakeTunnel) Start(adapter.StartStage, *adapter.Scope) error {
++	return nil
++}
++
++func (f *fakeTunnel) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	f.dialed.Add(1)
++	if f.alive.Load() {
++		client, server := net.Pipe()
++		_ = server.Close()
++		return client, nil
++	}
++	return nil, context.DeadlineExceeded
++}
++
++func newHop(t *testing.T, list []candidate, build func(candidate) (adapter.Endpoint, error), first adapter.Endpoint) *Endpoint {
++	t.Helper()
++	logger := log.NewNOPFactory().Logger()
++	hop := &Endpoint{
++		ctx:         context.Background(),
++		logger:      logger,
++		await:       make(chan struct{}),
++		list:        list,
++		build:       build,
++		scope:       adapter.NewScope(context.Background(), logger),
++		endpoint:    first,
++		lastSuccess: time.Now().Add(-time.Hour),
++	}
++	close(hop.await)
++	return hop
++}
++
++func waitFor(t *testing.T, condition func() bool) {
++	t.Helper()
++	deadline := time.Now().Add(10 * time.Second)
++	for time.Now().Before(deadline) {
++		if condition() {
++			return
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	t.Fatal("the condition never came true")
++}
++
++func TestADeadTunnelIsReplacedAfterTwoTimeoutsInARow(t *testing.T) {
++	dead := &fakeTunnel{name: "wireguard"}
++	masqueTunnel := &fakeTunnel{name: "masque"}
++	masqueTunnel.alive.Store(true)
++	list := []candidate{wireGuardCandidate("198.51.100.1", 2408), {transport: transportMasqueQUIC}}
++	var built []transport
++	hop := newHop(t, list, func(current candidate) (adapter.Endpoint, error) {
++		built = append(built, current.transport)
++		return masqueTunnel, nil
++	}, dead)
++	var remembered atomic.Int32
++	hop.remember = func(candidate) { remembered.Add(1) }
++
++	destination := M.ParseSocksaddrHostPort("203.0.113.9", 443)
++	if _, err := hop.DialContext(context.Background(), N.NetworkTCP, destination); err == nil {
++		t.Fatal("a dead tunnel must fail the dial")
++	}
++	if hop.active() != adapter.Endpoint(dead) {
++		t.Fatal("one timeout is a bad destination, not a dead tunnel")
++	}
++	if _, err := hop.DialContext(context.Background(), N.NetworkTCP, destination); err == nil {
++		t.Fatal("a dead tunnel must fail the dial")
++	}
++	waitFor(t, func() bool { return hop.active() == adapter.Endpoint(masqueTunnel) })
++	if !reflect.DeepEqual(built, []transport{transportMasqueQUIC}) {
++		t.Fatalf("built %v", built)
++	}
++	if remembered.Load() != 1 {
++		t.Fatalf("the transport that works must be remembered once, got %d", remembered.Load())
++	}
++	if connection, err := hop.DialContext(context.Background(), N.NetworkTCP, destination); err != nil {
++		t.Fatalf("the replacement must carry the dial: %v", err)
++	} else {
++		_ = connection.Close()
++	}
++}
++
++func TestATunnelThatCarriedConnectionsLatelyIsNotReplacedBecauseOfOneBadDestination(t *testing.T) {
++	tunnel := &fakeTunnel{name: "wireguard"}
++	hop := newHop(t, []candidate{wireGuardCandidate("198.51.100.1", 2408), {transport: transportMasqueQUIC}}, func(candidate) (adapter.Endpoint, error) {
++		t.Error("nothing may be built")
++		return nil, errors.New("unexpected")
++	}, tunnel)
++	hop.lastSuccess = time.Now()
++	destination := M.ParseSocksaddrHostPort("203.0.113.9", 443)
++	for range 5 {
++		_, _ = hop.DialContext(context.Background(), N.NetworkTCP, destination)
++	}
++	time.Sleep(100 * time.Millisecond)
++	if hop.active() != adapter.Endpoint(tunnel) {
++		t.Fatal("the tunnel must stay")
++	}
++}
++
++func TestWhenNoCandidateAnswersTheHopKeepsItsTunnelAndRestsBeforeTrying(t *testing.T) {
++	dead := &fakeTunnel{name: "wireguard"}
++	still := &fakeTunnel{name: "masque"}
++	var builds atomic.Int32
++	hop := newHop(t, []candidate{wireGuardCandidate("198.51.100.1", 2408), {transport: transportMasqueQUIC}}, func(candidate) (adapter.Endpoint, error) {
++		builds.Add(1)
++		return still, nil
++	}, dead)
++	destination := M.ParseSocksaddrHostPort("203.0.113.9", 443)
++	_, _ = hop.DialContext(context.Background(), N.NetworkTCP, destination)
++	_, _ = hop.DialContext(context.Background(), N.NetworkTCP, destination)
++	waitFor(t, func() bool {
++		hop.hopAccess.Lock()
++		defer hop.hopAccess.Unlock()
++		return !hop.rotating && builds.Load() > 0
++	})
++	if hop.active() != adapter.Endpoint(dead) {
++		t.Fatal("a failed rotation keeps the current tunnel")
++	}
++	before := builds.Load()
++	_, _ = hop.DialContext(context.Background(), N.NetworkTCP, destination)
++	_, _ = hop.DialContext(context.Background(), N.NetworkTCP, destination)
++	time.Sleep(100 * time.Millisecond)
++	if builds.Load() != before {
++		t.Fatal("the cooldown must stop a second walk right away")
++	}
++}
++
++func TestANetworkChangeForgetsWhatTheOldNetworkTaught(t *testing.T) {
++	hop := newHop(t, []candidate{wireGuardCandidate("198.51.100.1", 2408)}, nil, &fakeTunnel{})
++	hop.demoted = map[transport]bool{transportWireGuard: true}
++	hop.failures = 3
++	hop.coolUntil = time.Now().Add(time.Hour)
++	hop.networkChanged()
++	if len(hop.demoted) != 0 || hop.failures != 0 || !hop.coolUntil.IsZero() {
++		t.Fatalf("state survived the network change: %v %d %v", hop.demoted, hop.failures, hop.coolUntil)
++	}
++}
++
++// hangingTunnel never answers a dial until its context ends, like a tunnel the network went silent on.
++type hangingTunnel struct{ fakeTunnel }
++
++
++func (h *hangingTunnel) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	<-ctx.Done()
++	return nil, ctx.Err()
++}
++
++func TestADialThatHangsPastTheSlowLimitCountsEvenWhenTheCallerOnlyCancels(t *testing.T) {
++	hanging := &hangingTunnel{}
++	alive := &fakeTunnel{name: "masque"}
++	alive.alive.Store(true)
++	hop := newHop(t, []candidate{wireGuardCandidate("198.51.100.1", 2408), {transport: transportMasqueQUIC}}, func(candidate) (adapter.Endpoint, error) {
++		return alive, nil
++	}, hanging)
++	destination := M.ParseSocksaddrHostPort("203.0.113.9", 443)
++	for range 2 {
++		ctx, cancel := context.WithTimeout(context.Background(), slowDial+time.Second)
++		go func() {
++			defer cancel()
++			_, _ = hop.DialContext(ctx, N.NetworkTCP, destination)
++		}()
++	}
++	waitFor(t, func() bool { return hop.active() == adapter.Endpoint(alive) })
++}
++
++func TestACancelBeforeTheSlowLimitSaysNothingAboutTheTunnel(t *testing.T) {
++	hanging := &hangingTunnel{}
++	hop := newHop(t, []candidate{wireGuardCandidate("198.51.100.1", 2408), {transport: transportMasqueQUIC}}, func(candidate) (adapter.Endpoint, error) {
++		t.Error("nothing may be built")
++		return nil, errors.New("unexpected")
++	}, hanging)
++	destination := M.ParseSocksaddrHostPort("203.0.113.9", 443)
++	for range 4 {
++		ctx, cancel := context.WithCancel(context.Background())
++		go func() {
++			time.Sleep(50 * time.Millisecond)
++			cancel()
++		}()
++		_, _ = hop.DialContext(ctx, N.NetworkTCP, destination)
++	}
++	if hop.failures != 0 {
++		t.Fatalf("quick cancels counted as failures: %d", hop.failures)
++	}
++}

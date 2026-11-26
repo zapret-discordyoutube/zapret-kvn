@@ -28,12 +28,13 @@ class AboutUsLinksTests(unittest.TestCase):
         self.assertEqual(links.ALL[0], links.BOT)
         self.assertEqual(links.ALL[1:], (*links.CHANNELS, *links.RESOURCES))
 
-    def test_channels_are_the_four_telegram_links_in_order(self) -> None:
+    def test_channels_are_the_telegram_links_in_order(self) -> None:
         self.assertEqual(
             [item.url for item in links.CHANNELS],
             [
                 "https://t.me/bypassblock",
                 "https://t.me/vpndpi",
+                "https://t.me/vpndiscordyooutube",
                 "https://t.me/runetvpnyoutubediscord",
                 "https://t.me/zastogram",
             ],

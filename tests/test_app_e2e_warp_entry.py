@@ -369,5 +369,69 @@ class WarpEntryBlockedAddressE2E(_WarpE2EBase):
         )
 
 
+class _FirewallBlocked(_WarpE2EBase):
+    """The network drops the WARP WireGuard ports (and, when asked, UDP 443) for the real core: only MASQUE can get through.
+
+    A Windows Firewall rule on the real ``sing-box.exe`` stands in for the carrier that cuts WireGuard (the owner's mobile
+    data, 2026-11-26): the packets never leave the machine, and nothing about the tunnel is faked.
+    """
+
+    SCHEMES = ("vless",)
+    #: UDP remote ports the rule drops.
+    UDP_PORTS = "2408,500,4500,1701,854,934"
+    _RULE = "kvn-e2e-warp-block"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import subprocess
+
+        super().setUpClass()
+        subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}"], capture_output=True)
+        added = subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule", f"name={cls._RULE}", "dir=out", "action=block",
+                "protocol=UDP", f"remoteport={cls.UDP_PORTS}", f"program={_SINGBOX.resolve()}",
+            ],
+            capture_output=True,  # bytes: netsh answers in the console code page of the machine, not in UTF-8
+        )
+        if added.returncode != 0:
+            raise unittest.SkipTest("cannot add the firewall rule (needs an administrator), netsh code " + str(added.returncode))
+        shown = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", f"name={cls._RULE}"], capture_output=True)
+        if shown.returncode != 0:
+            raise AssertionError("the firewall rule that stands for the carrier is not there after it was added")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        import subprocess
+
+        try:
+            super().tearDownClass()
+        finally:
+            subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}"], capture_output=True)
+
+    def _tunnel_answered_at(self, transport: str) -> bool:
+        return any("WARP tunnel answered at " + transport in line for line in self.logs)
+
+
+@unittest.skipUnless(_RUNNABLE, _SKIP)
+class WarpEntryWireGuardBlockedE2E(_FirewallBlocked):
+    """WireGuard to every WARP port is dropped: the hop comes up over MASQUE (QUIC) and a real page comes back."""
+
+    def test_a_real_page_comes_back_over_masque_when_wireguard_is_dropped(self) -> None:
+        self._a_real_page_comes_back()
+        self.assertTrue(self._tunnel_answered_at("masque-quic"), "the tunnel did not come up over MASQUE\n" + self._evidence())
+
+
+@unittest.skipUnless(_RUNNABLE, _SKIP)
+class WarpEntryQuicAndWireGuardBlockedE2E(_FirewallBlocked):
+    """WireGuard and UDP 443 are dropped: the hop comes up over MASQUE on HTTP/2 (TCP 443) and a real page comes back."""
+
+    UDP_PORTS = "2408,500,4500,1701,854,934,443"
+
+    def test_a_real_page_comes_back_over_masque_http2_when_quic_is_dropped_too(self) -> None:
+        self._a_real_page_comes_back()
+        self.assertTrue(self._tunnel_answered_at("masque-http2"), "the tunnel did not come up over HTTP/2\n" + self._evidence())
+
+
 if __name__ == "__main__":
     unittest.main()
