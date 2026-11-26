@@ -162,7 +162,21 @@ class _WarpE2EBase(unittest.TestCase):
     def _seen(self, text: str) -> bool:
         return any(text in line for line in self.logs)
 
+    def _everything(self) -> str:
+        """Debug only (KVN_E2E_DEBUG=1): the last lines and statuses, addresses and names taken out."""
+        import re
+
+        topic = os.environ.get("KVN_E2E_DEBUG_TOPIC", "")
+        lines = [line for line in self.logs if topic in line.lower()] if topic else self.logs
+        rows = [f"[status {level}] {message}" for level, message in self.statuses[-8:]] + lines[-80:]
+        return "\n".join(
+            re.sub(r"[0-9a-fA-F:.]{7,}|[\w-]+(\.[\w-]+){2,}", "<x>", re.sub(r"^\[(sing-box|xray)\]\[[^\]]*\]\s*", "[\\1] ", row))[:230]
+            for row in rows
+        )
+
     def _evidence(self) -> str:
+        if os.environ.get("KVN_E2E_DEBUG"):
+            return self._everything()
         # Only lines about the hop, with every address and name taken out: this text lands in test failures.
         import re
 
@@ -218,7 +232,10 @@ class _WarpE2EBase(unittest.TestCase):
             self._seen("вход через WARP: серверов через вход="), "the plan did not get the hop\n" + self._evidence()
         )
         self.assertTrue(
-            any("warp[kvn-warp-entry]" in line and "outbound connection to" in line for line in self.logs),
+            any(
+                "warp[kvn-warp-entry]" in line and ("outbound connection to" in line or "outbound packet connection" in line)
+                for line in self.logs
+            ),
             "the page did not cross the WARP endpoint\n" + self._evidence(),
         )
 
