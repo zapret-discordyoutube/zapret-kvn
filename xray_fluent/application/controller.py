@@ -4809,6 +4809,10 @@ class AppController(QObject):
 
     def _on_core_log(self, engine: str, line: str) -> None:
         if engine == "sing-box" and self._warp_health is not None:
+            elapsed = time.monotonic() - getattr(self, "_warp_connect_started", time.monotonic())
+            timeline = self._warp_health.timeline(line, elapsed)
+            if timeline:
+                self._log(f"[warp-entry] {timeline}")
             notice = self._warp_health.observe(line)
             if notice:
                 self._log(f"[warp-entry] {notice}")

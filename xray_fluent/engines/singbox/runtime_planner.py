@@ -8,6 +8,7 @@ from ipaddress import ip_address
 import json
 import secrets
 import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +142,8 @@ class SingboxRuntimePlan:
     slot_plans: tuple[Any, ...] = ()
     # What the WARP entry hop did (None = off): the controller logs it.
     warp_entry: EntryHopResult | None = None
+    #: How long the hop pass (chaining, rules, guard) took, for the start log (owner request 2026-11-26).
+    warp_entry_millis: int = 0
 
     @property
     def is_hybrid(self) -> bool:
@@ -368,6 +371,7 @@ def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str, *, tun: bool) 
     paths = ([str(HYSTERIA_PATH_DEFAULT.resolve())] if plan.hysteria_sidecar is not None else []) + _slot_helper_paths(plan)
     if paths and not tun:
         raise ValueError(WARP_ENTRY_NEEDS_TUN)
+    pass_started = time.monotonic()
     inbounds = [_APP_SINGBOX_HYBRID_PROTECT_INBOUND_TAG] if plan.xray_sidecar is not None else []
     pool = plan.provider_payload.get("outbounds") if isinstance(plan.provider_payload, dict) else None
     # The account registration and the server names must resolve OUTSIDE the tunnel: the default DNS goes through the
@@ -393,6 +397,7 @@ def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str, *, tun: bool) 
     if misuse:
         raise ValueError(f"WARP может быть только входом к серверу, найдено другое использование: {misuse[0]}.")
     plan.warp_entry = result
+    plan.warp_entry_millis = int((time.monotonic() - pass_started) * 1000)
     return plan
 
 

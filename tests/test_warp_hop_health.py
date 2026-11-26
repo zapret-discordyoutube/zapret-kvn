@@ -54,6 +54,20 @@ class HopHealthTests(unittest.TestCase):
         self.assertIsNone(health.observe(RETRY_2408))     # three unanswered handshakes: the fourth candidate is still to come
         self.assertIsNone(health.observe(NOT_READY))
 
+    def test_the_start_of_the_tunnel_is_logged_with_the_seconds_since_the_connect(self) -> None:
+        # The first line is a real capture (win10, 2026-11-25); the second is the core patch's own INFO line (real
+        # capture of the emulator run 2026-11-26), visible only when the sing-box log level is info.
+        answered = PREFIX + "-0400 2026-11-26 06:00:03 INFO endpoint/warp[kvn-warp-entry]: WARP tunnel answered at 162.159.192.1:2408 (attempt 2)"
+        health = HopHealth()
+        retry = health.timeline(RETRY_2408, 3.2)
+        self.assertEqual("рукопожатие WARP не ответило на порту 2408, пробуется следующий адрес (3 с после подключения)", retry)
+        self.assertEqual(
+            "туннель WARP ответил на порту 2408, попытка 2 (7 с после подключения)", health.timeline(answered, 7.4)
+        )
+        self.assertIsNone(health.timeline(UNRELATED, 1.0))
+        self.assertIsNone(health.timeline(NOT_READY, 1.0))
+        self.assertNotIn("162.159", health.timeline(answered, 7.4))
+
     def test_stuck_address_lookups_get_their_own_message(self) -> None:
         health = HopHealth()
         notices = [health.observe(LOOKUP) for _ in range(5)]

@@ -19,6 +19,7 @@ _RETRY = re.compile(r"endpoint/warp\[" + HOP + r"\]: WARP handshake did not answ
 _NOT_READY = "using outbound/warp[" + HOP + "]: endpoint not initialized"
 _LOOKUP = re.compile(r"using outbound/warp\[" + HOP + r"\]: lookup .*deadline exceeded")
 _REGISTRATION = re.compile(r"endpoint/warp\[" + HOP + r"\]: Post ")
+_ANSWERED = re.compile(r"endpoint/warp\[" + HOP + r"\]: WARP tunnel answered at \S*?:(\d+) \(attempt (\d+)\)")
 
 #: Enough evidence to tell the user: the tunnel is not coming up (not just slow).
 NOT_READY_LIMIT = 5
@@ -71,6 +72,27 @@ class HopHealth:
         if self.lookup_timeouts >= LOOKUP_LIMIT and "lookup" not in self._told:
             self._told.add("lookup")
             return LOOKUP_STUCK
+        return None
+
+    def timeline(self, line: str, seconds: float) -> str | None:
+        """A log line for the core's own words about the start of the tunnel, with the seconds since the connect.
+
+        Owner request 2026-11-26 ("taking too long, improve the logs", the same as on Android): a slow start must say
+        when each address was given up and when the tunnel answered.  Ports only, never addresses."""
+        if HOP not in line:
+            return None
+        retry = _RETRY.search(line)
+        if retry:
+            return (
+                f"рукопожатие WARP не ответило на порту {retry.group(1)}, пробуется следующий адрес "
+                f"({seconds:.0f} с после подключения)"
+            )
+        answered = _ANSWERED.search(line)
+        if answered:
+            return (
+                f"туннель WARP ответил на порту {answered.group(1)}, попытка {answered.group(2)} "
+                f"({seconds:.0f} с после подключения)"
+            )
         return None
 
     def summary(self, seconds: int) -> str:

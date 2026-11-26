@@ -211,7 +211,8 @@ def _log_warp_entry(controller: AppController, plan) -> None:
     hop = getattr(plan, "warp_entry", None)
     if hop is not None:
         controller._log(
-            f"[warp-entry] вход через WARP: серверов через вход={hop.chained}, правил помощников={hop.rerouted}"
+            f"[warp-entry] вход через WARP: серверов через вход={hop.chained}, правил помощников={hop.rerouted}, "
+            f"проход входа {getattr(plan, 'warp_entry_millis', 0)} мс"
         )
 
 
