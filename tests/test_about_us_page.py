@@ -33,7 +33,7 @@ class AboutUsLinksTests(unittest.TestCase):
             [item.url for item in links.CHANNELS],
             [
                 "https://t.me/bypassblock",
-                "https://t.me/vpndiscordyooutube",
+                "https://t.me/vpndpi",
                 "https://t.me/runetvpnyoutubediscord",
                 "https://t.me/zastogram",
             ],

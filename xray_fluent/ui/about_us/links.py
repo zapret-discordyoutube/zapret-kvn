@@ -32,7 +32,7 @@ BOT = AboutUsLink("Zapret VPN bot", "Главный VPN-бот: здесь мо�
 
 CHANNELS: tuple[AboutUsLink, ...] = (
     AboutUsLink("Zapret KVN", "Telegram-канал", "https://t.me/bypassblock", "telegram"),
-    AboutUsLink("VPN Discord YouTube", "Telegram-сообщество", "https://t.me/vpndiscordyooutube", "telegram"),
+    AboutUsLink("Zapret VPN", "Telegram-канал: новости и обновления", "https://t.me/vpndpi", "telegram"),
     AboutUsLink("RuNet VPN YouTube Discord", "Telegram-канал", "https://t.me/runetvpnyoutubediscord", "telegram"),
     AboutUsLink("Zastogram", "Telegram-канал", "https://t.me/zastogram", "telegram"),
 )
