@@ -46,6 +46,21 @@ _SKIP = "needs Windows, QApplication, the bundled sing-box core and the real tes
 _PAGE_WAIT = 75
 
 
+_SHARED_ACCOUNT: Path | None = None
+
+
+def _shared_account() -> Path:
+    """The account file of this run, shared by the classes (registered once); removed when the process ends."""
+    global _SHARED_ACCOUNT
+    if _SHARED_ACCOUNT is None:
+        import atexit
+
+        directory = Path(tempfile.mkdtemp(prefix="zkvn-e2e-warp-shared-"))
+        _SHARED_ACCOUNT = directory / "account.json"
+        atexit.register(shutil.rmtree, directory, True)
+    return _SHARED_ACCOUNT
+
+
 def _spin(ms: int) -> None:
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
@@ -79,14 +94,24 @@ class _WarpE2EBase(unittest.TestCase):
 
         cls.tmp = Path(tempfile.mkdtemp(prefix="zkvn-e2e-warp-"))
         cls.account = cls.tmp / "warp-entry-profile.json"
-        # An account registered by an earlier run may be reused (KVN_E2E_ACCOUNT): the registration API answers 429 when
-        # one address registers many devices, which a series of single-server runs would do.
+        # One account serves the whole run: the registration API answers 429 when one address registers many devices
+        # (the release gate of 0.8.125 failed that way after a day of real-API runs: every class registered its own WireGuard
+        # and MASQUE accounts).  KVN_E2E_ACCOUNT names a file kept between runs; without it the first class registers and the
+        # others of the same run copy it.  The MASQUE account (`<file>.masque`, registered by the app beside the connect)
+        # is shared the same way.
         reused = os.environ.get("KVN_E2E_ACCOUNT", "")
-        if reused and Path(reused).is_file():
-            shutil.copyfile(reused, cls.account)
+        shared = Path(reused) if reused else _shared_account()
+        if shared.is_file():
+            shutil.copyfile(shared, cls.account)
+        masque_shared = Path(str(shared) + ".masque")
+        if masque_shared.is_file():
+            shutil.copyfile(masque_shared, Path(str(cls.account) + ".masque"))
         cls.registration = warp_registration.ensure_account(cls.account)  # the real API
-        if reused and not Path(reused).is_file() and cls.account.is_file() and not cls.BLOCKED:
-            shutil.copyfile(cls.account, reused)
+        if not cls.registration.ok and "429" in cls.registration.detail:
+            # Cloudflare refuses new devices from this address for a while: nothing about the app is proven or refuted.
+            raise unittest.SkipTest("the registration API answers 429 (too many devices from this address): unproven now")
+        if not shared.is_file() and cls.account.is_file() and not cls.BLOCKED:
+            shutil.copyfile(cls.account, shared)
         if cls.BLOCKED:
             import json
 
@@ -146,6 +171,15 @@ class _WarpE2EBase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         controller = cls.controller
+        try:
+            # keep the MASQUE account the app registered for the classes that follow
+            reused = os.environ.get("KVN_E2E_ACCOUNT", "")
+            masque_file = Path(str(cls.account) + ".masque")
+            masque_shared = Path(str(Path(reused) if reused else _shared_account()) + ".masque")
+            if masque_file.is_file() and not masque_shared.is_file():
+                shutil.copyfile(masque_file, masque_shared)
+        except OSError:
+            pass
         try:
             if controller.connected or controller._desired_connected:
                 controller._desired_connected = False
@@ -415,11 +449,11 @@ class _FirewallBlocked(_WarpE2EBase):
 
 @unittest.skipUnless(_RUNNABLE, _SKIP)
 class WarpEntryWireGuardBlockedE2E(_FirewallBlocked):
-    """WireGuard to every WARP port is dropped: the hop comes up over MASQUE (QUIC) and a real page comes back."""
+    """WireGuard to every WARP port is dropped: the hop comes up over MASQUE and a real page comes back."""
 
     def test_a_real_page_comes_back_over_masque_when_wireguard_is_dropped(self) -> None:
         self._a_real_page_comes_back()
-        self.assertTrue(self._tunnel_answered_at("masque-quic"), "the tunnel did not come up over MASQUE\n" + self._evidence())
+        self.assertTrue(self._tunnel_answered_at("masque-"), "the tunnel did not come up over MASQUE\n" + self._evidence())
 
 
 @unittest.skipUnless(_RUNNABLE, _SKIP)

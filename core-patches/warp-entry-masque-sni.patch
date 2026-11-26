@@ -1,0 +1,275 @@
+diff --git a/protocol/warp/edge_memory.go b/protocol/warp/edge_memory.go
+index a0e398cee3576258463a4fea76d40f91a5928668..5e7e4610b19ec00ce3fca6ecaf550c4ddd010260 100644
+--- a/protocol/warp/edge_memory.go
++++ b/protocol/warp/edge_memory.go
+@@ -39,8 +39,14 @@ func loadEdgeMemory(path string) (candidate, bool) {
+ 	if info, err := os.Stat(path); err != nil || time.Since(info.ModTime()) > edgeMemoryLifetime {
+ 		return candidate{}, false
+ 	}
+-	if kind, ok := parseTransport(string(content)); ok {
+-		return candidate{transport: kind}, true
++	if fields := strings.Fields(string(content)); len(fields) > 0 {
++		if kind, ok := parseTransport(fields[0]); ok {
++			remembered := candidate{transport: kind}
++			if len(fields) > 1 && strings.HasPrefix(fields[1], "sni=") {
++				remembered.sni = strings.TrimPrefix(fields[1], "sni=")
++			}
++			return remembered, true
++		}
+ 	}
+ 	host, portText, err := net.SplitHostPort(strings.TrimSpace(string(content)))
+ 	if err != nil {
+diff --git a/protocol/warp/edge_memory_test.go b/protocol/warp/edge_memory_test.go
+index c83e74269f5b99623af75347aeed35eb821111f2..67a6ffdaec711d8260b374204b7ab350314129a2 100644
+--- a/protocol/warp/edge_memory_test.go
++++ b/protocol/warp/edge_memory_test.go
+@@ -13,7 +13,7 @@ func TestEdgeMemoryRoundTripIsPrivateAndForgettable(t *testing.T) {
+ 	if _, ok := loadEdgeMemory(path); ok {
+ 		t.Fatal("a missing file is no memory")
+ 	}
+-	want := candidate{"188.114.99.1", 4500, transportWireGuard}
++	want := candidate{"188.114.99.1", 4500, transportWireGuard, ""}
+ 	if err := saveEdgeMemory(path, want); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -48,7 +48,7 @@ func TestEdgeMemoryRefusesAnythingThatIsNotALiteralAddressWithAPort(t *testing.T
+ 
+ func TestRememberedEdgeGoesFirstWithoutDuplicatesOrLoss(t *testing.T) {
+ 	list := peerCandidates(accountPeer(), "", 0)
+-	remembered := candidate{"188.114.99.1", 4500, transportWireGuard}
++	remembered := candidate{"188.114.99.1", 4500, transportWireGuard, ""}
+ 	got := withRemembered(list, remembered, true)
+ 	if got[0] != remembered || len(got) != len(list) {
+ 		t.Fatalf("got %v", got)
+@@ -62,7 +62,7 @@ func TestRememberedEdgeGoesFirstWithoutDuplicatesOrLoss(t *testing.T) {
+ 	if count != 1 {
+ 		t.Fatalf("the remembered edge appears %d times in %v", count, got)
+ 	}
+-	unknown := candidate{"203.0.113.5", 2408, transportWireGuard}
++	unknown := candidate{"203.0.113.5", 2408, transportWireGuard, ""}
+ 	got = withRemembered(list, unknown, true)
+ 	if got[0] != unknown || len(got) != len(list)+1 || !reflect.DeepEqual(got[1:], list) {
+ 		t.Fatalf("got %v", got)
+diff --git a/protocol/warp/recovery.go b/protocol/warp/recovery.go
+index 2a3b964fc87928403ddf607e828d73d3deeb01af..d092cdc4964c8bddcdd9880724627107245baebb 100644
+--- a/protocol/warp/recovery.go
++++ b/protocol/warp/recovery.go
+@@ -31,6 +31,11 @@ type candidate struct {
+ 	// transport is how the candidate reaches Cloudflare: WireGuard to address:port, or MASQUE (address and port unused:
+ 	// the account's own MASQUE endpoint is dialed).
+ 	transport transport
++	// sni is the TLS server name a MASQUE candidate presents ("" = Cloudflare's own, consumer-masque.cloudflareclient.com).
++	// The MASQUE endpoint authenticates by the client's key, not by the name, and answers any name (checked against the
++	// real edge with www.cloudflare.com, yandex.ru and example.com over QUIC and HTTP/2): a network that blocks the
++	// cloudflareclient.com names, as one did the API, no longer sees them.
++	sni string
+ }
+ 
+ // wireGuardCandidate is a WireGuard peer address.
+@@ -41,6 +46,9 @@ func wireGuardCandidate(address string, port uint16) candidate {
+ // describe is the candidate as it appears in the log.
+ func (c candidate) describe() string {
+ 	if c.transport != transportWireGuard {
++		if c.sni != "" {
++			return c.transport.String() + " sni=" + c.sni
++		}
+ 		return c.transport.String()
+ 	}
+ 	return net.JoinHostPort(c.address, strconv.Itoa(int(c.port)))
+diff --git a/protocol/warp/recovery_test.go b/protocol/warp/recovery_test.go
+index e2fca8d8ef593b2e107573be39b9a24e713668d8..90eaa885b6019ac828a2389dbafe7aa8cf01fba8 100644
+--- a/protocol/warp/recovery_test.go
++++ b/protocol/warp/recovery_test.go
+@@ -20,14 +20,14 @@ func accountPeer() cloudflare.Peer {
+ func TestPeerCandidatesStartWithTheAccountsOwnAddressThenOtherWarpEdges(t *testing.T) {
+ 	got := peerCandidates(accountPeer(), "", 0)
+ 	want := []candidate{
+-		{"162.159.192.8", 2408, transportWireGuard},
+-		{"162.159.192.8", 500, transportWireGuard},
+-		{"162.159.192.8", 2408, transportWireGuard}, // a fresh socket on the same address: the stall depends on the source port
+-		{"188.114.97.1", 2408, transportWireGuard},
+-		{fallbackAddress, 500, transportWireGuard},
+-		{"188.114.99.1", 4500, transportWireGuard},
+-		{"188.114.96.1", 1701, transportWireGuard},
+-		{"188.114.98.1", 854, transportWireGuard},
++		{"162.159.192.8", 2408, transportWireGuard, ""},
++		{"162.159.192.8", 500, transportWireGuard, ""},
++		{"162.159.192.8", 2408, transportWireGuard, ""}, // a fresh socket on the same address: the stall depends on the source port
++		{"188.114.97.1", 2408, transportWireGuard, ""},
++		{fallbackAddress, 500, transportWireGuard, ""},
++		{"188.114.99.1", 4500, transportWireGuard, ""},
++		{"188.114.96.1", 1701, transportWireGuard, ""},
++		{"188.114.98.1", 854, transportWireGuard, ""},
+ 	}
+ 	if !reflect.DeepEqual(got, want) {
+ 		t.Fatalf("got %v, want %v", got, want)
+@@ -50,12 +50,12 @@ func TestPeerCandidatesStartWithTheAccountsOwnAddressThenOtherWarpEdges(t *testi
+ 
+ func TestExplicitAddressIsTheUsersChoiceAndNeverRotated(t *testing.T) {
+ 	got := peerCandidates(accountPeer(), "198.51.100.7", 4500)
+-	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 4500, transportWireGuard}}) {
++	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 4500, transportWireGuard, ""}}) {
+ 		t.Fatalf("got %v", got)
+ 	}
+ 	// without an explicit port the account's first port is used, as before
+ 	got = peerCandidates(accountPeer(), "198.51.100.7", 0)
+-	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 2408, transportWireGuard}}) {
++	if !reflect.DeepEqual(got, []candidate{{"198.51.100.7", 2408, transportWireGuard, ""}}) {
+ 		t.Fatalf("got %v", got)
+ 	}
+ }
+diff --git a/protocol/warp/transport.go b/protocol/warp/transport.go
+index 5c4b710f8b4dec556fe92aa99e47ef4728d3292c..b01436d6302309bfee4a770f0e48a690dfcc215e 100644
+--- a/protocol/warp/transport.go
++++ b/protocol/warp/transport.go
+@@ -69,16 +69,28 @@ const (
+ 	masqueHandshakeTimeout  = 5 * time.Second
+ )
+ 
+-// withMasque puts the two MASQUE candidates right after the account's own WireGuard address and its second port: WireGuard
++// masqueDecoys are the TLS server names MASQUE presents before its own (see candidate.sni): Cloudflare's own site first (the
++// name matches the address it is dialed on), a Russian one later.
++var masqueDecoys = []string{"www.cloudflare.com", "yandex.ru"}
++
++// withMasque puts the MASQUE candidates right after the account's own WireGuard address and its second port: WireGuard
+ // stays the first choice (it is the fastest), but a network that blocks it is reached after two failed starts, not after
+-// the whole list of alternate edges. An explicit address is the user's choice and gets no MASQUE.
++// the whole list of alternate edges. HTTP/2 (TCP 443) comes before QUIC (UDP is what mobile networks throttle first), and
++// the decoy name before the real one. An explicit address is the user's choice and gets no MASQUE.
+ func withMasque(list []candidate) []candidate {
+ 	if len(list) < 2 {
+ 		return list
+ 	}
+-	out := make([]candidate, 0, len(list)+2)
++	masqueList := []candidate{
++		{transport: transportMasqueHTTP2, sni: masqueDecoys[0]},
++		{transport: transportMasqueQUIC, sni: masqueDecoys[0]},
++		{transport: transportMasqueHTTP2},
++		{transport: transportMasqueQUIC},
++		{transport: transportMasqueHTTP2, sni: masqueDecoys[1]},
++	}
++	out := make([]candidate, 0, len(list)+len(masqueList))
+ 	out = append(out, list[:2]...)
+-	out = append(out, candidate{transport: transportMasqueQUIC}, candidate{transport: transportMasqueHTTP2})
++	out = append(out, masqueList...)
+ 	return append(out, list[2:]...)
+ }
+ 
+@@ -92,9 +104,10 @@ func (w *Endpoint) buildMasque(router adapter.Router, tag string, current candid
+ 	// Cancelling this one (abandon) lets a failed candidate go at once without stopping the whole hop.
+ 	ctx, cancel := context.WithCancel(w.ctx)
+ 	built, err := masque.NewOutbound(ctx, router, w.logger, tag, option.MASQUEOutboundOptions{
+-		DialerOptions: w.options.DialerOptions,
+-		UseHTTP2:      current.transport == transportMasqueHTTP2,
+-		Profile:       profile,
++		DialerOptions:                     w.options.DialerOptions,
++		UseHTTP2:                          current.transport == transportMasqueHTTP2,
++		Profile:                           profile,
++		MASQUEOutboundTLSOptionsContainer: option.MASQUEOutboundTLSOptionsContainer{TLS: tlsOptions(current)},
+ 		// Without a delay a network that refuses the socket at once (no route, a firewall) makes the tunnel retry in a
+ 		// busy loop (500 000 attempts a minute seen on a host with UDP 443 filtered).
+ 		ReconnectDelay:   badoption.Duration(masqueReconnectDelay),
+@@ -146,6 +159,14 @@ func (w *Endpoint) probeTimeoutFor(current candidate) time.Duration {
+ 	return masqueFirstProbeTimeout
+ }
+ 
++// tlsOptions is the TLS section of a MASQUE candidate: only the server name it presents.
++func tlsOptions(current candidate) *option.MASQUEOutboundTLSOptions {
++	if current.sni == "" {
++		return nil
++	}
++	return &option.MASQUEOutboundTLSOptions{ServerName: current.sni}
++}
++
+ // masqueAccountPath is where the MASQUE account lives ("" when the WireGuard account has no file).
+ func masqueAccountPath(cachePath string) string {
+ 	if cachePath == "" {
+diff --git a/protocol/warp/transport_test.go b/protocol/warp/transport_test.go
+index 14c84e736b6930ab30cf3de655a8cec8bda68eae..bd847d197bb2437f100341cb17199f60f87d9adf 100644
+--- a/protocol/warp/transport_test.go
++++ b/protocol/warp/transport_test.go
+@@ -17,19 +17,34 @@ import (
+ 	N "github.com/sagernet/sing/common/network"
+ )
+ 
+-func TestMasqueCandidatesFollowTheAccountsOwnWireGuardAddressAndItsSecondPort(t *testing.T) {
++func TestMasqueCandidatesFollowTheAccountsOwnWireGuardAddressAndItsSecondPortAndGoHTTP2WithADecoyNameFirst(t *testing.T) {
+ 	got := withMasque(peerCandidates(accountPeer(), "", 0))
+-	if len(got) != startAttempts+2 {
+-		t.Fatalf("want %d candidates, got %v", startAttempts+2, got)
++	if len(got) != startAttempts+5 {
++		t.Fatalf("want %d candidates, got %v", startAttempts+5, got)
++	}
++	want := []struct {
++		kind transport
++		sni  string
++	}{
++		{transportWireGuard, ""}, {transportWireGuard, ""},
++		{transportMasqueHTTP2, "www.cloudflare.com"}, {transportMasqueQUIC, "www.cloudflare.com"},
++		{transportMasqueHTTP2, ""}, {transportMasqueQUIC, ""}, {transportMasqueHTTP2, "yandex.ru"},
++		{transportWireGuard, ""}, {transportWireGuard, ""}, {transportWireGuard, ""}, {transportWireGuard, ""}, {transportWireGuard, ""}, {transportWireGuard, ""},
++	}
++	for index, expected := range want {
++		if got[index].transport != expected.kind || got[index].sni != expected.sni {
++			t.Fatalf("candidate %d is %v/%q, want %v/%q (%v)", index, got[index].transport, got[index].sni, expected.kind, expected.sni, got)
++		}
+ 	}
+-	want := []transport{
+-		transportWireGuard, transportWireGuard, transportMasqueQUIC, transportMasqueHTTP2,
+-		transportWireGuard, transportWireGuard, transportWireGuard, transportWireGuard, transportWireGuard, transportWireGuard,
++}
++
++func TestADecoyNameIsOnlyThePresentedServerName(t *testing.T) {
++	if tlsOptions(candidate{transport: transportMasqueHTTP2}) != nil {
++		t.Fatal("no decoy, no TLS section: Cloudflare's own name stays")
+ 	}
+-	for index, kind := range want {
+-		if got[index].transport != kind {
+-			t.Fatalf("candidate %d is %v, want %v (%v)", index, got[index].transport, kind, got)
+-		}
++	options := tlsOptions(candidate{transport: transportMasqueQUIC, sni: "yandex.ru"})
++	if options == nil || options.ServerName != "yandex.ru" || options.Insecure {
++		t.Fatalf("the decoy must change the name and nothing else, got %+v", options)
+ 	}
+ }
+ 
+@@ -51,10 +66,12 @@ func TestRotationAfterAWireGuardFailureTriesMasqueBeforeAnotherWireGuardPort(t *
+ 	if len(order) != len(list)-1 {
+ 		t.Fatalf("every other candidate is a next one: %v", order)
+ 	}
+-	if list[order[0]].transport != transportMasqueQUIC || list[order[1]].transport != transportMasqueHTTP2 {
+-		t.Fatalf("MASQUE must come first after a WireGuard failure: %v", order)
++	for _, index := range order[:5] {
++		if list[index].transport == transportWireGuard {
++			t.Fatalf("MASQUE must come first after a WireGuard failure: %v", order)
++		}
+ 	}
+-	for _, index := range order[2:] {
++	for _, index := range order[5:] {
+ 		if list[index].transport != transportWireGuard {
+ 			t.Fatalf("only the demoted WireGuard candidates are left at the end: %v", order)
+ 		}
+@@ -325,3 +342,23 @@ func TestAMasqueAccountThatIsNotOnDiskGetsALongerProbe(t *testing.T) {
+ 		t.Fatalf("WireGuard keeps its own probe, got %v", got)
+ 	}
+ }
++
++func TestTheMemoryKeepsTheDecoyNameOfTheMasqueCandidateThatAnswered(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "profile.json.edge")
++	want := candidate{transport: transportMasqueHTTP2, sni: "www.cloudflare.com"}
++	if err := saveEdgeMemory(path, want); err != nil {
++		t.Fatal(err)
++	}
++	got, ok := loadEdgeMemory(path)
++	if !ok || got != want {
++		t.Fatalf("got %v %v, want %v", got, ok, want)
++	}
++	// the older form without a name still reads
++	if err := os.WriteFile(path, []byte("masque-quic\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	got, ok = loadEdgeMemory(path)
++	if !ok || got != (candidate{transport: transportMasqueQUIC}) {
++		t.Fatalf("got %v %v", got, ok)
++	}
++}

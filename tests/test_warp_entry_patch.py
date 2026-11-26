@@ -311,5 +311,48 @@ class WarpMasqueTimingPatchTests(unittest.TestCase):
         self.assertLess(text.index("apply_exact_patch(source, masque_timing_patch"), text.index("prepare(source, stage"))
 
 
+MASQUE_SNI = ROOT / "core-patches/warp-entry-masque-sni.patch"
+ANDROID_MASQUE_SNI = ROOT.parent / "android/core-patches/0028-warp-masque-sni.patch"
+MASQUE_SNI_FILES = [
+    "protocol/warp/edge_memory.go",
+    "protocol/warp/edge_memory_test.go",
+    "protocol/warp/recovery.go",
+    "protocol/warp/recovery_test.go",
+    "protocol/warp/transport.go",
+    "protocol/warp/transport_test.go",
+]
+
+
+class WarpMasqueSniPatchTests(unittest.TestCase):
+    """MASQUE presents a decoy TLS server name, HTTP/2 before QUIC (owner 2026-11-26; Android 0028)."""
+
+    def test_patch_touches_only_the_hop_files(self) -> None:
+        text = MASQUE_SNI.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(sorted(touched), sorted(MASQUE_SNI_FILES))
+        self.assertEqual(len(re.findall(r"^index [0-9a-f]{40}\.\.[0-9a-f]{40}", text, re.MULTILINE)), len(touched))
+
+    def test_decoy_names_come_before_cloudflares_own_and_http2_before_quic(self) -> None:
+        text = MASQUE_SNI.read_text(encoding="utf-8")
+        self.assertIn('var masqueDecoys = []string{"www.cloudflare.com", "yandex.ru"}', text)
+        self.assertLess(text.index("{transport: transportMasqueHTTP2, sni: masqueDecoys[0]}"), text.index("{transport: transportMasqueQUIC, sni: masqueDecoys[0]}"))
+        self.assertLess(text.index("{transport: transportMasqueQUIC, sni: masqueDecoys[0]}"), text.index("{transport: transportMasqueHTTP2},"))
+
+    def test_the_candidate_code_is_the_same_as_android(self) -> None:
+        if not ANDROID_MASQUE_SNI.is_file():
+            self.skipTest("android repository is not next to windows")
+        android = ANDROID_MASQUE_SNI.read_text(encoding="utf-8")
+        windows = MASQUE_SNI.read_text(encoding="utf-8")
+        for needle in ("masqueDecoys", "func tlsOptions(", "TestADecoyNameIsOnlyThePresentedServerName"):
+            self.assertEqual(needle in android, needle in windows, needle)
+
+    def test_builder_applies_the_patch_after_the_timing_patch_and_records_it(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_MASQUE_SNI_PATCH = "warp-entry-masque-sni.patch"', text)
+        self.assertIn('"warp_masque_sni_patch_sha256"', text)
+        self.assertLess(text.index("apply_exact_patch(source, masque_timing_patch"), text.index("apply_exact_patch(source, masque_sni_patch"))
+        self.assertLess(text.index("apply_exact_patch(source, masque_sni_patch"), text.index("prepare(source, stage"))
+
+
 if __name__ == "__main__":
     unittest.main()
