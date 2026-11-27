@@ -140,10 +140,15 @@ def cleanup_connection_runtime_state(
 
 
 def _connection_managers(controller: AppController) -> tuple:
-    # Close traffic admission before stopping its transport.
+    # Close traffic admission before stopping its transport. EVERY helper that `_has_residual_processes` counts must be
+    # here: a missing naive left `naive.exe` alive after a disconnect, the cleanup action found nothing to stop and was
+    # queued again at once, forever (0.8.127-0.8.135: the window stopped answering, owner report 2026-11-27).
     return tuple(
         manager
-        for manager in (controller.singbox, controller.xray, controller.hysteria, getattr(controller, "amnezia", None))
+        for manager in (
+            controller.singbox, controller.xray, controller.hysteria,
+            getattr(controller, "amnezia", None), getattr(controller, "naive", None),
+        )
         if manager is not None
     )
 

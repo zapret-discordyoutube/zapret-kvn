@@ -633,6 +633,8 @@ class AppController(QObject):
         self._protection_prepared_generation = 0
         # Процессы прерванного перехода гасятся отдельным шагом очереди.
         self._cleanup_pending = False
+        #: The last cleanup stopped nothing and a process is still alive: do not queue another (it would spin the GUI).
+        self._cleanup_futile = False
         # Поля плана для сигнатур (без портов): ключ — документ, режим, нода, пул.
         self._plan_facts_cache: dict[tuple, SingboxPlanFacts | None] = {}
         # Следующий disconnect из очереди — без статуса «Отключено»
@@ -3276,7 +3278,7 @@ class AppController(QObject):
         if self.bypass.waiting_for(self._transition_generation):
             return
 
-        if self._cleanup_pending or self._has_residual_processes():
+        if self._cleanup_pending or (self._has_residual_processes() and not self._cleanup_futile):
             # Процессы недостартовавшего/прерванного перехода гасятся отдельным
             # шагом до любого нового действия; следующий drain решит, что дальше.
             self._cleanup_pending = False
@@ -3368,10 +3370,22 @@ class AppController(QObject):
                 # desired_connected (их задаёт последний запрос), но обязан
                 # оставить связку процессов консистентной.
                 self._reconcile_cancelled_transition()
+            if action == "cleanup":
+                # A cleanup that ends with a process still alive cannot be helped by another one at 0 ms: it spun
+                # the GUI thread with 1,667 empty cleanups in 5 minutes (naive.exe was not in the stop list).
+                self._cleanup_futile = not runner.cancelled and not self.connected and self._has_residual_processes()
+                if self._cleanup_futile:
+                    self._log(
+                        "[transition] cleanup left processes alive "
+                        f"({', '.join(self._residual_process_names())}); not repeating it until the next connection action"
+                    )
+            else:
+                self._cleanup_futile = False
             if (
                 not runner.cancelled
                 and not self.connected
                 and not getattr(self, "_hysteria_recovery_active", False)
+                and not self._cleanup_futile
                 and self._has_residual_processes()
             ):
                 self._cleanup_pending = True
@@ -3469,16 +3483,21 @@ class AppController(QObject):
                 return "TARGET_NETWORK_TIMEOUT"
         return None
 
+    def _residual_process_names(self) -> list[str]:
+        names = []
+        for name, manager in (
+            ("sing-box", self.singbox), ("xray", self.xray), ("hysteria", self.hysteria),
+            ("amnezia", getattr(self, "amnezia", None)), ("naive", getattr(self, "naive", None)),
+        ):
+            if manager is not None and (manager.is_running is True or _process_alive(manager)):
+                names.append(name)
+        return names
+
     def _has_residual_processes(self) -> bool:
         """Processes alive without a connected session (aborted transition)."""
         if self.connected:
             return False
-        for manager in (self.singbox, self.xray, self.hysteria, getattr(self, "amnezia", None), getattr(self, "naive", None)):
-            if manager is None:
-                continue
-            if manager.is_running is True or _process_alive(manager):
-                return True
-        return False
+        return bool(self._residual_process_names())
 
     def _reconcile_cancelled_transition(self) -> None:
         """Привести состояние к консистентному виду после устаревшего перехода.
