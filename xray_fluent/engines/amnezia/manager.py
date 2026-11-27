@@ -389,7 +389,10 @@ class AmneziaManager(QObject):
     def _ready_steps(self, port: int, config: dict) -> TransitionSteps:
         if self._failed or self._cancelled() or self._process.state() == QProcess.ProcessState.NotRunning:
             return False
-        deadline = time.monotonic() + 20
+        # A WireGuard handshake is sent at about 0, 5 and 10 s: 12 s covers three attempts, which a healthy server answers
+        # in the first or second. Was 20 s: on a network that drops UDP the user watched «Подключение…» for 20 s per try
+        # (owner report 2026-11-27, "thinking for a very long time").
+        deadline = time.monotonic() + 12
         executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="amnezia-ready")
         transferred = False
         try:
