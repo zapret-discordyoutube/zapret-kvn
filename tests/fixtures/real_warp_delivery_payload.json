@@ -1,0 +1,41 @@
+{
+ "v": 1,
+ "wireguard": {
+  "private_key": "aMsU91NBz9JpXnCCSakLf2LOz1TOVD8fXQ+Eli7su0c=",
+  "interface": {
+   "addresses": {
+    "v4": "172.16.0.2",
+    "v6": "2606:4700:110:8801:e2e5:958f:2cde:a88e"
+   }
+  },
+  "peers": [
+   {
+    "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+    "endpoint": {
+     "v4": "162.159.192.7:0",
+     "v6": "[2606:4700:d0::a29f:c007]:0",
+     "host": "engage.cloudflareclient.com:2408",
+     "ports": [
+      2408,
+      500,
+      1701,
+      4500
+     ]
+    }
+   }
+  ]
+ },
+ "masque": {
+  "private_key": "MHcCAQEEIPl8hm+0v5/Hc+oSm5EKiagli37sPKsNab+fLnBegC79oAoGCCqGSM49AwEHoUQDQgAETqQoIm7w4bQFvuyxFtAWp4LUbmqnCq3KCDddrI+G/34XFMNWjVShKClL9gHVG3Cf3Lu9bOX5E/naiG94ZqbNSA==",
+  "endpoint_v4": "162.159.198.2",
+  "endpoint_v6": "2606:4700:103::2",
+  "endpoint_h2_v4": "162.159.198.2",
+  "endpoint_h2_v6": "",
+  "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG\n7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w==\n-----END PUBLIC KEY-----\n",
+  "license": "r37je0y9-1T64Hr3V-264i9VoH",
+  "id": "5f64cf11-e34c-406f-8c93-0042017aca5f",
+  "access_token": "a38f7525-e4e5-41ec-a2c6-44779e9439b5",
+  "ipv4": "172.16.0.2",
+  "ipv6": "2606:4700:110:8751:3b04:78e9:80a9:b9b4"
+ }
+}

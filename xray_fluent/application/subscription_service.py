@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from copy import deepcopy
@@ -16,12 +18,15 @@ from ..profiles.models import (
     utc_now_iso,
 )
 from ..client_reports.contract import SERVER_IDS_HEADER, parse_server_ids
+from ..network import warp_delivery
 from ..importer.subscription_http import SERVICE_HEADER, SubscriptionFetchResult, sanitize_fetch_error
 from ..importer.subscription_parser import (
     ParsedSubscription,
     hidden_source_key_for_node,
     source_fingerprint_for_node,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 #: Имя подписки, которая ещё ни разу не загрузилась и поэтому не знает своего названия; после первой
@@ -86,6 +91,7 @@ def apply_not_modified(
     # vpnbot sends zapret-server-ids on a 304 too: an app updated while its ETag stays valid
     # still learns the ids without waiting for the body to change.
     learn_server_ids(subscription, fetch)
+    learn_warp_account(subscription, fetch)
     return SubscriptionUpdateResult(
         subscription_id=subscription.id,
         success=True,
@@ -280,6 +286,7 @@ def _apply_success_metadata(
     subscription.service = SERVICE_HEADER in fetch.headers
     # Id каталога для отчётов о подключениях: только в ответе сервиса, ответ без заголовка карту стирает.
     subscription.server_ids = _server_id_map(fetch) if subscription.service else {}
+    learn_warp_account(subscription, fetch)
     metadata = parsed.metadata
     if not subscription.name:
         subscription.name = metadata.title
@@ -319,6 +326,30 @@ def learn_server_ids(subscription: Subscription, fetch: SubscriptionFetchResult)
         return False
     subscription.server_ids = _server_id_map(fetch)
     return True
+
+
+def learn_warp_account(subscription: Subscription, fetch: SubscriptionFetchResult) -> warp_delivery.Outcome:
+    """Take the WARP accounts the service hands over in the ``zapret-warp-account`` header (full or 304 reply).
+
+    Only the service's own replies count, and only a missing account is filled (docs/WARP_ACCOUNT_DELIVERY.md); the
+    payload is never logged.  A failure here must never fail the subscription update."""
+    if not subscription.service:
+        return warp_delivery.Outcome("none")
+    try:
+        from ..constants import DATA_DIR
+
+        outcome = warp_delivery.apply(fetch.headers, DATA_DIR)
+    except Exception as error:  # noqa: BLE001 - the subscription itself is what matters
+        _LOGGER.warning("[warp-entry] аккаунт WARP из подписки не применён: %s", type(error).__name__)
+        return warp_delivery.Outcome("invalid", type(error).__name__)
+    if outcome.status == "written":
+        _LOGGER.info(
+            "[warp-entry] аккаунт WARP получен из подписки (WireGuard: %s, MASQUE: %s)",
+            "записан" if outcome.wrote_wireguard else "был", "записан" if outcome.wrote_masque else "был",
+        )
+    elif outcome.status == "invalid":
+        _LOGGER.warning("[warp-entry] аккаунт WARP из подписки не принят: %s", outcome.detail)
+    return outcome
 
 
 def _server_id_map(fetch: SubscriptionFetchResult) -> dict[str, dict[str, str]]:
