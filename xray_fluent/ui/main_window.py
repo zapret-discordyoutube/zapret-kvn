@@ -435,7 +435,14 @@ class MainWindow(FluentWindow):
     def _open_routing_section(self, key: str) -> None:
         """Подпункт «Маршрутизации»: одна страница-контейнер, свой раздел внутри."""
         self.switchTo(self.configs_page)
-        self.configs_page.show_section(key)
+        try:
+            self.configs_page.show_section(key)
+        except FileNotFoundError:
+            # The bundled core schema (assets/sing-box-schema) is missing from this install (field check #7: Windows
+            # 0.8.123, one install, a crash in the routing page): say what is wrong instead of crashing.
+            self._show_status("error", "Не найден файл схемы маршрутизации (assets/sing-box-schema): приложение "
+                                      "установлено не полностью. Переустановите его или обновите до последней версии.")
+            return
         route = self.configs_page.objectName() if key == "overview" else f"configs-{key}"
         self.navigationInterface.setCurrentItem(route)
 

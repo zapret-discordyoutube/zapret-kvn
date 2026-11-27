@@ -288,8 +288,15 @@ class ObjectList(QWidget):
         self.changed.emit()
 
 
+def _existing_tags(items: list) -> set[str]:
+    """The tags already in a user's list.  A hand-edited config may hold anything under ``tag`` (a list, an object):
+    only text can collide with a new tag, and an unhashable value must not crash the page (field check #7: ``TypeError``
+    in ``unique_tag`` on Windows 0.8.130)."""
+    return {item["tag"] for item in items if isinstance(item, dict) and isinstance(item.get("tag"), str)}
+
+
 def _unique_tag(tag: str, items: list) -> str:
-    existing = {item.get("tag") for item in items if isinstance(item, dict)}
+    existing = _existing_tags(items)
     index = 2
     while f"{tag}-{index}" in existing:
         index += 1
@@ -297,7 +304,7 @@ def _unique_tag(tag: str, items: list) -> str:
 
 
 def unique_tag(base: str, items: list) -> str:
-    existing = {item.get("tag") for item in items if isinstance(item, dict)}
+    existing = _existing_tags(items)
     if base not in existing:
         return base
     return _unique_tag(base, items)
