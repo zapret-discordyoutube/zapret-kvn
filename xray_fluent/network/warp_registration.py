@@ -47,7 +47,10 @@ HEADERS = {
     "Content-Type": "application/json; charset=UTF-8",
 }
 # The API host's addresses seen in the field, tried after what DoH resolves (a censor may block one of them only).
-KNOWN_ADDRESSES = ("162.159.137.105", "162.159.138.105", "8.6.112.0", "8.47.69.0")
+# Addresses of the API seen to answer (the service's host, 2026-11-27: api.cloudflareclient.com then resolved only to 8.6.112.0 and
+# 8.47.69.0 and both timed out there, while the same API answered POST 200 on 104.19.192.1, 104.19.193.1 and 162.159.137.105): the
+# ones that answered come first, a block that a provider cuts is not the only one.
+KNOWN_ADDRESSES = ("104.19.192.1", "162.159.137.105", "104.19.193.1", "162.159.138.105", "8.6.112.0", "8.47.69.0")
 MAX_RESPONSE = 64 * 1024
 # Where inside the ClientHello the first segment ends: in the middle of the server name.
 _SPLIT_INTO_NAME = 3

@@ -183,6 +183,18 @@ def physical_network_steps(
     raise OSError("Physical interface for Amnezia UDP transport not found" + detail)
 
 
+#: How long the first handshake is waited for: three WireGuard attempts at about 0, 5 and 10 s.
+HANDSHAKE_WAIT_S = 12.0
+#: Through the WARP entry the helper's UDP first needs the hop's tunnel (a start whose WireGuard stalls on its first address moves
+#: to the next candidate after 3-8 s, MASQUE after more): the real server behind the hop missed the 12 s on the release gate
+#: (0.8.132 and 0.8.133 full runs, 2026-11-27: "transition connect failed" at 14 s while the same test passed alone in 12 s).
+HANDSHAKE_WAIT_THROUGH_HOP_S = 30.0
+
+
+def handshake_wait_seconds(through_hop: bool) -> float:
+    return HANDSHAKE_WAIT_THROUGH_HOP_S if through_hop else HANDSHAKE_WAIT_S
+
+
 class AmneziaManager(QObject):
     log_received = pyqtSignal(str)
     error = pyqtSignal(str)
@@ -190,6 +202,8 @@ class AmneziaManager(QObject):
     failure = pyqtSignal(object)
     stopped = pyqtSignal(int)
     state_changed = pyqtSignal(bool)
+    #: Set by the controller before a start: longer when the helper's UDP goes through the WARP entry (`handshake_wait_seconds`).
+    handshake_wait_s: float = HANDSHAKE_WAIT_S
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -392,7 +406,7 @@ class AmneziaManager(QObject):
         # A WireGuard handshake is sent at about 0, 5 and 10 s: 12 s covers three attempts, which a healthy server answers
         # in the first or second. Was 20 s: on a network that drops UDP the user watched «Подключение…» for 20 s per try
         # (owner report 2026-11-27, "thinking for a very long time").
-        deadline = time.monotonic() + 12
+        deadline = time.monotonic() + self.handshake_wait_s
         executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="amnezia-ready")
         transferred = False
         try:

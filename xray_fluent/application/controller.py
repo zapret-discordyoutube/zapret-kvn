@@ -205,7 +205,7 @@ from ..engines.xray import (
     get_xray_version,
 )
 from ..engines.hysteria import HysteriaManager
-from ..engines.amnezia.manager import AmneziaManager
+from ..engines.amnezia.manager import AmneziaManager, handshake_wait_seconds
 from ..engines.naive.manager import NaiveManager
 from ..engines.singbox import (
     SingBoxManager,
@@ -2296,6 +2296,7 @@ class AppController(QObject):
         self._amnezia_target_generation = _increment_int(getattr(self, "_amnezia_target_generation", 0))
         generation = self._transition_generation
         manager.server_ipv6_first = self._server_ipv6_first()
+        manager.handshake_wait_s = handshake_wait_seconds(getattr(plan, "warp_entry", None) is not None)
         return (yield from manager.start_steps(
             sidecar.config, sidecar.relay_port, context=sidecar.context,
             session_generation=_increment_int(getattr(self, "_session_generation", 0)),
