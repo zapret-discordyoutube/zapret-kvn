@@ -33,9 +33,10 @@ from ...network.bootstrap_dns import resolve_bootstrap
 from ..sidecar import wait_for_loopback_relay_steps
 from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 
-#: A fresh key needs up to about a minute before its node accepts it (node-side apply), so the first tunnel check keeps
-#: retrying instead of treating the first refusal as the answer.
-READY_TIMEOUT_SECONDS = 75.0
+#: The first tunnel check retries instead of treating the first refusal as the answer (a node needs a moment after a key
+#: is issued; the bot's canary keys were ready in 6-20 s). 25 s, not more: a wrong or expired key must not hold a connect
+#: for over a minute with no word (owner report 2026-11-27, "thinking for a very long time").
+READY_TIMEOUT_SECONDS = 25.0
 PROBE_TIMEOUT_SECONDS = 8.0
 RECENT_LINES = 40
 

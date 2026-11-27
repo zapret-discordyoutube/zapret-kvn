@@ -71,6 +71,18 @@ def _int_mapping(value: Any) -> dict[str, int]:
     return result
 
 
+#: The folder of the server list that holds NaiveProxy keys pasted one by one (owner request 2026-11-27).
+NAIVE_GROUP = "NaiveProxy"
+
+
+def _stored_group(data: dict[str, Any]) -> str:
+    """A stored node's group; a NaiveProxy key saved before it had its own folder moves out of "Default"."""
+    group = str(data.get("group") or "Default")
+    if group == "Default" and str(data.get("scheme") or "") == "naive" and not data.get("subscription_id"):
+        return NAIVE_GROUP
+    return group
+
+
 @dataclass(slots=True)
 class Node:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -140,7 +152,7 @@ class Node:
             port=int(data.get("port") or 0),
             link=str(data.get("link") or ""),
             outbound=dict(data.get("outbound") or {}),
-            group=str(data.get("group") or "Default"),
+            group=_stored_group(data),
             tags=list(data.get("tags") or []),
             ping_ms=data.get("ping_ms"),
             last_used_at=data.get("last_used_at"),

@@ -23,6 +23,7 @@ from xray_fluent.importer.link_parser import LinkParseError, parse_links_text, p
 from xray_fluent.importer.subscription_parser import hidden_source_key_for_node, parse_subscription_payload
 
 from tests import real_naive_key
+from xray_fluent.profiles.models import Node
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = ROOT / "data" / "templates" / "sing-box" / "default.json"
@@ -101,6 +102,19 @@ class NaiveImportTests(unittest.TestCase):
         self.assertIs(ProtocolCore.NAIVE, protocol_core(node))
         self.assertEqual("naive_sidecar", classify_node_for_singbox(node))
         self.assertEqual(_line(), node.link)
+
+    def test_a_pasted_key_goes_to_its_own_folder(self) -> None:
+        self.assertEqual("NaiveProxy", parse_single(_line()).group)
+        nodes, _ = parse_links_text(_line() + "\n")
+        self.assertEqual({"NaiveProxy"}, {node.group for node in nodes})
+
+    def test_a_key_stored_before_the_folder_existed_moves_into_it(self) -> None:
+        node = parse_single(_line())
+        old = {**node.to_dict(), "group": "Default"}
+        self.assertEqual("NaiveProxy", Node.from_dict(old).group)
+        # A key that came with a subscription keeps its subscription's folder.
+        self.assertEqual("MyVPN", Node.from_dict({**old, "group": "MyVPN", "subscription_id": "x"}).group)
+        self.assertEqual("Default", Node.from_dict({**old, "scheme": "vless"}).group)
 
     def test_the_exported_outbound_carries_no_secret(self) -> None:
         node = parse_single(_line())

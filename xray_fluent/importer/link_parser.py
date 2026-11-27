@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..engines.hysteria.runtime_contract import classify_hysteria_uri
 from ..engines.naive.key import NaiveKeyError, parse_naive_key
-from ..profiles.models import Node
+from ..profiles.models import NAIVE_GROUP, Node
 
 
 class LinkParseError(ValueError):
@@ -1048,6 +1048,9 @@ def _parse_naive(link: str) -> Node:
         port=key.port,
         link=link,
         outbound=outbound,
+        # Owner request 2026-11-27: keys have their own folder in the server list (a subscription still files its own
+        # naive lines under the subscription's name, as every other server of it).
+        group=NAIVE_GROUP,
     )
 
 
