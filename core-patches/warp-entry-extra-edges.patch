@@ -1,0 +1,221 @@
+diff --git a/option/warp.go b/option/warp.go
+index 61f625b67311eb6923b2f461cf53d4babd5dc86e..1ea8324ad9961f0760e875cc4fb43b57bce4f513 100644
+--- a/option/warp.go
++++ b/option/warp.go
+@@ -21,9 +21,21 @@ type WARPEndpointOptions struct {
+ 	// NoMasque keeps the hop on WireGuard only. By default a network that cuts WireGuard is answered with Cloudflare's
+ 	// MASQUE tunnel (QUIC, then HTTP/2).
+ 	NoMasque bool `json:"no_masque,omitempty"`
++	// ExtraEdges are WARP edges the caller knows work somewhere (the service sends them to the apps, which pass them
++	// here), tried right after the account's own first two candidates. See protocol/warp/extra_edges.go.
++	ExtraEdges []WARPExtraEdge `json:"extra_edges,omitempty"`
+ 	DialerOptions
+ }
+ 
++// WARPExtraEdge is one more way to reach Cloudflare: transport is "wireguard", "masque-http2" or "masque-quic";
++// address is a literal IP; port defaults to 2408 (WireGuard) or 443 (MASQUE); sni is the TLS name a MASQUE edge presents.
++type WARPExtraEdge struct {
++	Transport string `json:"transport"`
++	Address   string `json:"address"`
++	Port      uint16 `json:"port,omitempty"`
++	SNI       string `json:"sni,omitempty"`
++}
++
+ type WARPAmnezia struct {
+ 	JC                     int                      `json:"jc,omitempty"`
+ 	JMin                   int                      `json:"jmin,omitempty"`
+diff --git a/protocol/warp/endpoint.go b/protocol/warp/endpoint.go
+index a18ef14d8ecc4ecf33fb1e81d678f5b06057aa44..8ddd511de11214f1a696db66ff45ac3fabb7c8fe 100644
+--- a/protocol/warp/endpoint.go
++++ b/protocol/warp/endpoint.go
+@@ -123,6 +123,9 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		if options.Address == "" && !options.NoMasque {
+ 			candidates = withMasque(candidates)
+ 		}
++		if options.Address == "" {
++			candidates = withExtraEdges(candidates, extraCandidates(options.ExtraEdges))
++		}
+ 		// An explicit address is the user's choice and is never rotated or replaced by a remembered edge.
+ 		edgePath := ""
+ 		if options.Address == "" {
+diff --git a/protocol/warp/extra_edges.go b/protocol/warp/extra_edges.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..08a66f316ded54a227ca321a5230bb4700357e14
+--- /dev/null
++++ b/protocol/warp/extra_edges.go
+@@ -0,0 +1,90 @@
++package warp
++
++import (
++	"net/netip"
++	"regexp"
++
++	"github.com/sagernet/sing-box/option"
++)
++
++// maxExtraEdges bounds what a caller can add: the walk through the candidates is bounded in time, not only in count.
++const maxExtraEdges = 16
++
++// extraEdgePosition is where the extra edges go in the list: after the account's own first two WireGuard candidates and
++// before MASQUE and the built-in alternates. The service curates them (they answered somewhere lately), so they are
++// tried early; the account's own address stays first because it is the fastest where it works.
++const extraEdgePosition = 2
++
++var sniPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
++
++// extraCandidates turns the caller's extra edges into candidates. Everything that is not a literal IP, has an unknown
++// transport or a bad name is skipped (the list comes from the network: it must never be able to break the start), and
++// duplicates are dropped.
++func extraCandidates(edges []option.WARPExtraEdge) []candidate {
++	var out []candidate
++	seen := map[candidate]bool{}
++	for _, edge := range edges {
++		if len(out) >= maxExtraEdges {
++			break
++		}
++		parsed, err := netip.ParseAddr(edge.Address)
++		if err != nil {
++			continue
++		}
++		address := parsed.Unmap().String()
++		var item candidate
++		switch edge.Transport {
++		case "wireguard":
++			port := edge.Port
++			if port == 0 {
++				port = defaultWarpPort
++			}
++			item = wireGuardCandidate(address, port)
++		case "masque-http2", "masque-quic":
++			port := edge.Port
++			if port == 0 {
++				port = 443
++			}
++			kind := transportMasqueHTTP2
++			if edge.Transport == "masque-quic" {
++				kind = transportMasqueQUIC
++			}
++			if edge.SNI != "" && !sniPattern.MatchString(edge.SNI) {
++				continue
++			}
++			item = candidate{transport: kind, address: address, port: port, sni: edge.SNI}
++		default:
++			continue
++		}
++		if seen[item] {
++			continue
++		}
++		seen[item] = true
++		out = append(out, item)
++	}
++	return out
++}
++
++// withExtraEdges inserts the extra candidates into the list at extraEdgePosition, dropping later duplicates of them.
++func withExtraEdges(list []candidate, extra []candidate) []candidate {
++	if len(extra) == 0 {
++		return list
++	}
++	position := extraEdgePosition
++	if position > len(list) {
++		position = len(list)
++	}
++	taken := map[candidate]bool{}
++	for _, item := range extra {
++		taken[item] = true
++	}
++	out := make([]candidate, 0, len(list)+len(extra))
++	out = append(out, list[:position]...)
++	out = append(out, extra...)
++	for _, item := range list[position:] {
++		if !taken[item] {
++			out = append(out, item)
++		}
++	}
++	return out
++}
+diff --git a/protocol/warp/extra_edges_test.go b/protocol/warp/extra_edges_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c75fefbbcb670de1ca6cdbedc73df7191f02c3e
+--- /dev/null
++++ b/protocol/warp/extra_edges_test.go
+@@ -0,0 +1,79 @@
++package warp
++
++import (
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++)
++
++func TestExtraEdgesBecomeCandidatesAndTheBadOnesAreSkipped(t *testing.T) {
++	got := extraCandidates([]option.WARPExtraEdge{
++		{Transport: "wireguard", Address: "188.114.97.5"},
++		{Transport: "wireguard", Address: "188.114.97.5"},                            // a duplicate
++		{Transport: "wireguard", Address: "engage.cloudflareclient.com", Port: 2408}, // not a literal IP: no attempt may need DNS
++		{Transport: "masque-http2", Address: "162.159.198.77", SNI: "www.cloudflare.com"},
++		{Transport: "masque-quic", Address: "::ffff:162.159.198.2", Port: 4443},
++		{Transport: "masque-http2", Address: "162.159.198.9", SNI: "bad name!"},
++		{Transport: "carrier-pigeon", Address: "1.2.3.4"},
++	})
++	want := []candidate{
++		wireGuardCandidate("188.114.97.5", 2408),
++		{transport: transportMasqueHTTP2, address: "162.159.198.77", port: 443, sni: "www.cloudflare.com"},
++		{transport: transportMasqueQUIC, address: "162.159.198.2", port: 4443},
++	}
++	if len(got) != len(want) {
++		t.Fatalf("got %v, want %v", got, want)
++	}
++	for index := range want {
++		if got[index] != want[index] {
++			t.Fatalf("candidate %d: got %v, want %v", index, got[index], want[index])
++		}
++	}
++}
++
++func TestExtraEdgesAreBoundedAndGoAfterTheAccountsOwnFirstTwo(t *testing.T) {
++	var edges []option.WARPExtraEdge
++	for index := 0; index < 40; index++ {
++		edges = append(edges, option.WARPExtraEdge{Transport: "wireguard", Address: "188.114.96.1", Port: uint16(1000 + index)})
++	}
++	extra := extraCandidates(edges)
++	if len(extra) != maxExtraEdges {
++		t.Fatalf("want %d extra edges, got %d", maxExtraEdges, len(extra))
++	}
++	base := withMasque(peerCandidates(accountPeer(), "", 0))
++	list := withExtraEdges(base, extra)
++	if list[0] != base[0] || list[1] != base[1] {
++		t.Fatalf("the account's own first two candidates stay first: %v", list[:3])
++	}
++	for index := 0; index < maxExtraEdges; index++ {
++		if list[extraEdgePosition+index] != extra[index] {
++			t.Fatalf("extra edge %d is not where it belongs: %v", index, list[:extraEdgePosition+index+1])
++		}
++	}
++	if len(list) != len(base)+maxExtraEdges {
++		t.Fatalf("an extra edge is not in the list once: %d vs %d", len(list), len(base)+maxExtraEdges)
++	}
++}
++
++func TestAnExtraEdgeAlreadyInTheListIsNotTriedTwice(t *testing.T) {
++	base := peerCandidates(accountPeer(), "", 0)
++	duplicate := base[len(base)-1] // one of the built-in alternate edges
++	list := withExtraEdges(base, []candidate{duplicate})
++	count := 0
++	for _, item := range list {
++		if item == duplicate {
++			count++
++		}
++	}
++	if count != 1 || list[extraEdgePosition] != duplicate {
++		t.Fatalf("the duplicate must be moved forward, not repeated: %v", list)
++	}
++}
++
++func TestNoExtraEdgesLeavesTheListAlone(t *testing.T) {
++	base := withMasque(peerCandidates(accountPeer(), "", 0))
++	list := withExtraEdges(base, nil)
++	if len(list) != len(base) {
++		t.Fatalf("the list changed: %v", list)
++	}
++}

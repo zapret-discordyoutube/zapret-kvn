@@ -18,7 +18,7 @@ from ..profiles.models import (
     utc_now_iso,
 )
 from ..client_reports.contract import SERVER_IDS_HEADER, parse_server_ids
-from ..network import warp_delivery
+from ..network import warp_delivery, warp_edges
 from ..importer.subscription_http import SERVICE_HEADER, SubscriptionFetchResult, sanitize_fetch_error
 from ..importer.subscription_parser import (
     ParsedSubscription,
@@ -349,6 +349,11 @@ def learn_warp_account(subscription: Subscription, fetch: SubscriptionFetchResul
         from ..constants import DATA_DIR
 
         outcome = warp_delivery.apply(fetch.headers, DATA_DIR)
+        edges = warp_edges.apply(fetch.headers, DATA_DIR)
+        if edges == "written":
+            _LOGGER.info("[warp-entry] список краёв WARP из подписки обновлён")
+        elif edges == "invalid":
+            _LOGGER.warning("[warp-entry] список краёв WARP из подписки не принят")
     except Exception as error:  # noqa: BLE001 - the subscription itself is what matters
         _LOGGER.warning("[warp-entry] аккаунт WARP из подписки не применён: %s", type(error).__name__)
         return warp_delivery.Outcome("invalid", type(error).__name__)

@@ -394,5 +394,45 @@ class WarpMasqueEdgesPatchTests(unittest.TestCase):
         self.assertLess(text.index("apply_exact_patch(source, masque_edges_patch"), text.index("prepare(source, stage"))
 
 
+EXTRA_EDGES = ROOT / "core-patches/warp-entry-extra-edges.patch"
+ANDROID_EXTRA_EDGES = ROOT.parent / "android/core-patches/0031-warp-extra-edges.patch"
+
+
+class WarpExtraEdgesPatchTests(unittest.TestCase):
+    """The `extra_edges` option of the warp endpoint (owner 2026-11-27; Android 0031)."""
+
+    def test_patch_touches_only_the_hop_files_and_its_option(self) -> None:
+        text = EXTRA_EDGES.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(
+            sorted(touched),
+            ["option/warp.go", "protocol/warp/endpoint.go", "protocol/warp/extra_edges.go", "protocol/warp/extra_edges_test.go"],
+        )
+
+    def test_the_option_is_bounded_and_takes_literal_ips_only(self) -> None:
+        text = EXTRA_EDGES.read_text(encoding="utf-8")
+        for needle in ("const maxExtraEdges = 16", "netip.ParseAddr(edge.Address)", "ExtraEdges []WARPExtraEdge",
+                       "const extraEdgePosition = 2"):
+            self.assertIn(needle, text)
+
+    def test_the_code_is_the_same_as_android(self) -> None:
+        if not ANDROID_EXTRA_EDGES.is_file():
+            self.skipTest("android repository is not next to windows")
+        # the two cores differ around endpoint.go (other hunks above it), so the diffs differ in context: the new files are the same
+        android = ANDROID_EXTRA_EDGES.read_text(encoding="utf-8")
+        windows = EXTRA_EDGES.read_text(encoding="utf-8")
+        for needle in ("func extraCandidates(", "func withExtraEdges(", "TestExtraEdgesAreBoundedAndGoAfterTheAccountsOwnFirstTwo",
+                       "candidates = withExtraEdges(candidates, extraCandidates(options.ExtraEdges))"):
+            self.assertEqual(needle in android, needle in windows, needle)
+            self.assertIn(needle, windows)
+
+    def test_builder_applies_the_patch_after_the_edges_patch_and_records_it(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_EXTRA_EDGES_PATCH = "warp-entry-extra-edges.patch"', text)
+        self.assertIn('"warp_extra_edges_patch_sha256"', text)
+        self.assertLess(text.index("apply_exact_patch(source, masque_edges_patch"), text.index("apply_exact_patch(source, extra_edges_patch"))
+        self.assertLess(text.index("apply_exact_patch(source, extra_edges_patch"), text.index("prepare(source, stage"))
+
+
 if __name__ == "__main__":
     unittest.main()

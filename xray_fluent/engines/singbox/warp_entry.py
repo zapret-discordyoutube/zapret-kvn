@@ -25,6 +25,8 @@ from dataclasses import dataclass
 import ipaddress
 from typing import Any, Iterable
 
+from ...network.warp_edges import load as load_extra_edges
+
 WARP_ENTRY_TAG = "kvn-warp-entry"
 
 # A direct outbound used only to register the WARP account (`profile.detour`).  The registration call is a plain Go HTTP
@@ -127,15 +129,19 @@ def apply_entry_hop(
             api["domain_resolver"] = resolver
         outbounds.append(api)
         payload["outbounds"] = outbounds
-        endpoints.append(
-            {
-                "type": "warp",
-                "tag": WARP_ENTRY_TAG,
-                "mtu": WARP_ENTRY_MTU,
-                "amnezia": dict(WARP_ENTRY_NOISE),
-                "profile": {"cache_path": profile_path, "detour": WARP_ENTRY_API_TAG},
-            }
-        )
+        hop: dict[str, Any] = {
+            "type": "warp",
+            "tag": WARP_ENTRY_TAG,
+            "mtu": WARP_ENTRY_MTU,
+            "amnezia": dict(WARP_ENTRY_NOISE),
+            "profile": {"cache_path": profile_path, "detour": WARP_ENTRY_API_TAG},
+        }
+        # Other edges the service sent (header zapret-warp-edges, core patch warp-entry-extra-edges): tried right after the
+        # account's own first two addresses.
+        extra = load_extra_edges(profile_path)
+        if extra:
+            hop["extra_edges"] = extra
+        endpoints.append(hop)
     if endpoints or "endpoints" in payload:
         payload["endpoints"] = endpoints
     return EntryHopResult(chained=chained, rerouted=rerouted)

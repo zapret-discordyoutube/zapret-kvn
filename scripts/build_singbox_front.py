@@ -55,6 +55,10 @@ WARP_MASQUE_SNI_PATCH = "warp-entry-masque-sni.patch"
 # адреса блока MASQUE (HTTP/2 отвечает на 162.159.198.2-50, проверено на настоящем Cloudflare), IPv6, третий блок WireGuard
 # 162.159.195.x и другие порты; после отказа WireGuard пробуется другой блок адресов, а не тот же (тот же код, что Android 0030).
 WARP_MASQUE_EDGES_PATCH = "warp-entry-masque-edges.patch"
+# Владелец 2026-11-27: «WARP должен пробиваться отовсюду». Другие края Cloudflare, которые сервис присылает заголовком подписки
+# `zapret-warp-edges` (network/warp_edges.py), ядро получает опцией `extra_edges` endpoint-а и пробует сразу после двух первых
+# адресов аккаунта: новые адреса и порты находятся без выпуска приложения (тот же код, что Android 0031).
+WARP_EXTRA_EDGES_PATCH = "warp-entry-extra-edges.patch"
 # Signs that upstream already stopped scanning the whole connection table per
 # lookup (sing dev 4ca3bebe: keyed TCP owner lookup; any table cache/single-flight).
 UPSTREAM_OWNER_LOOKUP_MARKERS = ("FindSocketOwner", "nsiGetTCPConnection", "singleflight")
@@ -192,6 +196,9 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     masque_edges_patch = manifest.parent / WARP_MASQUE_EDGES_PATCH
     apply_exact_patch(source, masque_edges_patch, what="другие адреса и порты входа WARP", port_hint=(
         f"перенесите патч {masque_edges_patch.name} на новую версию sing-box"))
+    extra_edges_patch = manifest.parent / WARP_EXTRA_EDGES_PATCH
+    apply_exact_patch(source, extra_edges_patch, what="другие края WARP от сервиса", port_hint=(
+        f"перенесите патч {extra_edges_patch.name} на новую версию sing-box"))
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
     # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
@@ -245,7 +252,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                   "warp_masque_patch_sha256": sha256(masque_patch),
                   "warp_masque_timing_patch_sha256": sha256(masque_timing_patch),
                   "warp_masque_sni_patch_sha256": sha256(masque_sni_patch),
-                  "warp_masque_edges_patch_sha256": sha256(masque_edges_patch)}
+                  "warp_masque_edges_patch_sha256": sha256(masque_edges_patch),
+                  "warp_extra_edges_patch_sha256": sha256(extra_edges_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
 

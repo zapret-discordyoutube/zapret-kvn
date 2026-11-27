@@ -183,5 +183,29 @@ class RealServersEnterThroughTheHopTests(unittest.TestCase):
                 self.assertEqual([], violations(built.singbox_config, sidecar_process_paths=[], sidecar_inbounds=[relay["tag"]]))
 
 
+@requires_real_subscription
+class ExtraEdgesFromTheServiceTests(unittest.TestCase):
+    """The edges the service sent (owner 2026-11-27) reach the hop endpoint of the real plan of every real server."""
+
+    def test_the_edges_file_next_to_the_account_goes_into_the_hop_endpoint(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        edges = [
+            {"transport": "masque-http2", "address": "162.159.198.7", "sni": "www.cloudflare.com"},
+            {"transport": "wireguard", "address": "188.114.97.5", "port": 2408},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            profile = str(Path(directory) / "warp-entry-profile.json")
+            for node in (*nodes_of("vless"), *nodes_of("hysteria2")):
+                with self.subTest(node.scheme):
+                    self.assertNotIn("extra_edges", hop(plan(node, profile=profile)), "no file, no option")
+            Path(profile + ".edges").write_text(json.dumps({"v": 1, "edges": edges}), encoding="utf-8")
+            for node in (*nodes_of("vless"), *nodes_of("hysteria2")):
+                with self.subTest(node.scheme):
+                    self.assertEqual(edges, hop(plan(node, profile=profile))["extra_edges"])
+
+
 if __name__ == "__main__":
     unittest.main()
