@@ -12,6 +12,7 @@ from collections import deque
 import ipaddress
 import json
 import os
+import threading
 from pathlib import Path
 import time
 
@@ -37,7 +38,9 @@ from ..socks_probe import HTTPS_ENDPOINTS, probe_https
 #: is issued; the bot's canary keys were ready in 6-20 s). 25 s, not more: a wrong or expired key must not hold a connect
 #: for over a minute with no word (owner report 2026-11-27, "thinking for a very long time").
 READY_TIMEOUT_SECONDS = 25.0
-PROBE_TIMEOUT_SECONDS = 8.0
+PROBE_TIMEOUT_SECONDS = 3.0
+#: Hard wall time of one probe step (see `_tunnel_ready_steps`).
+PROBE_WALL_SECONDS = 4.0
 RECENT_LINES = 40
 
 
@@ -213,27 +216,39 @@ class NaiveManager(QObject):
         """One HTTPS request through naive to the key's server proves the key is accepted and the path works."""
 
         deadline = time.monotonic() + READY_TIMEOUT_SECONDS
-        last_error = ""
+        errors: dict[str, str] = {}
 
-        def attempt() -> str | None:
-            errors = []
-            for endpoint in HTTPS_ENDPOINTS:
+        def attempt(endpoint) -> str | None:
+            """One probe, never longer than PROBE_WALL_SECONDS: a newer click can only be served between two steps, so a
+            step that ran for half a minute (three endpoints, several socket waits each) held the whole app on
+            «Подключение…» (measured on win10, 2026-11-27: a click on a VLESS server waited 29 s behind a dead key)."""
+            box: list[str | None] = []
+
+            def run() -> None:
                 try:
                     probe_https(port, username=username, password=password, endpoint=endpoint,
                                 timeout=PROBE_TIMEOUT_SECONDS)
-                    return None
+                    box.append(None)
                 except (OSError, ValueError) as exc:
-                    errors.append(f"{endpoint[0]}: {type(exc).__name__}: {exc}")
-            return "; ".join(errors)
+                    box.append(f"{type(exc).__name__}: {exc}")
 
+            thread = threading.Thread(target=run, name="naive-probe", daemon=True)
+            thread.start()
+            thread.join(PROBE_WALL_SECONDS)
+            return box[0] if box else f"no answer in {PROBE_WALL_SECONDS:.0f} s"
+
+        turn = 0
         while time.monotonic() < deadline:
             if self._failed or cancelled() or self._process.state() == QProcess.ProcessState.NotRunning:
                 return False
-            outcome = yield run_in_worker(attempt)
+            endpoint = HTTPS_ENDPOINTS[turn % len(HTTPS_ENDPOINTS)]
+            turn += 1
+            outcome = yield run_in_worker(lambda endpoint=endpoint: attempt(endpoint))
             if outcome is None:
                 return True
-            last_error = str(outcome)
-            yield sleep_ms(1500)
+            errors[endpoint[0]] = str(outcome)
+            yield sleep_ms(1000)
+        last_error = "; ".join(f"{host}: {text}" for host, text in errors.items())
         if not self._failed and not cancelled():
             tail = " | ".join(self._recent)
             self._report("tunnel_readiness", f"No request got through the NaiveProxy server: {last_error}. {tail}")
