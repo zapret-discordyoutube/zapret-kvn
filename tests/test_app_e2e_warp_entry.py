@@ -418,6 +418,8 @@ class _FirewallBlocked(_WarpE2EBase):
     SCHEMES = ("vless",)
     #: UDP remote ports the rule drops.
     UDP_PORTS = "2408,500,4500,1701,854,934"
+    #: One address whose TCP 443 is dropped too ("" = none).
+    TCP_BLOCKED_IP = ""
     _RULE = "kvn-e2e-warp-block"
 
     @classmethod
@@ -435,6 +437,18 @@ class _FirewallBlocked(_WarpE2EBase):
         )
         if added.returncode != 0:
             raise unittest.SkipTest("cannot add the firewall rule (needs an administrator), netsh code " + str(added.returncode))
+        if cls.TCP_BLOCKED_IP:
+            # TCP 443 to ONE address (the account's own MASQUE edge): the rule of a censor that cut an address, not a block
+            subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}-tcp"], capture_output=True)
+            added = subprocess.run(
+                [
+                    "netsh", "advfirewall", "firewall", "add", "rule", f"name={cls._RULE}-tcp", "dir=out", "action=block",
+                    "protocol=TCP", "remoteport=443", f"remoteip={cls.TCP_BLOCKED_IP}", f"program={_SINGBOX.resolve()}",
+                ],
+                capture_output=True,
+            )
+            if added.returncode != 0:
+                raise unittest.SkipTest("cannot add the TCP firewall rule, netsh code " + str(added.returncode))
         shown = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", f"name={cls._RULE}"], capture_output=True)
         if shown.returncode != 0:
             raise AssertionError("the firewall rule that stands for the carrier is not there after it was added")
@@ -447,6 +461,7 @@ class _FirewallBlocked(_WarpE2EBase):
             super().tearDownClass()
         finally:
             subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}"], capture_output=True)
+            subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}-tcp"], capture_output=True)
 
     def _tunnel_answered_at(self, transport: str) -> bool:
         return any("WARP tunnel answered at " + transport in line for line in self.logs)
@@ -628,6 +643,30 @@ class WarpEntryDeadHopE2E(_WarpE2EBase):
         worker.start()
         _spin_until(lambda: not worker.is_alive(), _PAGE_WAIT + 5)
         self.assertEqual(200, result.get("status"), "no page through the server after the fallback\n" + self._evidence())
+
+
+@unittest.skipUnless(_RUNNABLE, _SKIP)
+class WarpEntryMasqueAddressBlockedE2E(_FirewallBlocked):
+    """WireGuard, QUIC and the account's own MASQUE address (162.159.198.2) are dropped: another address of the MASQUE block
+    carries the hop (owner 2026-11-27, "try more WARP address ranges and ports"; core patch warp-entry-masque-edges)."""
+
+    UDP_PORTS = "2408,500,4500,1701,854,934,443"
+    TCP_BLOCKED_IP = "162.159.198.2"
+
+    def test_a_real_page_comes_back_over_another_masque_address_when_the_accounts_own_one_is_cut(self) -> None:
+        self._a_real_page_comes_back()
+        self.assertTrue(self._tunnel_answered_at("masque-http2 edge="), "the tunnel did not come up over another MASQUE edge\n" + self._evidence())
+
+
+@unittest.skipUnless(_RUNNABLE, _SKIP)
+class WarpEntryApiBlockedTunE2E(WarpEntryApiBlockedE2E):
+    """The same as `WarpEntryApiBlockedE2E` in the VPN (TUN) mode, the mode of the owner's PC (2026-11-27): the connect without
+    the hop, the registration through the VPN, the restart and the page must work with the TUN adapter too."""
+
+    TUN = True
+
+    def test_the_app_registers_its_accounts_through_the_vpn_and_restarts_with_the_hop(self) -> None:
+        super().test_the_app_registers_its_accounts_through_the_vpn_and_restarts_with_the_hop()
 
 
 if __name__ == "__main__":

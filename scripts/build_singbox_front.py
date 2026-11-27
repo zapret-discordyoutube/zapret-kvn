@@ -50,6 +50,11 @@ WARP_MASQUE_TIMING_PATCH = "warp-entry-masque-timing.patch"
 # берёт имя сервера любым (проверено на настоящем Cloudflare: www.cloudflare.com, yandex.ru, example.com, QUIC и HTTP/2), поэтому
 # кандидаты идут сначала с подставным именем, HTTP/2 раньше QUIC (тот же код, что Android 0028).
 WARP_MASQUE_SNI_PATCH = "warp-entry-masque-sni.patch"
+# Поле 2026-11-27 (диагностика Android 0.6.65, мобильная сеть): туннель WARP не пропускал трафик ни по WireGuard, ни по MASQUE на
+# адресах 162.159.192.x и 162.159.198.2. Владелец: «попробовать больше диапазонов адресов и портов». Больше кандидатов: другие
+# адреса блока MASQUE (HTTP/2 отвечает на 162.159.198.2-50, проверено на настоящем Cloudflare), IPv6, третий блок WireGuard
+# 162.159.195.x и другие порты; после отказа WireGuard пробуется другой блок адресов, а не тот же (тот же код, что Android 0030).
+WARP_MASQUE_EDGES_PATCH = "warp-entry-masque-edges.patch"
 # Signs that upstream already stopped scanning the whole connection table per
 # lookup (sing dev 4ca3bebe: keyed TCP owner lookup; any table cache/single-flight).
 UPSTREAM_OWNER_LOOKUP_MARKERS = ("FindSocketOwner", "nsiGetTCPConnection", "singleflight")
@@ -184,6 +189,9 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
     masque_sni_patch = manifest.parent / WARP_MASQUE_SNI_PATCH
     apply_exact_patch(source, masque_sni_patch, what="имя сервера в TLS туннеля MASQUE", port_hint=(
         f"перенесите патч {masque_sni_patch.name} на новую версию sing-box"))
+    masque_edges_patch = manifest.parent / WARP_MASQUE_EDGES_PATCH
+    apply_exact_patch(source, masque_edges_patch, what="другие адреса и порты входа WARP", port_hint=(
+        f"перенесите патч {masque_edges_patch.name} на новую версию sing-box"))
     dependency = prepare(source, stage / "dependency", manifest, go)
     assert_process_lookup_patch_needed(source, dependency)
     # Go записывает путь замены модуля в сам exe (go version -m). Абсолютный путь
@@ -236,7 +244,8 @@ def build(lock_path: Path, output: Path, work: Path, go: str) -> dict:
                   "warp_candidates_patch_sha256": sha256(candidates_patch),
                   "warp_masque_patch_sha256": sha256(masque_patch),
                   "warp_masque_timing_patch_sha256": sha256(masque_timing_patch),
-                  "warp_masque_sni_patch_sha256": sha256(masque_sni_patch)}
+                  "warp_masque_sni_patch_sha256": sha256(masque_sni_patch),
+                  "warp_masque_edges_patch_sha256": sha256(masque_edges_patch)}
     output.with_suffix(".build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     return provenance
 

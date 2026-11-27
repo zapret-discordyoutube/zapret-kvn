@@ -1,0 +1,309 @@
+diff --git a/protocol/warp/edge_memory.go b/protocol/warp/edge_memory.go
+index 5e7e4610b19ec00ce3fca6ecaf550c4ddd010260..445ab86c7bb6bd66f98f663d9b386141a9a2a6da 100644
+--- a/protocol/warp/edge_memory.go
++++ b/protocol/warp/edge_memory.go
+@@ -42,8 +42,15 @@ func loadEdgeMemory(path string) (candidate, bool) {
+ 	if fields := strings.Fields(string(content)); len(fields) > 0 {
+ 		if kind, ok := parseTransport(fields[0]); ok {
+ 			remembered := candidate{transport: kind}
+-			if len(fields) > 1 && strings.HasPrefix(fields[1], "sni=") {
+-				remembered.sni = strings.TrimPrefix(fields[1], "sni=")
++			for _, field := range fields[1:] {
++				switch {
++				case strings.HasPrefix(field, "sni="):
++					remembered.sni = strings.TrimPrefix(field, "sni=")
++				case strings.HasPrefix(field, "edge="):
++					if _, err := netip.ParseAddr(strings.TrimPrefix(field, "edge=")); err == nil {
++						remembered.address, remembered.port = strings.TrimPrefix(field, "edge="), 443
++					}
++				}
+ 			}
+ 			return remembered, true
+ 		}
+diff --git a/protocol/warp/recovery.go b/protocol/warp/recovery.go
+index d092cdc4964c8bddcdd9880724627107245baebb..9934f7f22a9e908cf43babb4907b44c6436ec191 100644
+--- a/protocol/warp/recovery.go
++++ b/protocol/warp/recovery.go
+@@ -5,6 +5,7 @@ import (
+ 	"net"
+ 	"net/netip"
+ 	"strconv"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -46,10 +47,15 @@ func wireGuardCandidate(address string, port uint16) candidate {
+ // describe is the candidate as it appears in the log.
+ func (c candidate) describe() string {
+ 	if c.transport != transportWireGuard {
++		text := c.transport.String()
++		if c.address != "" {
++			// a MASQUE edge other than the account's own (a public Cloudflare address, not the user's server)
++			text += " edge=" + c.address
++		}
+ 		if c.sni != "" {
+-			return c.transport.String() + " sni=" + c.sni
++			text += " sni=" + c.sni
+ 		}
+-		return c.transport.String()
++		return text
+ 	}
+ 	return net.JoinHostPort(c.address, strconv.Itoa(int(c.port)))
+ }
+@@ -69,6 +75,31 @@ var alternateEdges = []candidate{
+ 	wireGuardCandidate("188.114.99.1", 4500),
+ 	wireGuardCandidate("188.114.96.1", 1701),
+ 	wireGuardCandidate("188.114.98.1", 854),
++	// More ranges and ports (owner 2026-11-27, "try more WARP address ranges and ports", after a mobile network let the
++	// WireGuard handshake through on 162.159.192.x and then carried nothing): 162.159.195.1 is the third block the WARP
++	// config generators use, the 188.114.96-99 ports differ again, and the IPv6 edge (2606:4700:d0::a29f:c001/c002) is the
++	// address family a mobile network filters least. A network without IPv6 refuses those sockets at once.
++	wireGuardCandidate("162.159.195.1", 2408),
++	wireGuardCandidate("188.114.97.1", 934),
++	wireGuardCandidate("188.114.96.1", 4500),
++	wireGuardCandidate("2606:4700:d0::a29f:c001", 2408),
++	wireGuardCandidate("2606:4700:d0::a29f:c002", 500),
++}
++
++// alternateRange names the block an address belongs to ("162.159", "188.114", "2606:4700:d0"): a censor that cut one block
++// of WARP addresses has not necessarily cut the others, so a WireGuard candidate in another block is not a retry of the
++// one that failed (see rotationOrder).
++func alternateRange(address string) string {
++	parsed, err := netip.ParseAddr(address)
++	if err != nil {
++		return address
++	}
++	if parsed.Is4() {
++		octets := parsed.As4()
++		return strconv.Itoa(int(octets[0])) + "." + strconv.Itoa(int(octets[1]))
++	}
++	groups := strings.Split(parsed.StringExpanded(), ":")
++	return strings.Join(groups[:3], ":")
+ }
+ 
+ // peerCandidates is the short list of places to dial the WARP peer, best first. All are literal IPs when the profile has an
+diff --git a/protocol/warp/recovery_test.go b/protocol/warp/recovery_test.go
+index 90eaa885b6019ac828a2389dbafe7aa8cf01fba8..737da6ff140e534eff8750f1c27e351fc08212e2 100644
+--- a/protocol/warp/recovery_test.go
++++ b/protocol/warp/recovery_test.go
+@@ -28,12 +28,18 @@ func TestPeerCandidatesStartWithTheAccountsOwnAddressThenOtherWarpEdges(t *testi
+ 		{"188.114.99.1", 4500, transportWireGuard, ""},
+ 		{"188.114.96.1", 1701, transportWireGuard, ""},
+ 		{"188.114.98.1", 854, transportWireGuard, ""},
++		// more ranges and ports (owner 2026-11-27): the third block, other ports of the second, the IPv6 edge
++		{"162.159.195.1", 2408, transportWireGuard, ""},
++		{"188.114.97.1", 934, transportWireGuard, ""},
++		{"188.114.96.1", 4500, transportWireGuard, ""},
++		{"2606:4700:d0::a29f:c001", 2408, transportWireGuard, ""},
++		{"2606:4700:d0::a29f:c002", 500, transportWireGuard, ""},
+ 	}
+ 	if !reflect.DeepEqual(got, want) {
+ 		t.Fatalf("got %v, want %v", got, want)
+ 	}
+-	if len(got) != startAttempts {
+-		t.Fatalf("want %d attempts, got %v", startAttempts, got)
++	if len(got) != 3+len(alternateEdges) {
++		t.Fatalf("want %d attempts, got %v", 3+len(alternateEdges), got)
+ 	}
+ 	// the censor blocks by address and by port: the alternates must change both
+ 	addresses, ports := map[string]bool{}, map[uint16]bool{}
+@@ -65,7 +71,7 @@ func TestProfileWithoutV4StartsFromTheHostNameAndEndsOnLiteralEdges(t *testing.T
+ 	peer.Endpoint.Host = "engage.cloudflareclient.com:2408"
+ 	peer.Endpoint.Ports = []int{2408}
+ 	got := peerCandidates(peer, "", 0)
+-	if len(got) != startAttempts || got[0].address != "engage.cloudflareclient.com" || got[len(got)-1].address != alternateEdges[len(alternateEdges)-1].address {
++	if len(got) != 3+len(alternateEdges) || got[0].address != "engage.cloudflareclient.com" || got[len(got)-1].address != alternateEdges[len(alternateEdges)-1].address {
+ 		t.Fatalf("got %v", got)
+ 	}
+ }
+diff --git a/protocol/warp/transport.go b/protocol/warp/transport.go
+index b01436d6302309bfee4a770f0e48a690dfcc215e..452b0f1e68a7d43246b435440ec768f806682887 100644
+--- a/protocol/warp/transport.go
++++ b/protocol/warp/transport.go
+@@ -73,6 +73,16 @@ const (
+ // name matches the address it is dialed on), a Russian one later.
+ var masqueDecoys = []string{"www.cloudflare.com", "yandex.ru"}
+ 
++// masqueEdgeV6 is the IPv6 address of Cloudflare's MASQUE edge, the one every account lists as endpoint_v6.
++const masqueEdgeV6 = "2606:4700:103::2"
++
++// masqueEdgeAlternate and masqueEdgeFarAlternate are other addresses of the 162.159.198.0/24 block that answered MASQUE over
++// HTTP/2 on the real edge (2026-11-27, host: .2 .3 .4 .5 .6 .10 .20 .50).
++const (
++	masqueEdgeAlternate    = "162.159.198.3"
++	masqueEdgeFarAlternate = "162.159.198.50"
++)
++
+ // withMasque puts the MASQUE candidates right after the account's own WireGuard address and its second port: WireGuard
+ // stays the first choice (it is the fastest), but a network that blocks it is reached after two failed starts, not after
+ // the whole list of alternate edges. HTTP/2 (TCP 443) comes before QUIC (UDP is what mobile networks throttle first), and
+@@ -84,9 +94,17 @@ func withMasque(list []candidate) []candidate {
+ 	masqueList := []candidate{
+ 		{transport: transportMasqueHTTP2, sni: masqueDecoys[0]},
+ 		{transport: transportMasqueQUIC, sni: masqueDecoys[0]},
++		// Other MASQUE edges (owner 2026-11-27, "try more WARP address ranges"; checked against the real edge: HTTP/2 answers on
++		// 162.159.198.2-50 alike, QUIC on .1 and .2 only): a network that cut one address has not cut the block, and
++		// the IPv6 edge is the family a mobile network filters least (a network without IPv6 refuses the socket at once).
++		// They come before the other TLS names: five names on the same cut address would use the whole start budget.
++		{transport: transportMasqueHTTP2, address: masqueEdgeAlternate, port: 443, sni: masqueDecoys[0]},
++		{transport: transportMasqueHTTP2, address: masqueEdgeV6, port: 443, sni: masqueDecoys[0]},
++		{transport: transportMasqueQUIC, address: masqueEdgeV6, port: 443, sni: masqueDecoys[0]},
+ 		{transport: transportMasqueHTTP2},
+ 		{transport: transportMasqueQUIC},
+ 		{transport: transportMasqueHTTP2, sni: masqueDecoys[1]},
++		{transport: transportMasqueHTTP2, address: masqueEdgeFarAlternate, port: 443, sni: masqueDecoys[0]},
+ 	}
+ 	out := make([]candidate, 0, len(list)+len(masqueList))
+ 	out = append(out, list[:2]...)
+@@ -106,6 +124,8 @@ func (w *Endpoint) buildMasque(router adapter.Router, tag string, current candid
+ 	built, err := masque.NewOutbound(ctx, router, w.logger, tag, option.MASQUEOutboundOptions{
+ 		DialerOptions:                     w.options.DialerOptions,
+ 		UseHTTP2:                          current.transport == transportMasqueHTTP2,
++		Address:                           current.address,
++		Port:                              current.port,
+ 		Profile:                           profile,
+ 		MASQUEOutboundTLSOptionsContainer: option.MASQUEOutboundTLSOptionsContainer{TLS: tlsOptions(current)},
+ 		// Without a delay a network that refuses the socket at once (no route, a firewall) makes the tunnel retry in a
+@@ -303,11 +323,20 @@ func (w *Endpoint) rotate() {
+ 
+ // rotationOrder lists the candidate positions to try after position current: the ones whose transport has not failed
+ // first, in list order, then the demoted ones (a transport that failed once may work again on another source port).
++//
++// One exception (owner 2026-11-27, "try more WARP address ranges and ports"): a demoted WireGuard candidate in ANOTHER block
++// of addresses than the one that just failed counts as fresh. A censor that cut 162.159.192.x has not necessarily cut
++// 188.114.x or the IPv6 edge, and those candidates were never reached in the field because the five MASQUE candidates
++// ahead of them used the whole start budget. They go after the MASQUE candidates that precede them in the list, not before.
+ func rotationOrder(list []candidate, current int, demoted map[transport]bool) []int {
+ 	var fresh, rest []int
++	failed := list[current]
+ 	for step := 1; step < len(list); step++ {
+ 		index := (current + step) % len(list)
+-		if demoted[list[index].transport] {
++		candidateAt := list[index]
++		otherBlock := candidateAt.transport == transportWireGuard && failed.transport == transportWireGuard &&
++			alternateRange(candidateAt.address) != alternateRange(failed.address)
++		if demoted[candidateAt.transport] && !otherBlock {
+ 			rest = append(rest, index)
+ 		} else {
+ 			fresh = append(fresh, index)
+diff --git a/protocol/warp/transport_test.go b/protocol/warp/transport_test.go
+index bd847d197bb2437f100341cb17199f60f87d9adf..f56a272224360da03fe037572106cc57628145b2 100644
+--- a/protocol/warp/transport_test.go
++++ b/protocol/warp/transport_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"reflect"
++	"strings"
+ 	"sync/atomic"
+ 	"testing"
+ 	"time"
+@@ -19,8 +20,8 @@ import (
+ 
+ func TestMasqueCandidatesFollowTheAccountsOwnWireGuardAddressAndItsSecondPortAndGoHTTP2WithADecoyNameFirst(t *testing.T) {
+ 	got := withMasque(peerCandidates(accountPeer(), "", 0))
+-	if len(got) != startAttempts+5 {
+-		t.Fatalf("want %d candidates, got %v", startAttempts+5, got)
++	if len(got) != 3+len(alternateEdges)+9 {
++		t.Fatalf("want %d candidates, got %v", 3+len(alternateEdges)+9, got)
+ 	}
+ 	want := []struct {
+ 		kind transport
+@@ -28,7 +29,10 @@ func TestMasqueCandidatesFollowTheAccountsOwnWireGuardAddressAndItsSecondPortAnd
+ 	}{
+ 		{transportWireGuard, ""}, {transportWireGuard, ""},
+ 		{transportMasqueHTTP2, "www.cloudflare.com"}, {transportMasqueQUIC, "www.cloudflare.com"},
++		// another address of the MASQUE block, then the IPv6 edge, then the other TLS names on the account's own address
++		{transportMasqueHTTP2, "www.cloudflare.com"}, {transportMasqueHTTP2, "www.cloudflare.com"}, {transportMasqueQUIC, "www.cloudflare.com"},
+ 		{transportMasqueHTTP2, ""}, {transportMasqueQUIC, ""}, {transportMasqueHTTP2, "yandex.ru"},
++		{transportMasqueHTTP2, "www.cloudflare.com"},
+ 		{transportWireGuard, ""}, {transportWireGuard, ""}, {transportWireGuard, ""}, {transportWireGuard, ""}, {transportWireGuard, ""}, {transportWireGuard, ""},
+ 	}
+ 	for index, expected := range want {
+@@ -60,21 +64,81 @@ func TestTransportNamesRoundTrip(t *testing.T) {
+ 	}
+ }
+ 
+-func TestRotationAfterAWireGuardFailureTriesMasqueBeforeAnotherWireGuardPort(t *testing.T) {
++func TestRotationAfterAWireGuardFailureTriesMasqueBeforeAnotherWireGuardPortOfTheSameBlock(t *testing.T) {
+ 	list := withMasque(peerCandidates(accountPeer(), "", 0))
+ 	order := rotationOrder(list, 0, map[transport]bool{transportWireGuard: true})
+ 	if len(order) != len(list)-1 {
+ 		t.Fatalf("every other candidate is a next one: %v", order)
+ 	}
+-	for _, index := range order[:5] {
++	// the account's own block (162.159.192.x) failed: its other ports go last, MASQUE and the OTHER blocks go first
++	failedBlock := alternateRange(list[0].address)
++	seenMasque := false
++	for _, index := range order {
++		candidateAt := list[index]
++		if candidateAt.transport != transportWireGuard {
++			seenMasque = true
++			continue
++		}
++		sameBlock := alternateRange(candidateAt.address) == failedBlock
++		if sameBlock && !seenMasque {
++			t.Fatalf("MASQUE must come before another port of the failed block: %v", order)
++		}
++	}
++	tail := order[len(order)-4:]
++	for _, index := range tail {
++		if list[index].transport != transportWireGuard || alternateRange(list[index].address) != failedBlock {
++			t.Fatalf("only the failed block's own candidates are left at the end: %v", order)
++		}
++	}
++}
++
++func TestRotationAfterAWireGuardFailureReachesTheOtherBlocksAndIPv6(t *testing.T) {
++	list := withMasque(peerCandidates(accountPeer(), "", 0))
++	order := rotationOrder(list, 0, map[transport]bool{transportWireGuard: true})
++	blocks := map[string]bool{}
++	for _, index := range order {
+ 		if list[index].transport == transportWireGuard {
+-			t.Fatalf("MASQUE must come first after a WireGuard failure: %v", order)
++			blocks[alternateRange(list[index].address)] = true
++		}
++	}
++	for _, want := range []string{"162.159", "188.114", "2606:4700:00d0"} {
++		if !blocks[want] {
++			t.Fatalf("block %s is never tried: %v", want, blocks)
+ 		}
+ 	}
+-	for _, index := range order[5:] {
++	// every block other than the failed one is ahead of the failed block's repeats
++	firstRepeat := -1
++	lastOther := -1
++	for position, index := range order {
+ 		if list[index].transport != transportWireGuard {
+-			t.Fatalf("only the demoted WireGuard candidates are left at the end: %v", order)
++			continue
+ 		}
++		if alternateRange(list[index].address) == alternateRange(list[0].address) {
++			if firstRepeat < 0 {
++				firstRepeat = position
++			}
++		} else {
++			lastOther = position
++		}
++	}
++	if lastOther > firstRepeat {
++		t.Fatalf("another block comes after a repeat of the failed one: %v", order)
++	}
++}
++
++func TestMemoryHoldsAMasqueEdgeOtherThanTheAccountsOwn(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "profile.json.edge")
++	edge := candidate{transport: transportMasqueQUIC, address: masqueEdgeV6, port: 443, sni: "www.cloudflare.com"}
++	if err := saveEdgeMemory(path, edge); err != nil {
++		t.Fatal(err)
++	}
++	content, _ := os.ReadFile(path)
++	if !strings.Contains(string(content), "edge=2606:4700:103::2") {
++		t.Fatalf("the edge is not in the memory file: %q", content)
++	}
++	got, ok := loadEdgeMemory(path)
++	if !ok || got != edge {
++		t.Fatalf("got %v %v, want %v", got, ok, edge)
+ 	}
+ }
+ 

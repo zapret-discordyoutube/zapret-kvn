@@ -56,25 +56,15 @@ class HopHealthTests(unittest.TestCase):
         notices = [health.observe(line) for line in (RETRY_2408, RETRY_500, RETRY_2408, RETRY_500)]
         self.assertEqual([None, None, None, TUNNEL_DOWN], notices)
 
-    def test_the_hop_is_given_up_when_four_candidates_stay_silent_and_not_before(self) -> None:
-        health = HopHealth()
-        states = []
-        for line in CANDIDATES_SILENT:
-            self.assertIsNone(health.observe(line), "a silent candidate is counted, not announced")
-            states.append(health.dead)
-        self.assertEqual([False, False, False, True, True], states)
-
     def test_the_start_form_of_a_silent_masque_candidate_is_counted_and_a_wireguard_port_is_not(self) -> None:
         health = HopHealth()
         health.observe(START_FORM_SILENT)
         health.observe(RETRY_2408)
         self.assertEqual(1, health.candidates_failed)
         self.assertEqual(1, health.handshake_retries)
-
-    def test_a_masque_that_answers_after_one_silent_candidate_is_not_given_up(self) -> None:
-        health = HopHealth()
-        health.observe(CANDIDATES_SILENT[1])
-        self.assertFalse(health.dead)
+        for line in CANDIDATES_SILENT:
+            self.assertIsNone(health.observe(line), "a silent candidate is counted, not announced")
+        self.assertEqual(6, health.candidates_failed)
 
     def test_a_slow_start_is_not_a_warning(self) -> None:
         health = HopHealth()

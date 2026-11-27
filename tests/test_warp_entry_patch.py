@@ -354,5 +354,45 @@ class WarpMasqueSniPatchTests(unittest.TestCase):
         self.assertLess(text.index("apply_exact_patch(source, masque_sni_patch"), text.index("prepare(source, stage"))
 
 
+MASQUE_EDGES = ROOT / "core-patches/warp-entry-masque-edges.patch"
+ANDROID_MASQUE_EDGES = ROOT.parent / "android/core-patches/0030-warp-more-edges.patch"
+
+
+class WarpMasqueEdgesPatchTests(unittest.TestCase):
+    """More MASQUE and WireGuard edges, another block first after a failure (owner 2026-11-27; Android 0030)."""
+
+    def test_patch_touches_only_the_hop_files(self) -> None:
+        text = MASQUE_EDGES.read_text(encoding="utf-8")
+        touched = re.findall(r"^diff --git a/(\S+) b/", text, re.MULTILINE)
+        self.assertEqual(sorted(touched), sorted(f for f in MASQUE_SNI_FILES if f != "protocol/warp/edge_memory_test.go"))
+        self.assertEqual(len(re.findall(r"^index [0-9a-f]{40}\.\.[0-9a-f]{40}", text, re.MULTILINE)), len(touched))
+
+    def test_the_edges_that_answered_the_real_cloudflare_are_the_ones_listed(self) -> None:
+        text = MASQUE_EDGES.read_text(encoding="utf-8")
+        # checked on the host against the real edge on 2026-11-27: HTTP/2 answers on 162.159.198.2-50, QUIC on .1 and .2 only
+        for needle in ('masqueEdgeAlternate    = "162.159.198.3"', 'masqueEdgeFarAlternate = "162.159.198.50"',
+                       'const masqueEdgeV6 = "2606:4700:103::2"', 'wireGuardCandidate("162.159.195.1", 2408)',
+                       'wireGuardCandidate("2606:4700:d0::a29f:c001", 2408)'):
+            self.assertIn(needle, text)
+        self.assertNotIn('transport: transportMasqueQUIC, address: masqueEdgeAlternate', text)
+
+    def test_another_block_is_tried_before_a_repeat_of_the_failed_one(self) -> None:
+        text = MASQUE_EDGES.read_text(encoding="utf-8")
+        self.assertIn("func alternateRange(address string) string", text)
+        self.assertIn("alternateRange(candidateAt.address) != alternateRange(failed.address)", text)
+
+    def test_the_code_is_the_same_as_android(self) -> None:
+        if not ANDROID_MASQUE_EDGES.is_file():
+            self.skipTest("android repository is not next to windows")
+        self.assertEqual(ANDROID_MASQUE_EDGES.read_text(encoding="utf-8"), MASQUE_EDGES.read_text(encoding="utf-8"))
+
+    def test_builder_applies_the_patch_after_the_sni_patch_and_records_it(self) -> None:
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('WARP_MASQUE_EDGES_PATCH = "warp-entry-masque-edges.patch"', text)
+        self.assertIn('"warp_masque_edges_patch_sha256"', text)
+        self.assertLess(text.index("apply_exact_patch(source, masque_sni_patch"), text.index("apply_exact_patch(source, masque_edges_patch"))
+        self.assertLess(text.index("apply_exact_patch(source, masque_edges_patch"), text.index("prepare(source, stage"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,11 +33,6 @@ NOT_READY_LIMIT = 5
 #: handshakes is the tunnel given up (a start that needs two or three retries is slow, not blocked).
 RETRY_LIMIT = 4
 LOOKUP_LIMIT = 3
-#: Candidates (WireGuard ports and MASQUE transports) that did not answer before the hop is given up: the owner's mobile
-#: network 2026-11-27 (Android 0.6.65) let all five MASQUE candidates time out and the connect was refused.  A working
-#: MASQUE answers on the first or second candidate, so four silent ones mean the network carries none of them.
-CANDIDATE_LIMIT = 4
-
 TUNNEL_DOWN = (
     "Вход через WARP не поднимается: туннель WARP не отвечает. Возможно, сеть блокирует UDP-порты WARP "
     "(2408, 500, 1701, 4500). Выключите вход через WARP или смените сеть."
@@ -58,11 +53,6 @@ class HopHealth:
     registration_errors: int = 0
     candidates_failed: int = 0
     _told: set[str] = field(default_factory=set)
-
-    @property
-    def dead(self) -> bool:
-        """The tunnel carries nothing over any candidate: the connect should go on without the hop."""
-        return self.candidates_failed >= CANDIDATE_LIMIT
 
     def observe(self, line: str) -> str | None:
         """Count one core line; returns a message for the user the first time a limit is crossed."""

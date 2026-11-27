@@ -436,8 +436,11 @@ _WARP_MASQUE_BUDGET_S = 12.0
 #: After a start with the WARP entry that carried nothing the entry is not tried on the same network for this long.
 _WARP_PAUSE_S = 600.0
 #: Traffic through the entry is checked this long after the connect, then once more this much later; two silent checks give it up.
-_WARP_PROBE_FIRST_S = 20.0
+_WARP_PROBE_FIRST_S = 25.0
 _WARP_PROBE_RETRY_S = 12.0
+#: Silent checks that give the entry up: 25 s, 37 s and 49 s after the connect, so that the rotation through the other
+#: address blocks and ports (core patch warp-entry-masque-edges) has the time it needs on a network that cuts some of them.
+_WARP_PROBE_FAILURES = 3
 _WARP_SUMMARY_MS = 40_000
 
 class AppController(QObject):
@@ -1693,7 +1696,7 @@ class AppController(QObject):
             return
         self._warp_probe_failures += 1
         self._log(f"[warp-entry] проверка: трафик через вход WARP не прошёл ({self._warp_probe_failures})")
-        if self._warp_probe_failures >= 2:
+        if self._warp_probe_failures >= _WARP_PROBE_FAILURES:
             if not self._warp_dead_handled:
                 self._warp_dead_handled = True
                 self._warp_hop_gave_up()
@@ -5087,9 +5090,6 @@ class AppController(QObject):
             if notice:
                 self._log(f"[warp-entry] {notice}")
                 self.status.emit("warning-long", notice)
-            if self._warp_health is not None and self._warp_health.dead and not self._warp_dead_handled:
-                self._warp_dead_handled = True
-                self._warp_hop_gave_up()
         if "DNS_FALLBACK server=" in line:
             self._report_dns_fallback(line)
         health_log = engine == "hysteria" and re.match(
