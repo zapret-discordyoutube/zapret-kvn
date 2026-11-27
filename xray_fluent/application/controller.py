@@ -166,6 +166,7 @@ from .runtime import (
 )
 from .signature_service import SingboxPlanFacts
 from .subscription_service import (
+    reconnect_after_update,
     AWAITING_NAME,
     apply_not_modified,
     hide_subscription_node as hide_subscription_node_operation,
@@ -1392,7 +1393,8 @@ class AppController(QObject):
         if "youtube" not in self.slot_runtime.active_slots:
             return False
         settings = self.state.settings
-        if not settings.auto_switch_enabled or not getattr(settings, "auto_switch_low_speed_enabled", True):
+        if (not settings.auto_switch_enabled or not getattr(settings, "auto_switch_low_speed_enabled", True)
+                or not getattr(settings, "auto_reconnect_enabled", True)):
             return True
         now = time.monotonic()
         current = self.slot_runtime.server_of("youtube")
@@ -4021,12 +4023,17 @@ class AppController(QObject):
             QTimer.singleShot(0, self._start_country_ip_resolution)
             self.nodes_changed.emit(self.state.nodes)
             self.selection_changed.emit(self.selected_node)
-            if result.reconnect_required and (self.connected or self._desired_connected):
+            active = self.connected or self._desired_connected
+            if reconnect_after_update(self.state.settings, result, active):
                 if self.state.selected_node_id is None and not self._can_connect_without_selected_node():
                     self._desired_connected = False
                 else:
                     self._desired_connected = True
                 self._request_transition("subscription updated")
+            elif result.reconnect_required and active:
+                # The master switch is off: the connection stays as it is, the new data waits for the next connect.
+                self._log("[subscription] the selected server changed, the connection is kept (automatic reconnection is off)")
+                self.status.emit("info", "Подписка обновлена: сервер изменился, подключение сохранено. Переподключитесь, когда удобно")
             QTimer.singleShot(500, self._start_country_ip_resolution)
         self._pending_subscription_additions.pop(subscription.id, None)
         self.subscriptions_changed.emit(self.state.subscriptions)
@@ -5338,6 +5345,7 @@ class AppController(QObject):
             and not self._desired_connected
             and not self._transition_active
             and self.state.settings.reconnect_on_network_change
+            and self.state.settings.auto_reconnect_enabled
         ):
             # Прошлое подключение не удалось без сети: сеть появилась — пробуем снова.
             self._retry_connect_on_network = False
@@ -5364,7 +5372,8 @@ class AppController(QObject):
         server_family.MEMORY.reset()
         if (self.connected and self._desired_connected
                 and not self._transition_active and not self._disconnecting
-                and self.state.settings.reconnect_on_network_change):
+                and self.state.settings.reconnect_on_network_change
+                and self.state.settings.auto_reconnect_enabled):
             self._desired_connected = True
             self._request_transition("network changed")
 

@@ -88,7 +88,10 @@ def on_xray_update_worker_done(controller: AppController, result: XrayCoreUpdate
 
     if controller._reconnect_after_xray_update:
         controller._reconnect_after_xray_update = False
-        controller._desired_connected = True
-        controller._request_transition("core update reconnect")
+        if getattr(controller.state.settings, "auto_reconnect_enabled", True):
+            controller._desired_connected = True
+            controller._request_transition("core update reconnect")
+        else:
+            controller._log("[core-update] the core was updated; the connection is kept until you reconnect")
 
     controller._xray_update_silent = False

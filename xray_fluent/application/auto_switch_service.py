@@ -95,7 +95,7 @@ def check_auto_switch(
     A slow but working server is never switched.
     """
     settings = controller.state.settings
-    if not settings.auto_switch_enabled:
+    if not settings.auto_switch_enabled or not settings.auto_reconnect_enabled:
         return
     if not controller.connected or controller._switching or controller._reconnecting:
         return

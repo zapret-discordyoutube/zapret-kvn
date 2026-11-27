@@ -329,7 +329,7 @@ def gate_reason(controller: AppController, now: float) -> str | None:
     """Почему умная проверка сейчас недопустима (None — можно)."""
 
     settings = controller.state.settings
-    if not settings.auto_switch_enabled:
+    if not settings.auto_switch_enabled or not getattr(settings, "auto_reconnect_enabled", True):
         return "авто-переключение выключено"
     if not getattr(settings, "auto_switch_low_speed_enabled", True):
         return "переключение при низкой скорости выключено"

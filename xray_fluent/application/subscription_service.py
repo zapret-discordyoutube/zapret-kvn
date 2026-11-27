@@ -228,6 +228,16 @@ def reconcile_subscription(
     return ReconcileOutcome(result, selected_changed, selected_removed)
 
 
+def reconnect_after_update(settings, result, active: bool) -> bool:
+    """Whether a finished subscription refresh restarts the running connection.
+
+    A refresh that changed or removed the SELECTED server needs a restart to take effect, but a restart drops every live
+    connection (a game session, a call): with the master switch «Автоматическое переподключение» off it never happens by
+    itself, the new data applies at the next connection the user makes.
+    """
+    return bool(result.reconnect_required and active and getattr(settings, "auto_reconnect_enabled", True))
+
+
 def remove_subscription(state: AppState, subscription_id: str, *, keep_nodes: bool) -> bool:
     subscription = next((item for item in state.subscriptions if item.id == subscription_id), None)
     if subscription is None:

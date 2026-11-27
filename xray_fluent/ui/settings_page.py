@@ -248,6 +248,12 @@ class SettingsPage(ScrollablePage):
             "Роутер, принтеры и другие домашние устройства открываются без прокси",
             parent=network_group,
         )
+        self.auto_reconnect_card = SwitchSettingCard(
+            FIF.PIN, "Автоматическое переподключение",
+            "Выключено: приложение само ничего не перезапускает и не меняет сервер (обновление подписки, смена сети, "
+            "авто-переключение, ротация). Подключение держится, пока вы не переподключитесь сами",
+            parent=network_group,
+        )
         self.reconnect_card = SwitchSettingCard(
             FIF.SYNC, "Переподключение при смене сети",
             "Восстанавливать подключение после перехода на другой Wi-Fi или кабель",
@@ -273,6 +279,7 @@ class SettingsPage(ScrollablePage):
         )
 
         network_group.addSettingCard(self.proxy_bypass_lan_card)
+        network_group.addSettingCard(self.auto_reconnect_card)
         network_group.addSettingCard(self.reconnect_card)
         network_group.addSettingCard(self.server_ipv6_card)
         network_group.addSettingCard(self.warp_entry_card)
@@ -643,6 +650,7 @@ class SettingsPage(ScrollablePage):
         self.subscriptions_auto_update_card.checkedChanged.connect(self._auto_save)
         self.subscriptions_startup_check_card.checkedChanged.connect(self._auto_save)
         self.subscriptions_interval_card.spin.valueChanged.connect(self._auto_save)
+        self.auto_reconnect_card.checkedChanged.connect(self._auto_save)
         self.reconnect_card.checkedChanged.connect(self._auto_save)
         self.server_ipv6_card.checkedChanged.connect(self._auto_save)
         self.warp_entry_card.checkedChanged.connect(self._auto_save)
@@ -716,6 +724,7 @@ class SettingsPage(ScrollablePage):
         self.subscriptions_interval_card.spin.setValue(
             clamp_subscriptions_check_interval(settings.subscriptions_check_interval_min)
         )
+        self.auto_reconnect_card.setChecked(settings.auto_reconnect_enabled)
         self.reconnect_card.setChecked(settings.reconnect_on_network_change)
         self.server_ipv6_card.setChecked(settings.server_ipv6_first)
         self.warp_entry_card.setChecked(settings.warp_entry_hop)
@@ -882,6 +891,7 @@ class SettingsPage(ScrollablePage):
         data.subscriptions_auto_update = self.subscriptions_auto_update_card.isChecked()
         data.subscriptions_check_on_startup = self.subscriptions_startup_check_card.isChecked()
         data.subscriptions_check_interval_min = int(self.subscriptions_interval_card.spin.value())
+        data.auto_reconnect_enabled = self.auto_reconnect_card.isChecked()
         data.reconnect_on_network_change = self.reconnect_card.isChecked()
         data.server_ipv6_first = self.server_ipv6_card.isChecked()
         data.warp_entry_hop = self.warp_entry_card.isChecked()

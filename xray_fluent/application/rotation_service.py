@@ -87,7 +87,7 @@ def build_rotation_plan(
     молча не сработало бы.
     """
 
-    if not settings.rotation_enabled:
+    if not settings.rotation_enabled or not getattr(settings, "auto_reconnect_enabled", True):
         return None
 
     candidates = [

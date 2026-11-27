@@ -597,6 +597,10 @@ class AppSettings:
     # пустой = выключено. Ключи более новой сборки сохраняются при записи.
     masking: dict[str, Any] = field(default_factory=dict)
     launch_on_startup: bool = False
+    #: Master switch of everything that reconnects or switches servers BY ITSELF (owner request 2026-11-27: "completely
+    #: disable server reconnection"; a WoW session was dropped every hour). Off: a subscription refresh keeps the running
+    #: connection, a network change, auto-switch, rotation and a core update do not restart it. Manual actions are never gated.
+    auto_reconnect_enabled: bool = True
     reconnect_on_network_change: bool = True
     server_ipv6_first: bool = True  # к VPN-серверу сначала по IPv6 (если у сети есть IPv6), быстрый откат на IPv4
     warp_entry_hop: bool = False  # вход через Cloudflare WARP: устройство -> WARP -> наш сервер (решение владельца 2026-11-25)
@@ -693,6 +697,7 @@ class AppSettings:
             "lan_proxy_enabled": self.lan_proxy_enabled,
             "masking": dict(self.masking),
             "launch_on_startup": self.launch_on_startup,
+            "auto_reconnect_enabled": self.auto_reconnect_enabled,
             "reconnect_on_network_change": self.reconnect_on_network_change,
             "server_ipv6_first": self.server_ipv6_first,
             "warp_entry_hop": self.warp_entry_hop,
@@ -775,6 +780,7 @@ class AppSettings:
             lan_proxy_enabled=bool(data.get("lan_proxy_enabled", False)),
             masking=dict(data["masking"]) if isinstance(data.get("masking"), dict) else {},
             launch_on_startup=bool(data.get("launch_on_startup", False)),
+            auto_reconnect_enabled=bool(data.get("auto_reconnect_enabled", True)),
             reconnect_on_network_change=bool(data.get("reconnect_on_network_change", True)),
             server_ipv6_first=bool(data.get("server_ipv6_first", True)),
             warp_entry_hop=bool(data.get("warp_entry_hop", False)),
