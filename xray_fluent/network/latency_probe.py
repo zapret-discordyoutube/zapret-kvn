@@ -267,7 +267,7 @@ def _launch(
             _singbox_config(node, port, host, addresses, ipv6_first), [exe, "run", "--disable-color", "-c"],
             None, str(Path(paths.singbox).parent),
         )
-    return None  # AmneziaWG: своего прокси-режима у ядра нет
+    return None  # AmneziaWG, NaiveProxy: проверяются только подключением
 
 
 def unmeasurable_reason(node: Node) -> str:
@@ -278,6 +278,8 @@ def unmeasurable_reason(node: Node) -> str:
     core = protocol_core(node)
     if core is ProtocolCore.AMNEZIA:
         return "AmneziaWG проверяется только подключением"
+    if core is ProtocolCore.NAIVE:
+        return "NaiveProxy проверяется только подключением"
     if core is ProtocolCore.XRAY:
         skip, message = should_skip_speed_test(node)
         return message if skip else ""

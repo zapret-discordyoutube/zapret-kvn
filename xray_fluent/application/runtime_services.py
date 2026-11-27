@@ -369,6 +369,8 @@ def shutdown(controller: AppController) -> None:
     controller.disconnect_current()
     if getattr(controller, "amnezia", None) is not None:
         controller.amnezia.stop()
+    if getattr(controller, "naive", None) is not None:
+        controller.naive.stop()
     if controller.hysteria.is_running:
         controller.hysteria.stop()
     if controller.singbox.is_running:

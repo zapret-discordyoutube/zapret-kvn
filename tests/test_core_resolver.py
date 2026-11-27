@@ -40,6 +40,17 @@ def _release(repository: str, tag: str, assets: list[dict], *, prerelease: bool 
 
 
 class StableSelectionTests(unittest.TestCase):
+    def test_naive_takes_the_highest_stable_chromium_build(self) -> None:
+        releases = [
+            _release("klzgrad/naiveproxy", "v154.0.8037.49-6", [], prerelease=True),
+            _release("klzgrad/naiveproxy", "v154.0.8037.49-5", [], prerelease=False),
+            _release("klzgrad/naiveproxy", "v154.0.8037.49-10", [], prerelease=False),
+            _release("klzgrad/naiveproxy", "v150.0.7871.63-1", [], prerelease=False),
+            _release("klzgrad/naiveproxy", "nightly", [], prerelease=False),
+        ]
+
+        self.assertEqual(resolver.select_stable_naive(releases)["tag_name"], "v154.0.8037.49-10")
+
     def test_xray_uses_github_prerelease_flag_not_tag_shape(self) -> None:
         releases = [
             _release("XTLS/Xray-core", "v26.7.28", [], prerelease=True),
@@ -313,11 +324,17 @@ class LockUpdateTests(unittest.TestCase):
         singbox_payload = b"singbox"
         routing_payload = b"routing"
         hysteria_payload = b"hysteria"
+        naive_payload = b"naive"
         license_payload = b"license"
         hysteria_release = _release(
             "HyNetworks/hysteria",
             "app/v2.12.3",
             [_asset("HyNetworks/hysteria", "app/v2.12.3", "hysteria-windows-amd64.exe", hysteria_payload)],
+        )
+        naive_release = _release(
+            "klzgrad/naiveproxy",
+            "v154.0.8037.49-6",
+            [_asset("klzgrad/naiveproxy", "v154.0.8037.49-6", "naiveproxy-v154.0.8037.49-6-win-x64.zip", naive_payload)],
         )
         routing_commit = "b" * 40
         xray_release = _release(
@@ -345,12 +362,13 @@ class LockUpdateTests(unittest.TestCase):
                 xray_release,
                 singbox_release,
                 hysteria_release,
+                naive_release,
             ]),
             patch.object(resolver, "github_branch_commit", return_value=routing_commit),
             patch.object(
                 resolver,
                 "download_and_verify",
-                side_effect=[len(xray_payload), len(singbox_payload), len(hysteria_payload)],
+                side_effect=[len(xray_payload), len(singbox_payload), len(hysteria_payload), len(naive_payload)],
             ),
             patch.object(
                 resolver,
@@ -388,6 +406,9 @@ class LockUpdateTests(unittest.TestCase):
         self.assertEqual(candidate_by_id["hysteria"]["version"], "app/v2.12.3")
         self.assertEqual(candidate_by_id["hysteria"]["release_tag"], "app/v2.12.3")
         self.assertEqual(candidate_by_id["hysteria"]["files"], current_by_id["hysteria"]["files"])
+        self.assertEqual(candidate_by_id["naive"]["version"], "v154.0.8037.49-6")
+        self.assertEqual(candidate_by_id["naive"]["asset_name"], "naiveproxy-v154.0.8037.49-6-win-x64.zip")
+        self.assertEqual(candidate_by_id["naive"]["files"], current_by_id["naive"]["files"])
         self.assertEqual(candidate_by_id["hysteria-license"]["version"], "app/v2.12.3")
         self.assertEqual(
             candidate_by_id["hysteria-license"]["url"],

@@ -51,6 +51,26 @@ def udp_unanswered_message(server_name: str, protocol: str) -> str:
     )
 
 
+def naive_failure_message(server_name: str, *, stage: str, message: str, output_lines: Iterable[str] = ()) -> str | None:
+    """Cause of a NaiveProxy start failure, from what the stock client and the readiness check observed."""
+    label = _server_label(server_name)
+    lines = [message, *output_lines]
+    if _seen(lines, _NO_ROUTE_MARKERS):
+        return no_network_message()
+    if "naive.exe is missing" in str(message).lower():
+        return "Не найден naive.exe: переустановите или обновите Zapret KVN."
+    if _seen(lines, ("err_proxy_auth", "407 proxy", "proxy authentication")):
+        return f"{label} не принял ключ NaiveProxy. Проверьте, что ключ действует, или получите новый."
+    if _seen(lines, ("err_cert", "certificate")):
+        return f"Сертификат сервера «{server_name}» не прошёл проверку: NaiveProxy остановлен ради безопасности."
+    if stage in {"tunnel_readiness", "startup"} and "did not open its local socks port" not in str(message).lower():
+        return (
+            f"{label} не ответил по ключу NaiveProxy: запросы через него не проходят. "
+            "Проверьте, что ключ действует, и повторите подключение."
+        )
+    return None
+
+
 def hysteria_failure_message(
     server_name: str,
     *,

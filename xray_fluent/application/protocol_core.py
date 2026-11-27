@@ -8,6 +8,7 @@ class ProtocolCore(str, Enum):
     XRAY = "xray"
     HYSTERIA = "hysteria"
     AMNEZIA = "amnezia"
+    NAIVE = "naive"
 
 
 # Protocols whose complete native implementation is Xray-core (VLESS is handled first, by name).
@@ -24,6 +25,9 @@ def protocol_core(node) -> ProtocolCore:
     # (`type` key, no Xray `protocol` key) is the user's own sing-box JSON and stays with sing-box.
     if protocol in XRAY_NATIVE_PROTOCOLS and "protocol" in outbound:
         return ProtocolCore.XRAY
+    # NaiveProxy keys (naive+https) run on the stock naive client, never on sing-box (owner decision 2026-11-27).
+    if protocol == "naive":
+        return ProtocolCore.NAIVE
     if protocol in {"wireguard", "awg"}:
         return ProtocolCore.AMNEZIA
     # The official v2 client cannot consume Hysteria v1 configurations.

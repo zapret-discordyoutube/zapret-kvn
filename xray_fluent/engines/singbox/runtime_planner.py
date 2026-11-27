@@ -18,6 +18,8 @@ from ...constants import (
     DEFAULT_SOCKS_PORT,
     HYSTERIA_PATH_DEFAULT,
     HYSTERIA_SIDECAR_RELAY_PORT,
+    NAIVE_PATH_DEFAULT,
+    NAIVE_SIDECAR_RELAY_PORT,
     PROXY_HOST,
     SINGBOX_CLASH_API_PORT,
     SINGBOX_XRAY_RELAY_PORT,
@@ -36,6 +38,7 @@ from ...application.outbound_pool_service import (
     xray_pool_exclusion,
 )
 from ..hysteria.runtime_contract import classify_hysteria_uri
+from ..naive.key import NaiveKeyError, helper_config, parse_naive_key
 from .warp_entry import WARP_ENTRY_MTU, EntryHopResult, apply_entry_hop, violations as warp_entry_violations
 from ...application.protocol_core import ProtocolCore, protocol_core
 from ...profiles.models import Node
@@ -108,6 +111,19 @@ class SingboxHysteriaSidecarPlan:
     context: RuntimeNodeIdentity
 
 
+@dataclass(slots=True)
+class SingboxNaiveSidecarPlan:
+    """The stock naive client behind a loopback SOCKS5 relay: its config and the secrets that must stay out of logs."""
+
+    relay_port: int
+    relay_username: str
+    relay_password: str
+    config: dict[str, Any]
+    context: RuntimeNodeIdentity
+    server_host: str
+    secrets: tuple[str, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class UdpRelay:
     """A loopback UDP port of sing-box that carries one helper's datagrams to its server through the WARP hop."""
@@ -129,7 +145,7 @@ class SingboxAmneziaSidecarPlan:
 
 @dataclass(slots=True)
 class SingboxRuntimePlan:
-    outcome: str  # native_singbox | hybrid_xray_sidecar | hysteria_sidecar
+    outcome: str  # native_singbox | hybrid_xray_sidecar | hysteria_sidecar | naive_sidecar
     source_path: Path
     text_hash: str
     singbox_config: dict[str, Any]
@@ -138,6 +154,7 @@ class SingboxRuntimePlan:
     xray_sidecar: SingboxXraySidecarPlan | None
     hysteria_sidecar: SingboxHysteriaSidecarPlan | None = None
     amnezia_sidecar: SingboxAmneziaSidecarPlan | None = None
+    naive_sidecar: SingboxNaiveSidecarPlan | None = None
     requested_socks_port: int = 0
     requested_http_port: int = 0
     socks_port: int = 0
@@ -166,9 +183,15 @@ class SingboxRuntimePlan:
         return self.outcome == "hysteria_sidecar"
 
     @property
+    def is_naive_sidecar(self) -> bool:
+        return self.outcome == "naive_sidecar"
+
+    @property
     def sidecar_kind(self) -> str:
         if self.amnezia_sidecar is not None:
             return "amnezia"
+        if self.naive_sidecar is not None:
+            return "naive"
         if self.is_hybrid:
             return "xray"
         if self.is_hysteria_sidecar:
@@ -256,6 +279,8 @@ def classify_node_for_singbox(node: Node | None) -> str:
         return "amnezia_sidecar"
     if protocol_core(node) is ProtocolCore.HYSTERIA:
         return "hysteria_sidecar"
+    if protocol_core(node) is ProtocolCore.NAIVE:
+        return "naive_sidecar"
     if protocol_core(node) is ProtocolCore.XRAY:
         return "hybrid_xray_sidecar"
     return "native_singbox"
@@ -454,6 +479,10 @@ def apply_warp_entry(plan: SingboxRuntimePlan, profile_path: str, *, tun: bool) 
     Safe to run again after the slots were attached: the hop is rebuilt from scratch each time.
     """
     paths = ([str(HYSTERIA_PATH_DEFAULT.resolve())] if plan.hysteria_sidecar is not None and tun else []) + _slot_helper_paths(plan)
+    # naive dials its server with its own TCP sockets: under the TUN its `process_path` rule leads into the hop; in the
+    # proxy mode nothing captures it and it cannot be relayed (not proven on a real run: said so in the docs).
+    if plan.naive_sidecar is not None:
+        paths.append(str(NAIVE_PATH_DEFAULT.resolve()))
     if paths and not tun:
         raise ValueError(WARP_ENTRY_NEEDS_TUN)
     pass_started = time.monotonic()
@@ -574,6 +603,20 @@ def _plan_runtime_outbound(
 
     if protocol_core(node) is ProtocolCore.HYSTERIA:
         return _plan_hysteria_sidecar_runtime(
+            document,
+            runtime_config=runtime_config,
+            proxy_index=proxy_index,
+            node=node,
+            preferred_relay_port=preferred_relay_port,
+            requested_socks_port=requested_socks_port,
+            requested_http_port=requested_http_port,
+            socks_port=socks_port,
+            http_port=http_port,
+            clash_api_port=clash_api_port,
+        )
+
+    if protocol_core(node) is ProtocolCore.NAIVE:
+        return _plan_naive_sidecar_runtime(
             document,
             runtime_config=runtime_config,
             proxy_index=proxy_index,
@@ -821,10 +864,88 @@ def _plan_hysteria_sidecar_runtime(
     )
 
 
+def _plan_naive_sidecar_runtime(
+    document: ParsedSingboxDocument,
+    *,
+    runtime_config: dict[str, Any],
+    proxy_index: int,
+    node: Node,
+    preferred_relay_port: int,
+    requested_socks_port: int = 0,
+    requested_http_port: int = 0,
+    socks_port: int = 0,
+    http_port: int = 0,
+    clash_api_port: int = 0,
+) -> SingboxRuntimePlan:
+    """A NaiveProxy key (owner decision 2026-11-27): the stock naive client is the only owner of the protocol.
+
+    Like Hysteria2, it is only ever started from the original key line, never from a translated sing-box outbound;
+    sing-box keeps the routing, DNS and TUN and dials naive's loopback SOCKS5 port as the node's `proxy` outbound.
+    """
+
+    raw_link = str(node.link or "").strip()
+    try:
+        key = parse_naive_key(raw_link)
+    except NaiveKeyError as exc:
+        raise ValueError(
+            "NaiveProxy запускается только из исходного ключа naive+https://. Импортируйте ключ заново. " + str(exc)
+        ) from exc
+    try:
+        relay_port = preferred_relay_port if preferred_relay_port > 0 else _find_free_port(
+            preferred=NAIVE_SIDECAR_RELAY_PORT,
+            allow_ephemeral_fallback=True,
+        )
+    except RuntimeError as exc:
+        raise ValueError("Не удалось подобрать свободный локальный TCP-порт для NaiveProxy.") from exc
+    relay_username, relay_password = generate_local_proxy_credentials(prefix="naive")
+    outbounds = runtime_config.setdefault("outbounds", [])
+    assert isinstance(outbounds, list)
+    outbounds[proxy_index] = {
+        "type": "socks",
+        "tag": "proxy",
+        "server": PROXY_HOST,
+        "server_port": relay_port,
+        "username": relay_username,
+        "password": relay_password,
+        "inet4_bind_address": PROXY_HOST,
+    }
+    _ensure_process_direct_route(runtime_config, str(NAIVE_PATH_DEFAULT.resolve()))
+    _validate_runtime_dns_contract(runtime_config)
+    sidecar = SingboxNaiveSidecarPlan(
+        relay_port=relay_port,
+        relay_username=relay_username,
+        relay_password=relay_password,
+        config=helper_config(key, relay_port=relay_port, relay_username=relay_username, relay_password=relay_password),
+        context=RuntimeNodeIdentity.from_node(node),
+        server_host=key.host,
+        secrets=key.secrets(),
+    )
+    return SingboxRuntimePlan(
+        outcome="naive_sidecar",
+        source_path=document.source_path,
+        text_hash=document.text_hash,
+        singbox_config=runtime_config,
+        has_proxy_outbound=True,
+        used_selected_node=True,
+        xray_sidecar=None,
+        naive_sidecar=sidecar,
+        requested_socks_port=requested_socks_port,
+        requested_http_port=requested_http_port,
+        socks_port=socks_port,
+        http_port=http_port,
+        clash_api_port=clash_api_port,
+    )
+
+
 def _ensure_hysteria_process_direct_route(payload: dict[str, Any]) -> None:
+    _ensure_process_direct_route(payload, str(HYSTERIA_PATH_DEFAULT.resolve()))
+
+
+def _ensure_process_direct_route(payload: dict[str, Any], executable: str) -> None:
+    """The helper's own sockets leave directly: they must not re-enter the sing-box TUN."""
+
     route = _ensure_dict(payload, "route")
     rules = _ensure_list(route, "rules")
-    executable = str(HYSTERIA_PATH_DEFAULT.resolve())
     protect_rule = {"process_path": [executable], "outbound": "direct"}
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict):

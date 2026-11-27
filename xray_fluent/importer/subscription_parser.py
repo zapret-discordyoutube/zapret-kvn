@@ -11,6 +11,7 @@ from urllib.parse import unquote, urlsplit
 
 from .link_parser import (
     hysteria2_uri_fingerprint,
+    naive_uri_fingerprint,
     link_import_warnings,
     parse_single,
     validate_node_outbound,
@@ -29,6 +30,7 @@ _KNOWN_SCHEMES = (
     "hysteria2://",
     "hy2://",
     "tuic://",
+    "naive+https://",
     "socks://",
     "socks5://",
     "http://",
@@ -111,7 +113,7 @@ def source_key_for_node(node: Node) -> str:
 def source_fingerprint_for_node(node: Node) -> str:
     """Return a secret-safe hash of transport data omitted from outbound JSON."""
 
-    return hysteria2_uri_fingerprint(node.link)
+    return hysteria2_uri_fingerprint(node.link) or naive_uri_fingerprint(node.link)
 
 
 def hidden_source_key_for_node(node: Node) -> str:

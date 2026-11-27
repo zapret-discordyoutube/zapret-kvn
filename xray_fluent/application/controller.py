@@ -205,6 +205,7 @@ from ..engines.xray import (
 )
 from ..engines.hysteria import HysteriaManager
 from ..engines.amnezia.manager import AmneziaManager
+from ..engines.naive.manager import NaiveManager
 from ..engines.singbox import (
     SingBoxManager,
     classify_node_for_singbox,
@@ -248,7 +249,7 @@ from ..constants import (
     STATE_SCHEMA_VERSION,
 )
 from ..diagnostics.export import collect_runtime_diagnostics, export_diagnostics
-from ..diagnostics.transport_failure import amnezia_failure_message, hysteria_failure_message
+from ..diagnostics.transport_failure import amnezia_failure_message, hysteria_failure_message, naive_failure_message
 from .server_selection import ServerSelection
 from .transition_outcome import STALE_SERVER_ADDRESS_HINT, FailureRank, TransitionOutcome, failure_status
 from ..platform.windows import browser_proxy
@@ -491,6 +492,7 @@ class AppController(QObject):
         self._slot_failed: dict[str, set[str]] = {}
         self.amnezia = self._new_amnezia_manager()
         self._amnezia_target_generation = 0
+        self.naive = self._new_naive_manager()
         self._xray_tun_routes = XrayTunRouteManager(self)
         self.zapret = ZapretManager(self)
         self.bypass = ServerBypass(self)
@@ -1770,6 +1772,7 @@ class AppController(QObject):
         *,
         prepared_hysteria: HysteriaManager | None = None,
         prepared_amnezia: AmneziaManager | None = None,
+        prepared_naive: NaiveManager | None = None,
     ) -> bool:
         """Синхронный драйвер (тесты). Переходы — ``_start_singbox_runtime_plan_steps``."""
         return bool(
@@ -1778,6 +1781,7 @@ class AppController(QObject):
                     plan,
                     prepared_hysteria=prepared_hysteria,
                     prepared_amnezia=prepared_amnezia,
+                    prepared_naive=prepared_naive,
                 )
             )
         )
@@ -1788,9 +1792,11 @@ class AppController(QObject):
         *,
         prepared_hysteria: HysteriaManager | None = None,
         prepared_amnezia: AmneziaManager | None = None,
+        prepared_naive: NaiveManager | None = None,
     ) -> TransitionSteps:
         request_generation = getattr(self, "_transition_generation", None)
         owned_amnezia = prepared_amnezia or getattr(self, "amnezia", None)
+        owned_naive = prepared_naive or getattr(self, "naive", None)
 
         def request_cancelled() -> bool:
             return (
@@ -1830,7 +1836,24 @@ class AppController(QObject):
             if request_cancelled():
                 yield from target_amnezia.stop_steps()
                 return False
-        if plan.hysteria_sidecar is not None:
+        if getattr(plan, "naive_sidecar", None) is not None:
+            self._protect_ss_port = 0
+            self._protect_ss_password = ""
+            self._log(
+                "[sing-box] starting stock naive sidecar "
+                f"relay=127.0.0.1:{plan.naive_sidecar.relay_port}"
+            )
+            if prepared_naive is not None:
+                if not prepared_naive.is_running:
+                    return False
+            elif not (yield from self._start_naive_manager_steps(owned_naive, plan)):
+                if not request_cancelled():
+                    self._fail_sidecar(owned_naive, runtime_node)
+                return False
+            if request_cancelled():
+                yield from owned_naive.stop_steps()
+                return False
+        elif plan.hysteria_sidecar is not None:
             self._protect_ss_port = 0
             self._protect_ss_password = ""
             self._log(
@@ -1937,6 +1960,8 @@ class AppController(QObject):
                     yield from target_manager.stop_steps()
             if getattr(plan, "amnezia_sidecar", None) is not None:
                 yield from (prepared_amnezia or self.amnezia).stop_steps()
+            if getattr(plan, "naive_sidecar", None) is not None:
+                yield from owned_naive.stop_steps()
             return False
         singbox_start_tag = (
             plan.hybrid_relay_selected_tag if plan.is_hybrid else plan.selected_outbound_tag
@@ -2026,6 +2051,8 @@ class AppController(QObject):
             yield from self.xray.stop_steps()
         if getattr(plan, "amnezia_sidecar", None) is not None:
             yield from owned_amnezia.stop_steps()
+        if getattr(plan, "naive_sidecar", None) is not None:
+            yield from owned_naive.stop_steps()
         if plan.hysteria_sidecar is not None:
             target_manager = prepared_hysteria or self.hysteria
             if target_manager.is_running or _process_alive(target_manager):
@@ -2035,6 +2062,58 @@ class AppController(QObject):
         self._singbox_clash_api_port = 0
         self._xray_api_port = 0
         return False
+
+    def _new_naive_manager(self) -> NaiveManager:
+        manager = NaiveManager(self)
+        manager.log_received.connect(self._log)
+        manager.warning.connect(lambda message, owned=manager: self._on_naive_warning(owned, message))
+        manager.failure.connect(lambda event, owned=manager: self._on_naive_failure(owned, event))
+        return manager
+
+    def _on_naive_warning(self, manager, message) -> None:
+        if manager is self.naive and manager.is_running:
+            self.status.emit("warning", message)
+
+    def _on_naive_failure(self, manager, event) -> None:
+        self.runtime_errors.record(event)
+        self.runtime_errors_changed.emit(self.runtime_errors.snapshot())
+        # A startup failure of the live manager means the helper we just tried to bring up never became ready:
+        # say why even when no naive session is committed yet. A retired replacement candidate stays silent.
+        if manager is self.naive and event.stage in {"startup", "tunnel_readiness"}:
+            self._fail_transition(event.message, rank=FailureRank.CORE)
+            return
+        session = self._active_session
+        if manager is not self.naive or session is None or session.sidecar_kind != "naive":
+            return
+        self._set_connection_status("error", event.message, level="error")
+        if event.stage == "process":
+            def close_owned():
+                if manager is self.naive and self._active_session is session:
+                    self._desired_connected = False
+                    self._handle_unexpected_disconnect()
+            QTimer.singleShot(0, close_owned)
+
+    def _start_naive_manager_steps(self, manager, plan: SingboxRuntimePlan) -> TransitionSteps:
+        sidecar = getattr(plan, "naive_sidecar", None)
+        if sidecar is None:
+            return False
+        generation = self._transition_generation
+        manager.server_ipv6_first = self._server_ipv6_first()
+        return (yield from manager.start_steps(
+            sidecar.config, sidecar.relay_port,
+            relay_username=sidecar.relay_username, relay_password=sidecar.relay_password,
+            context=sidecar.context, secrets=sidecar.secrets, server_host=sidecar.server_host,
+            should_continue=lambda: self._desired_connected and self._transition_generation == generation,
+        ))
+
+    def _prepare_naive_replacement_steps(self, plan: SingboxRuntimePlan) -> TransitionSteps:
+        candidate = self._new_naive_manager()
+        if (yield from self._start_naive_manager_steps(candidate, plan)):
+            return candidate
+        self._fail_sidecar(candidate, self._runtime_selected_node())
+        yield from candidate.stop_steps()
+        candidate.deleteLater()
+        return None
 
     def _new_amnezia_manager(self) -> AmneziaManager:
         manager = AmneziaManager(self)
@@ -2192,6 +2271,14 @@ class AppController(QObject):
                 output_lines=lines if isinstance(lines, (tuple, list)) else (),
             )
         failure = getattr(manager, "last_failure", None)
+        if isinstance(manager, NaiveManager):
+            if isinstance(failure, tuple) and len(failure) == 2:
+                lines = getattr(manager, "recent_output_lines", ())
+                return naive_failure_message(
+                    name, stage=str(failure[0]), message=str(failure[1]),
+                    output_lines=lines if isinstance(lines, (tuple, list)) else (),
+                )
+            return None
         if isinstance(failure, tuple) and len(failure) == 2:
             return amnezia_failure_message(name, stage=str(failure[0]), message=str(failure[1]))
         return None
@@ -2216,6 +2303,8 @@ class AppController(QObject):
         if plan.hysteria_sidecar is not None and not self.hysteria.is_running:
             return False
         if getattr(plan, "amnezia_sidecar", None) is not None and not self.amnezia.is_running:
+            return False
+        if getattr(plan, "naive_sidecar", None) is not None and not self.naive.is_running:
             return False
         if plan.xray_sidecar is not None and not self.xray.is_running:
             return False
@@ -3239,7 +3328,7 @@ class AppController(QObject):
         """Processes alive without a connected session (aborted transition)."""
         if self.connected:
             return False
-        for manager in (self.singbox, self.xray, self.hysteria, getattr(self, "amnezia", None)):
+        for manager in (self.singbox, self.xray, self.hysteria, getattr(self, "amnezia", None), getattr(self, "naive", None)):
             if manager is None:
                 continue
             if manager.is_running is True or _process_alive(manager):
@@ -3949,6 +4038,8 @@ class AppController(QObject):
     def _compute_connected_state(self) -> bool:
         if self._active_session is not None and self._active_session.sidecar_kind == "amnezia":
             return self.singbox.is_running and self.amnezia.is_running
+        if self._active_session is not None and self._active_session.sidecar_kind == "naive":
+            return self.singbox.is_running and self.naive.is_running
         if self._active_session is not None and self._active_session.hybrid:
             return self.singbox.is_running and self.xray.is_running
         if self._active_session is not None and self._active_session.sidecar_kind == "hysteria":

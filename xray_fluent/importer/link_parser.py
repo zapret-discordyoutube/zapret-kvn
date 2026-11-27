@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..engines.hysteria.runtime_contract import classify_hysteria_uri
+from ..engines.naive.key import NaiveKeyError, parse_naive_key
 from ..profiles.models import Node
 
 
@@ -105,6 +106,8 @@ def parse_single(raw: str) -> Node:
         return _parse_hysteria2(text)
     if scheme == "tuic":
         return _parse_tuic(text)
+    if scheme == "naive+https":
+        return _parse_naive(text)
     if scheme in {"socks", "socks5"}:
         return _parse_socks(text)
     if scheme in {"http", "https"}:
@@ -1012,6 +1015,40 @@ def _parse_hysteria2(link: str) -> Node:
         outbound["hop_interval"] = hop_interval
 
     return _native_node(link, "hysteria2", outbound, server, port)
+
+
+def naive_uri_fingerprint(raw: str) -> str:
+    """Secret-safe identity of a NaiveProxy key: who (client_id) on which server, never the secret or the name."""
+
+    try:
+        key = parse_naive_key(str(raw or "").strip())
+    except NaiveKeyError:
+        return ""
+    return hashlib.sha256(f"naive:{key.client_id}@{key.host}:{key.port}".encode("utf-8")).hexdigest()
+
+
+def _parse_naive(link: str) -> Node:
+    """A ``naive+https`` key of the VPN bot: run by the stock naive client, never translated to a sing-box outbound.
+
+    Like Hysteria2, the node keeps the original line (it holds the secret, so it lives only in the encrypted state);
+    the outbound dict names the server and the concurrency and carries no credentials, so it is safe to export.
+    """
+
+    try:
+        key = parse_naive_key(link)
+    except NaiveKeyError as exc:
+        raise LinkParseError(str(exc)) from None
+    outbound: dict[str, Any] = {"type": "naive", "server": key.host, "server_port": key.port}
+    if key.concurrency > 1:
+        outbound["insecure_concurrency"] = key.concurrency
+    return Node(
+        name=_clean_name(urlsplit(link).fragment, f"naive-{key.host}:{key.port}"),
+        scheme="naive",
+        server=key.host,
+        port=key.port,
+        link=link,
+        outbound=outbound,
+    )
 
 
 def _parse_tuic(link: str) -> Node:

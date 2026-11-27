@@ -59,9 +59,11 @@ SINGBOX_PATH_DEFAULT = BASE_DIR / "core" / "sing-box.exe"
 SINGBOX_CLASH_API_PORT = 19090
 SINGBOX_XRAY_RELAY_PORT = 11808
 HYSTERIA_SIDECAR_RELAY_PORT = 11809
+NAIVE_SIDECAR_RELAY_PORT = 11810
 SLOT_RELAY_PORT_START = 11820  # one loopback relay per service slot (docs/SERVICE_SLOTS.md)
 HYSTERIA_PATH_DEFAULT = BASE_DIR / "core" / "hysteria.exe"
 AMNEZIA_PATH_DEFAULT = BASE_DIR / "core" / "zapret-amnezia.exe"
+NAIVE_PATH_DEFAULT = BASE_DIR / "core" / "naive.exe"
 HYSTERIA_CONFIG_FILE = RUNTIME_DIR / "hysteria_config.json"
 
 # Только зарубежные цели: трафик через VPN идёт за рубеж, а сервер, чей адрес

@@ -74,6 +74,18 @@ $expectedHysteriaVersion = ([string]$hysteriaSource.version).Replace("app/", "")
 if ($hysteriaVersionOutput -notmatch [regex]::Escape($expectedHysteriaVersion)) {
     throw "Bundled Hysteria version output does not match $($hysteriaSource.version)"
 }
+$naiveSource = $manifest.sources | Where-Object { [string]$_.id -eq "naive" } | Select-Object -First 1
+if (-not $naiveSource) { throw "Core manifest does not identify the stock NaiveProxy client" }
+$naivePath = Join-Path $CoreDirectory "naive.exe"
+$naiveVersionOutput = (& $naivePath --version 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    throw "Bundled naive failed its version command with exit code $LASTEXITCODE"
+}
+# The tag is the Chromium version plus a build number: v154.0.8037.49-5 prints 154.0.8037.49.
+$expectedNaiveVersion = (([string]$naiveSource.version).TrimStart("v") -replace '-\d+$', '')
+if ($naiveVersionOutput -notmatch [regex]::Escape($expectedNaiveVersion)) {
+    throw "Bundled naive version output does not match $($naiveSource.version)"
+}
 
 Write-Host "[core] verified $($manifest.files.Count) files"
 $amneziaSource = @($manifest.sources | Where-Object { [string]$_.id -eq "amnezia" })
@@ -85,3 +97,4 @@ if ($LASTEXITCODE -ne 0 -or $amneziaOutput -notmatch [regex]::Escape([string]$am
 Write-Host "[core] Amnezia: $($amneziaSource[0].version)"
 Write-Host "[core] sing-box: $($singBoxSource.version)"
 Write-Host "[core] Hysteria: $($hysteriaSource.version)"
+Write-Host "[core] naive: $($naiveSource.version)"

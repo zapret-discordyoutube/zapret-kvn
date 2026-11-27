@@ -121,6 +121,10 @@ def connect_selected_steps(controller: AppController, allow_during_reconnect: bo
                 if not tun and singbox_plan is not None and singbox_plan.is_hybrid
                 else " (sing-box + Hysteria2)"
                 if not tun and singbox_plan is not None and singbox_plan.is_hysteria_sidecar
+                else " (TUN, NaiveProxy)"
+                if tun and singbox_plan is not None and getattr(singbox_plan, "is_naive_sidecar", False)
+                else " (sing-box + NaiveProxy)"
+                if not tun and singbox_plan is not None and getattr(singbox_plan, "is_naive_sidecar", False)
                 else " (sing-box extended)"
                 if not tun and singbox_plan is not None
                 else " (TUN)" if tun else ""

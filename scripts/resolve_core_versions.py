@@ -49,6 +49,8 @@ XRAY_ASSET_NAME = "Xray-windows-64.zip"
 SINGBOX_REPOSITORY = "shtorm-7/sing-box-extended"
 HYSTERIA_REPOSITORY = "HyNetworks/hysteria"
 HYSTERIA_ASSET_NAME = "hysteria-windows-amd64.exe"
+# The stock NaiveProxy client (owner decision 2026-11-27); the brief named a non-existent owner, the real one is klzgrad.
+NAIVE_REPOSITORY = "klzgrad/naiveproxy"
 ROUTING_REPOSITORY = "runetfreedom/russia-v2ray-rules-dat"
 ROUTING_BRANCH = "release"
 AMNEZIA_REPOSITORY = "amnezia-vpn/amneziawg-go"
@@ -59,6 +61,7 @@ _SINGBOX_TAG_RE = re.compile(
     r"^v(\d+)\.(\d+)\.(\d+)-extended-(\d+)\.(\d+)\.(\d+)$"
 )
 _HYSTERIA_TAG_RE = re.compile(r"^app/v(\d+)\.(\d+)\.(\d+)$")
+_NAIVE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)\.(\d+)-(\d+)$")
 _SHA256_RE = re.compile(r"(?i)(?:sha256\s*:\s*)?([0-9a-f]{64})")
 _FILE_MAPPING_RE = re.compile(
     r'\{\n\s+"match": ("(?:\\.|[^"\\])*"),\n'
@@ -182,6 +185,13 @@ def _hysteria_version(tag: str) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
+def _naive_version(tag: str) -> tuple[int, int, int, int, int] | None:
+    match = _NAIVE_TAG_RE.fullmatch(tag)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+
+
 def _stable_release(
     releases: list[dict[str, Any]],
     *,
@@ -228,6 +238,16 @@ def select_stable_hysteria(releases: list[dict[str, Any]]) -> dict[str, Any]:
         releases,
         version_parser=_hysteria_version,
         component="Hysteria",
+    )
+
+
+def select_stable_naive(releases: list[dict[str, Any]]) -> dict[str, Any]:
+    """Select the highest stable NaiveProxy release (``vA.B.C.D-N``, Chromium version plus build number)."""
+
+    return _stable_release(
+        releases,
+        version_parser=_naive_version,
+        component="NaiveProxy",
     )
 
 
@@ -416,6 +436,7 @@ def _validate_lock(lock: dict[str, Any]) -> None:
         "sing-box-extended",
         "xray-core",
         "hysteria",
+        "naive",
         "runetfreedom-routing-data",
     ):
         if required not in ids:
@@ -617,6 +638,11 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
     hysteria_release = select_stable_hysteria(
         [github_latest_release(HYSTERIA_REPOSITORY, timeout=timeout)]
     )
+    naive_release = (
+        select_stable_naive([github_latest_release(NAIVE_REPOSITORY, timeout=timeout)])
+        if any(source.get("id") == "naive" for source in candidate["sources"])
+        else None
+    )
     routing_commit = github_branch_commit(
         ROUTING_REPOSITORY,
         ROUTING_BRANCH,
@@ -650,6 +676,16 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
         asset_name=HYSTERIA_ASSET_NAME,
         timeout=timeout,
     )
+    replacement_naive = None
+    if naive_release is not None:
+        naive_tag = str(naive_release.get("tag_name") or "")
+        replacement_naive = _replace_source(
+            _source_by_id(candidate, "naive"),
+            release=naive_release,
+            repository=NAIVE_REPOSITORY,
+            asset_name=f"naiveproxy-{naive_tag}-win-x64.zip",
+            timeout=timeout,
+        )
     replacement_hysteria_license = None
     if any(source.get("id") == "hysteria-license" for source in candidate["sources"]):
         replacement_hysteria_license = _replace_hysteria_license(
@@ -670,6 +706,8 @@ def resolve_lock(lock: dict[str, Any], *, timeout: float = 30.0) -> dict[str, An
             candidate["sources"][index] = replacement_routing
         elif source.get("id") == "hysteria":
             candidate["sources"][index] = replacement_hysteria
+        elif source.get("id") == "naive" and replacement_naive is not None:
+            candidate["sources"][index] = replacement_naive
         elif source.get("id") == "hysteria-license" and replacement_hysteria_license is not None:
             candidate["sources"][index] = replacement_hysteria_license
     if "amnezia" in candidate:

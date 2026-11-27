@@ -33,8 +33,8 @@ class SlotAssignment:
 
 
 def slot_capable(node: Node) -> bool:
-    """Whether a server can carry a slot: AWG has no slot helper yet. The card lists only these servers."""
-    return protocol_core(node) is not ProtocolCore.AMNEZIA
+    """Whether a server can carry a slot: AWG and NaiveProxy have no slot helper yet. The card lists only these servers."""
+    return protocol_core(node) not in {ProtocolCore.AMNEZIA, ProtocolCore.NAIVE}
 
 
 def default_host_keys(node: Node) -> frozenset[str]:

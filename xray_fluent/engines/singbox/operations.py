@@ -34,6 +34,8 @@ def _runtime_suffix(plan: SingboxRuntimePlan) -> str:
         return " (sing-box + Hysteria2)"
     if getattr(plan, "amnezia_sidecar", None) is not None:
         return " (sing-box + Amnezia WG/AWG)"
+    if getattr(plan, "naive_sidecar", None) is not None:
+        return " (sing-box + NaiveProxy)"
     return " (sing-box extended)"
 
 
@@ -117,6 +119,8 @@ def start_proxy_steps(
         yield from controller.singbox.stop_steps()
         if getattr(controller, "amnezia", None) is not None:
             yield from controller.amnezia.stop_steps()
+        if getattr(controller, "naive", None) is not None:
+            yield from controller.naive.stop_steps()
         if controller.xray.is_running:
             yield from controller.xray.stop_steps()
         if controller.hysteria.is_running:
@@ -178,6 +182,10 @@ def start_tun_steps(
         elif plan.is_hysteria_sidecar:
             controller._log(
                 f"[tun] outbound tag 'proxy' replaced with local official Hysteria2 relay: {node.name}"
+            )
+        elif getattr(plan, "is_naive_sidecar", False):
+            controller._log(
+                f"[tun] outbound tag 'proxy' replaced with local stock naive relay: {node.name}"
             )
         else:
             controller._log(f"[tun] outbound tag 'proxy' replaced from selected node: {node.name}")
@@ -275,6 +283,8 @@ def capture_runtime_session(controller: AppController, plan: SingboxRuntimePlan,
             if plan.hysteria_sidecar
             else plan.amnezia_sidecar.relay_port
             if getattr(plan, "amnezia_sidecar", None)
+            else plan.naive_sidecar.relay_port
+            if getattr(plan, "naive_sidecar", None)
             else 0
         ),
         protect_ss_port=controller._protect_ss_port,
@@ -309,6 +319,8 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
     hysteria_recovery = bool(controller._hysteria_recovery_active)
     replacement_amnezia = None
     amnezia_committed = False
+    replacement_naive = None
+    naive_committed = False
     controller._switching = True
     try:
         if (yield from _abort_security_recovery_steps(controller, hysteria_recovery)):
@@ -330,6 +342,12 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
         old_plan = getattr(controller, "_active_singbox_plan", None)
         old_hysteria = controller.hysteria
         old_amnezia = getattr(controller, "amnezia", None)
+        old_naive = getattr(controller, "naive", None)
+        if getattr(plan, "naive_sidecar", None) is not None:
+            replacement_naive = yield from controller._prepare_naive_replacement_steps(plan)
+            if replacement_naive is None:
+                controller._fail_transition("Новый сервер NaiveProxy не прошёл проверку.")
+                return False
         # A helper that enters through the WARP hop needs the new front to be up (its UDP goes to the relay of the front):
         # it is started by the front's own start, after it, never prepared beside the old one.
         if getattr(plan, "amnezia_sidecar", None) is not None and not (getattr(plan.amnezia_sidecar, "config", None) or {}).get("unbound"):
@@ -383,6 +401,7 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
             plan,
             prepared_hysteria=replacement_hysteria,
             **({"prepared_amnezia": replacement_amnezia} if replacement_amnezia is not None else {}),
+            **({"prepared_naive": replacement_naive} if replacement_naive is not None else {}),
         )
         if (yield from _abort_security_recovery_steps(controller, hysteria_recovery, replacement_hysteria)):
             return False
@@ -433,6 +452,14 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
         if replacement_amnezia is not None:
             controller.amnezia = replacement_amnezia
         amnezia_committed = True
+        if replacement_naive is not None:
+            controller.naive = replacement_naive
+        naive_committed = True
+        if old_naive is not None and (old_naive is not controller.naive or getattr(plan, "naive_sidecar", None) is None):
+            if old_naive.is_running is True or getattr(old_naive, "process_alive", False) is True:
+                yield from old_naive.stop_steps()
+            if old_naive is not controller.naive:
+                old_naive.deleteLater()
         if old_amnezia is not None and (old_amnezia is not controller.amnezia or getattr(plan, "amnezia_sidecar", None) is None):
             yield from old_amnezia.stop_steps()
             if old_amnezia is not controller.amnezia:
@@ -448,6 +475,12 @@ def _replace_runtime_steps(controller: AppController, reason: str, *, tun: bool)
         controller.schedule_save()
         return True
     finally:
+        if replacement_naive is not None and not naive_committed:
+            replacement_naive.request_stop()
+            if replacement_naive.process_alive:
+                replacement_naive.stopped.connect(replacement_naive.deleteLater)
+            else:
+                replacement_naive.deleteLater()
         if replacement_amnezia is not None and not amnezia_committed:
             # finally не может ждать шагами: закрываем без ожидания, процесс
             # добьёт собственный таймер, объект удалится после выхода.
