@@ -355,6 +355,12 @@ def _process_alive(manager: object) -> bool:
     return getattr(manager, "process_alive", False) is True
 
 
+def _automatic_reconnect_on(controller: Any) -> bool:
+    """The master switch «Автоматическое переподключение»; on when there is no setting to read (older state, test doubles)."""
+    settings = getattr(getattr(controller, "state", None), "settings", None)
+    return bool(getattr(settings, "auto_reconnect_enabled", True))
+
+
 def _log_transition_profile(controller: Any, kind: str, runner: TransitionRunner) -> None:
     """Одна строка [perf] на переход: где ушло время подключения/переключения."""
     log = getattr(controller, "_log", None)
@@ -2573,6 +2579,10 @@ class AppController(QObject):
             replacement = candidate
             break
 
+        automatic_off = not _automatic_reconnect_on(self)
+        if replacement is not None and automatic_off:
+            self._log("[hysteria-recovery] automatic switch skipped: automatic reconnection is off")
+            replacement = None
         self._hysteria_failure_episode_id += 1
         self._hysteria_automatic_switch_attempted = replacement is not None
         self._hysteria_contract.fail(
@@ -2588,7 +2598,9 @@ class AppController(QObject):
             )
             self._set_connection_status(
                 "error",
-                "Hysteria2: совместимый резервный сервер не найден.",
+                "Hysteria2: сервер не отвечает. Автоматическое переподключение выключено."
+                if automatic_off
+                else "Hysteria2: совместимый резервный сервер не найден.",
                 level="error",
             )
             # Stop admission immediately; otherwise front keeps opening new
@@ -2596,7 +2608,8 @@ class AppController(QObject):
             if self.singbox.is_running:
                 self.singbox.request_stop(expected=True)
             self._desired_connected = False
-            self._schedule_return_to_selected("no replacement server available")
+            if not automatic_off:
+                self._schedule_return_to_selected("no replacement server available")
             return
 
         self._hysteria_recovery_active = True
@@ -2653,6 +2666,9 @@ class AppController(QObject):
             return
         self._hysteria_return_episode = 0
         if self.connected or self._desired_connected or self.selected_node is None:
+            return
+        if not _automatic_reconnect_on(self):
+            self._log("[hysteria-recovery] return to the selected server skipped: automatic reconnection is off")
             return
         self._log("[hysteria-recovery] reconnecting to the selected server")
         self._desired_connected = True
@@ -4091,6 +4107,10 @@ class AppController(QObject):
         """
 
         if self.locked or not self.connected or self.get_effective_http_proxy_port() is None:
+            return
+        # The retry is an automatic update too: the global switch «автообновление подписок» stops it (it did not, and the
+        # result it applied could restart the connection).
+        if not self.state.settings.subscriptions_auto_update:
             return
         for subscription in self.state.subscriptions:
             if subscription.retry_via_tunnel:
