@@ -28,13 +28,19 @@ from qfluentwidgets import (
     StrongBodyLabel,
 )
 
+from ...singbox_config import tun_bypass
 from ...singbox_config.simple_rule import BLOCK, ParsedRule, build_rule, routes_through_tunnel
-from ...platform.windows.running_programs import group_programs, running_program_paths
+from ...platform.windows.running_programs import established_connections, group_programs, running_program_paths
 from ..detail_page import DetailPage
 from .running_programs_dialog import RunningProgramsDialog
 
 #: (ключ, подпись) вариантов «Куда»; ключ — тег выхода или BLOCK.
 TARGETS: tuple[tuple[str, str], ...] = (("proxy", "Через VPN"), ("direct", "Напрямую"), (BLOCK, "Блокировать"))
+
+#: «Мимо TUN»: not a route rule. The addresses go into the TUN inbound's ``route_exclude_address`` of the same JSON, and the
+#: packets to them never enter the adapter (owner request 2026-11-27). Domains cannot be excluded, only IP addresses.
+BYPASS = "bypass-tun"
+BYPASS_TITLE = "Мимо TUN"
 
 _FIELDS = (
     ("sites", "Сайты", "2ip.ru\nyoutube.com\ngeosite:category-ru"),
@@ -54,11 +60,20 @@ class SimpleRulePage(DetailPage):
         outbounds: list[str],
         rule_sets: set[str],
         on_add: Callable[[dict, bool], None],
+        bypass_available: bool = False,
+        on_bypass: Callable[[list[str], bool], None] | None = None,
+        on_bypass_clear: Callable[[], None] | None = None,
+        bypass_current: Callable[[], list[str]] | None = None,
     ):
         super().__init__(root_label, "Новое правило", parent, root_key="back", page_key="simple")
         self._rule_sets = rule_sets
         self._on_add = on_add
         self._targets = [(key, text) for key, text in TARGETS if key == BLOCK or key in outbounds]
+        self._on_bypass = on_bypass
+        self._on_bypass_clear = on_bypass_clear
+        self._bypass_current = bypass_current or (lambda: [])
+        if bypass_available and on_bypass is not None:
+            self._targets.append((BYPASS, BYPASS_TITLE))
 
         self.content_layout.addWidget(StrongBodyLabel("Куда отправить", self.body))
         self.target = SegmentedWidget(self.body)
@@ -70,8 +85,10 @@ class SimpleRulePage(DetailPage):
         font = QFont("Consolas", 10)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.editors: dict[str, PlainTextEdit] = {}
+        self._field_titles: dict[str, StrongBodyLabel] = {}
         for key, title, example in _FIELDS:
-            self.content_layout.addWidget(StrongBodyLabel(title, self.body))
+            self._field_titles[key] = StrongBodyLabel(title, self.body)
+            self.content_layout.addWidget(self._field_titles[key])
             editor = PlainTextEdit(self.body)
             editor.setPlaceholderText(example)
             editor.setFont(font)
@@ -81,6 +98,8 @@ class SimpleRulePage(DetailPage):
             self.editors[key] = editor
             if key == "programs":
                 self.content_layout.addLayout(self._program_helpers())
+            if key == "ips":
+                self.content_layout.addLayout(self._bypass_helpers())
         self.hint = CaptionLabel(
             "По одному в строке. Правило сработает, если совпадёт что-нибудь из списков. "
             "Сайт «2ip.ru» — вместе со всеми поддоменами, программа — без учёта регистра. "
@@ -90,6 +109,15 @@ class SimpleRulePage(DetailPage):
         )
         self.hint.setWordWrap(True)
         self.content_layout.addWidget(self.hint)
+        self.bypass_note = CaptionLabel(
+            "«Мимо TUN» работает по IP-адресам: пакеты к ним вообще не заходят в адаптер TUN и идут через обычную сетевую карту. "
+            "Домены тут не подходят. Игре нужны адреса её серверов: запустите игру, дождитесь входа и нажмите "
+            "«Определить адреса». Список фиксированный: если игра подключится к другому серверу, определите адреса заново. "
+            "Работает в режиме «VPN (TUN)» и после «Применить».",
+            self.body,
+        )
+        self.bypass_note.setWordWrap(True)
+        self.content_layout.addWidget(self.bypass_note)
         self.except_russian = CheckBox("Кроме российских сайтов", self.body)
         self.except_russian.setChecked(True)
         self.except_russian.setToolTip(
@@ -119,6 +147,67 @@ class SimpleRulePage(DetailPage):
         self._refresh_timer.setInterval(150)
         self._refresh_timer.timeout.connect(self._refresh)
         self._refresh()
+
+    # -- «Мимо TUN» ---------------------------------------------------------------------
+
+    def _bypass_helpers(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        self.find_addresses_btn = PushButton(FIF.SEARCH, "Определить адреса", self.body)
+        self.find_addresses_btn.setToolTip("Взять адреса, к которым сейчас подключены программы из списка выше")
+        self.find_addresses_btn.clicked.connect(self._find_addresses)
+        self.widen_check = CheckBox("Всю подсеть /24", self.body)
+        self.widen_check.setToolTip("Соседние адреса сервера игры тоже пойдут мимо TUN: надёжнее, но захватывает больше")
+        self.clear_bypass_btn = PushButton(FIF.DELETE, "Убрать все «Мимо TUN»", self.body)
+        self.clear_bypass_btn.setToolTip("Очистить «Кроме этих адресов» у входа TUN")
+        self.clear_bypass_btn.clicked.connect(self._clear_bypass)
+        for widget in (self.find_addresses_btn, self.widen_check, self.clear_bypass_btn):
+            row.addWidget(widget)
+        row.addStretch(1)
+        self._bypass_widgets = (self.find_addresses_btn, self.widen_check, self.clear_bypass_btn)
+        return row
+
+    def _is_bypass(self) -> bool:
+        return self.target_key() == BYPASS
+
+    def _find_addresses(self) -> None:
+        entries = self.texts()["programs"].splitlines()
+        found = tun_bypass.remote_addresses_of_programs(established_connections(), entries)
+        if not found:
+            self.preview.setText(
+                "Подключений у этих программ не нашлось. Запустите игру, дождитесь входа в игру и нажмите ещё раз."
+                if any(line.strip() for line in entries)
+                else "Сначала укажите программы или папку игры выше."
+            )
+            return
+        if self.widen_check.isChecked():
+            found = tun_bypass.widen_to_subnet(found)
+        editor = self.editors["ips"]
+        have = {line.strip() for line in editor.toPlainText().splitlines()}
+        fresh = [item for item in found if item not in have]
+        text = editor.toPlainText().rstrip("\n")
+        editor.setPlainText("\n".join(([text] if text else []) + fresh))
+
+    def _clear_bypass(self) -> None:
+        if self._on_bypass_clear is not None:
+            self._on_bypass_clear()
+        self._refresh()
+
+    def parsed_bypass(self) -> tun_bypass.ParsedAddresses:
+        return tun_bypass.parse_addresses(self.texts()["ips"])
+
+    def _apply_target_layout(self) -> None:
+        """«Мимо TUN» hides what it cannot use (domains) and shows its own helpers."""
+        bypass = self._is_bypass()
+        for key in ("sites",):
+            self._field_titles[key].setVisible(not bypass)
+            self.editors[key].setVisible(not bypass)
+        self._field_titles["ips"].setText("IP-адреса и подсети мимо TUN" if bypass else "IP-адреса и подсети")
+        self._field_titles["programs"].setText("Программы и игры (чтобы определить их адреса)" if bypass else "Программы и игры")
+        for widget in self._bypass_widgets:
+            widget.setVisible(bypass)
+        self.bypass_note.setVisible(bypass)
+        self.hint.setVisible(not bypass)
+        self.clear_bypass_btn.setEnabled(bool(self._bypass_current()))
 
     # -- programs: whole folders ------------------------------------------------------
 
@@ -221,7 +310,29 @@ class SimpleRulePage(DetailPage):
                 "банки и госсервисы с зарубежного адреса часто не открываются."
             )
 
+    def _refresh_bypass(self) -> None:
+        result = self.parsed_bypass()
+        filled = bool(self.texts()["ips"].strip())
+        ready = bool(result.cidrs) and not result.errors
+        self.add_btn.setEnabled(ready)
+        self.apply_btn.setEnabled(ready)
+        current = self._bypass_current()
+        lines = []
+        if ready:
+            lines.append(f"{tun_bypass.summary(result.cidrs)} → мимо TUN. Заработает после «Применить» и только в режиме TUN.")
+        elif filled:
+            lines.extend(result.errors or ["Укажите хотя бы один IP-адрес."])
+        if current:
+            lines.append(f"Сейчас мимо TUN: {tun_bypass.summary(current)}.")
+        self.preview.setText("\n".join(lines))
+
     def _refresh(self) -> None:
+        self._apply_target_layout()
+        if self._is_bypass():
+            self.russian_note.setVisible(False)
+            self.except_russian.setVisible(False)
+            self._refresh_bypass()
+            return
         self._refresh_russian_choice()
         result = self.parsed()
         filled = self.is_dirty()
@@ -238,6 +349,13 @@ class SimpleRulePage(DetailPage):
 
     def _submit(self, *, apply: bool) -> None:
         self._refresh_timer.stop()
+        if self._is_bypass():
+            parsed = self.parsed_bypass()
+            if parsed.cidrs and not parsed.errors and self._on_bypass is not None:
+                self._on_bypass(parsed.cidrs, apply)
+            else:
+                self._refresh()
+            return
         result = self.parsed()
         if result.rule is None:
             self._refresh()

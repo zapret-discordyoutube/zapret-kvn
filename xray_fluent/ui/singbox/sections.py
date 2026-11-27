@@ -47,6 +47,7 @@ from .fields import FieldEditor, FormContext, create_editor
 from .form import SchemaForm
 from .lists import AddOption, NavStack, ObjectList, RowInfo, section_header, unique_tag
 from .session import SingboxSession
+from ...singbox_config import tun_bypass
 from .simple_rule_page import SimpleRulePage
 from ...singbox_config.route_explain import RouteVerdict
 from ...singbox_config.simple_rule import insert_index
@@ -653,10 +654,29 @@ class RulesSection(Section):
             outbounds=tags(self.document, "outbound"),
             rule_sets=set(tags(self.document, "rule_set")),
             on_add=self._add_simple_rule,
+            bypass_available=bool(tun_bypass.tun_inbounds(self.document)),
+            on_bypass=self._add_bypass,
+            on_bypass_clear=self._clear_bypass,
+            bypass_current=lambda: tun_bypass.current(self.document),
         )
         self._on_close.append(None)
         self.nav.push(page)
         return page
+
+    def _add_bypass(self, cidrs: list[str], apply: bool) -> None:
+        """«Мимо TUN»: the prefixes go to ``route_exclude_address`` of the TUN inbound, a visible field of the same JSON."""
+        try:
+            tun_bypass.add_to_document(self.document, cidrs)
+        except LookupError:
+            return
+        self.nav.pop()
+        self.edited()
+        if apply:
+            self.apply_requested.emit()
+
+    def _clear_bypass(self) -> None:
+        tun_bypass.remove_from_document(self.document)
+        self.edited()
 
     def _add_simple_rule(self, rule: dict, apply: bool) -> None:
         page = self.nav.currentWidget()

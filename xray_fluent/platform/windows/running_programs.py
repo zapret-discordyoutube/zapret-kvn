@@ -69,6 +69,68 @@ def group_programs(paths: Iterable[str]) -> list[ProgramGroup]:
     return sorted(groups, key=lambda group: (-group.processes, group.name.casefold()))
 
 
+def _image_path(kernel32, pid: int, buffer) -> str | None:
+    import ctypes
+    from ctypes import wintypes
+
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(len(buffer))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return buffer.value
+        return None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def established_connections() -> list[tuple[str, str]]:
+    """(program image path, remote address) of every ESTABLISHED TCP connection, IPv4 and IPv6 (Windows only)."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    import socket
+    from ctypes import wintypes
+
+    iphlpapi, kernel32 = ctypes.WinDLL("iphlpapi"), ctypes.WinDLL("kernel32", use_last_error=True)
+    established = 5  # MIB_TCP_STATE_ESTAB
+    owner_pid_all = 5  # TCP_TABLE_OWNER_PID_ALL
+    buffer = ctypes.create_unicode_buffer(1024)
+    paths: dict[int, str | None] = {}
+    result: list[tuple[str, str]] = []
+
+    def path_of(pid: int) -> str | None:
+        if pid not in paths:
+            paths[pid] = _image_path(kernel32, pid, buffer)
+        return paths[pid]
+
+    for family in (socket.AF_INET, socket.AF_INET6):
+        size = wintypes.DWORD(0)
+        iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, family, owner_pid_all, 0)
+        raw = (ctypes.c_ubyte * max(size.value, 4))()
+        if iphlpapi.GetExtendedTcpTable(raw, ctypes.byref(size), False, family, owner_pid_all, 0) != 0:
+            continue
+        count = int.from_bytes(bytes(raw[0:4]), "little")
+        # MIB_TCPROW_OWNER_PID: state, laddr, lport, raddr, rport, pid (6 x DWORD); MIB_TCP6ROW_OWNER_PID: laddr[16], lscope,
+        # lport, raddr[16], rscope, rport, state, pid (16+4+4+16+4+4+4+4 = 56 bytes)
+        width = 24 if family == socket.AF_INET else 56
+        for index in range(count):
+            row = bytes(raw[4 + index * width: 4 + (index + 1) * width])
+            if len(row) < width:
+                break
+            if family == socket.AF_INET:
+                state, remote, pid = (int.from_bytes(row[0:4], "little"), row[12:16], int.from_bytes(row[20:24], "little"))
+            else:
+                state, remote, pid = (int.from_bytes(row[48:52], "little"), row[24:40], int.from_bytes(row[52:56], "little"))
+            if state != established or not pid:
+                continue
+            path = path_of(pid)
+            if path:
+                result.append((path, socket.inet_ntop(family, remote)))
+    return result
+
+
 def running_program_paths() -> list[str]:
     """Full paths of the programs running now (Windows only; empty elsewhere). Blocking, for a worker or a short call."""
     if os.name != "nt":
@@ -84,13 +146,7 @@ def running_program_paths() -> list[str]:
     paths: list[str] = []
     buffer = ctypes.create_unicode_buffer(1024)
     for index in range(needed.value // ctypes.sizeof(wintypes.DWORD)):
-        handle = kernel32.OpenProcess(0x1000, False, ids[index])  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            continue
-        try:
-            size = wintypes.DWORD(len(buffer))
-            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-                paths.append(buffer.value)
-        finally:
-            kernel32.CloseHandle(handle)
+        path = _image_path(kernel32, ids[index], buffer)
+        if path:
+            paths.append(path)
     return paths
