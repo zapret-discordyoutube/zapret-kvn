@@ -86,6 +86,10 @@ class _Palette:
         self.chevron_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
 
 
+#: Horizontal step of one folder level (pixels).
+_GROUP_INDENT = 18
+
+
 class NodesDelegate(QStyledItemDelegate):
     def __init__(self, view: NodesView):
         super().__init__(view)
@@ -158,7 +162,7 @@ class NodesDelegate(QStyledItemDelegate):
         color = model.status_color(item, col) or pal.text
         text_rect = rect.adjusted(_TEXT_PAD, 0, -_TEXT_PAD, 0)
         if col == COL_NAME:
-            text_rect.setLeft(text_rect.left() + _PILL_WIDTH + 2)
+            text_rect.setLeft(text_rect.left() + _PILL_WIDTH + 2 + int(getattr(item, "depth", 0)) * _GROUP_INDENT)
             pixmap = self._flag(node_country(node), painter)
             if pixmap is not None:
                 y = rect.top() + (rect.height() - FLAG_SIZE.height()) // 2
@@ -213,7 +217,8 @@ class NodesDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(pal.chevron_pen)
-        x, y = rect.left() + 14.0, float(rect.center().y()) + 0.5
+        indent = int(getattr(item, "depth", 0)) * _GROUP_INDENT
+        x, y = rect.left() + 14.0 + indent, float(rect.center().y()) + 0.5
         if item.collapsed:
             points = (QPointF(x - 1.5, y - 4), QPointF(x + 2.5, y), QPointF(x - 1.5, y + 4))
         else:
@@ -224,7 +229,14 @@ class NodesDelegate(QStyledItemDelegate):
         painter.drawPath(path)
         painter.setFont(pal.bold)
         painter.setPen(pal.text)
-        text_rect = rect.adjusted(30, 0, -_TEXT_PAD, 0)
+        text_rect = rect.adjusted(30 + indent, 0, -_TEXT_PAD, 0)
+        country = getattr(item, "country", "")
+        pixmap = self._flag(country, painter) if country else None
+        if pixmap is not None:
+            # A country (or a server of one) is named with its flag, as the servers below it are.
+            top = rect.top() + (rect.height() - FLAG_SIZE.height()) // 2
+            painter.drawPixmap(text_rect.left(), top, pixmap)
+            text_rect.setLeft(text_rect.left() + FLAG_SIZE.width() + 8)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          pal.bold_metrics.elidedText(item.label, Qt.TextElideMode.ElideRight, text_rect.width()))
         painter.restore()

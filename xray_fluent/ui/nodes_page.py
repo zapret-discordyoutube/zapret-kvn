@@ -31,6 +31,7 @@ from .bulk_edit_page import BulkEditPage
 from .detail_page import StackedSection
 from .node_detail_widget import NodeDetailWidget
 from .node_edit_page import NodeEditPage
+from .group_levels_dialog import GroupLevelsDialog, levels_title
 from .nodes_view import FLAG_SIZE, NodesView
 from .nodes_table_model import (
     COL_ADDRESS,
@@ -47,6 +48,8 @@ from .nodes_table_model import (
     COLUMN_SPECS,
     DEFAULT_VISIBLE_COLUMNS,
     GROUP_MODES,
+    group_levels,
+    normalize_group_mode,
     NODE_ID_ROLE,
     NODE_ROW_HEIGHT,
     SORT_KEYS,
@@ -93,6 +96,10 @@ def _node_protocol(node: Node) -> str:
     """Protocol as protocol_core() reads it: Xray "protocol", sing-box "type", else the link scheme."""
     outbound = node.outbound or {}
     return str(outbound.get("protocol", outbound.get("type", node.scheme)) or "").lower()
+
+
+#: userData of the combo entry that opens the dialog for the user's own order of folders.
+_CUSTOM_GROUPING = "__custom__"
 
 
 class NodesPage(StackedSection):
@@ -348,6 +355,8 @@ class NodesPage(StackedSection):
         self.group_by_combo = ComboBox(self)
         for mode, title in GROUP_MODES.items():
             self.group_by_combo.addItem(title, userData=mode)
+        self.group_by_combo.addItem("Свой порядок…", userData=_CUSTOM_GROUPING)
+        self._grouping_before_dialog = "source"
         self.group_by_combo.currentIndexChanged.connect(self._change_grouping)
         self.favorites_filter = TransparentToggleToolButton(FIF.HEART, self)
         self.favorites_filter.setToolTip("Только избранные")
@@ -510,10 +519,8 @@ class NodesPage(StackedSection):
                 if not columns or columns in (["name", "type", "address", "ping", "speed"], ["name", "ping", "speed"]):
                     columns = list(DEFAULT_VISIBLE_COLUMNS)
             self._table_model.set_collapsed_groups(getattr(settings, "nodes_collapsed_groups", []))
-            mode = getattr(settings, "nodes_group_by", "source")
-            if mode not in GROUP_MODES:
-                mode = "source"
-            self.group_by_combo.setCurrentIndex(list(GROUP_MODES).index(mode))
+            mode = normalize_group_mode(getattr(settings, "nodes_group_by", "source"))
+            self._sync_grouping_combo(mode)
             self.favorites_filter.setChecked(bool(getattr(settings, "nodes_favorites_only", False)))
             widths = dict(getattr(settings, "nodes_column_widths", {}) or {})
             order = list(getattr(settings, "nodes_column_order", []) or [])
@@ -976,8 +983,39 @@ class NodesPage(StackedSection):
                 and not self.search_edit.text().strip() and not self.favorites_filter.isChecked()
                 and all(combo.currentIndex() == 0 for combo in (self.group_filter, self.tag_filter, self.source_filter)))
 
+    def _sync_grouping_combo(self, mode: str) -> None:
+        """Show the mode in the combo without applying it again: a preset by its name, any other as «Свой: …»."""
+        mode = normalize_group_mode(mode)
+        combo = self.group_by_combo
+        combo.blockSignals(True)
+        try:
+            # drop the previous custom entry (between the presets and «Свой порядок…»)
+            for index in range(combo.count() - 1, -1, -1):
+                data = combo.itemData(index)
+                if isinstance(data, str) and data not in GROUP_MODES and data != _CUSTOM_GROUPING:
+                    combo.removeItem(index)
+            if mode not in GROUP_MODES:
+                combo.insertItem(combo.count() - 1, f"Свой: {levels_title(group_levels(mode))}", userData=mode)
+            for index in range(combo.count()):
+                if combo.itemData(index) == mode:
+                    combo.setCurrentIndex(index)
+                    break
+        finally:
+            combo.blockSignals(False)
+        self._grouping_before_dialog = mode
+
     def _change_grouping(self, *_):
-        self._table_model.set_group_mode(self.group_by_combo.currentData())
+        chosen = self.group_by_combo.currentData()
+        if chosen == _CUSTOM_GROUPING:
+            dialog = GroupLevelsDialog(self._grouping_before_dialog, self.window())
+            if dialog.exec():
+                self._table_model.set_group_mode(dialog.mode())
+                self._sync_grouping_combo(self._table_model.group_mode())
+            else:
+                self._sync_grouping_combo(self._grouping_before_dialog)
+        else:
+            self._table_model.set_group_mode(chosen)
+            self._grouping_before_dialog = self._table_model.group_mode()
         self._emit_selection()
         self._emit_view_prefs()
 

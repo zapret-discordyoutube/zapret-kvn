@@ -21,6 +21,8 @@ from qfluentwidgets import qconfig
 
 from ..profiles.country_flags import get_flag_icon
 from ..profiles.models import Node
+from ..profiles.country_names import country_title
+from ..profiles.server_naming import parse_server_name
 from ..profiles.node_presentation import display_name, node_country
 from .privacy import node_endpoint_text
 from .theme import error_color, positive_color, text_muted_color, warning_color
@@ -92,7 +94,56 @@ CENTERED_COLUMNS = frozenset(index for index, spec in enumerate(COLUMN_SPECS) if
 SORT_KEYS = ("manual", "name", "group", "type", "ping", "speed", "last_used")
 DEFAULT_SORT_KEY = "manual"
 
-GROUP_MODES = {"source": "Подписки", "group": "Группы", "country": "Страны", "type": "Протоколы", "none": "Без группировки"}
+GROUP_MODES = {
+    "source": "Подписки",
+    "group": "Группы",
+    "country": "Страны",
+    "type": "Протоколы",
+    "server": "Серверы",
+    "country_server": "Страны › серверы › протоколы",
+    "none": "Без группировки",
+}
+#: What a preset expands to. The user can also pick the levels himself: a mode is then the levels joined by «+»
+#: (for example ``country+type``), saved as the same setting string (owner request 2026-11-27: "the user chooses how to
+#: group the servers themselves").
+GROUP_PRESET_LEVELS = {
+    "source": ("source",),
+    "group": ("group",),
+    "country": ("country",),
+    "type": ("type",),
+    "server": ("server", "type"),
+    "country_server": ("country", "server", "type"),
+    "none": (),
+}
+#: Levels a user can combine, with their titles in the picker.
+GROUP_LEVELS = {
+    "source": "Подписка",
+    "country": "Страна",
+    "server": "Сервер",
+    "type": "Протокол",
+    "group": "Группа",
+}
+MAX_GROUP_LEVELS = 3
+
+
+def group_levels(mode: str) -> tuple[str, ...]:
+    """The levels a mode string stands for; an unknown one falls back to the old default (by subscription)."""
+    text = str(mode or "")
+    if text in GROUP_PRESET_LEVELS:
+        return GROUP_PRESET_LEVELS[text]
+    parts = [part for part in text.split("+") if part]
+    if parts and len(parts) <= MAX_GROUP_LEVELS and len(set(parts)) == len(parts) and all(p in GROUP_LEVELS for p in parts):
+        return tuple(parts)
+    return GROUP_PRESET_LEVELS["source"]
+
+
+def normalize_group_mode(mode: str) -> str:
+    """A valid mode string: a preset name, or valid levels joined by «+»; anything else is the default."""
+    text = str(mode or "")
+    if text in GROUP_PRESET_LEVELS:
+        return text
+    levels = group_levels(text)
+    return "+".join(levels) if levels and "+".join(levels) == text else "source"
 
 LOCAL_SOURCE_NAME = "Локальные"
 
@@ -196,7 +247,7 @@ def fastest_node_id(nodes) -> str | None:
 class NodeRow:
     """Строка-сервер. ``texts``/``ping_status`` считаются лениво."""
 
-    __slots__ = ("key", "node", "texts", "status")
+    __slots__ = ("key", "node", "texts", "status", "depth")
     is_group = False
 
     def __init__(self, node: Node) -> None:
@@ -204,18 +255,23 @@ class NodeRow:
         self.node = node
         self.texts: tuple[str, ...] | None = None
         self.status: int | None = None
+        self.depth = 0
 
 
 class GroupRow:
-    __slots__ = ("key", "title", "count", "collapsed", "label")
+    __slots__ = ("key", "title", "count", "collapsed", "label", "depth", "country")
     is_group = True
 
-    def __init__(self, key: str, title: str, count: int, collapsed: bool) -> None:
+    def __init__(self, key: str, title: str, count: int, collapsed: bool, depth: int = 0, country: str = "") -> None:
         self.key = key
         self.title = title
         self.count = count
         self.collapsed = collapsed
         self.label = f"{title} · {count}"
+        #: Nesting level (0 = top): the delegate indents by it.
+        self.depth = depth
+        #: A country code when the header names a country or a server of one: the flag is drawn from it.
+        self.country = country
 
 
 class NodesTableModel(QAbstractTableModel):
@@ -334,7 +390,7 @@ class NodesTableModel(QAbstractTableModel):
         return self._sort_key
 
     def set_group_mode(self, mode: str) -> None:
-        mode = mode if mode in GROUP_MODES else "source"
+        mode = normalize_group_mode(mode)
         if mode != self._group_mode:
             self._group_mode = mode
             self._relayout()
@@ -482,8 +538,11 @@ class NodesTableModel(QAbstractTableModel):
         node = self._by_id.get(node_id)
         if node is None or not self._accepts(node):
             return None
-        key = self._group_of(node)[0]
-        return key if key and key in self._collapsed else None
+        # The outermost collapsed folder on the node's path is the one that hides it.
+        for key, _title, _country in self._group_path(node):
+            if key in self._collapsed:
+                return key
+        return None
 
     def visible_node_count(self) -> int:
         return self._visible_node_count
@@ -652,7 +711,7 @@ class NodesTableModel(QAbstractTableModel):
     def _layout_sig(self, node: Node) -> tuple:
         """Значения ноды, от которых зависят фильтр, сортировка и группа."""
         return (node.is_favorite, node.group, tuple(node.tags), node.subscription_id,
-                self._sort_value(node), self._group_of(node)[0],
+                self._sort_value(node), tuple(key for key, _t, _c in self._group_path(node)),
                 self._haystack_source(node) if self._query else None)
 
     def _layout_changed_for(self, node_ids: set[str]) -> bool:
@@ -710,21 +769,43 @@ class NodesTableModel(QAbstractTableModel):
             return known + unknown
         return sorted(nodes, key=self._sort_value, reverse=self._descending)
 
-    def _group_of(self, node: Node) -> tuple[str, str]:
-        mode = self._group_mode
-        if mode == "none":
-            return "", ""
-        if mode == "source":
+    def _group_path(self, node: Node) -> list[tuple[str, str, str]]:
+        """The folders of this node, outermost first: (path key, title, country code or "").
+
+        A path key holds the keys of every level above it, so the same server under two countries (or the same
+        protocol under two servers) are different folders with their own collapsed state.
+        """
+        path: list[tuple[str, str, str]] = []
+        prefix = ""
+        for level in group_levels(self._group_mode):
+            key, title, country = self._level_of(node, level)
+            prefix = f"{prefix}/{key}" if prefix else key
+            path.append((prefix, title, country))
+        return path
+
+    def _level_of(self, node: Node, level: str) -> tuple[str, str, str]:
+        if level == "source":
             key = node.subscription_id or "local"
             title = self._source_names.get(key, LOCAL_SOURCE_NAME if key == "local" else "Подписка")
-            return "source:" + key, title
-        if mode == "group":
-            return "group:" + node.group, node.group or "Без группы"
-        if mode == "country":
+            return "source:" + key, title, ""
+        if level == "group":
+            return "group:" + node.group, node.group or "Без группы", ""
+        if level == "country":
             code = node_country(node)
-            return "country:" + code, code or "Страна не определена"
+            return "country:" + code, country_title(code), code
+        if level == "server":
+            parsed = parse_server_name(node.name)
+            code = node_country(node)
+            return "server:" + parsed.server_key, parsed.server, code
         value = node_type_text(node)
-        return "type:" + value, value
+        return "type:" + value, value, ""
+
+    def _group_of(self, node: Node) -> tuple[str, str]:
+        """The innermost folder (kept for callers that only need one key)."""
+        path = self._group_path(node)
+        if not path:
+            return "", ""
+        return path[-1][0], path[-1][1]
 
     def _relayout(self) -> None:
         self._relayout_timer.stop()
@@ -734,22 +815,36 @@ class NodesTableModel(QAbstractTableModel):
         old_rows = {row.key: row for row in self._rows}
         rows: list[NodeRow | GroupRow] = []
         group_keys: list[str] = []
-        if self._group_mode == "none":
+        levels = group_levels(self._group_mode)
+        if not levels:
             rows = [self._reuse_row(old_rows, node) for node in visible]
         else:
-            groups: dict[str, tuple[str, list[Node]]] = {}
-            for node in visible:
-                key, title = self._group_of(node)
-                groups.setdefault(key, (title, []))[1].append(node)
-            for key, (title, members) in sorted(groups.items(), key=lambda item: (item[1][0].casefold(), item[0])):
-                collapsed = key in self._collapsed
-                group_keys.append(key)
-                rows.append(GroupRow(key, title, len(members), collapsed))
-                if not collapsed:
-                    rows.extend(self._reuse_row(old_rows, node) for node in members)
+            self._append_folder_rows(rows, group_keys, old_rows, [(node, self._group_path(node)) for node in visible], 0)
         self._apply_rows(rows)
         self._group_keys = group_keys
         self._visible_node_count = len(visible)
+
+    def _append_folder_rows(self, rows: list, group_keys: list[str], old_rows: dict,
+                            members: list[tuple[Node, list[tuple[str, str, str]]]], depth: int) -> None:
+        """One level of the tree: folders sorted by title, each followed by its content unless collapsed."""
+        folders: dict[str, tuple[str, str, list]] = {}
+        leaves: list[Node] = []
+        for node, path in members:
+            if len(path) <= depth:
+                leaves.append(node)
+                continue
+            key, title, country = path[depth]
+            folders.setdefault(key, (title, country, []))[2].append((node, path))
+        for key, (title, country, inner) in sorted(folders.items(), key=lambda item: (item[1][0].casefold(), item[0])):
+            collapsed = key in self._collapsed
+            group_keys.append(key)
+            rows.append(GroupRow(key, title, len(inner), collapsed, depth, country))
+            if not collapsed:
+                self._append_folder_rows(rows, group_keys, old_rows, inner, depth + 1)
+        for node in leaves:
+            row = self._reuse_row(old_rows, node)
+            row.depth = depth
+            rows.append(row)
 
     @staticmethod
     def _reuse_row(old_rows: dict, node: Node) -> NodeRow:
