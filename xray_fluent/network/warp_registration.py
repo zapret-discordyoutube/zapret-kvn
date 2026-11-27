@@ -196,10 +196,21 @@ def _write_account(path: str | os.PathLike[str], private_key: str, raw: bytes) -
         raise
 
 
-def _through_proxy(body: bytes, proxy_url: str, timeout: float) -> bytes:
+def _through_proxy(
+    body: bytes,
+    proxy_url: str,
+    timeout: float,
+    *,
+    method: str = "POST",
+    path: str = API_PATH,
+    token: str | None = None,
+) -> bytes:
     from .http_utils import fetch_bytes
 
-    request = Request(f"https://{API_HOST}{API_PATH}", data=body, headers=dict(HEADERS), method="POST")
+    headers = dict(HEADERS)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = Request(f"https://{API_HOST}{path}", data=body, headers=headers, method=method)
     return fetch_bytes(request, timeout=timeout, max_bytes=MAX_RESPONSE, proxy_url=proxy_url, prefer_proxy=True,
                        attempts_per_route=1).data
 

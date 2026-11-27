@@ -128,10 +128,18 @@ def ensure(
     timeout: float = 8.0,
     budget: float = 25.0,
     requester: Requester | None = None,
+    proxy_url: str | None = None,
 ) -> Outcome:
-    """Make sure `<account>.masque` exists, registering it over the routes of `warp_registration.routes`."""
+    """Make sure `<account>.masque` exists, registering it over the routes of `warp_registration.routes`.
+
+    `proxy_url` set means "through that proxy only" (the VPN of a connect that runs without the hop, owner 2026-11-27:
+    break through once, then reuse the account): one route, no back-off to honour, none recorded."""
     global _failed_at
-    send = requester or warp_registration._exchange
+    if proxy_url:
+        def send(address, body, fragmented, limit, **kwargs):  # noqa: ANN001, ANN202 - same shape as `_exchange`
+            return warp_registration._through_proxy(body, proxy_url, limit, **kwargs)
+    else:
+        send = requester or warp_registration._exchange
     target = account_path(wireguard_account)
     if ready(target):
         return Outcome(True, "cached", "account file is there")
@@ -140,9 +148,9 @@ def ensure(
     def took() -> int:
         return int((time.monotonic() - started) * 1000)
 
-    if started - _failed_at < RETRY_S:
+    if not proxy_url and started - _failed_at < RETRY_S:
         return Outcome(False, "skipped", "the routes failed a moment ago")
-    routes = warp_registration.routes(addresses)
+    routes = [("vpn", None, False)] if proxy_url else warp_registration.routes(addresses)
 
     def over_routes(first: tuple | None, step: Callable[[str | None, bool, float], dict]):
         ordered = ([first] if first else []) + [route for route in routes if route != first]
@@ -167,7 +175,8 @@ def ensure(
 
     registered = over_routes(None, register)
     if registered is None:
-        _failed_at = time.monotonic()
+        if not proxy_url:
+            _failed_at = time.monotonic()
         return Outcome(False, "none", f"no route registered the device in {budget:g} s", took())
     device = registered[1]
     private, public = new_key()
@@ -186,7 +195,8 @@ def ensure(
 
     enrolled = over_routes(registered[0], enroll)
     if enrolled is None:
-        _failed_at = time.monotonic()
+        if not proxy_url:
+            _failed_at = time.monotonic()
         return Outcome(False, registered[0][0], f"the MASQUE key was not accepted in {budget:g} s", took())
     try:
         write_account(target, private, device["id"], device["token"], enrolled[1])

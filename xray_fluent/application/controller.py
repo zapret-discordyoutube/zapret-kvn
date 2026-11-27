@@ -418,6 +418,8 @@ def _slot_host_keys(node: Node) -> frozenset[str]:
 # How long after the connect the app writes what the core said about the WARP hop (one line).
 #: After a failed direct registration the next connects skip the direct routes for this long (seconds).
 _WARP_DIRECT_RETRY_S = 600.0
+#: The MASQUE account is waited for this long at most while connecting.
+_WARP_MASQUE_BUDGET_S = 12.0
 _WARP_SUMMARY_MS = 40_000
 
 class AppController(QObject):
@@ -1515,13 +1517,12 @@ class AppController(QObject):
         # What the core says about the hop is counted from here to the summary line (warp_hop_health.py).
         self._warp_health = HopHealth()
         self._warp_summary_timer.start(_WARP_SUMMARY_MS)
+        started = time.monotonic()
         if warp_registration.account_file_ready(profile):
             # One line per connect while the setting is on: its absence in a report means the setting was off at connect.
             self._log("[warp-entry] вход через WARP включён, аккаунт WARP готов")
-            self._register_masque_account_later(profile)
-            return
-        started = time.monotonic()
-        if started - getattr(self, "_warp_direct_failed_at", -1e9) < _WARP_DIRECT_RETRY_S:
+            outcome = warp_registration.Outcome(True, "cached", "account file is there")
+        elif started - getattr(self, "_warp_direct_failed_at", -1e9) < _WARP_DIRECT_RETRY_S:
             # The direct routes failed a moment ago (every one ran into its timeout): do not make this connect wait for
             # them again, go on without the hop and register through the VPN once it is up.
             outcome = warp_registration.Outcome(False, "skipped", "the direct routes failed a moment ago")
@@ -1532,14 +1533,35 @@ class AppController(QObject):
             if not outcome.ok:
                 self._warp_direct_failed_at = time.monotonic()
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        self._warp_register = (registration_result(outcome.ok, outcome.detail), elapsed_ms)
+        if outcome.route != "cached":
+            self._warp_register = (registration_result(outcome.ok, outcome.detail), elapsed_ms)
         if outcome.ok:
-            self._log(f"[warp-entry] аккаунт WARP зарегистрирован, путь: {outcome.route}, {elapsed_ms} мс")
-            self._register_masque_account_later(profile)
-            return
-        self._log(
-            f"[warp-entry] аккаунт WARP не зарегистрировать напрямую ({outcome.route}: {outcome.detail}), {elapsed_ms} мс"
-        )
+            if outcome.route != "cached":
+                self._log(f"[warp-entry] аккаунт WARP зарегистрирован, путь: {outcome.route}, {elapsed_ms} мс")
+            # The second account, for the MASQUE tunnel the core falls back to where WireGuard is cut (field report
+            # 2026-11-27 on Android: the handshake answered, nothing came through, MASQUE had no account, the connect
+            # was refused).  Waited for a short while: a blocked API is told by the budget, never by a long wait.
+            masque_started = time.monotonic()
+            masque = yield run_in_worker(
+                lambda: warp_masque_account.ensure(
+                    profile, budget=_WARP_MASQUE_BUDGET_S,
+                    addresses=lambda: list(resolve_bootstrap(warp_registration.API_HOST).addresses),
+                )
+            )
+            if masque.route != "cached":
+                self._log(
+                    f"[warp-entry] аккаунт MASQUE готов, путь: {masque.route}, {masque.elapsed_ms} мс"
+                    if masque.ok
+                    else f"[warp-entry] аккаунт MASQUE не зарегистрирован ({masque.route}: {masque.detail}), "
+                    f"{int((time.monotonic() - masque_started) * 1000)} мс"
+                )
+            if masque.ok:
+                return
+            outcome = warp_registration.Outcome(False, "masque", masque.detail)
+        else:
+            self._log(
+                f"[warp-entry] аккаунт WARP не зарегистрировать напрямую ({outcome.route}: {outcome.detail}), {elapsed_ms} мс"
+            )
         self._warp_health = None
         self._warp_summary_timer.stop()
         self._warp_hop_suspended = True
@@ -1602,15 +1624,29 @@ class AppController(QObject):
             runner.start()
 
     def _register_warp_via_vpn_steps(self) -> TransitionSteps:
-        session = self._active_session
-        port = int(getattr(session, "http_port", 0) or 0)
         profile = str(DATA_DIR / "warp-entry-profile.json")
+        # The connected signal can come before the session snapshot with the local ports is in place (found by the live e2e
+        # with the API blocked, 2026-11-27): wait for it a few seconds before giving up.
+        port = 0
+        for _ in range(40):
+            port = int(getattr(self._active_session, "http_port", 0) or 0)
+            if port > 0 or not self.connected:
+                break
+            yield sleep_ms(250)
         if port <= 0:
             self._log("[warp-entry] нет локального порта HTTP, аккаунт WARP через VPN не зарегистрировать")
             return False
         outcome = yield run_in_worker(
             lambda: warp_registration.ensure_account(profile, proxy_url=f"http://127.0.0.1:{port}", timeout=20.0)
         )
+        if outcome.ok:
+            # Registered once, reused for good (owner 2026-11-27): the MASQUE account too, through the same VPN.
+            masque = yield run_in_worker(
+                lambda: warp_masque_account.ensure(profile, proxy_url=f"http://127.0.0.1:{port}", timeout=20.0, budget=40.0)
+            )
+            if not masque.ok:
+                self._log(f"[warp-entry] аккаунт MASQUE через VPN не зарегистрирован ({masque.detail})")
+                outcome = warp_registration.Outcome(False, masque.route, masque.detail)
         if not outcome.ok:
             self._log(f"[warp-entry] аккаунт WARP через VPN не зарегистрирован ({outcome.detail})")
             self.status.emit(

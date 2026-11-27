@@ -83,6 +83,8 @@ class _WarpE2EBase(unittest.TestCase):
     BLOCKED = False
     # True: the VPN (TUN) mode, which captures the helpers' own sockets; it changes the routes of the machine.
     TUN = False
+    # True: no account is copied in and none is registered by the class itself: the app has to get its own.
+    FRESH = False
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -101,16 +103,19 @@ class _WarpE2EBase(unittest.TestCase):
         # is shared the same way.
         reused = os.environ.get("KVN_E2E_ACCOUNT", "")
         shared = Path(reused) if reused else _shared_account()
-        if shared.is_file():
+        if shared.is_file() and not cls.FRESH:
             shutil.copyfile(shared, cls.account)
         masque_shared = Path(str(shared) + ".masque")
-        if masque_shared.is_file():
+        if masque_shared.is_file() and not cls.FRESH:
             shutil.copyfile(masque_shared, Path(str(cls.account) + ".masque"))
-        cls.registration = warp_registration.ensure_account(cls.account)  # the real API
+        if cls.FRESH:
+            cls.registration = warp_registration.Outcome(False, "none", "the app registers its own account")
+        else:
+            cls.registration = warp_registration.ensure_account(cls.account)  # the real API
         if not cls.registration.ok and "429" in cls.registration.detail:
             # Cloudflare refuses new devices from this address for a while: nothing about the app is proven or refuted.
             raise unittest.SkipTest("the registration API answers 429 (too many devices from this address): unproven now")
-        if not shared.is_file() and cls.account.is_file() and not cls.BLOCKED:
+        if not shared.is_file() and cls.account.is_file() and not cls.BLOCKED and not cls.FRESH:
             shutil.copyfile(cls.account, shared)
         if cls.BLOCKED:
             import json
@@ -465,6 +470,85 @@ class WarpEntryQuicAndWireGuardBlockedE2E(_FirewallBlocked):
     def test_a_real_page_comes_back_over_masque_http2_when_quic_is_dropped_too(self) -> None:
         self._a_real_page_comes_back()
         self.assertTrue(self._tunnel_answered_at("masque-http2"), "the tunnel did not come up over HTTP/2\n" + self._evidence())
+
+
+@unittest.skipUnless(_RUNNABLE, _SKIP)
+class WarpEntryApiBlockedE2E(_WarpE2EBase):
+    """The network blocks the registration API (the owner's mobile data, 2026-11-27): no account can be made directly.
+
+    A Windows Firewall rule on this Python process drops TCP 443 to every address of the API; the VPN's own helper (the real
+    sing-box) is not blocked, which is what a tunnel to a server outside the provider's reach looks like.  The first connect
+    must go on without the hop and say so, register both accounts THROUGH the VPN, restart by itself and bring a real page
+    through the WARP endpoint.  That a real provider behaves like the rule is proven only on the owner's network."""
+
+    SCHEMES = ("vless",)
+    FRESH = True
+    _RULE = "kvn-e2e-warp-api-block"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import socket
+        import subprocess
+        import sys
+
+        from xray_fluent.network import warp_registration
+
+        addresses = {info[4][0] for info in socket.getaddrinfo(warp_registration.API_HOST, 443, socket.AF_INET)}
+        addresses.update(warp_registration.KNOWN_ADDRESSES)
+        subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}"], capture_output=True)
+        # A venv's python.exe starts the base interpreter, which is the process that really opens the sockets: block both.
+        programs = {Path(sys.executable).resolve(), Path(getattr(sys, "_base_executable", sys.executable)).resolve()}
+        for index, program in enumerate(sorted(programs)):
+            added = subprocess.run(
+                [
+                    "netsh", "advfirewall", "firewall", "add", "rule", f"name={cls._RULE}", "dir=out", "action=block",
+                    "protocol=TCP", "remoteport=443", f"remoteip={','.join(sorted(addresses))}", f"program={program}",
+                ],
+                capture_output=True,
+            )
+            if added.returncode != 0:
+                raise unittest.SkipTest("cannot add the firewall rule (needs an administrator), netsh code " + str(added.returncode))
+        try:
+            super().setUpClass()
+        except BaseException:
+            subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}"], capture_output=True)
+            raise
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        import subprocess
+
+        try:
+            super().tearDownClass()
+        finally:
+            subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}"], capture_output=True)
+
+    def test_the_app_registers_its_accounts_through_the_vpn_and_restarts_with_the_hop(self) -> None:
+        from xray_fluent.network import warp_masque_account, warp_registration
+
+        c = self.controller
+        # the precondition: the rule really blocks the API from this process
+        probe = warp_registration.ensure_account(self.tmp / "probe.json", timeout=4.0, budget=10.0)
+        self.assertFalse(probe.ok, "the API is reachable directly: the rule does not block it")
+        c._warp_direct_failed_at = -1e9
+        self.assertFalse(self.account.is_file())
+        from xray_fluent.application.selection_source import SelectionSource
+
+        c.set_selected_node(self.nodes[0].id, source=SelectionSource.NODES_MENU)
+        c.toggle_connection()
+        self.assertTrue(_spin_until(lambda: c.connected, 120), "the connect without the hop did not come up\n" + self._evidence())
+        self.assertTrue(
+            any("Не удалось зарегистрировать аккаунт WARP напрямую" in message for _, message in self.statuses),
+            "the user was not told that this connect runs without the hop\n" + self._evidence(),
+        )
+        self.assertTrue(
+            _spin_until(lambda: self._seen("аккаунт WARP зарегистрирован через VPN"), 150),
+            "the accounts were not registered through the VPN\n" + self._evidence(),
+        )
+        self.assertTrue(warp_registration.account_file_ready(self.account))
+        self.assertTrue(warp_masque_account.ready(warp_masque_account.account_path(self.account)))
+        _spin_until(lambda: not c._transition_active and c.connected, 90)
+        self._a_real_page_comes_back()
 
 
 if __name__ == "__main__":
