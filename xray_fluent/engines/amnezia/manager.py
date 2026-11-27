@@ -406,7 +406,7 @@ class AmneziaManager(QObject):
         # A WireGuard handshake is sent at about 0, 5 and 10 s: 12 s covers three attempts, which a healthy server answers
         # in the first or second. Was 20 s: on a network that drops UDP the user watched «Подключение…» for 20 s per try
         # (owner report 2026-11-27, "thinking for a very long time").
-        deadline = time.monotonic() + self.handshake_wait_s
+        deadline = time.monotonic() + getattr(self, "handshake_wait_s", HANDSHAKE_WAIT_S)
         executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="amnezia-ready")
         transferred = False
         try:
