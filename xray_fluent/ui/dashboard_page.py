@@ -58,7 +58,9 @@ from ..profiles.models import AppSettings, Node, RoutingSettings
 from ..platform.windows.proxy_manager import SystemProxyState
 from .base_page import BODY_MARGINS, ScrollablePage
 from .connection_orb import CONNECTED, CONNECTING, ERROR, IDLE
-from .dashboard_widgets import ConnectionScene, FlagBadge, ModeTile, ProcessBars, SignalBars, StatTile, latency_color
+from .dashboard_widgets import (
+    ConnectionScene, FlagBadge, ModeTile, ProcessBars, ShieldBadge, SignalBars, StatTile, latency_color,
+)
 from .detail_page import DetailPage, StackedSection
 from .privacy import masked_endpoint, node_name_text
 from .theme import error_color, graph_down_color, graph_up_color, on_theme_or_accent_changed, positive_color
@@ -91,8 +93,10 @@ def hero_sizes(viewport_height: int) -> tuple[int, int, int]:
     return orb, padding, graph
 
 
-def _proxy_hint(enabled: bool) -> str:
+def _proxy_hint(enabled: bool, tun: bool = False) -> str:
     """Подпись переключателя «Системный прокси Windows» — что сейчас идёт через туннель."""
+    if tun:
+        return "В режиме VPN (TUN) прокси не нужен: весь трафик компьютера уже идёт через туннель"
     if enabled:
         return "Браузеры и большинство программ подхватывают прокси сами"
     return "Выключен — через туннель идут только программы с ручной настройкой прокси"
@@ -415,6 +419,8 @@ class DashboardPage(StackedSection):
         self.proxy_hint_label = CaptionLabel(_proxy_hint(False), self.proxy_options)
         self.proxy_hint_label.setWordWrap(True)
         texts.addWidget(self.proxy_hint_label)
+        self.proxy_shield = ShieldBadge(self.proxy_options)
+        options.insertWidget(0, self.proxy_shield, 0, Qt.AlignmentFlag.AlignVCenter)
         options.addLayout(texts, 1)
         self.proxy_switch = SwitchButton(self.proxy_options)
         self.proxy_switch.setOnText("Вкл")
@@ -441,8 +447,8 @@ class DashboardPage(StackedSection):
         )
         self.telegram_proxy_btn.clicked.connect(self._add_proxy_to_telegram)
         address.addWidget(self.telegram_proxy_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.connection_ports_label.setVisible(False)
-        self.proxy_address_row.setVisible(False)
+        # Ряд прокси не прячется ни в каком режиме (владелец, 27.11.2026: «пропал в трёх местах»): в TUN и без
+        # подключения он показывает, почему неактивен, а не исчезает.
         layout.addWidget(self.proxy_address_row)
 
     def _build_traffic_card(self, container: QWidget) -> None:
@@ -957,14 +963,47 @@ class DashboardPage(StackedSection):
         core = self._settings.tun_engine if self._settings.tun_mode else self._settings.proxy_engine
         self.connection_engine_label.setText(f"Ядро: {core}")
         self.connection_engine_label.setToolTip(self._route_engine_label())
-        self.proxy_options.setVisible(not self._settings.tun_mode)
+        # Три места, которые раньше исчезали в режиме VPN (TUN) и без подключения, теперь всегда на месте.
+        tun = bool(self._settings.tun_mode)
         ports_text = self._proxy_ports_text()
-        self.connection_ports_label.setText(ports_text)
-        self.connection_ports_label.setToolTip(self._proxy_ports_tooltip())
-        self.connection_ports_label.setVisible(bool(ports_text))
-        self.proxy_address_row.setVisible(bool(ports_text))
-        # В TUN Telegram идёт через сервер сам; кнопка нужна режиму «Прокси».
-        self.telegram_proxy_btn.setVisible(bool(ports_text) and not self._settings.tun_mode)
+        self.proxy_options.setVisible(True)
+        self.connection_ports_label.setText(ports_text or self._proxy_ports_placeholder())
+        self.connection_ports_label.setToolTip(self._proxy_ports_tooltip() if ports_text else "")
+        self.connection_ports_label.setVisible(True)
+        self.proxy_address_row.setVisible(True)
+        # В TUN Telegram идёт через сервер сам; кнопка нужна режиму «Прокси» с живым прокси, иначе она неактивна.
+        self.telegram_proxy_btn.setVisible(True)
+        self.telegram_proxy_btn.setEnabled(bool(ports_text) and not tun)
+        if tun:
+            self.telegram_proxy_btn.setToolTip("В режиме VPN (TUN) Telegram и так идёт через сервер")
+        elif not ports_text:
+            self.telegram_proxy_btn.setToolTip("Станет доступна после подключения в режиме «Прокси»")
+        else:
+            self.telegram_proxy_btn.setToolTip(
+                "Откроет Telegram и предложит подключить этот прокси (SOCKS5). Тогда Telegram пойдёт через сервер"
+            )
+        self._refresh_proxy_shield()
+
+    def _proxy_ports_placeholder(self) -> str:
+        if self._settings.tun_mode:
+            return "Адрес локального прокси: в режиме VPN (TUN) не нужен"
+        return "Адрес локального прокси появится после подключения"
+
+    def _refresh_proxy_shield(self) -> None:
+        """Щит рядом с системным прокси: включён ли прокси (в TUN: идёт ли весь трафик через туннель)."""
+        tun = bool(self._settings.tun_mode)
+        if tun:
+            if self._connected:
+                self.proxy_shield.set_state("on", "VPN (TUN) подключён: весь трафик компьютера идёт через туннель")
+            else:
+                self.proxy_shield.set_state("off", "VPN (TUN) не подключён")
+            return
+        if self._proxy_intent.pending:
+            self.proxy_shield.set_state("applying", "Системный прокси применяется…")
+        elif self._proxy_intent.display(self._observed_system_proxy()):
+            self.proxy_shield.set_state("on", "Системный прокси Windows включён")
+        else:
+            self.proxy_shield.set_state("off", "Системный прокси Windows выключен")
 
     def _color_state_title(self, *_args) -> None:
         """Заголовок состояния в цвет сферы: зелёный — есть защита, красный — ошибка."""
@@ -1370,7 +1409,8 @@ class DashboardPage(StackedSection):
         self.proxy_switch.setText(("Вкл" if proxy_on else "Выкл") + ("…" if applying else ""))
         self.proxy_switch.setToolTip("Применяется…" if applying else "")
         self.proxy_switch.blockSignals(False)
-        self.proxy_hint_label.setText(_proxy_hint(proxy_on))
+        self.proxy_hint_label.setText(_proxy_hint(proxy_on, bool(self._settings.tun_mode)))
+        self._refresh_proxy_shield()
         self._apply_interaction_state()
 
     def _apply_interaction_state(self) -> None:

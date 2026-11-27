@@ -208,7 +208,9 @@ class ModeTilesTest(unittest.TestCase):
     def test_tiles_follow_settings(self) -> None:
         self.assertTrue(self.page.vpn_tile.isChecked())
         self.assertFalse(self.page.proxy_tile.isChecked())
-        self.assertTrue(self.page.proxy_options.isHidden())
+        # Строка системного прокси не исчезает в режиме VPN: переключатель только неактивен.
+        self.assertFalse(self.page.proxy_options.isHidden())
+        self.assertFalse(self.page.proxy_switch.isEnabled())
         self.page.set_settings_snapshot(AppSettings(tun_mode=False))
         self.page._do_refresh_dashboard()
         self.assertFalse(self.page.vpn_tile.isChecked())

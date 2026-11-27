@@ -876,6 +876,45 @@ class FlagBadge(QWidget):
         painter.end()
 
 
+class ShieldBadge(QWidget):
+    """Отдельный щит со статусом защиты рядом с «Системный прокси Windows» (владелец, 27.11.2026).
+
+    Три состояния: ``on`` (щит с галочкой в цвет акцента), ``off`` (приглушённый щит без галочки), ``applying``
+    (оранжевый щит: настройка применяется). Подпись состояния лежит в подсказке, чтобы значок читался и без цвета.
+    """
+
+    STATES = ("off", "on", "applying")
+
+    def __init__(self, parent: QWidget | None = None, size: int = 26):
+        super().__init__(parent)
+        self._state = "off"
+        self.setFixedSize(size + 6, size + 6)
+        on_theme_or_accent_changed(self._repaint)
+
+    def _repaint(self, *_args) -> None:
+        self.update()
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def set_state(self, state: str, tooltip: str = "") -> None:
+        state = state if state in self.STATES else "off"
+        if state != self._state:
+            self._state = state
+            self.update()
+        if tooltip != self.toolTip():
+            self.setToolTip(tooltip)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = {"on": positive_color(), "applying": warning_color()}.get(self._state, text_muted_color())
+        paint_shield(painter, QPointF(self.width() / 2, self.height() / 2), self.height() - 6, color,
+                     check=self._state == "on")
+        painter.end()
+
+
 # ── Индикатор качества связи ──────────────────────────────────────────
 
 

@@ -200,8 +200,11 @@ class DashboardWordWrapTest(unittest.TestCase):
 
         page.set_tun_mode(True)
         page._do_refresh_dashboard()
+        # Кнопка не исчезает в TUN, а становится неактивной и объясняет почему (владелец, 27.11.2026).
         self.assertFalse(page.proxy_address_row.isHidden())
-        self.assertTrue(page.telegram_proxy_btn.isHidden())
+        self.assertFalse(page.telegram_proxy_btn.isHidden())
+        self.assertFalse(page.telegram_proxy_btn.isEnabled())
+        self.assertIn("TUN", page.telegram_proxy_btn.toolTip())
         page.deleteLater()
         QApplication.processEvents()
 
@@ -227,7 +230,9 @@ class DashboardWordWrapTest(unittest.TestCase):
         page = DashboardPage()
         page.set_settings_snapshot(AppSettings(tun_mode=False, proxy_engine="singbox"))
         page._do_refresh_dashboard()
-        self.assertTrue(page.proxy_address_row.isHidden())
+        self.assertFalse(page.proxy_address_row.isHidden())
+        self.assertFalse(page.telegram_proxy_btn.isEnabled())
+        self.assertIn("появится после подключения", page.connection_ports_label.text())
         with patch("xray_fluent.ui.dashboard_page.QDesktopServices.openUrl") as open_url:
             page._add_proxy_to_telegram()
         open_url.assert_not_called()
