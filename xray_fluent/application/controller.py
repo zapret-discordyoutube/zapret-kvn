@@ -367,7 +367,20 @@ def _log_transition_profile(controller: Any, kind: str, runner: TransitionRunner
     waited = ""
     if requested is not None:
         waited = f" since_request={(time.perf_counter() - requested) * 1000.0:.0f}ms"
-    log(f"[perf] {kind} {outcome}{waited} {profile.summary()}")
+    # What the transition was for and why it failed, so the line stands alone (the steps alone do not say which server).
+    target = ""
+    node_getter = getattr(controller, "_runtime_selected_node", None)
+    try:
+        node = node_getter() if callable(node_getter) else None
+    except Exception:  # noqa: BLE001 — a log line must never break a transition
+        node = None
+    if node is not None:
+        target = f' target="{getattr(node, "name", "")}" protocol={getattr(node, "scheme", "")}'
+    cause = ""
+    failure = getattr(getattr(controller, "_transition_outcome", None), "failure", None)
+    if outcome == "failed" and failure is not None:
+        cause = f' cause="{getattr(failure, "message", "")}"'
+    log(f"[perf] {kind} {outcome}{waited}{target}{cause} {profile.summary()}")
 
 
 def _write_json_atomically(path: Path, payload: object) -> None:
@@ -506,6 +519,8 @@ class AppController(QObject):
         self._node_lookup_size = -1
         self._node_by_id: dict[str, Node] = {}
         self.recent_logs: list[str] = []
+        # Progress lines of every running transition (start, and where it waits every few seconds).
+        TransitionRunner.heartbeat_sink = self._log
         self.runtime_errors = RuntimeErrorJournal()
         self.connected = False
         self.locked = False
@@ -4975,8 +4990,12 @@ class AppController(QObject):
         self._perform_auto_connect()
 
     def _log(self, line: str) -> None:
-        """Send a log line to the UI and write it to the log file."""
-        line = redact_server_addresses(line)
+        """Send a log line to the UI and write it to the log file.
+
+        Every line carries the time it was written (owner request 2026-11-27, "the logs don't show much": the lines of the
+        exported diagnostics had no time except the ones a core printed itself, so a stall could not be placed).
+        """
+        line = f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {redact_server_addresses(line)}"
         self.recent_logs.append(line)
         if len(self.recent_logs) > 5000:
             self.recent_logs = self.recent_logs[-5000:]

@@ -34,7 +34,7 @@ from __future__ import annotations
 import inspect
 import time
 from concurrent.futures import Executor, Future, TimeoutError as FutureTimeoutError
-from typing import Any, Callable, Generator
+from typing import Any, Callable, ClassVar, Generator
 
 from PyQt6.QtCore import QObject, QProcess, Qt, QTimer, pyqtSignal
 
@@ -410,12 +410,27 @@ class TransitionProfile:
         end = self.finished if self.finished is not None else time.perf_counter()
         return (end - self.started) * 1000.0
 
+    def grouped(self) -> list[tuple[str, int, float]]:
+        """Steps with the same label merged: (label, how many times, total ms), the longest first.
+
+        A wait that polls every 25 ms used to fill the log line with a dozen identical entries and hide the one step that
+        actually held the transition (owner report 2026-11-27, "the logs don't show much").
+        """
+        merged: dict[str, list[float]] = {}
+        for label, ms in self.steps:
+            entry = merged.setdefault(label, [0.0, 0.0])
+            entry[0] += 1
+            entry[1] += ms
+        return sorted(((label, int(count), total) for label, (count, total) in merged.items()),
+                      key=lambda item: item[2], reverse=True)
+
     def summary(self) -> str:
-        listed = [(label, ms) for label, ms in self.steps if ms >= self.LIST_THRESHOLD_MS]
-        rest = [ms for _label, ms in self.steps if ms < self.LIST_THRESHOLD_MS]
-        parts = [f"{label}={ms:.0f}" for label, ms in listed]
+        groups = self.grouped()
+        listed = [(label, count, ms) for label, count, ms in groups if ms >= self.LIST_THRESHOLD_MS]
+        rest = [(count, ms) for _label, count, ms in groups if ms < self.LIST_THRESHOLD_MS]
+        parts = [f"{label}{f' ×{count}' if count > 1 else ''}={ms:.0f}" for label, count, ms in listed]
         if rest:
-            parts.append(f"прочие {len(rest)} шагов={sum(rest):.0f}")
+            parts.append(f"прочие {sum(count for count, _ in rest)} шагов={sum(ms for _, ms in rest):.0f}")
         text = f"total={self.total_ms:.0f}ms gui={self.gui_ms:.0f}ms steps={len(self.steps)}"
         text += (" | " + ", ".join(parts) if parts else "")
         if self.slow_slices:
@@ -440,6 +455,11 @@ class TransitionRunner(QObject):
     # (seq, value, error) — queued so resumes never re-enter the caller.
     _step_completed = pyqtSignal(int, object, object)
 
+    #: Where a transition's progress lines go (the controller sets its own log). A transition used to be logged only
+    #: when it ended, so a hang left no trace while it lasted (owner report 2026-11-27).
+    heartbeat_sink: ClassVar[Callable[[str], None] | None] = None
+    HEARTBEAT_MS = 3000
+
     def __init__(
         self,
         generator: TransitionSteps,
@@ -461,6 +481,10 @@ class TransitionRunner(QObject):
         self.profile = TransitionProfile()
         #: perf_counter() запроса, ради которого запущен переход (для журнала).
         self.requested_at: float | None = None
+        self._started_at: float | None = None
+        self._heartbeat = QTimer(self)
+        self._heartbeat.setInterval(self.HEARTBEAT_MS)
+        self._heartbeat.timeout.connect(self._beat)
         self._step_completed.connect(self._handle_step_completed, Qt.ConnectionType.QueuedConnection)
 
     @property
@@ -468,7 +492,25 @@ class TransitionRunner(QObject):
         return self._done
 
     def start(self) -> None:
+        self._started_at = time.monotonic()
+        sink = TransitionRunner.heartbeat_sink
+        if sink is not None:
+            sink(f"[transition] start {getattr(getattr(self._gen, 'gi_code', None), 'co_name', 'transition')}")
+        self._heartbeat.start()
         self._advance(None, None)
+
+    def _beat(self) -> None:
+        """Every few seconds a running transition says where it waits."""
+        if self._done:
+            self._heartbeat.stop()
+            return
+        sink = TransitionRunner.heartbeat_sink
+        if sink is None or self._started_at is None:
+            return
+        sink(
+            f"[transition] still running {time.monotonic() - self._started_at:.0f} s, "
+            f"waiting in {_step_origin(self._gen)}"
+        )
 
     def cancel(self) -> None:
         """Cancel immediately (used by shutdown paths)."""
@@ -565,6 +607,7 @@ class TransitionRunner(QObject):
         if self._done:
             return
         self._done = True
+        self._heartbeat.stop()
         self.profile.close()
         self.result = result
         self.error = error

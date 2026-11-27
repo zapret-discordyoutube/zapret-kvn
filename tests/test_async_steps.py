@@ -175,6 +175,42 @@ class TransitionRunnerTests(unittest.TestCase):
 
 
 @unittest.skipIf(shutil.which("sleep") is None, "требуется бинарь sleep")
+class TransitionLogTests(unittest.TestCase):
+    """The perf line and the progress lines of a transition (owner report 2026-11-27, "the logs don't show much")."""
+
+    def test_repeated_steps_are_merged_into_one_entry_with_a_count(self) -> None:
+        from xray_fluent.application.async_steps import TransitionProfile
+
+        profile = TransitionProfile()
+        # The shape of the owner's real line: one wait polled 15 times next to the one step that held the transition.
+        profile.steps = [("_wait_until_proxy_ready_steps:600 sleep 25", 30.0)] * 15 + [("_launch_steps:216 sleep 1000", 987.0)]
+        text = profile.summary()
+        self.assertEqual(1, text.count("_wait_until_proxy_ready_steps:600"), text)
+        self.assertIn("_wait_until_proxy_ready_steps:600 sleep 25 ×15=450", text)
+        self.assertLess(text.index("_launch_steps:216"), text.index("_wait_until_proxy_ready_steps"), text)
+
+    def test_a_running_transition_says_where_it_waits(self) -> None:
+        from xray_fluent.application.async_steps import TransitionRunner
+
+        lines: list[str] = []
+        previous = TransitionRunner.heartbeat_sink
+        TransitionRunner.heartbeat_sink = lines.append
+        try:
+            def slow():
+                yield sleep_ms(120)
+                return True
+
+            runner = TransitionRunner(slow())
+            runner.HEARTBEAT_MS = 30
+            runner._heartbeat.setInterval(30)
+            runner.start()
+            self.assertTrue(_drive_until(lambda: runner.done))
+        finally:
+            TransitionRunner.heartbeat_sink = previous
+        self.assertTrue(lines[0].startswith("[transition] start slow"), lines)
+        self.assertTrue(any("still running" in line and "waiting in slow:" in line for line in lines), lines)
+
+
 class WaitProcessFinishedTests(unittest.TestCase):
     def test_resolves_true_when_process_finishes(self) -> None:
         process = QProcess()
