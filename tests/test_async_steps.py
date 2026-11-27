@@ -174,7 +174,6 @@ class TransitionRunnerTests(unittest.TestCase):
         self.assertEqual(seen[0].result, 7)
 
 
-@unittest.skipIf(shutil.which("sleep") is None, "требуется бинарь sleep")
 class TransitionLogTests(unittest.TestCase):
     """The perf line and the progress lines of a transition (owner report 2026-11-27, "the logs don't show much")."""
 
@@ -211,6 +210,7 @@ class TransitionLogTests(unittest.TestCase):
         self.assertTrue(any("still running" in line and "waiting in slow:" in line for line in lines), lines)
 
 
+@unittest.skipIf(shutil.which("sleep") is None, "требуется бинарь sleep")
 class WaitProcessFinishedTests(unittest.TestCase):
     def test_resolves_true_when_process_finishes(self) -> None:
         process = QProcess()
