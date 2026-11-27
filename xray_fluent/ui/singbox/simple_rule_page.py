@@ -15,7 +15,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -29,7 +29,9 @@ from qfluentwidgets import (
 )
 
 from ...singbox_config.simple_rule import BLOCK, ParsedRule, build_rule, routes_through_tunnel
+from ...platform.windows.running_programs import group_programs, running_program_paths
 from ..detail_page import DetailPage
+from .running_programs_dialog import RunningProgramsDialog
 
 #: (ключ, подпись) вариантов «Куда»; ключ — тег выхода или BLOCK.
 TARGETS: tuple[tuple[str, str], ...] = (("proxy", "Через VPN"), ("direct", "Напрямую"), (BLOCK, "Блокировать"))
@@ -37,7 +39,7 @@ TARGETS: tuple[tuple[str, str], ...] = (("proxy", "Через VPN"), ("direct", 
 _FIELDS = (
     ("sites", "Сайты", "2ip.ru\nyoutube.com\ngeosite:category-ru"),
     ("ips", "IP-адреса и подсети", "1.1.1.1\n10.0.0.0/8\ngeoip:ru"),
-    ("programs", "Программы", "chrome.exe\nC:\\Games\\game.exe"),
+    ("programs", "Программы и игры", "chrome.exe\nC:\\Games\\game.exe\nC:\\Program Files (x86)\\World of Warcraft\\"),
 )
 
 
@@ -77,9 +79,13 @@ class SimpleRulePage(DetailPage):
             editor.textChanged.connect(self._schedule_refresh)
             self.content_layout.addWidget(editor)
             self.editors[key] = editor
+            if key == "programs":
+                self.content_layout.addLayout(self._program_helpers())
         self.hint = CaptionLabel(
             "По одному в строке. Правило сработает, если совпадёт что-нибудь из списков. "
-            "Сайт «2ip.ru» — вместе со всеми поддоменами, программа — без учёта регистра.",
+            "Сайт «2ip.ru» — вместе со всеми поддоменами, программа — без учёта регистра. "
+            "Строка с косой чертой на конце — папка: правило охватит всё, что запускается из неё "
+            "(у игры десятки процессов — укажите её папку, а не каждый .exe).",
             self.body,
         )
         self.hint.setWordWrap(True)
@@ -113,6 +119,42 @@ class SimpleRulePage(DetailPage):
         self._refresh_timer.setInterval(150)
         self._refresh_timer.timeout.connect(self._refresh)
         self._refresh()
+
+    # -- programs: whole folders ------------------------------------------------------
+
+    def _program_helpers(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        pick = PushButton(FIF.FOLDER, "Папка игры…", self.body)
+        pick.setToolTip("Выбрать папку установки: одно правило на все процессы игры")
+        pick.clicked.connect(self._pick_folder)
+        scan = PushButton(FIF.SEARCH, "Найти запущенные…", self.body)
+        scan.setToolTip("Показать работающие программы, сгруппированные по папкам")
+        scan.clicked.connect(self._scan_running)
+        row.addWidget(pick)
+        row.addWidget(scan)
+        row.addStretch(1)
+        return row
+
+    def add_programs(self, entries: list[str]) -> None:
+        """Append lines to the programs editor, skipping the ones already there."""
+        editor = self.editors["programs"]
+        have = {line.strip().lower() for line in editor.toPlainText().splitlines()}
+        fresh = [entry for entry in entries if entry.strip().lower() not in have]
+        if not fresh:
+            return
+        text = editor.toPlainText().rstrip("\n")
+        editor.setPlainText("\n".join(([text] if text else []) + fresh))
+
+    def _pick_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Папка игры или программы")
+        if folder:
+            self.add_programs([folder.replace("/", "\\").rstrip("\\") + "\\"])
+
+    def _scan_running(self) -> None:
+        groups = group_programs(running_program_paths())
+        dialog = RunningProgramsDialog(groups, self.window())
+        if groups and dialog.exec():
+            self.add_programs(dialog.chosen_folders())
 
     # -- state ------------------------------------------------------------------
 

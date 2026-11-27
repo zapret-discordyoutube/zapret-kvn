@@ -47,6 +47,8 @@ _SERVICE_ACTIONS = ("sniff", "hijack-dns")
 _REGEX_META = set("\\.+*?()|[]{}^$")
 _NAME_PATTERN = re.compile(r"^\(\?i\)\(\^\|\[\\\\/\]\)(.+)\$$")
 _PATH_PATTERN = re.compile(r"^\(\?i\)\^(.+)\$$")
+#: A whole folder: every program started from it or from any folder below it (a game has many processes).
+_FOLDER_PATTERN = re.compile(r"^\(\?i\)\^(.+\\\\)\.\+\$$")
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*$")
 
 
@@ -173,9 +175,22 @@ def _unescape(pattern: str) -> str:
     return re.sub(r"\\(.)", r"\1", pattern)
 
 
+def is_folder_entry(value: str) -> bool:
+    """A line that names a folder: it ends with a slash or with ``\\*`` (``C:\\Games\\World of Warcraft\\``)."""
+    text = value.strip().strip('"')
+    return text.endswith(("\\", "/", "\\*", "/*"))
+
+
 def process_pattern(value: str) -> str:
-    """Имя или путь программы — регулярное выражение без учёта регистра."""
+    """Имя или путь программы — регулярное выражение без учёта регистра.
+
+    Папка (строка с косой чертой на конце) — все программы из неё и из вложенных папок одним правилом: у игры
+    десятки процессов (клиент, лаунчер, обновлялка), перечислять их по одному не нужно.
+    """
     name = value.strip().strip('"')
+    if is_folder_entry(name):
+        folder = name.rstrip("*").replace("/", "\\").rstrip("\\")
+        return f"(?i)^{_regex_escape(folder + chr(92))}.+$"
     if "\\" in name or "/" in name:
         return f"(?i)^{_regex_escape(name)}$"
     if "." not in name:
@@ -185,7 +200,7 @@ def process_pattern(value: str) -> str:
 
 def process_display(pattern: str) -> str | None:
     """Обратно в имя или путь для подписи; ``None`` — это не наш шаблон."""
-    for shape in (_NAME_PATTERN, _PATH_PATTERN):
+    for shape in (_FOLDER_PATTERN, _NAME_PATTERN, _PATH_PATTERN):
         match = shape.match(pattern)
         if match:
             return _unescape(match.group(1))
