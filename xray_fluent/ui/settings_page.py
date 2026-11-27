@@ -520,7 +520,7 @@ class SettingsPage(ScrollablePage):
         )
         self.allow_updates_card = SwitchSettingCard(
             FIF.DOWNLOAD, "Устанавливать автоматически",
-            "Приложение само обновится, перезапустится и вернёт подключение",
+            "Приложение обновится само, перезапустится и вернёт подключение. Пока подключение включено, ждёт, когда вы отойдёте от компьютера",
             parent=updates_group,
         )
         self.share_updates_lan_card = SwitchSettingCard(

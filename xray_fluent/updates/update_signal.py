@@ -16,6 +16,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..constants import APP_VERSION
 from .auto_update import WHY_RE
+from .user_activity import idle_seconds, user_is_active
 from .release_watch import (
     ACTIVITY_FULLSCREEN,
     ACTIVITY_TRAY,
@@ -115,10 +116,21 @@ class UpdateSignal(QObject):
         with self._lock:
             return float(self._granted_at.get(str(version), 0.0))
 
-    @staticmethod
-    def busy_reason() -> str:
-        """Почему обновляться сейчас не время; пусто — можно."""
-        return "на экране игра или видео на весь экран" if fullscreen_app_active() else ""
+    def busy_reason(self) -> str:
+        """Почему обновляться сейчас не время; пусто — можно.
+
+        Игра на весь экран видна по Windows. Игра в обычном окне (с заголовком) — нет, а перезапуск рвёт подключение и игру
+        вместе с ним: поэтому при включённом подключении обновление ждёт, пока человек за компьютером (недавний ввод).
+        """
+        if fullscreen_app_active():
+            return "на экране игра или видео на весь экран"
+        try:
+            connected = bool(self._connected())
+        except Exception:
+            connected = False
+        if connected and user_is_active(idle_seconds()):
+            return "вы сейчас работаете за компьютером при включённом подключении"
+        return ""
 
     def set_report(self, report: dict | None) -> None:
         """Что сказать серверу об исходе прошлого обновления (один раз)."""
