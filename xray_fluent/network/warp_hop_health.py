@@ -19,6 +19,12 @@ _RETRY = re.compile(r"endpoint/warp\[" + HOP + r"\]: WARP handshake did not answ
 _NOT_READY = "using outbound/warp[" + HOP + "]: endpoint not initialized"
 _LOOKUP = re.compile(r"using outbound/warp\[" + HOP + r"\]: lookup .*deadline exceeded")
 _REGISTRATION = re.compile(r"endpoint/warp\[" + HOP + r"\]: Post ")
+# A MASQUE candidate that stayed silent: the rotation of a running tunnel says "WARP candidate masque-x did not answer", the
+# start of a tunnel that never answered says "WARP handshake did not answer at masque-x" (real captures of both forms).
+_CANDIDATE_FAILED = re.compile(
+    r"endpoint/warp\[" + HOP + r"\]: (?:WARP candidate masque-\S+(?: sni=\S+)? did not answer"
+    r"|WARP handshake did not answer at masque-\S+(?: sni=\S+)?, trying)"
+)
 _ANSWERED = re.compile(r"endpoint/warp\[" + HOP + r"\]: WARP tunnel answered at \S*?:(\d+) \(attempt (\d+)\)")
 
 #: Enough evidence to tell the user: the tunnel is not coming up (not just slow).
@@ -27,6 +33,10 @@ NOT_READY_LIMIT = 5
 #: handshakes is the tunnel given up (a start that needs two or three retries is slow, not blocked).
 RETRY_LIMIT = 4
 LOOKUP_LIMIT = 3
+#: Candidates (WireGuard ports and MASQUE transports) that did not answer before the hop is given up: the owner's mobile
+#: network 2026-11-27 (Android 0.6.65) let all five MASQUE candidates time out and the connect was refused.  A working
+#: MASQUE answers on the first or second candidate, so four silent ones mean the network carries none of them.
+CANDIDATE_LIMIT = 4
 
 TUNNEL_DOWN = (
     "Вход через WARP не поднимается: туннель WARP не отвечает. Возможно, сеть блокирует UDP-порты WARP "
@@ -46,7 +56,13 @@ class HopHealth:
     not_initialized: int = 0
     lookup_timeouts: int = 0
     registration_errors: int = 0
+    candidates_failed: int = 0
     _told: set[str] = field(default_factory=set)
+
+    @property
+    def dead(self) -> bool:
+        """The tunnel carries nothing over any candidate: the connect should go on without the hop."""
+        return self.candidates_failed >= CANDIDATE_LIMIT
 
     def observe(self, line: str) -> str | None:
         """Count one core line; returns a message for the user the first time a limit is crossed."""
@@ -64,6 +80,9 @@ class HopHealth:
             self.lookup_timeouts += 1
         elif _REGISTRATION.search(line):
             self.registration_errors += 1
+        elif _CANDIDATE_FAILED.search(line):
+            self.candidates_failed += 1
+            return None
         else:
             return None
         if (self.not_initialized >= NOT_READY_LIMIT or self.handshake_retries >= RETRY_LIMIT) and "down" not in self._told:
@@ -136,3 +155,23 @@ def tunnel_result(health: HopHealth) -> str:
     if health.not_initialized > 0 or health.handshake_retries >= RETRY_LIMIT:
         return "timeout"
     return "answered"
+
+
+#: A plain HTTP page that answers 204 to anyone: the same kind of address the apps already use for connectivity checks.
+PROBE_URL = "http://cp.cloudflare.com/generate_204"
+
+
+def traffic_passes_through(port: int, *, timeout: float = 8.0) -> bool:
+    """One real request through the app's local HTTP proxy: does traffic cross the connection (and so the hop) at all?
+
+    The request leaves through the VPN server like any page the user opens, so a provider sees nothing it does not see
+    already.  Used by the controller to give a dead WARP entry up (owner 2026-11-27): the core's own lines differ by the
+    way the network blocks (silence, resets, refused sockets), real traffic does not."""
+    import urllib.request
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{port}"}))
+    try:
+        with opener.open(PROBE_URL, timeout=timeout) as reply:
+            return 200 <= reply.status < 400
+    except Exception:  # noqa: BLE001 - any failure means "nothing crossed"
+        return False

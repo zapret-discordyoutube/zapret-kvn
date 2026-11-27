@@ -20,6 +20,15 @@ RETRY_500 = PREFIX + "-0400 2026-11-25 18:04:22 WARN endpoint/warp[kvn-warp-entr
 NOT_READY = PREFIX + "+0300 2026-11-26 00:07:40 ERROR [1316337261 15ms] connection: open connection to [<сервер 17e86f8758cc>] using outbound/warp[kvn-warp-entry]: endpoint not initialized"
 LOOKUP = PREFIX + "+0300 2026-11-26 00:07:40 ERROR [3405634934 6.45s] connection: open connection to <сервер 9cd8dfb20f14>:8443 using outbound/warp[kvn-warp-entry]: lookup <сервер 9cd8dfb20f14>: context deadline exceeded"
 REGISTRATION = PREFIX + '+0300 2026-11-25 23:43:53 ERROR endpoint/warp[kvn-warp-entry]: Post "<URL скрыт>": read tcp 192.168.1.2:29054->8.6.112.0:443: wsarecv: An existing connection was forcibly closed by the remote host.'
+# The five MASQUE candidates of the owner's phone on mobile data (Android 0.6.65 diagnostic, 2026-11-27 11:11), all silent
+# for 7 s each, the same core as on Windows; the Windows prefix is the one of the captures above.
+CANDIDATES_SILENT = [
+    PREFIX + "-0400 2026-11-27 11:11:22 WARN endpoint/warp[kvn-warp-entry]: WARP candidate " + name + " did not answer"
+    for name in ("masque-http2 sni=www.cloudflare.com", "masque-quic sni=www.cloudflare.com", "masque-http2", "masque-quic", "masque-http2 sni=yandex.ru")
+]
+# The start form of the same silence, from the real win10 run with every WARP path dropped (2026-11-27): the core of a tunnel
+# that never answered names the candidate in the handshake line, with no port.
+START_FORM_SILENT = PREFIX + "-0400 2026-11-27 06:50:30 WARN endpoint/warp[kvn-warp-entry]: WARP handshake did not answer at masque-http2 sni=yandex.ru, trying the next address"
 UNRELATED = "[sing-box][engine=sing-box role=front mode=proxy generation=1] +0300 2026-11-26 00:49:40 ERROR [2452425249 8ms] connection: open connection to chatgpt.com:443 using outbound/selector[zapret-slot-ai]: dial tcp 127.0.0.1:0->127.0.0.1:11820: connectex: No connection could be made"
 
 
@@ -46,6 +55,26 @@ class HopHealthTests(unittest.TestCase):
         health = HopHealth()
         notices = [health.observe(line) for line in (RETRY_2408, RETRY_500, RETRY_2408, RETRY_500)]
         self.assertEqual([None, None, None, TUNNEL_DOWN], notices)
+
+    def test_the_hop_is_given_up_when_four_candidates_stay_silent_and_not_before(self) -> None:
+        health = HopHealth()
+        states = []
+        for line in CANDIDATES_SILENT:
+            self.assertIsNone(health.observe(line), "a silent candidate is counted, not announced")
+            states.append(health.dead)
+        self.assertEqual([False, False, False, True, True], states)
+
+    def test_the_start_form_of_a_silent_masque_candidate_is_counted_and_a_wireguard_port_is_not(self) -> None:
+        health = HopHealth()
+        health.observe(START_FORM_SILENT)
+        health.observe(RETRY_2408)
+        self.assertEqual(1, health.candidates_failed)
+        self.assertEqual(1, health.handshake_retries)
+
+    def test_a_masque_that_answers_after_one_silent_candidate_is_not_given_up(self) -> None:
+        health = HopHealth()
+        health.observe(CANDIDATES_SILENT[1])
+        self.assertFalse(health.dead)
 
     def test_a_slow_start_is_not_a_warning(self) -> None:
         health = HopHealth()

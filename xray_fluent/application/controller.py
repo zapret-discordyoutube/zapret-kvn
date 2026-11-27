@@ -277,7 +277,7 @@ from ..network.bootstrap_dns import resolve_bootstrap
 from ..network.bootstrap_dns import refresh_async as refresh_bootstrap_address
 from ..network.network_monitor import NetworkMonitor
 from ..network import entry_hop, server_family, warp_masque_account, warp_registration
-from ..network.warp_hop_health import HopHealth, WarpFacts, registration_result, tunnel_result
+from ..network.warp_hop_health import HopHealth, WarpFacts, registration_result, traffic_passes_through, tunnel_result
 from ..network.physical_route import (
     has_network,
     is_physical_fingerprint,
@@ -433,6 +433,11 @@ def _slot_host_keys(node: Node) -> frozenset[str]:
 _WARP_DIRECT_RETRY_S = 600.0
 #: The MASQUE account is waited for this long at most while connecting.
 _WARP_MASQUE_BUDGET_S = 12.0
+#: After a start with the WARP entry that carried nothing the entry is not tried on the same network for this long.
+_WARP_PAUSE_S = 600.0
+#: Traffic through the entry is checked this long after the connect, then once more this much later; two silent checks give it up.
+_WARP_PROBE_FIRST_S = 20.0
+_WARP_PROBE_RETRY_S = 12.0
 _WARP_SUMMARY_MS = 40_000
 
 class AppController(QObject):
@@ -448,6 +453,7 @@ class AppController(QObject):
     subscription_update_progress = pyqtSignal(str, str)
     subscription_update_finished = pyqtSignal(object)
     selection_changed = pyqtSignal(object)
+    _warp_probe_result = pyqtSignal(int, bool)
     connection_changed = pyqtSignal(bool)
     connection_status_changed = pyqtSignal(str, str)
     routing_changed = pyqtSignal(object)
@@ -495,6 +501,11 @@ class AppController(QObject):
         # WARP entry: the account could not be registered over the direct routes, so this launch runs without the hop and
         # the account is registered through the VPN once it is up (see _ensure_warp_account_steps).
         self._warp_hop_suspended = False
+        self._warp_pause_until = 0.0
+        self._warp_dead_handled = False
+        self._warp_watch_generation = 0
+        self._warp_probe_failures = 0
+        self._warp_probe_result.connect(self._on_warp_probe_result)
         self._warp_register_via_vpn = False
         self._warp_health: HopHealth | None = None
         self._warp_connect_started = 0.0
@@ -1524,7 +1535,16 @@ class AppController(QObject):
         self._warp_hop_suspended = False
         self._warp_health = None
         self._warp_register = None
+        self._warp_dead_handled = False
+        self._warp_watch_generation += 1  # a check of the previous connect must not judge this one
         self._warp_summary_timer.stop()
+        if time.monotonic() < self._warp_pause_until and self._warp_entry_profile():
+            # A start with the entry carried nothing a moment ago on this network: do not spend a minute on it again.
+            self._warp_hop_suspended = True
+            self._log(
+                f"[warp-entry] вход через WARP приостановлен после отказа, ещё {int(self._warp_pause_until - time.monotonic())} с"
+            )
+            return
         profile = self._warp_entry_profile()
         if not profile:
             return
@@ -1588,6 +1608,21 @@ class AppController(QObject):
             "зарегистрирован через VPN, и вход через WARP включится сам.",
         )
 
+    def _warp_hop_gave_up(self) -> None:
+        """The tunnel carries nothing over any candidate (the owner's mobile network, 2026-11-27): connect without the hop.
+
+        The hop hides the server's address, it must not cost the connection: the app pauses the entry on this network
+        and reconnects without it, saying so."""
+        self._warp_pause_until = time.monotonic() + _WARP_PAUSE_S
+        self._log("[warp-entry] туннель WARP не пропускает трафик ни по одному кандидату, подключаюсь без входа через WARP")
+        self.status.emit(
+            "warning-long",
+            "Вход через WARP не заработал в этой сети: туннель WARP не пропускает трафик. Подключение перезапускается без "
+            "входа, адрес сервера на этот раз виден провайдеру. Вход снова будет пробоваться через 10 минут или в другой сети.",
+        )
+        if self.connected or self._desired_connected:
+            QTimer.singleShot(0, lambda: self._reconnect("warp-hop-dead"))
+
     def _register_masque_account_later(self, profile: str) -> None:
         """The second account, for the MASQUE tunnel the core falls back to where WireGuard is cut (owner 2026-11-26).
 
@@ -1631,7 +1666,43 @@ class AppController(QObject):
         if health is not None and (self.connected or self._desired_connected):
             self._log(health.summary(_WARP_SUMMARY_MS // 1000))
 
+    def _start_warp_watch(self) -> None:
+        """A connect with the entry on: check real traffic through it a little later (field report 2026-11-27)."""
+        self._warp_watch_generation += 1
+        self._warp_probe_failures = 0
+        generation = self._warp_watch_generation
+        QTimer.singleShot(int(_WARP_PROBE_FIRST_S * 1000), lambda: self._run_warp_probe(generation))
+
+    def _run_warp_probe(self, generation: int) -> None:
+        if generation != self._warp_watch_generation or not self.connected or self._warp_health is None:
+            return
+        port = int(getattr(self._active_session, "http_port", 0) or 0)
+        if port <= 0:
+            return
+
+        def work() -> None:
+            self._warp_probe_result.emit(generation, traffic_passes_through(port))
+
+        threading.Thread(target=work, name="warp-traffic-probe", daemon=True).start()
+
+    def _on_warp_probe_result(self, generation: int, ok: bool) -> None:
+        if generation != self._warp_watch_generation or self._warp_health is None or not self.connected:
+            return
+        if ok:
+            self._log("[warp-entry] проверка: трафик через вход WARP проходит")
+            return
+        self._warp_probe_failures += 1
+        self._log(f"[warp-entry] проверка: трафик через вход WARP не прошёл ({self._warp_probe_failures})")
+        if self._warp_probe_failures >= 2:
+            if not self._warp_dead_handled:
+                self._warp_dead_handled = True
+                self._warp_hop_gave_up()
+            return
+        QTimer.singleShot(int(_WARP_PROBE_RETRY_S * 1000), lambda: self._run_warp_probe(generation))
+
     def _on_connection_changed_for_warp(self, connected: bool) -> None:
+        if connected and self._warp_health is not None:
+            self._start_warp_watch()
         if connected and self._warp_register_via_vpn:
             self._warp_register_via_vpn = False
             runner = TransitionRunner(self._register_warp_via_vpn_steps(), is_current=lambda: True, parent=self)
@@ -1671,6 +1742,7 @@ class AppController(QObject):
             )
             return False
         self._log("[warp-entry] аккаунт WARP зарегистрирован через VPN, перезапускаю подключение со входом через WARP")
+        self._warp_pause_until = 0.0
         self._warp_hop_suspended = False
         self.status.emit("info", "Аккаунт WARP зарегистрирован: подключение перезапустится со входом через WARP.")
         return self._reconnect("warp-account-registered")
@@ -5015,6 +5087,9 @@ class AppController(QObject):
             if notice:
                 self._log(f"[warp-entry] {notice}")
                 self.status.emit("warning-long", notice)
+            if self._warp_health is not None and self._warp_health.dead and not self._warp_dead_handled:
+                self._warp_dead_handled = True
+                self._warp_hop_gave_up()
         if "DNS_FALLBACK server=" in line:
             self._report_dns_fallback(line)
         health_log = engine == "hysteria" and re.match(
@@ -5254,6 +5329,7 @@ class AppController(QObject):
         return NetworkMonitor._fingerprint()
 
     def _on_network_changed(self, old: str, new: str) -> None:
+        self._warp_pause_until = 0.0
         self._log(f"[network] changed: {old} -> {new}")
         if (
             getattr(self, "_retry_connect_on_network", False)

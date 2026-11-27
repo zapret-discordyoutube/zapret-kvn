@@ -551,5 +551,84 @@ class WarpEntryApiBlockedE2E(_WarpE2EBase):
         self._a_real_page_comes_back()
 
 
+@unittest.skipUnless(_RUNNABLE, _SKIP)
+class WarpEntryDeadHopE2E(_WarpE2EBase):
+    """Every path to the WARP edge is dropped for the real core (the owner's mobile network, 2026-11-27): the connect must not die.
+
+    A Windows Firewall rule on the real ``sing-box.exe`` drops every packet to the WARP address ranges (WireGuard ports,
+    QUIC, and the HTTP/2 MASQUE on TCP 443) while everything else, our server included, is open: the tunnel can carry
+    nothing over any candidate.  The app must say so, reconnect WITHOUT the entry by itself and bring a real page through the
+    server.  That a real carrier behaves like the rule is proven only on the owner's network."""
+
+    SCHEMES = ("vless",)
+    _RULE = "kvn-e2e-warp-dead"
+    _RANGES = "162.159.192.0/22,162.159.198.0/24,188.114.96.0/22"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import subprocess
+
+        super().setUpClass()
+        subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}"], capture_output=True)
+        added = subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule", f"name={cls._RULE}", "dir=out", "action=block",
+                "protocol=any", f"remoteip={cls._RANGES}", f"program={_SINGBOX.resolve()}",
+            ],
+            capture_output=True,
+        )
+        if added.returncode != 0:
+            raise unittest.SkipTest("cannot add the firewall rule (needs an administrator), netsh code " + str(added.returncode))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        import subprocess
+
+        try:
+            super().tearDownClass()
+        finally:
+            subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={cls._RULE}"], capture_output=True)
+
+    def test_a_dead_hop_falls_back_to_the_server_without_it(self) -> None:
+        from xray_fluent.application.selection_source import SelectionSource
+
+        c = self.controller
+        c.set_selected_node(self.nodes[0].id, source=SelectionSource.NODES_MENU)
+        c.toggle_connection()
+        self.assertTrue(
+            _spin_until(lambda: self._seen("не пропускает трафик ни по одному кандидату"), 180),
+            "the app did not give the hop up\n" + self._evidence(),
+        )
+        self.assertTrue(
+            any("не заработал в этой сети" in message for _, message in self.statuses),
+            "the user was not told\n" + self._evidence(),
+        )
+        # the reconnect without the hop: the pause line of the next connect, then a real page through the server
+        self.assertTrue(
+            _spin_until(lambda: self._seen("вход через WARP приостановлен после отказа"), 120),
+            "the reconnect did not run without the hop\n" + self._evidence(),
+        )
+        _spin_until(lambda: not c._transition_active and c.connected, 90)
+        self.assertTrue(c.connected, "the connection is down after the fallback\n" + self._evidence())
+        port = c._active_session.http_port
+        result: dict[str, int] = {}
+
+        def browse() -> None:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{port}"}))
+            deadline = time.monotonic() + _PAGE_WAIT
+            while time.monotonic() < deadline and "status" not in result:
+                try:
+                    with opener.open("http://example.com/", timeout=20) as reply:
+                        if b"Example Domain" in reply.read(2048):
+                            result["status"] = reply.status
+                except Exception:  # noqa: BLE001 - not up yet
+                    time.sleep(1)
+
+        worker = threading.Thread(target=browse, daemon=True)
+        worker.start()
+        _spin_until(lambda: not worker.is_alive(), _PAGE_WAIT + 5)
+        self.assertEqual(200, result.get("status"), "no page through the server after the fallback\n" + self._evidence())
+
+
 if __name__ == "__main__":
     unittest.main()
